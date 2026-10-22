@@ -296,6 +296,30 @@ dt, dd { padding: 6px 0; border-bottom: 1px solid var(--line); }
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 
+/* the input: its preview video and the views the build used */
+.inputfig { margin: 0; }
+/* --ar: the preview's width / height, so a portrait video gets a narrow box and no black bars */
+.inputfig video { display: block; width: 100%; max-width: min(100%, 640px, calc(60vh * var(--ar, 16 / 9))); height: auto;
+  max-height: 60vh; background: #000; border-radius: var(--r2); }
+.inputfig figcaption, #inputvideo p { margin: 6px 0 0; overflow-wrap: anywhere; }
+#inputmsg:empty { display: none; }
+.viewshead { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 16px 0 4px; }
+.viewshead h4 { margin: 0; }
+.viewshead button[aria-pressed=true] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.views { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin: 8px 0; }
+.views figure { margin: 0; min-width: 0; }
+.views .pic { position: relative; display: block; width: 100%; min-height: 0; padding: 0; border: 2px solid var(--line);
+  border-radius: var(--r1); background: var(--surface-2); color: inherit; font: inherit; overflow: hidden; }
+.views button.pic { cursor: pointer; }
+.views button.pic:hover:not(:disabled) { filter: none; border-color: var(--line-strong); }
+.views figure.at .pic { border-color: var(--accent); }
+.views img { display: block; width: 100%; height: auto; object-fit: contain; }
+.views .chip { position: absolute; top: 4px; left: 4px; padding: 0 6px; border-radius: 3px; background: var(--accent);
+  color: var(--accent-fg); font-size: 12px; line-height: 1.5; }
+.views figcaption { margin-top: 4px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere; }
+.views figure.at figcaption { color: var(--fg); font-weight: 500; }
+
 /* phones */
 @media (max-width: 600px) {
   main { padding: 12px 12px 48px; }

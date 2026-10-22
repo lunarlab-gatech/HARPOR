@@ -32,9 +32,11 @@ analyze also writes J/frames/preview.mp4 in the same decode pass, for the result
 as the frames come, the long side at most 640 px and both sides even, and every k-th frame, k the
 smallest stride that brings the mean rate to at most 15 fps (1% leeway, since the rate is measured).
 A frame's time in it is its time in meta.json minus t0, the time of frame 0, so the video starts at 0
-(a Stray capture's frame 0 comes before 0). It is moved into place before meta.json, whose "preview" is
-{file, width, height, fps, stride, frames, t0, bytes}, or {"error": why} when the encoder failed; the
-analysis goes on without it.
+(a Stray capture's frame 0 comes before 0). A kept frame less than 2 ms after the kept frame before it (a
+burst of messages in a bag timed by log time) moves to 2 ms after that frame, so that a seek 1 ms after a
+frame's time shows that frame; "moved" lists those frames' times in the preview. It is moved into place
+before meta.json, whose "preview" is {file, width, height, fps, stride, frames, t0, moved, bytes}, or
+{"error": why} when the encoder failed; the analysis goes on without it.
 
 Candidates: the video is cut into K = 2 per second (16 to 32) equal time bins, and each bin gives
 its sharpest frame by rel within the central 60% of the bin, so two candidates are never next to
@@ -73,7 +75,8 @@ MAX_THUMBS = 600
 PREVIEW_SIDE = 640  # the preview's long side at most, px
 PREVIEW_FPS = 15  # its mean rate at most, frames per second (1% leeway)
 PREVIEW_TB = Fraction(1, 90000)  # its time base
-PREVIEW_OPTIONS = {"crf": "28", "preset": "veryfast"}  # libx264's
+PREVIEW_GAP = 180  # kept frames are at least this far apart in it, in PREVIEW_TB ticks (2 ms)
+PREVIEW_CODEC, PREVIEW_OPTIONS = "libx264", {"crf": "28", "preset": "veryfast"}
 
 
 def open_video(path, options=None):
@@ -205,7 +208,8 @@ def preview_plan(info):
 
 class Preview:
     """J/frames/preview.mp4, written frame by frame in analyze's decode pass (see the module docstring).
-    add() takes every frame and keeps every stride-th one; close() moves the file into place. An encoder
+    add() takes every frame and keeps every stride-th one; close() moves the file into place. moved: {frame:
+    time in the preview} of the kept frames that PREVIEW_GAP moved later. An encoder
     or disk error drops the preview: it prints a warning, and the record says why. Used as a context
     manager, it deletes the half-written file when the decode pass stops with an exception."""
 
@@ -216,12 +220,12 @@ class Preview:
         self.tmp = self.path.with_name(".tmp_" + self.path.name)
         self.width, self.height, self.stride = preview_plan(info)
         self.fps = round(info["fps"] / self.stride, 3) if info.get("fps") else None
-        self.t0, self.last, self.n, self.error, self.c, self.s = None, -1, 0, None, None, None
+        self.t0, self.last, self.n, self.error, self.c, self.s, self.moved = None, -1, 0, None, None, None, {}
         try:
             self.c = av.open(str(self.tmp), "w", format="mp4", options={"movflags": "+faststart"})
             rate = Fraction(self.fps or PREVIEW_FPS).limit_denominator(1000)
             gop = str(max(1, round(2 * (self.fps or PREVIEW_FPS))))
-            self.s = self.c.add_stream("libx264", rate=rate, options={**PREVIEW_OPTIONS, "g": gop})
+            self.s = self.c.add_stream(PREVIEW_CODEC, rate=rate, options={**PREVIEW_OPTIONS, "g": gop})
             self.s.width, self.s.height, self.s.pix_fmt = self.width, self.height, "yuv420p"
             self.s.time_base = self.s.codec_context.time_base = PREVIEW_TB
         except (av.FFmpegError, OSError, ValueError) as e:  # ValueError: PyAV without libx264
@@ -260,7 +264,11 @@ class Preview:
         try:
             f = av.VideoFrame.from_ndarray(np.ascontiguousarray(rgb), format="rgb24").reformat(
                 width=self.width, height=self.height, format="yuv420p", interpolation="AREA")
-            self.last = f.pts = max(round((t - self.t0) / PREVIEW_TB), self.last + 1)  # repeated times stay in order
+            pts = round((t - self.t0) / PREVIEW_TB)
+            if self.n and pts < self.last + PREVIEW_GAP:  # too near the kept frame before (also a repeated time)
+                pts = self.last + PREVIEW_GAP
+                self.moved[str(i)] = round(float(pts * PREVIEW_TB), 4)
+            self.last = f.pts = pts
             f.time_base = PREVIEW_TB
             for p in self.s.encode(f):
                 self.c.mux(p)
@@ -270,7 +278,7 @@ class Preview:
 
     def close(self):
         """Finish the file and move it to path. Returns meta.json's "preview": {file, width, height, fps, stride,
-        frames, t0, bytes}, or {"error": why} (no file at path then)."""
+        frames, t0, moved, bytes}, or {"error": why} (no file at path then)."""
         import av
 
         if self.s is not None:
@@ -286,7 +294,8 @@ class Preview:
             self.path.unlink(missing_ok=True)  # an earlier analysis's preview would not match meta.json
             return {"error": self.error}
         return {"file": f"frames/{self.path.name}", "width": self.width, "height": self.height, "fps": self.fps,
-                "stride": self.stride, "frames": self.n, "t0": round(self.t0, 4), "bytes": self.path.stat().st_size}
+                "stride": self.stride, "frames": self.n, "t0": round(self.t0, 4), "moved": self.moved,
+                "bytes": self.path.stat().st_size}
 
 
 def write_json(path, data):

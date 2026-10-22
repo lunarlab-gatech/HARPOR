@@ -36,7 +36,7 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       "articulated", "parts_mode" and "parts_review" (the job waits for its
                                       part list), "lidar" (steps.lidar), "calibration" (the uploaded
                                       calibration's summary, calibration_summary, or null) and "preview"
-                                      (the input's preview video, preview_of)
+                                      (the input's preview video and where each view is in it, preview_of)
   DELETE /api/jobs/{id}               the job folder, unless the job is uploading, analyzing, queued or
                                       running
   GET    /api/jobs/{id}/frames        frames/meta.json, with frames/pool.json as "pool" once extracted
@@ -95,7 +95,8 @@ Routes (JSON unless said otherwise; {id} is a job id):
   GET    /api/jobs/{id}/file/{path}   only the paths that ALLOW matches; refined.glb is the agent's GLB
                                       (steps.agent_glb), never the Stage A or split parts' GLB. A Range
                                       request (the preview video's seek) gets 206 with Content-Range, and 416
-                                      when it starts past the end (Starlette's FileResponse)
+                                      when it starts past the end (Starlette's FileResponse). HEAD gets the
+                                      headers alone
 
 picks and view0 of the start request are frames as the user clicked them; video extract snaps them
 to the sharpest frame within 0.25 s (frames/pool.json "picks"). The overrides name pool frames
@@ -198,15 +199,28 @@ def lidar_compact(rec, stale=False):
 
 
 def preview_of(J):
-    """frames/meta.json "preview" for the page, or None for a job analyzed before the app made previews: the
-    record of video.Preview while frames/preview.mp4 is there, else {"error": why}."""
+    """frames/meta.json "preview" for the page, or None for a job analyzed before the app made previews.
+    {"error": why} when the frames stage could not write the preview, {"missing": true} when the file is gone
+    since. Else the record of video.Preview without "moved", and "seek": {pick's frame: {frame, at}} for every
+    pick of selection.json: the frame that the preview shows for it (the kept frame at or before it, since the
+    preview keeps every stride-th frame) and that frame's time in the preview, in s."""
     meta = read_json(J / "frames" / "meta.json")
     rec = meta.get("preview") if isinstance(meta, dict) else None
     if not isinstance(rec, dict):
         return None
-    if rec.get("error") is None and resolve(J, "frames/preview.mp4"):
-        return rec
-    return {"error": str(rec.get("error") or "frames/preview.mp4 is missing")[:300]}
+    if rec.get("error") is not None:
+        return {"error": str(rec["error"])[:300]}
+    if not resolve(J, "frames/preview.mp4"):
+        return {"missing": True}
+    out, seek = {k: v for k, v in rec.items() if k != "moved"}, {}
+    times, moved, stride = meta.get("times") or [], rec.get("moved") or {}, max(1, int(rec.get("stride") or 1))
+    sel = read_json(J / "selection.json")
+    for pk in (sel.get("picks") if isinstance(sel, dict) else None) or []:
+        f = pk.get("frame") if isinstance(pk, dict) else None
+        if type(f) is int and 0 <= f < len(times):
+            k = f - f % stride
+            seek[str(f)] = {"frame": k, "at": moved.get(str(k), round(max(0.0, times[k] - (rec.get("t0") or 0)), 4))}
+    return {**out, "seek": seek}
 
 
 def lidar_of(job):
@@ -775,7 +789,7 @@ def make_app(cfg, token, key_dir=None):
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.get("/api/jobs/{job_id}/file/{rel:path}")
+    @app.api_route("/api/jobs/{job_id}/file/{rel:path}", methods=["GET", "HEAD"])  # HEAD: the headers alone
     def file(job_id: str, rel: str):
         J = job_dir(job_id)
         p = resolve(J, rel)

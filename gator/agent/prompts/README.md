@@ -1,8 +1,7 @@
 # Agent prompts
 
 `refinement_prompt.md` (Prompt 1) and `scratch_prompt.md` (Prompt 2) are the two prompt files
-embedded in the arXiv HTML of GATOR (https://arxiv.org/html/2610.11215v1, appendix A.4), copied
-byte for byte on 2026-10-14.
+embedded in the arXiv HTML of GATOR (https://arxiv.org/html/2610.11215v1, appendix A.4).
 
 Source: Qirui Wu, Stan Birchfield, Hesam Rabeti, Angel X. Chang and Bowen Wen, "GATOR: Generative
 and Agentic 3D Object Reconstruction From Casual Images", arXiv 2610.11215v1, 2026. License:

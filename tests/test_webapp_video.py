@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -71,6 +72,139 @@ def job(tmp_path, video, **kw):
     d.mkdir()
     (d / "job.json").write_text(json.dumps({"video": {"name": video.name, "path": str(video)}, "mode": "auto", **kw}))
     return d
+
+
+def read_preview(path):
+    """(facts, [(time_s, RGB)]) of a preview video: codec, pix_fmt, width, height, the first frame's rotation and
+    the container's duration_s."""
+    import av
+
+    with av.open(str(path)) as c:
+        s = c.streams.video[0]
+        got = [(float(f.time), f.rotation, f.to_ndarray(format="rgb24")) for f in c.decode(s)]
+        facts = {"codec": s.codec_context.name, "pix_fmt": s.codec_context.pix_fmt, "width": s.codec_context.width,
+                 "height": s.codec_context.height, "rotation": got[0][1], "duration_s": c.duration / 1e6}
+    return facts, [(t, a) for t, _, a in got]
+
+
+def square_x(a):
+    """The column centre of the white square (picture()) in an upright frame."""
+    cols = np.flatnonzero((V.gray(a[35:55].astype(float)) > 230).mean(0) > 0.5)
+    return cols.mean()
+
+
+def check_preview(J, stride, size, upright=None, wrong=None):
+    """J/frames/preview.mp4 against J/frames/meta.json: H.264 yuv420p in an MP4 with its index first, no rotation
+    tag, the size (long side at most 640 px, both even), every stride-th frame at its meta.json time less t0
+    (the time of frame 0), the duration up to the last kept frame plus one, and meta.json's "preview" record.
+    upright(i), wrong(i): frame i upright and turned wrong; each kept frame is much nearer the upright one, in
+    gray. Returns (meta, the kept frames, the preview's frames)."""
+    meta = json.loads((J / "frames" / "meta.json").read_text())
+    rec, times = meta["preview"], meta["times"]
+    kept = list(range(0, len(times), stride))
+    data = (J / "frames" / "preview.mp4").read_bytes()
+    assert data[4:8] == b"ftyp" and data.index(b"moov") < data.index(b"mdat")  # it can play before it is all loaded
+    assert not (J / "frames" / ".tmp_preview.mp4").exists()
+    facts, got = read_preview(J / "frames" / "preview.mp4")
+    assert (facts["codec"], facts["pix_fmt"], facts["rotation"]) == ("h264", "yuv420p", 0)
+    assert (facts["width"], facts["height"]) == tuple(size) and max(size) <= 640 and size[0] % 2 == size[1] % 2 == 0
+    assert rec == {"file": "frames/preview.mp4", "width": size[0], "height": size[1],
+                   "fps": round(meta["video"]["fps"] / stride, 3), "stride": stride, "frames": len(kept), "t0": times[0],
+                   "moved": {}, "bytes": len(data)}
+    assert rec["fps"] <= V.PREVIEW_FPS * 1.01
+    assert len(got) == len(kept)
+    assert [t for t, _ in got] == pytest.approx([times[i] - times[0] for i in kept], abs=1e-3)
+    last = times[kept[-1]] - times[0]
+    assert last < facts["duration_s"] <= last + 1.5 / rec["fps"]
+    if upright:
+        for (_, a), i in zip(got, kept):
+            right = np.abs(V.gray(a) - V.gray(upright(i))).mean()
+            assert right < 12 and right < 0.5 * np.abs(V.gray(a) - V.gray(wrong(i))).mean(), i
+    return meta, kept, got
+
+
+def test_preview_plan():
+    """The preview's size (long side at most 640 px, both sides even, never enlarged) and stride (at most 15 fps,
+    with 1% leeway for a measured rate)."""
+    plan = lambda w, h, fps: V.preview_plan({"width": w, "height": h, "fps": fps})  # noqa: E731
+    assert plan(1920, 1080, 29.97) == (640, 360, 2) and plan(1080, 1920, 30.0012) == (360, 640, 2)
+    assert plan(1440, 1920, 60) == (480, 640, 4) and plan(1920, 1440, 240) == (640, 480, 16)
+    assert plan(160, 96, 30) == (160, 96, 2) and plan(193, 129, 10) == (192, 128, 1) and plan(1, 1, None) == (2, 2, 1)
+    assert plan(640, 480, 24) == (640, 480, 2) and plan(640, 480, 15.1) == (640, 480, 1) and plan(640, 480, 15.5)[2] == 2
+
+
+def test_preview_of_a_video(tmp_path, capsys, monkeypatch):
+    """analyze writes the preview in its decode pass, before meta.json: every second frame of the 30 fps video
+    (15 fps), at its own size, each frame where the video has it."""
+    path = write_video(tmp_path / "v.mp4")
+    j = job(tmp_path, path)
+    replaced, replace = [], V.os.replace
+    monkeypatch.setattr(V.os, "replace", lambda a, b: replaced.append(Path(b).name) or replace(a, b))
+    V.main(["analyze", "--job", str(j)])
+    assert replaced == ["preview.mp4", "meta.json"]  # meta.json is the done marker
+    assert re.search(r"^preview video: 32 frames, 160x96, 15\.\d* fps, 0\.\d MB$", capsys.readouterr().out, re.M)
+    _, kept, got = check_preview(j, 2, (W, H), lambda i: shot(i), lambda i: shot(i)[::-1, ::-1])
+    assert [square_x(a) for _, a in got] == pytest.approx([square_x(shot(i)) for i in kept], abs=1.5)
+
+
+def test_preview_of_a_rotated_video_is_upright(tmp_path):
+    """The preview has no rotation tag: its frames are turned upright as the frames stage turns them."""
+    path = write_video(tmp_path / "r.mp4", rotation=90)
+    j = job(tmp_path, path)
+    V.analyze(j)
+    check_preview(j, 2, (H, W), lambda i: np.rot90(shot(i), 1), lambda i: np.rot90(shot(i), 3))
+
+
+def test_preview_of_a_large_video(tmp_path):
+    """A 1024x576 video at 60 fps: the preview's long side is 640 px and it keeps every fourth frame."""
+    import av
+
+    rng = np.random.default_rng(2)
+    bg = (rng.random((576 // 16, 1024 // 16, 3)) * 160 + 20).astype(np.uint8).repeat(16, 0).repeat(16, 1)
+    path = tmp_path / "big.mp4"
+    with av.open(str(path), "w") as c:
+        s = c.add_stream("libx264", rate=60, options={"crf": "18", "preset": "ultrafast"})
+        s.width, s.height, s.pix_fmt = 1024, 576, "yuv420p"
+        for i in range(24):
+            a = bg.copy()
+            a[200:380, 40 * i:40 * i + 160] = 255
+            for p in s.encode(av.VideoFrame.from_ndarray(a, format="rgb24")):
+                c.mux(p)
+        for p in s.encode():
+            c.mux(p)
+    j = job(tmp_path, path)
+    V.analyze(j)
+    _, kept, got = check_preview(j, 4, (640, 360))
+    k = 640 / 1024
+    for (_, a), i in zip(got, kept):  # the bar where the frame has it
+        cols = np.flatnonzero((V.gray(a[140:220].astype(float)) > 235).mean(0) > 0.5)
+        assert cols.mean() == pytest.approx(k * (40 * i + 80), abs=2)
+
+
+def test_preview_moves_the_frames_of_a_burst(tmp_path):
+    """Frames that come in bursts (a bag timed by log time: 5 messages 0.2 ms apart every 150 ms, 33 fps): a kept
+    frame less than 2 ms after the kept frame before it moves to 2 ms after that frame, and "moved" says where it
+    is. So a seek 1 ms after each kept frame's time in the preview shows that frame and no later one."""
+    times = [0.15 * (i // 5) + 0.0002 * (i % 5) for i in range(60)]
+    pv = V.Preview(tmp_path / "preview.mp4", {"width": 64, "height": 48, "fps": 33.3})
+    with pv:
+        for i, t in enumerate(times):
+            a = np.zeros((48, 64, 3), np.uint8)
+            a[:, i:i + 4] = 255  # a bar at column i
+            pv.add(i, t, a)
+        rec = pv.close()
+    kept = list(range(0, 60, 3))
+    assert (rec["stride"], rec["frames"], rec["t0"]) == (3, 20, 0.0)
+    at = {k: rec["moved"].get(str(k), times[k]) for k in kept}  # each kept frame's time in the preview
+    assert rec["moved"] == pytest.approx({"3": 0.002, "9": 0.1522, "18": 0.452, "24": 0.6022, "33": 0.902, "39": 1.0522,
+                                          "48": 1.352, "54": 1.5022}, abs=1e-4)
+    _, got = read_preview(tmp_path / "preview.mp4")
+    pts = [t for t, _ in got]
+    assert pts == pytest.approx([at[k] for k in kept], abs=1e-4) and min(np.diff(pts)) >= 0.002 - 1e-6
+    for k in kept:
+        j = max(n for n, t in enumerate(pts) if t <= at[k] + 0.001)  # the frame that a browser shows there
+        bar = np.flatnonzero(V.gray(got[j][1][20:28].astype(float)).mean(0) > 128)
+        assert kept[j] == k and bar.mean() == pytest.approx(k + 1.5, abs=1), k
 
 
 def test_probe_and_frames(tmp_path):
@@ -186,6 +320,8 @@ def test_rosbag_job(tmp_path, capsys):
     assert "header_ns" not in json.dumps(meta)
     assert v["fps"] == pytest.approx(30) and meta["times"][:3] == pytest.approx([0, 1 / 30, 2 / 30], abs=1e-4)
     assert BLUR not in meta["candidates"] and meta["candidates"] and meta["thumbs"] == list(range(N))
+    # The preview shows the chosen topic (the other one is upside down), every second message.
+    check_preview(j, 2, (W, H), shot, lambda i: shot(i)[::-1])
     V.main(["extract", "--job", str(j)])
     pool = json.loads((j / "frames" / "pool.json").read_text())
     assert set(pool["pool"]) == set(meta["candidates"]) | {pool["picks"][str(BLUR)]} and pool["picks"][str(BLUR)] != BLUR
@@ -248,6 +384,10 @@ def test_stray_job(tmp_path, capsys):
     a = V.gray(np.asarray(Image.open(J / "frames" / "thumbs" / "3.jpg")))  # JPEG: compared in gray
     up = V.gray(picture(3, (240, 320)))
     assert a.shape == (320, 240) and np.abs(a - up).mean() < 10 < np.abs(a - up[::-1, ::-1]).mean()
+    # The preview is turned upright by gravity too. It starts at frame 0, which rgb.mp4 read without its edit
+    # list does not time at 0.
+    check_preview(J, 1, (240, 320), lambda i: picture(i, (240, 320)), lambda i: picture(i, (240, 320))[::-1, ::-1])
+    assert meta["preview"]["t0"] == meta["times"][0] != 0
     V.main(["extract", "--job", str(J)])
     pool = json.loads((J / "frames" / "pool.json").read_text())
     assert pool["pool"] == meta["candidates"]
@@ -258,6 +398,43 @@ def test_stray_job(tmp_path, capsys):
     (J / "video" / "capture.zip").write_bytes(b"not a zip")
     with pytest.raises(SystemExit, match="capture.zip is not a readable zip"):
         V.analyze(J)
+
+
+def test_preview_failures_leave_no_file(tmp_path, capsys, monkeypatch):
+    """Without the encoder, or when it refuses its options, the analysis goes on without a preview: meta.json says
+    why, and no preview (also none from an earlier analysis) or half-written file stays. A decode pass that stops
+    deletes the half-written file."""
+    path = write_video(tmp_path / "v.mp4")
+    j = job(tmp_path, path)
+    for name, value, why in (("PREVIEW_CODEC", "no_such_codec", "UnknownCodecError"),
+                             ("PREVIEW_OPTIONS", {"preset": "nope"}, "ArgumentError")):
+        (j / "frames").mkdir(exist_ok=True)
+        (j / "frames" / "preview.mp4").write_bytes(b"an earlier analysis's preview")
+        with monkeypatch.context() as m:
+            m.setattr(V, name, value)
+            meta = V.analyze(j)
+        assert meta["preview"]["error"].startswith(why + ": ") and set(meta["preview"]) == {"error"}
+        assert json.loads((j / "frames" / "meta.json").read_text())["preview"] == meta["preview"]
+        assert f"warning: no preview video ({why}: " in capsys.readouterr().out
+        assert sorted(p.name for p in (j / "frames").iterdir()) == ["meta.json", "thumbs"]
+        assert meta["candidates"] and len(meta["times"]) == N
+
+    def stops(job, video, extra=None):  # the input ends badly after 5 frames
+        probe_input, read = source(job, video, extra)
+
+        def frames(info, **kw):
+            for i, t, a in read(info, **kw):
+                if i == 5:
+                    raise SystemExit("message 5 is broken")
+                yield i, t, a
+        return probe_input, frames
+
+    source = V.source
+    monkeypatch.setattr(V, "source", stops)
+    (j / "frames" / "meta.json").unlink()
+    with pytest.raises(SystemExit, match="message 5 is broken"):
+        V.analyze(j)
+    assert sorted(p.name for p in (j / "frames").iterdir()) == ["thumbs"]
 
 
 def test_bad_inputs(tmp_path):

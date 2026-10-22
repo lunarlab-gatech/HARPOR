@@ -1,5 +1,6 @@
 // HARPOR web app UI: jobs list and upload, camera topic, frames and build settings (with LiDAR for the metric
-// scale), stages and log, review of the views and of the part list (an articulated object), results.
+// scale), stages and log, review of the views and of the part list (an articulated object), results, and the
+// input with the views the build used.
 // Plain DOM code, no build step. The API key is only read from the password fields and sent once.
 "use strict";
 
@@ -47,7 +48,8 @@ const KIND_LABEL = { video: "video", rosbag: "rosbag", stray: "Stray capture" };
 const OFFLINE = "Cannot reach the server. Is the SSH tunnel up?";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 // The open job page: id, job, meta, picks, view0, sel, ov (pending overrides), es, state, scaleStale (the LiDAR scale
-// ran with another calibration) and lidarEdit (the build settings show in review for the calibration).
+// ran with another calibration), lidarEdit (the build settings show in review for the calibration), and input,
+// inputKey, inputPlaced, inputAsked, placeAsked and overlay (the input panel: renderInput).
 let V = {};
 let listKey = null, upXhr = null;  // the jobs list as last drawn; the running upload
 
@@ -250,7 +252,10 @@ async function openJob(id) {
   show("job");
   V = { id, picks: [], view0: null };
   // The last job's, until refresh draws this one's.
-  $("#review").hidden = $("#partsreview").hidden = $("#results").hidden = $("#lidarfail").hidden = true;
+  $("#review").hidden = $("#partsreview").hidden = $("#results").hidden = $("#lidarfail").hidden = $("#input").hidden = true;
+  fill($("#inputvideo"));
+  fill($("#inputviews"));
+  say($("#inputmsg"), "", true);
   $("#log").textContent = "";
   $("#logname").textContent = "";
   $("#rawlog").hidden = true;
@@ -299,6 +304,17 @@ async function refresh() {
   if (!$("#lidarfail").hidden) await renderLidarFail(job).catch((e) => fill($("#lidarfailbody"), h("p", { class: "msg" }, e.message)));
   $("#results").hidden = ACTIVE.includes(job.status) || !job.files.includes("run/posed.glb");
   if (!$("#results").hidden) await renderResults(job);
+  // The input and the views used, once the views are selected: in review, during the build and after a failure.
+  const selected = (job.stages.select || {}).status === "done";
+  V.inputAsked = false;
+  $("#input").hidden = !selected;
+  if (selected) await renderInput(job).catch((e) => fill($("#inputviews"), h("p", { class: "msg" }, e.message)));
+  else if (V.input) {  // a new selection runs: the old views go
+    V.input = V.inputKey = null;
+    fill($("#inputvideo"));
+    fill($("#inputviews"));
+    say($("#inputmsg"), "", true);
+  }
   if (job.status === "failed" && !V.es && !$("#log").textContent) {
     const failed = job.progress.find((x) => x.status === "failed");
     if (failed) await showLog(failed.name);
@@ -462,7 +478,21 @@ function openStream() {
   es.onerror = () => {
     if (V.id === id) $("#logname").textContent = es.readyState === 2 ? "live log lost: reload the page" : "live log (reconnecting)";
   };
-  es.addEventListener("state", (e) => { if (V.id === id) renderState(JSON.parse(e.data)); });
+  es.addEventListener("state", (e) => {
+    if (V.id !== id) return;
+    const st = JSON.parse(e.data);
+    renderState(st);
+    // The views were selected while the page is open: refresh draws the input panel. place ended: refresh adds the
+    // mesh fit toggle to it (once per place run).
+    const sel = st.stages.find((x) => x.name === "select"), place = st.stages.find((x) => x.name === "place");
+    if (sel && sel.status === "done" && $("#input").hidden && !V.inputAsked) {
+      V.inputAsked = true;
+      refresh().catch(() => { V.inputAsked = false; });
+    } else if (place && place.status === "done" && V.input && !V.input.placed && V.placeAsked !== place.ended) {
+      V.placeAsked = place.ended;
+      refresh().catch(() => { V.placeAsked = null; });
+    }
+  });
   es.addEventListener("log", (e) => {
     if (V.id !== id) return;
     const d = JSON.parse(e.data);
@@ -1168,6 +1198,104 @@ function metricScale(place, rec, job) {
     same && c.views_used != null ? `${c.views_used} views` : null, same && c.spread_rel != null ? "spread " + pct(c.spread_rel) : null];
   const shown = facts.filter(Boolean);
   return `x${m.toFixed(3)} from LiDAR` + (shown.length ? ` (${shown.join(", ")})` : "");
+}
+
+// ---- 5b. the input: its preview video and the views the build used ----
+
+// job.preview (server.preview_of): the record of frames/preview.mp4 (video.Preview) with "seek", where each view is in
+// it; {error} when the frames stage could not write it; {missing} when the file is gone since; or null for a job read
+// before the app made previews.
+const NO_PREVIEW = "This job has no preview video, because its input was read before the app made previews.";
+const MISSING_PREVIEW = "The preview video of this job is missing on the server.";
+// The input's name and kind: "table.MOV (video)", "run.bag (rosbag, camera topic /cam/image_rect)".
+function inputLabel(job) {
+  const src = job.source || {}, kind = job.kind || src.kind || "video";
+  return `${job.video.name} (${KIND_LABEL[kind] || kind}${kind === "rosbag" && src.topic ? ", camera topic " + src.topic : ""})`;
+}
+// Where the preview p shows view pick pk: {frame, at}, the frame it shows (the preview keeps every stride-th frame, so a
+// skipped frame shows the kept one before it) and its time in the video (p.seek). Without p.seek, frame is null and at
+// is the pick's time less t0, since the preview starts at frame 0.
+function previewSpot(pk, p) {
+  const s = p.seek && p.seek[pk.frame];
+  return s ? { frame: s.frame, at: Number(s.at) } : { frame: null, at: Math.max(0, Number(pk.time_s) - (Number(p.t0) || 0)) };
+}
+const viewText = (pk, i) => `view ${i}, frame ${pk.frame}, ${Number(pk.time_s).toFixed(1)} s`;  // a selection.json pick
+const viewSrc = (i) => file(V.overlay === true && V.input.placed ? `run/overlay_${i}.png` : `run/input/images/${i}.png`);
+async function renderInput(job) {
+  const p = job.preview && job.preview.file ? job.preview : null;
+  V.inputPlaced = job.files.includes("run/placement.json");  // place drew run/overlay_<i>.png for every view first
+  // Drawn once per selection, so a refresh does not stop the video. A place run that ends or goes changes only the
+  // heading (its mesh fit toggle).
+  const key = JSON.stringify([job.id, (job.stages.select || {}).ended, job.preview]);
+  if (key === V.inputKey) {
+    if (V.input && V.input.placed !== V.inputPlaced) {
+      V.input.placed = V.inputPlaced;
+      inputHead();
+      if (V.overlay === true) V.input.imgs.forEach((img, i) => img.setAttribute("src", viewSrc(i)));
+    }
+    return;
+  }
+  const page = V;  // openJob makes a new V for another job
+  V.inputKey = key;
+  const gone = () => V !== page || V.inputKey !== key;  // another job's page, or another selection, came meanwhile
+  let sel;
+  try { sel = await api(file("selection.json")); } catch (e) {
+    if (gone()) return;
+    V.inputKey = null;
+    throw e;
+  }
+  if (gone()) return;
+  const video = p ? h("video", { src: file("frames/preview.mp4"), controls: true, preload: "metadata", playsinline: true,
+    muted: true, width: p.width, height: p.height, style: `--ar: ${p.width} / ${p.height}`,
+    "aria-label": "Preview of " + job.video.name }) : null;
+  if (video) video.muted = true;  // the attribute only sets the default
+  const fps = p && p.fps ? `, ${Number(Number(p.fps).toFixed(1))} fps` : "";
+  const why = !job.preview ? NO_PREVIEW : job.preview.missing ? MISSING_PREVIEW
+    : `The app could not make a preview video: ${job.preview.error}`;
+  fill($("#inputvideo"), video ? h("figure", { class: "inputfig" }, video, h("figcaption", {}, inputLabel(job),
+    h("span", { class: "hint" }, ` Preview at ${p.width}x${p.height}${fps}.`)))
+    : [h("p", {}, inputLabel(job)), h("p", { class: "hint" }, why)]);
+  say($("#inputmsg"), "", true);
+  const picks = sel && Array.isArray(sel.picks) ? sel.picks : [];  // in run order: view 0 first
+  V.input = { picks, video, preview: p, placed: V.inputPlaced, imgs: [], btns: [], figs: [],
+    head: h("div", { class: "viewshead" }), hint: h("p", { class: "hint" }) };
+  const ratio = p ? `aspect-ratio: ${p.width} / ${p.height}` : null;  // keeps cells sized before lazy images load
+  const figs = picks.map((pk, i) => {
+    const text = viewText(pk, i), img = h("img", { src: viewSrc(i), loading: "lazy", alt: "", style: ratio });  // the caption says it
+    const star = i === 0 ? h("b", { class: "chip", "aria-hidden": "true" }, "★") : null;
+    const btn = video ? h("button", { type: "button", class: "pic", "aria-label": `${text}: show it in the video`,
+      onclick: () => seekInput(i) }, img, star) : null;
+    V.input.imgs.push(img);
+    if (btn) V.input.btns.push(btn);
+    return h("figure", {}, btn || h("div", { class: "pic" }, img, star), h("figcaption", {}, text));
+  });
+  V.input.figs = figs;
+  fill($("#inputviews"), V.input.head, V.input.hint, h("div", { class: "views" }, figs));
+  inputHead();
+}
+function inputHead() {  // the strip's heading and hint, with the mesh fit toggle once place has run
+  const I = V.input;
+  fill(I.head, h("h4", {}, `Views used (${I.picks.length})`), I.placed ? h("button", { type: "button", class: "small secondary",
+    "aria-pressed": String(V.overlay === true), onclick: (e) => toggleOverlay(e.currentTarget) }, "Show the mesh fit") : null);
+  fill(I.hint, (I.video ? "Click a view to see its frame in the video. " : "") + "★ marks view 0." +
+    (I.placed ? " The mesh fit shows the posed mesh in red and the outline of the SAM 3 mask in green." : ""));
+}
+function toggleOverlay(btn) {  // each view's photo, or place's overlay of the posed mesh on it
+  V.overlay = V.overlay !== true;
+  btn.setAttribute("aria-pressed", String(V.overlay));
+  V.input.imgs.forEach((img, i) => img.setAttribute("src", viewSrc(i)));
+}
+function seekInput(i) {  // the preview at view i's frame, paused: it never starts playing by itself
+  const v = V.input && V.input.video, pk = V.input && V.input.picks[i], p = V.input && V.input.preview;
+  if (!v || !pk || !p) return;
+  const spot = previewSpot(pk, p);
+  v.pause();
+  v.currentTime = spot.at + 0.001;  // 1 ms in, so that a browser that rounds the time shows this frame, not the one before
+  V.input.figs.forEach((f, k) => f.classList.toggle("at", k === i));
+  V.input.btns.forEach((b, k) => b.setAttribute("aria-current", String(k === i)));  // the view that the video shows
+  say($("#inputmsg"), `The video shows view ${i} at ${fmt(spot.at)}` + (spot.frame == null ? "." : spot.frame === pk.frame
+    ? `: frame ${spot.frame}.` : `: frame ${spot.frame}, since the preview has no frame ${pk.frame}.`), true);
+  v.scrollIntoView({ block: "nearest" });
 }
 
 route();

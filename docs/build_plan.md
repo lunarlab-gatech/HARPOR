@@ -1000,6 +1000,16 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    from the log time when the stamps are missing or out of order.
 2. The app measures the sharpness of every frame (variance of the Laplacian, relative to the
    frames within 0.5 s) and keeps up to 32 candidate frames: the sharpest frame in each time bin.
+   In the same decode pass it writes a preview video of the input for the results page,
+   `frames/preview.mp4`: H.264 (libx264 through PyAV, yuv420p, crf 28, preset veryfast, a keyframe every
+   2 s) in MP4 with the index first. Its long side is at most 640 px, and it keeps every k-th frame, k
+   the smallest stride that brings the mean rate to at most 15 fps. Its frames are upright as the
+   frames stage turns them (the container's rotation for a video, gravity for a Stray capture). A
+   frame's time in it is its time in `meta.json` minus the time of frame 0 (`t0`). A kept frame less
+   than 2 ms after the kept frame before it (a burst of messages in a bag timed by log time) moves to
+   2 ms after that frame, so a seek 1 ms after a frame's time shows that frame. `meta.json` "preview"
+   records the size, fps, stride, frame count, `t0`, the moved frames and bytes, or the reason when
+   the encoder failed; the analysis goes on without a preview then.
 3. Choose Auto (the app picks N views, default 6) or Manual (click the frames; each click snaps to
    the sharpest frame within 0.25 s). Type the object noun for SAM 3, and pick the agent:
    GPT-6-Astra (asks for an OpenAI key), Claude Opus 5.5 (asks for an Anthropic key, checked with
@@ -1093,7 +1103,29 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
     again with LiDAR off or with other views.
   - Results add the row "Metric scale": the scale with the LiDAR topic (or "iPhone LiDAR depth"), the
     views used and the spread, or "Depth Anything 3's estimate (no LiDAR)".
-- The 15 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
+- Input panel (2026-10-22): once the views are selected (in review, during the build, and after a
+  failure later in the build), the panel "Input" shows the preview video (muted, with controls,
+  loading only its metadata first) with the input's name and kind, such as "table.MOV (video)" or
+  "scan.bag (rosbag, camera topic /cam/image_rect)", and its size and rate. Under it, "Views used"
+  shows one figure per view in run order: the view's image (`run/input/images/<i>.png`, loaded
+  lazily) and a caption such as "view 0, frame 152, 15.2 s" from `selection.json`; a star marks view
+  0. Each view is a button that puts the video at the frame that the preview shows for it, paused
+  (it never plays by itself), marks it as current, and says in a live region which frame the video
+  shows and at what time in the video (the kept frame before the view's frame when the preview
+  skipped it). After `place`, the button "Show the mesh fit" swaps every image for place's overlay
+  (`run/overlay_<i>.png`: the posed mesh in red, the mask outline in green); it looks pressed while
+  it is on. A job analyzed before previews says "This job has no preview video, because its input
+  was read before the app made previews." A job whose preview file is gone says so. The video is
+  drawn once per selection, so a refresh does not stop it; on a running job's page, the event that
+  says `select` is done draws the panel, and the event that says `place` is done adds the toggle
+  without drawing the video again. A portrait preview gets a narrow box, without black bars.
+  The server serves `frames/preview.mp4` as `video/mp4`, and the run's view images. Starlette's
+  `FileResponse` answers Range requests (206 with Content-Range, 416 for a range past the end), so
+  the browser can seek; the file route also answers HEAD.
+  `GET /api/jobs/{id}` adds "preview" (`server.preview_of`): the record with "seek" (for each view of
+  `selection.json`, the frame that the preview shows and its time in the preview), `{"error": ...}`,
+  `{"missing": true}`, or null for an older job.
+- The 17 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
   does not have, so run them on the Mac.
 
 **Security.** The server port on the compute node is open to other ICE users, so every request
@@ -1105,7 +1137,8 @@ never served or zipped, and the key is scrubbed from the agent's result. The key
 between the login node and the compute node.
 
 **Files.** Each job lives in `$G/webapp_runs/<job id>/`: `job.json`, the video, `frames/`
-(thumbnails and metrics), `scene/` (candidate frames and SAM 3 masks), `pool/` (prep and DA3 on
+(thumbnails, metrics and `preview.mp4`, the input's preview video), `scene/` (candidate frames
+and SAM 3 masks), `pool/` (prep and DA3 on
 the candidates), `selection.json`, `run/` (the MV-SAM3D run of the picks), `agent/`, `physics/`,
 `logs/` and `results.zip`. An articulated job adds `run/proposal.json`, `run/parts/` (the part masks
 in `sam3/`, `faces.npz`, `vote.json`, `split_report.json` and `split.log`), `run/parts.glb`,

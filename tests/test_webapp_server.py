@@ -988,6 +988,103 @@ def test_frames_retry_analyzes_the_video_again(client, tmp_path):
     assert r.status_code == 409 and "upload it again" in r.json()["detail"]
 
 
+def test_preview_video_and_view_images_are_served(client, tmp_path):
+    """The input's preview video is served as video/mp4 with byte ranges, so the page can seek in it: 206 with
+    Content-Range for a range, 416 for one past the end; HEAD gets the headers alone. The job names it ("preview")
+    with where each view is in it ("seek"), says why a job has none or that its file is gone, or gives null for a
+    job read before previews. The run's view images and place's overlays are served, and nothing else around
+    them."""
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)  # 64 frames at 24 fps, 192x128
+    J = cfg.runs / job_id
+    url = f"/api/jobs/{job_id}/file/frames/preview.mp4"
+    data = (J / "frames" / "preview.mp4").read_bytes()
+    meta = json.loads((J / "frames" / "meta.json").read_text())
+    job = c.get(f"/api/jobs/{job_id}").json()
+    assert meta["preview"]["moved"] == {}  # no frames come in bursts
+    assert job["preview"] == {**{k: v for k, v in meta["preview"].items() if k != "moved"}, "seek": {}}  # no views yet
+    assert job["preview"]["bytes"] == len(data) > 1000
+    assert {k: job["preview"][k] for k in ("width", "height", "stride", "frames", "t0")} == \
+        {"width": 192, "height": 128, "stride": 2, "frames": 32, "t0": 0.0}
+    r = c.get(url)
+    assert r.status_code == 200 and r.headers["content-type"] == "video/mp4" and r.content == data
+    assert r.headers["accept-ranges"] == "bytes" and int(r.headers["content-length"]) == len(data)
+    r = c.head(url)
+    assert r.status_code == 200 and r.headers["content-type"] == "video/mp4" and r.content == b""
+    assert int(r.headers["content-length"]) == len(data) and r.headers["accept-ranges"] == "bytes"
+    assert c.head(f"/api/jobs/{job_id}/file/frames/meta.json").status_code == 404
+    n = len(data)
+    for rng, a, b in (("bytes=0-99", 0, 99), ("bytes=100-", 100, n - 1), ("bytes=-10", n - 10, n - 1),
+                      (f"bytes=500-{n + 50}", 500, n - 1)):
+        r = c.get(url, headers={"Range": rng})
+        assert r.status_code == 206 and r.headers["content-range"] == f"bytes {a}-{b}/{n}", rng
+        assert r.content == data[a:b + 1] and r.headers["content-type"] == "video/mp4", rng
+    r = c.get(url, headers={"Range": f"bytes={n}-"})
+    assert r.status_code == 416 and r.headers["content-range"] == f"bytes */{n}" and not r.content
+    assert c.get(url, headers={"Range": "bytes=abc"}).status_code in (400, 416)  # never a part of the file
+    r = c.get(url, headers={"Range": "bytes=0-99", "If-Range": '"another version"'})
+    assert r.status_code == 200 and r.content == data  # the file changed: all of it
+    r = c.get(url, headers={"Range": "bytes=0-99", "If-Range": c.get(url).headers["etag"]})
+    assert r.status_code == 206 and r.content == data[:100]
+
+    # The views of a run, and place's overlays of the posed mesh on them.
+    from PIL import Image
+
+    (J / "run" / "input" / "images").mkdir(parents=True)
+    for rel in ("run/input/images/0.png", "run/input/images/11.png", "run/overlay_0.png"):
+        Image.new("RGB", (8, 6), (200, 10, 10)).save(J / rel)
+        r = c.get(f"/api/jobs/{job_id}/file/{rel}")
+        assert r.status_code == 200 and r.headers["content-type"] == "image/png" and r.content == (J / rel).read_bytes()
+    (J / "run" / "input" / "object").mkdir()
+    for rel in ("run/input/object/0.png", "run/masks/0.png", "run/input/images/1000.png", "run/input/images/x.png"):
+        (J / rel).parent.mkdir(parents=True, exist_ok=True)
+        (J / rel).write_bytes(b"not served")
+    (J / "frames" / ".tmp_preview.mp4").write_bytes(b"half written")
+    for p in ("run/input/object/0.png", "run/masks/0.png", "run/input/images/1000.png", "run/input/images/x.png",
+              "run/input/images/0.jpg", "run/input/images/../../job.json", "run/input/images/0.png/..",
+              "run/input/images/%2e%2e/%2e%2e/job.json", "frames/preview.mp4/../meta.json", "frames/../job.json",
+              "frames/.tmp_preview.mp4", "frames/preview.mp4.part", "frames/meta.json", "video/clip_one.mp4",
+              "run/overlay_0.png/../../job.json", "run//input/images/0.png"):
+        assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
+    (J / "frames" / ".tmp_preview.mp4").unlink()
+
+    # Where the views are in the preview: the kept frame at or before each pick (every second frame is kept), at
+    # its time less t0, or where the frames stage moved it.
+    times = meta["times"]
+    picks = [{"name": "f00020", "frame": 20, "time_s": times[20]}, {"name": "f00041", "frame": 41, "time_s": times[41]},
+             {"name": "f00063", "frame": 63, "time_s": times[63]}, {"name": "f00099", "frame": 99, "time_s": 9.9}]
+    (J / "selection.json").write_text(json.dumps({"ok": True, "picks": picks}))
+    seek = c.get(f"/api/jobs/{job_id}").json()["preview"]["seek"]
+    assert seek == {"20": {"frame": 20, "at": pytest.approx(times[20])}, "41": {"frame": 40, "at": pytest.approx(times[40])},
+                    "63": {"frame": 62, "at": pytest.approx(times[62])}}  # frame 99 is not in the input
+    (J / "frames" / "meta.json").write_text(json.dumps({**meta, "preview": {**meta["preview"], "t0": 0.5,
+                                                                            "moved": {"40": 1.7}}}))
+    seek = c.get(f"/api/jobs/{job_id}").json()["preview"]["seek"]
+    assert seek["41"] == {"frame": 40, "at": 1.7} and seek["20"] == {"frame": 20, "at": pytest.approx(times[20] - 0.5)}
+    (J / "selection.json").unlink()
+
+    # A preview that the frames stage could not write says why; one whose file is gone since says so; a job read
+    # before previews has none.
+    (J / "frames" / "meta.json").write_text(json.dumps({**meta, "preview": {"error": "ValueError: no libx264"}}))
+    assert c.get(f"/api/jobs/{job_id}").json()["preview"] == {"error": "ValueError: no libx264"}
+    (J / "frames" / "meta.json").write_text(json.dumps(meta))
+    (J / "frames" / "preview.mp4").unlink()
+    assert c.get(f"/api/jobs/{job_id}").json()["preview"] == {"missing": True}
+    assert c.get(url).status_code == 404
+    (J / "frames" / "meta.json").write_text(json.dumps({k: v for k, v in meta.items() if k != "preview"}))
+    assert c.get(f"/api/jobs/{job_id}").json()["preview"] is None
+
+    # Analyzing the input again deletes a half-written preview that a killed run left, and writes a new one.
+    (J / "frames" / ".tmp_preview.mp4").write_bytes(b"cut off")
+    jobs.update_stage(J, "frames", status="failed", note="cancelled", returncode=-15)
+    jobs.update(J, status="cancelled")
+    assert c.post(f"/api/jobs/{job_id}/continue", json={"from": "frames"}).json()["from"] == "frames"
+    job = wait(c, job_id, "ready", "failed")
+    assert job["status"] == "ready" and job["preview"]["frames"] == 32 and (J / "frames" / "preview.mp4").read_bytes()
+    assert not (J / "frames" / ".tmp_preview.mp4").exists()
+
+
 def test_no_delete_while_uploading(tmp_path):
     """The jobs list shows a job as soon as its upload starts; deleting it must wait for the upload."""
     import anyio
@@ -2061,3 +2158,224 @@ def test_app_js_results_show_the_metric_scale():
     assert out["s"]["row"] == "x1.250 from LiDAR (iPhone LiDAR depth, 6 views, spread 0.4%)"
     assert out["n"]["row"] == out["o"]["row"] == "Depth Anything 3's estimate (no LiDAR)"
     assert "lidar.json" not in out["n"]["zip"] and out["o"]["zip"] is None
+
+
+# ---- the input panel: the preview video and the views used ----
+
+# A stand-in for document.createElement that keeps what app.js puts in each element (tag, attributes, children,
+# class names, the video's calls), so a test can find the elements and click them; text(e) is e's text.
+ELEMENTS = """
+const made = [];
+document.createElement = (tag) => {
+  const e = { tag, kids: [], attrs: {}, cls: new Set(), calls: [],
+    setAttribute(k, v) { e.attrs[k] = String(v); }, append(...k) { e.kids.push(...k); }, replaceChildren(...k) { e.kids = k; },
+    pause() { e.calls.push("pause"); }, play() { e.calls.push("play"); }, load() { e.calls.push("load"); },
+    scrollIntoView() { e.calls.push("scroll"); }, focus() {} };
+  e.classList = { toggle: (c, on) => { if (on) e.cls.add(c); else e.cls.delete(c); }, add: (c) => e.cls.add(c) };
+  made.push(e);
+  return e;
+};
+const text = (e) => typeof e === "string" ? e : (e && e.kids || []).map(text).join("");
+const views = () => made.filter((e) => e.tag === "figure" && e.className !== "inputfig");
+"""
+PICKS = [{"name": "f00152", "frame": 152, "time_s": 15.2, "q": 0.9}, {"name": "f00040", "frame": 40, "time_s": 4.0, "q": 0.8},
+         {"name": "f00301", "frame": 301, "time_s": 30.1333, "q": 0.7}]
+PREVIEW = {"file": "frames/preview.mp4", "width": 640, "height": 360, "fps": 14.985, "stride": 2, "frames": 240, "t0": 0.2,
+           "bytes": 2_400_000}
+
+
+def input_job(job_id, select="done", sam3d="failed", **kw):
+    """GET /api/jobs/<job_id> of a video job whose views are selected and that failed at sam3d; select and sam3d
+    set those stages' status."""
+    names = ["frames", "extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "place", "agent"]
+    status = {n: "done" for n in names[:5]} | {"lidar": "skipped", "select": select, "sam3d": sam3d, "place": "pending",
+                                               "agent": "pending"}
+    progress = [{"name": n, "status": status[n]} for n in names]
+    return {"id": job_id, "kind": "video", "status": "failed", "video": {"name": "table.MOV"}, "source": {"kind": "video"},
+            "prompt": "table", "current": None, "error": "sam3d: out of memory", "warnings": [], "key_ok": False,
+            "agent": "none", "articulated": False, "parts_mode": "vlm", "parts_review": False, "mode": "auto", "picks": [],
+            "view0": None, "n_views": 3, "auto_continue": True, "parts": {}, "calibration": None, "lidar": None,
+            "files": ["selection.json"], "preview": PREVIEW, "progress": progress,
+            "stages": {n: {"status": status[n], "ended": 1000.0 + k} for k, n in enumerate(names)}, **kw}
+
+
+def test_app_js_input_panel_and_views():
+    """The input panel: the preview video (muted, controls, metadata only, sized by the preview's shape) with the
+    input's name and kind, and one figure per view in run order with its image and "view i, frame f, t s"; view 0
+    has the star. A click on a view puts the video at the frame that the preview shows for it (1 ms in), paused,
+    marks that view as current and says which frame it shows. Place's later end adds the mesh fit toggle without
+    drawing the video again; the toggle swaps every image for place's overlay. A job without a preview says why in
+    one sentence, and its views are no buttons. The panel is drawn once per selection, so a refresh does not stop
+    the video, and a selection.json that comes after another job's page draws nothing."""
+    seek = {"152": {"frame": 152, "at": 15.0}, "40": {"frame": 40, "at": 3.8}, "301": {"frame": 300, "at": 29.9}}
+    first = input_job("j", preview={**PREVIEW, "seek": seek})
+    run = {**first, "files": ["selection.json", "run/placement.json"]}  # place has ended since
+    old = input_job("m")  # a preview without "seek": the page seeks by the pick's time
+    bag = input_job("k", kind="rosbag", video={"name": "scan.bag"}, source={"kind": "rosbag", "topic": "/cam/image_rect"},
+                    preview=None)
+    stray = input_job("s", kind="stray", video={"name": "capture.zip"}, source={"kind": "stray"},
+                      preview={"error": "ValueError: no libx264"})
+    gone = input_job("g", preview={"missing": True})
+    replies = {f"/api/jobs/{i}/file/selection.json": {"ok": True, "picks": PICKS, "anchor": "f00152"} for i in "jmksg"}
+    out = run_form_js(ELEMENTS + """
+        (async () => {
+          const out = {};
+          V = { id: "j" };
+          await renderInput(""" + json.dumps(first) + """);
+          const video = made.find((e) => e.tag === "video"), figs = views(), btns = figs.map((f) => f.kids[0]);
+          out.video = { ...video.attrs, muted: video.muted };
+          out.caption = text(made.find((e) => e.className === "inputfig"));
+          out.caps = figs.map((f) => text(f.kids[1]));
+          out.buttons = btns.map((b) => [b.tag, b.attrs["aria-label"], text(b)]);
+          out.imgs = btns.map((b) => b.kids[0].attrs);
+          const head = made.find((e) => e.className === "viewshead"), hint = () => made.filter((e) => e.className === "hint").map(text);
+          out.head0 = text(head);
+          out.hint0 = hint();
+          const seek = (i) => { btns[i].onclick(); return [video.currentTime, $("#inputmsg").textContent]; };
+          out.seek1 = [...seek(1), [...video.calls], [...figs[1].cls], [...figs[0].cls], btns.map((b) => b.attrs["aria-current"])];
+          out.seek2 = seek(2);
+          out.seek0 = [...seek(0), [...figs[0].cls], [...figs[1].cls], btns.map((b) => b.attrs["aria-current"])];
+          const n = made.length;
+          await renderInput(""" + json.dumps(run) + """);  // place ended: only the heading changes
+          out.placed = [made.filter((e) => e.tag === "video").length, made.filter((e) => e.tag === "img").length, made.length - n,
+            [...figs[0].cls], btns[0].attrs["aria-current"], text(head), $("#inputmsg").textContent];
+          out.hint1 = hint();
+          const toggle = made.find((e) => e.tag === "button" && text(e) === "Show the mesh fit");
+          toggle.onclick({ currentTarget: toggle });
+          out.overlay = [toggle.attrs["aria-pressed"], btns.map((b) => b.kids[0].attrs.src)];
+          toggle.onclick({ currentTarget: toggle });
+          out.photos = [toggle.attrs["aria-pressed"], btns[2].kids[0].attrs.src];
+          const m = made.length;
+          await renderInput(""" + json.dumps(run) + """);  // a refresh of the same job: nothing drawn again
+          out.again = made.length === m && !video.calls.includes("play") && !video.calls.includes("load");
+          made.length = 0;
+          V = { id: "m" };
+          await renderInput(""" + json.dumps(old) + """);
+          views()[2].kids[0].onclick();
+          out.m = [made.find((e) => e.tag === "video").currentTime, $("#inputmsg").textContent];
+          for (const job of [""" + json.dumps(bag) + ", " + json.dumps(stray) + ", " + json.dumps(gone) + """]) {
+            made.length = 0;
+            V = { id: job.id };
+            await renderInput(job);
+            out[job.id] = { video: made.some((e) => e.tag === "video"), p: made.filter((e) => e.tag === "p").map(text),
+              tags: views().map((f) => f.kids[0].tag), alt: views()[0].kids[0].kids[0].attrs.alt,
+              toggle: made.some((e) => e.tag === "button") };
+          }
+          // Job j's selection.json comes after job k's page is drawn: it draws nothing there.
+          let release;
+          const fetch0 = fetch;
+          globalThis.fetch = (url, opt) => url === "/api/jobs/j/file/selection.json" ? new Promise((r) => {
+            release = () => r({ ok: true, status: 200, json: async () => ({ picks: [""" + json.dumps(PICKS[0]) + """] }) }); })
+            : fetch0(url, opt);
+          V = { id: "j" };
+          const slow = renderInput(""" + json.dumps(run) + """);
+          V = { id: "k" };
+          await renderInput(""" + json.dumps(bag) + """);
+          const drawn = made.length, key = V.inputKey;
+          release();
+          await slow;
+          out.slow = [made.length === drawn, V.input.picks.length, V.inputKey === key];
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    assert out["video"] == {"src": "/api/jobs/j/file/frames/preview.mp4", "controls": "", "preload": "metadata", "playsinline": "",
+                            "muted": True, "width": "640", "height": "360", "style": "--ar: 640 / 360",
+                            "aria-label": "Preview of table.MOV"}
+    assert out["caption"] == "table.MOV (video) Preview at 640x360, 15 fps."
+    caps = ["view 0, frame 152, 15.2 s", "view 1, frame 40, 4.0 s", "view 2, frame 301, 30.1 s"]
+    assert out["caps"] == caps
+    assert out["buttons"] == [["button", c + ": show it in the video", t] for c, t in zip(caps, ["★", "", ""])]
+    assert [i["src"] for i in out["imgs"]] == [f"/api/jobs/j/file/run/input/images/{i}.png" for i in range(3)]
+    assert all(i["loading"] == "lazy" and i["alt"] == "" and i["style"] == "aspect-ratio: 640 / 360" for i in out["imgs"])
+    assert out["head0"] == "Views used (3)"  # no toggle before place
+    assert "Click a view to see its frame in the video. ★ marks view 0." in out["hint0"]
+    time1, msg1, calls, at1, at0, current = out["seek1"]
+    assert time1 == pytest.approx(3.801) and calls == ["pause", "scroll"] and at1 == ["at"] and at0 == []
+    assert msg1 == "The video shows view 1 at 3.8 s: frame 40." and current == ["false", "true", "false"]
+    assert out["seek2"][0] == pytest.approx(29.901)
+    assert out["seek2"][1] == "The video shows view 2 at 29.9 s: frame 300, since the preview has no frame 301."
+    assert out["seek0"][0] == pytest.approx(15.001)
+    assert out["seek0"][1:] == ["The video shows view 0 at 15.0 s: frame 152.", ["at"], [], ["true", "false", "false"]]
+    # The same video and images, still at view 0; the heading gains the toggle.
+    assert out["placed"][:6] == [1, 3, 2, ["at"], "true", "Views used (3)Show the mesh fit"]
+    assert out["placed"][6] == "The video shows view 0 at 15.0 s: frame 152."
+    assert ("Click a view to see its frame in the video. ★ marks view 0. The mesh fit shows the posed mesh in red and the "
+            "outline of the SAM 3 mask in green.") in out["hint1"]
+    assert out["overlay"] == ["true", [f"/api/jobs/j/file/run/overlay_{i}.png" for i in range(3)]]
+    assert out["photos"] == ["false", "/api/jobs/j/file/run/input/images/2.png"]
+    assert out["again"] is True
+    assert out["m"][0] == pytest.approx(30.1333 - 0.2 + 0.001) and out["m"][1] == "The video shows view 2 at 29.9 s."
+    assert out["k"] == {"video": False, "tags": ["div"] * 3, "alt": "", "toggle": False,
+                        "p": ["scan.bag (rosbag, camera topic /cam/image_rect)",
+                              "This job has no preview video, because its input was read before the app made previews.",
+                              "★ marks view 0."]}
+    assert out["s"]["p"][:2] == ["capture.zip (Stray capture)", "The app could not make a preview video: ValueError: no libx264"]
+    assert out["s"]["video"] is False and out["s"]["tags"] == ["div"] * 3
+    assert out["g"]["p"][:2] == ["table.MOV (video)", "The preview video of this job is missing on the server."]
+    assert out["slow"] == [True, 3, True]
+
+
+def test_app_js_input_panel_follows_the_selection():
+    """refresh() shows the input panel once the views are selected (here after a failure at sam3d), and hides and
+    empties it while a new selection runs. On a running job's page, the event that says select is done draws it
+    (by one refresh), and later events do not draw it again. The event that says place is done adds the mesh fit
+    toggle (by one refresh) and keeps the video."""
+    failed = input_job("j")
+    pending = input_job("j", select="running", sam3d="pending", status="running", current="select", error=None)
+    running = input_job("j", sam3d="running", status="running", current="sam3d", error=None)
+    placed = input_job("j", sam3d="done", status="running", current="agent", error=None,
+                       files=["selection.json", "run/placement.json"])
+    placed["progress"] = [{**x, "status": "done", "ended": 1500.0} if x["name"] == "place" else x for x in placed["progress"]]
+    out = run_form_js(ELEMENTS + """
+        (async () => {
+          const out = {}, jobs = { failed: """ + json.dumps(failed) + """, pending: """ + json.dumps(pending) + """,
+            running: """ + json.dumps(running) + """, placed: """ + json.dumps(placed) + """ };
+          let now = "failed", selections = 0;
+          const fetch0 = fetch, reply = (x) => Promise.resolve({ ok: true, status: 200, json: async () => x });
+          globalThis.fetch = (url, opt) => url === "/api/jobs/j" ? reply(jobs[now])
+            : url === "/api/jobs/j/file/selection.json" ? (selections++, reply({ ok: true, picks: """ + json.dumps(PICKS) + """ }))
+              : fetch0(url, opt);
+          const streams = [];
+          globalThis.EventSource = class { constructor(url) { this.on = {}; streams.push(this); }
+            addEventListener(k, f) { this.on[k] = f; } close() {} };
+          const refresh0 = refresh;
+          let pending = null, refreshes = 0;
+          refresh = () => { refreshes++; return (pending = refresh0()); };
+          $("#log").textContent = "a log";
+          V = { id: "j", picks: [], view0: null };
+          await refresh();
+          out.failed = [$("#input").hidden, views().map((f) => text(f.kids[1])), made.filter((e) => e.tag === "video").length];
+          now = "pending";  // Build again: select runs
+          await refresh();
+          out.pending = [$("#input").hidden, V.input, V.inputKey];
+          made.length = streams.length = 0;
+          selections = 0;
+          refreshes = 0;
+          V = { id: "j", picks: [], view0: null };
+          await refresh();
+          out.live = [$("#input").hidden, streams.length];
+          now = "running";
+          const state = (job) => ({ data: JSON.stringify({ status: job.status, current: job.current, error: null, warnings: [],
+            key_ok: false, agent: "none", articulated: false, parts_mode: "vlm", parts_review: false, stages: job.progress }) });
+          streams[0].on.state(state(jobs.pending));
+          out.before = refreshes;
+          streams[0].on.state(state(jobs.running));
+          await pending;
+          out.after = [refreshes, $("#input").hidden, selections, made.filter((e) => e.tag === "video").length];
+          streams[0].on.state(state(jobs.running));
+          out.again = refreshes;
+          now = "placed";
+          streams[0].on.state(state(jobs.placed));
+          await pending;
+          const toggles = () => made.filter((e) => e.tag === "button" && text(e) === "Show the mesh fit").length;
+          out.placed = [refreshes, made.filter((e) => e.tag === "video").length, toggles(), selections];
+          streams[0].on.state(state(jobs.placed));
+          out.placedAgain = [refreshes, toggles()];
+          console.log(JSON.stringify(out));
+        })()
+        """, {"/api/jobs/j/frames": frames_meta()})
+    assert out["failed"] == [False, ["view 0, frame 152, 15.2 s", "view 1, frame 40, 4.0 s", "view 2, frame 301, 30.1 s"], 1]
+    assert out["pending"] == [True, None, None]
+    assert out["live"] == [True, 1] and out["before"] == 1
+    assert out["after"] == [2, False, 1, 1] and out["again"] == 2
+    assert out["placed"] == [3, 1, 1, 1] and out["placedAgain"] == [3, 1]
