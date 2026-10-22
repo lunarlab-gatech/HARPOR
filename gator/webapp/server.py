@@ -34,8 +34,9 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       an articulation result adds mode, counts and joints_delivered), the
                                       output files that exist,
                                       "articulated", "parts_mode" and "parts_review" (the job waits for its
-                                      part list), "lidar" (steps.lidar) and "calibration" (the uploaded
-                                      calibration's summary, calibration_summary, or null)
+                                      part list), "lidar" (steps.lidar), "calibration" (the uploaded
+                                      calibration's summary, calibration_summary, or null) and "preview"
+                                      (the input's preview video, preview_of)
   DELETE /api/jobs/{id}               the job folder, unless the job is uploading, analyzing, queued or
                                       running
   GET    /api/jobs/{id}/frames        frames/meta.json, with frames/pool.json as "pool" once extracted
@@ -92,7 +93,9 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       lines of the running stage's log; id <stage>:<byte offset>, so a
                                       reconnect resumes with Last-Event-ID), "end" when the job stops
   GET    /api/jobs/{id}/file/{path}   only the paths that ALLOW matches; refined.glb is the agent's GLB
-                                      (steps.agent_glb), never the Stage A or split parts' GLB
+                                      (steps.agent_glb), never the Stage A or split parts' GLB. A Range
+                                      request (the preview video's seek) gets 206 with Content-Range, and 416
+                                      when it starts past the end (Starlette's FileResponse)
 
 picks and view0 of the start request are frames as the user clicked them; video extract snaps them
 to the sharpest frame within 0.25 s (frames/pool.json "picks"). The overrides name pool frames
@@ -129,14 +132,15 @@ MAX_UPLOAD = 20 << 30
 FREE_FACTOR = {"stray": 2.2}  # free space an upload needs, times its size (+ 2 GB); 1.2 for the other kinds
 ACTIVE = ("analyzing", "queued", "running")
 # Path segments are words, so no "..", absolute path or backslash ever matches.
-ALLOW = re.compile(r"frames/thumbs/\d+\.jpg|frames/topic_previews/\d+\.jpg|frames/topics\.json"
-                   r"|pool/lidar\.json|lidar/check/f\d{5,9}\.jpg"
-                   r"|scene/sam3_\w+/check/[\w-]+\.jpg|run/overlay_\d+\.png|run/posed\.glb"
+ALLOW = re.compile(r"frames/thumbs/\d+\.jpg|frames/topic_previews/\d+\.jpg|frames/topics\.json|frames/preview\.mp4"
+                   r"|pool/lidar\.json|lidar/check/f\d{5,9}\.jpg|scene/sam3_\w+/check/[\w-]+\.jpg"
+                   r"|run/input/images/\d{1,3}\.png|run/overlay_\d+\.png|run/posed\.glb"
                    r"|run/parts\.glb|run/parts\.json|run/parts/sam3/check/\d+\.jpg"
                    r"|refined\.glb|physics/aligned\.glb|physics/summary\.json|physics/mjcf/mjcf\.json"
                    r"|physics/urdf/model\.urdf|run/placement\.json|selection\.json|results\.zip|logs/\w+\.log")
 TYPES = {".glb": "model/gltf-binary", ".jpg": "image/jpeg", ".png": "image/png", ".json": "application/json",
-         ".zip": "application/zip", ".log": "text/plain; charset=utf-8", ".urdf": "application/xml"}
+         ".zip": "application/zip", ".log": "text/plain; charset=utf-8", ".urdf": "application/xml",
+         ".mp4": "video/mp4"}
 # run/parts.* exist only for an articulated job; mjcf.json and model.urdf for every job that got that far.
 # pool/lidar.json only for a job with LiDAR.
 OUTPUTS = ("run/posed.glb", "run/parts.glb", "run/parts.json", "refined.glb", "physics/aligned.glb",
@@ -191,6 +195,18 @@ def lidar_compact(rec, stale=False):
             "calibration_changed": bool(stale and rec.get("ok") is True), "warnings": rec.get("warnings") or [],
             "views": [{k: v.get(k) for k in ("name", "s", "points_used", "status")} for v in rec.get("views") or []],
             "check_dir": "lidar/check"}
+
+
+def preview_of(J):
+    """frames/meta.json "preview" for the page, or None for a job analyzed before the app made previews: the
+    record of video.Preview while frames/preview.mp4 is there, else {"error": why}."""
+    meta = read_json(J / "frames" / "meta.json")
+    rec = meta.get("preview") if isinstance(meta, dict) else None
+    if not isinstance(rec, dict):
+        return None
+    if rec.get("error") is None and resolve(J, "frames/preview.mp4"):
+        return rec
+    return {"error": str(rec.get("error") or "frames/preview.mp4 is missing")[:300]}
 
 
 def lidar_of(job):
@@ -435,7 +451,7 @@ def make_app(cfg, token, key_dir=None):
         job.update(source=steps.source(job), kind=steps.source(job)["kind"], agent=steps.agent(job),
                    articulated=steps.articulated(job), parts_mode=steps.parts_mode(job),
                    parts_review=steps.waits_for_parts(J, job), lidar=lidar_of(job),
-                   calibration=calibration_summary(job.get("calibration")))
+                   calibration=calibration_summary(job.get("calibration")), preview=preview_of(J))
         job["progress"] = jobs.progress(J)
         job["files"] = [f for f in OUTPUTS if resolve(J, f)]
         r = read_json(J / "agent" / "result.json")

@@ -27,6 +27,15 @@ header_ns, log_ns}, every frame's header stamp and log time in ns (index i = fra
 meta.json; meta.json stays small because the server sends it whole. Every step prints `PROGRESS x`
 lines (0 to 1) for the server.
 
+analyze also writes J/frames/preview.mp4 in the same decode pass, for the results page (Preview): H.264
+(libx264, yuv420p, crf 28, preset veryfast, a keyframe every 2 s) in MP4 with the index first, upright
+as the frames come, the long side at most 640 px and both sides even, and every k-th frame, k the
+smallest stride that brings the mean rate to at most 15 fps (1% leeway, since the rate is measured).
+A frame's time in it is its time in meta.json minus t0, the time of frame 0, so the video starts at 0
+(a Stray capture's frame 0 comes before 0). It is moved into place before meta.json, whose "preview" is
+{file, width, height, fps, stride, frames, t0, bytes}, or {"error": why} when the encoder failed; the
+analysis goes on without it.
+
 Candidates: the video is cut into K = 2 per second (16 to 32) equal time bins, and each bin gives
 its sharpest frame by rel within the central 60% of the bin, so two candidates are never next to
 each other. A bin gives none when that frame is blurred (rel < 0.6) or badly exposed (mean luma
@@ -47,9 +56,12 @@ depth and odometry counts and the capture's warnings.
 """
 
 import argparse
+import contextlib
 import io
 import json
+import math
 import os
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -58,6 +70,10 @@ HDR = {18: "HLG", 16: "PQ"}  # AVCOL_TRC_ARIB_STD_B67, AVCOL_TRC_SMPTE2084
 METRIC_WIDTH = 960
 THUMB_SIDE = 320
 MAX_THUMBS = 600
+PREVIEW_SIDE = 640  # the preview's long side at most, px
+PREVIEW_FPS = 15  # its mean rate at most, frames per second (1% leeway)
+PREVIEW_TB = Fraction(1, 90000)  # its time base
+PREVIEW_OPTIONS = {"crf": "28", "preset": "veryfast"}  # libx264's
 
 
 def open_video(path, options=None):
@@ -177,6 +193,102 @@ def snap(index, times, rel, window_s=0.25):
     return int(max(idx, key=lambda j: (rel[j], -abs(j - index))))
 
 
+def preview_plan(info):
+    """(width, height, stride) of the preview of an input with probe()'s facts info: the upright size with
+    the long side at most PREVIEW_SIDE, both sides even (yuv420p needs that), and every stride-th frame
+    kept, the smallest stride that brings the mean rate to at most PREVIEW_FPS (1% leeway)."""
+    w, h = info["width"], info["height"]
+    k = min(1.0, PREVIEW_SIDE / max(w, h))
+    width, height = (max(2, 2 * round(x * k / 2)) for x in (w, h))
+    return width, height, max(1, math.ceil(0.99 * (info.get("fps") or 0) / PREVIEW_FPS))
+
+
+class Preview:
+    """J/frames/preview.mp4, written frame by frame in analyze's decode pass (see the module docstring).
+    add() takes every frame and keeps every stride-th one; close() moves the file into place. An encoder
+    or disk error drops the preview: it prints a warning, and the record says why. Used as a context
+    manager, it deletes the half-written file when the decode pass stops with an exception."""
+
+    def __init__(self, path, info):
+        import av
+
+        self.path = Path(path)
+        self.tmp = self.path.with_name(".tmp_" + self.path.name)
+        self.width, self.height, self.stride = preview_plan(info)
+        self.fps = round(info["fps"] / self.stride, 3) if info.get("fps") else None
+        self.t0, self.last, self.n, self.error, self.c, self.s = None, -1, 0, None, None, None
+        try:
+            self.c = av.open(str(self.tmp), "w", format="mp4", options={"movflags": "+faststart"})
+            rate = Fraction(self.fps or PREVIEW_FPS).limit_denominator(1000)
+            gop = str(max(1, round(2 * (self.fps or PREVIEW_FPS))))
+            self.s = self.c.add_stream("libx264", rate=rate, options={**PREVIEW_OPTIONS, "g": gop})
+            self.s.width, self.s.height, self.s.pix_fmt = self.width, self.height, "yuv420p"
+            self.s.time_base = self.s.codec_context.time_base = PREVIEW_TB
+        except (av.FFmpegError, OSError, ValueError) as e:  # ValueError: PyAV without libx264
+            self._fail(e)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self.c is not None:  # not closed: the decode pass stopped
+            self._drop()
+
+    def _drop(self):
+        """Close and delete the half-written file."""
+        import av
+
+        if self.c is not None:
+            with contextlib.suppress(av.FFmpegError, OSError, ValueError):
+                self.c.close()
+        self.c = self.s = None
+        self.tmp.unlink(missing_ok=True)
+
+    def _fail(self, e):
+        self.error = f"{type(e).__name__}: {e}"
+        print(f"warning: no preview video ({self.error})", flush=True)
+        self._drop()
+
+    def add(self, i, t, rgb):
+        """Frame i at time t (s), upright RGB uint8, of any size."""
+        import av
+
+        if self.t0 is None:
+            self.t0 = t  # frame 0, which every stride keeps
+        if self.s is None or i % self.stride:
+            return
+        try:
+            f = av.VideoFrame.from_ndarray(np.ascontiguousarray(rgb), format="rgb24").reformat(
+                width=self.width, height=self.height, format="yuv420p", interpolation="AREA")
+            self.last = f.pts = max(round((t - self.t0) / PREVIEW_TB), self.last + 1)  # repeated times stay in order
+            f.time_base = PREVIEW_TB
+            for p in self.s.encode(f):
+                self.c.mux(p)
+            self.n += 1
+        except (av.FFmpegError, OSError, ValueError) as e:
+            self._fail(e)
+
+    def close(self):
+        """Finish the file and move it to path. Returns meta.json's "preview": {file, width, height, fps, stride,
+        frames, t0, bytes}, or {"error": why} (no file at path then)."""
+        import av
+
+        if self.s is not None:
+            try:
+                for p in self.s.encode():
+                    self.c.mux(p)
+                self.c.close()
+                self.c = None
+                os.replace(self.tmp, self.path)
+            except (av.FFmpegError, OSError, ValueError) as e:
+                self._fail(e)
+        if self.s is None:
+            self.path.unlink(missing_ok=True)  # an earlier analysis's preview would not match meta.json
+            return {"error": self.error}
+        return {"file": f"frames/{self.path.name}", "width": self.width, "height": self.height, "fps": self.fps,
+                "stride": self.stride, "frames": self.n, "t0": round(self.t0, 4), "bytes": self.path.stat().st_size}
+
+
 def write_json(path, data):
     tmp = path.with_name(".tmp_" + path.name)
     tmp.write_text(json.dumps(data, indent=1))
@@ -286,14 +398,21 @@ def analyze(job_dir):
     # Every thumbnail is kept in memory as JPEG bytes (~15 kB each) until the candidates are known.
     jpgs, stats, times = {}, [], []
     every = max(1, n // 50)
-    for i, t, rgb in read(info, width=min(METRIC_WIDTH, w)):
-        stats.append(frame_stats(gray(rgb)))
-        times.append(t)
-        buf = io.BytesIO()
-        Image.fromarray(rgb).resize(tsize, Image.BILINEAR).save(buf, "JPEG", quality=80)
-        jpgs[i] = buf.getvalue()
-        if i % every == 0:
-            print(f"PROGRESS {0.05 + 0.9 * i / n:.3f}", flush=True)
+    (job_dir / "frames").mkdir(parents=True, exist_ok=True, mode=0o700)
+    with Preview(job_dir / "frames" / "preview.mp4", info) as preview:
+        for i, t, rgb in read(info, width=min(METRIC_WIDTH, w)):
+            stats.append(frame_stats(gray(rgb)))
+            times.append(t)
+            buf = io.BytesIO()
+            Image.fromarray(rgb).resize(tsize, Image.BILINEAR).save(buf, "JPEG", quality=80)
+            jpgs[i] = buf.getvalue()
+            preview.add(i, t, rgb)
+            if i % every == 0:
+                print(f"PROGRESS {0.05 + 0.9 * i / n:.3f}", flush=True)
+        preview_rec = preview.close()  # before meta.json, the done marker
+    if "error" not in preview_rec:
+        print(f"preview video: {preview_rec['frames']} frames, {preview_rec['width']}x{preview_rec['height']}, "
+              f"{preview_rec['fps']} fps, {preview_rec['bytes'] / 1e6:.1f} MB")
     s = np.array(stats).reshape(-1, 4)
     rel = relative(s[:, 0], times)
     cand = candidates(times, rel, s[:, 1], info["duration_s"])
@@ -309,7 +428,7 @@ def analyze(job_dir):
     meta = {"video": info, "times": [round(t, 4) for t in times], "lv": np.round(s[:, 0], 2).tolist(),
             "rel": np.round(rel, 4).tolist(), "luma": np.round(s[:, 1], 2).tolist(),
             "clip_hi": np.round(s[:, 2], 4).tolist(), "clip_lo": np.round(s[:, 3], 4).tolist(),
-            "candidates": cand, "thumbs": thumbs, "thumb_size": list(tsize)}
+            "candidates": cand, "thumbs": thumbs, "thumb_size": list(tsize), "preview": preview_rec}
     if info["kind"] == "rosbag":  # the absolute frame times, for matching LiDAR scans to frames
         write_json(job_dir / "frames" / "stamps.json", {"topic": info["topic"], "clock": info["clock"], **stamps})
     write_json(job_dir / "frames" / "meta.json", meta)  # last: the server takes it as the done marker

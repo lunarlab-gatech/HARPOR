@@ -79,8 +79,10 @@ BAGS = (".bag", ".mcap", ".db3")
 STRAY = (".zip",)  # a Stray Scanner export folder, zipped
 INPUTS = {"video": "a video", "rosbag": "a rosbag", "stray": "a Stray Scanner capture"}  # for messages
 # What a stage's rerun must not find from an earlier run; the other stages replace their own files.
-# The LiDAR samples cache (lidar/samples.*) stays: the lidar stage checks its key.
-DERIVED = {"frames": ("frames/meta.json", "frames/thumbs", "frames/stamps.json"),
+# The LiDAR samples cache (lidar/samples.*) stays: the lidar stage checks its key. A killed frames stage
+# leaves its half-written preview video (.tmp_preview.mp4).
+DERIVED = {"frames": ("frames/meta.json", "frames/thumbs", "frames/stamps.json", "frames/preview.mp4",
+                      "frames/.tmp_preview.mp4"),
            "extract": ("frames/pool.json", "scene", "pool"), "lidar": ("pool/lidar.json", "lidar/check"),
            "select": ("selection.json", "run"), "propose": ("run/proposal.json",),
            "parts": ("run/parts", "run/parts.glb", "run/parts.json"), "agent": ("agent",), "align": ("physics",),
