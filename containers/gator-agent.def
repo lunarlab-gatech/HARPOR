@@ -1,0 +1,28 @@
+# Agent image for Stage B (build_plan.md notes 5 and 7): Node.js, Codex CLI and Blender.
+# Built on an ICE compute node without root:
+#   apptainer build --fakeroot gator-agent.sif gator-agent.def
+Bootstrap: docker
+From: ubuntu:24.04
+
+%post
+  set -e
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates curl xz-utils git python3 \
+    libx11-6 libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 libegl1 libxkbcommon0 \
+    libsm6 libice6 libwayland-client0 libdecor-0-0 libvulkan1
+  rm -rf /var/lib/apt/lists/*
+  curl -fsSL https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz | tar -xJ -C /opt
+  ln -s /opt/node-v24.21.0-linux-x64 /opt/node
+  PATH=/opt/node/bin:$PATH npm install -g --prefix /opt/codex @openai/codex@0.162.1
+  curl -fsSL https://download.blender.org/release/Blender5.2/blender-5.2.2-linux-x64.tar.xz | tar -xJ -C /opt
+  ln -s /opt/blender-5.2.2-linux-x64 /opt/blender
+
+%environment
+  export PATH=/opt/codex/bin:/opt/node/bin:/opt/blender:$PATH
+
+%test
+  node --version
+  codex --version
+  blender --version | head -1
+  ! ldd /opt/blender/blender | grep "not found"

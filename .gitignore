@@ -1,0 +1,45 @@
+# Python and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Editors and macOS
+.DS_Store
+.vscode/
+.idea/
+
+# API keys (the real ones live in ~/.config/gator, never in the repo)
+.env
+*.env
+
+# Things that live on ICE under $G, not in the repo: environments, the SIF, model weights,
+# caches, session runs and web-app jobs
+envs/
+sif/
+*.sif
+.cache/
+weights/
+checkpoints/
+*.ckpt
+*.safetensors
+runs/
+webapp_runs/
+results/
+
+# Input data, which can be private (bags, phone videos): never commit it
+*.bag
+*.mcap
+*.db3
+*.mp4
+*.mov
+*.MOV
+*.zip
+*.m4v
+*.avi
+*.mkv
+*.webm

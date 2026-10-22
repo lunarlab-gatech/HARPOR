@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>HARPOR</title>
+<meta name="description" content="HARPOR: High-fidelity Articulated sim-Ready Object Reconstruction">
+<link rel="stylesheet" href="/static/style.css">
+<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.4.0/model-viewer.min.js"></script>
+</head>
+<body>
+<header>
+  <a href="#/" class="brand" title="High-fidelity Articulated sim-Ready Object Reconstruction">HARPOR <span class="brandsub">High-fidelity Articulated sim-Ready Object Reconstruction</span></a>
+  <span id="where"></span>
+  <span id="conn" class="conn" role="status" hidden></span>
+</header>
+<main>
+
+<section id="list" hidden>
+  <div id="drop" class="drop">
+    <p class="droptitle">Drop a phone video, a rosbag or a Stray Scanner export (.zip) of one object here</p>
+    <p class="hint">Video: .mp4 .mov .m4v .avi .mkv .webm. Rosbag: .bag, or the .mcap or .db3 file of a ROS 2 bag.
+      Stray Scanner: zip the export folder. Walk around the object, keep it in frame, and record with HDR off.</p>
+    <p><label class="button">Choose a file<input type="file" id="file" class="sr-only" accept="video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm,.bag,.mcap,.db3,.zip"></label>
+      <button id="upcancel" class="secondary" type="button" hidden>Cancel upload</button></p>
+    <progress id="upprog" max="1" value="0" aria-label="Upload progress" hidden></progress>
+    <p id="upmsg" class="msg" role="status"></p>
+    <p id="uprate" class="hint"></p>
+  </div>
+  <h2>Jobs</h2>
+  <div class="panel tablewrap" tabindex="0" role="region" aria-label="Jobs">
+    <table id="jobs">
+      <thead><tr><th><span class="sr-only">Preview</span></th><th>Input</th><th>Object</th><th>Created</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section id="job" hidden>
+  <div class="jobhead">
+    <h2 id="jtitle" tabindex="-1"></h2>
+    <p id="jid" class="hint mono"></p>
+    <div id="jstatus"></div>
+    <p id="jnext" class="next"></p>
+    <p id="announce" class="sr-only" role="status"></p>
+    <ul id="jwarn" class="warnings"></ul>
+    <div id="actions" class="actions">
+      <p id="keyrow" hidden><label><span id="key2name">OpenAI API key</span> <input id="key2" type="password" autocomplete="off" spellcheck="false"></label></p>
+      <button id="retry" type="button" hidden>Retry</button>
+      <button id="cancel" class="danger" type="button" hidden>Cancel job</button>
+      <span id="runmsg" class="msg" role="status"></span>
+    </div>
+  </div>
+
+  <div id="lidarfail" class="panel" hidden>
+    <h3>Metric scale from LiDAR</h3>
+    <div id="lidarfailbody"></div>
+  </div>
+
+  <div id="topics" class="panel" hidden>
+    <h3>Camera topic</h3>
+    <p class="hint">Choose the camera image topic of the bag to build from.</p>
+    <div class="scroll" tabindex="0" role="region" aria-label="Camera topics"><table id="ttable">
+      <thead><tr><th><span class="sr-only">Preview</span></th><th>Topic</th><th>Type</th><th>Messages</th><th>Rate</th><th>Size</th><th>Lens</th><th><span class="sr-only">Choose</span></th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <p id="tskipped" class="hint"></p>
+    <p><button id="tkeep" class="small secondary" type="button" hidden>Keep the current topic</button> <span id="topicmsg" class="msg" role="status"></span></p>
+  </div>
+
+  <div id="review" class="panel" hidden>
+    <h3>Review the views</h3>
+    <div class="revtop">
+      <figure class="ringbox">
+        <svg id="ring" role="img" aria-label="camera positions seen from above"></svg>
+        <figcaption class="hint">Cameras seen from above: filled = picked (with its view number), star = view 0, + = object.</figcaption>
+      </figure>
+      <div>
+        <p id="selsum"></p>
+        <div id="sellidar" class="lidarsum"></div>
+        <ul id="selwarn" class="warnings"></ul>
+        <p class="hint">Change a view with its menus, then select again. Build uses the picked views as they are.</p>
+      </div>
+    </div>
+    <div id="cards"></div>
+    <div id="revbar" class="stickybar">
+      <button id="build" type="button">Build</button>
+      <button id="reselect" class="secondary" type="button" disabled>Select again with my changes</button>
+      <button id="discard" class="small secondary" type="button" hidden>Discard changes</button>
+      <button id="manualstart" class="small secondary" type="button">Start over in manual mode</button>
+      <span id="revmsg" class="msg" role="status"></span>
+    </div>
+  </div>
+
+  <div id="partsreview" class="panel" hidden>
+    <h3>Check the part list</h3>
+    <div class="revtop">
+      <figure id="partsfig" class="photobox">
+        <img id="partsphoto" alt="View 0 of the object">
+        <figcaption class="hint">View 0, the photo the VLM saw, with the object's SAM 3 mask.</figcaption>
+      </figure>
+      <div>
+        <p id="partssum"></p>
+        <ul id="partswarn" class="warnings"></ul>
+        <label for="partsedit">Parts, one per line</label>
+        <textarea id="partsedit" rows="6" spellcheck="false" autocomplete="off" aria-describedby="partsedithelp"></textarea>
+        <p id="partsedithelp" class="hint">Write each part as name &gt; parent : joint. The first line is the base, which does not move.
+          The joint is revolute (it turns), prismatic (it slides), fixed or unknown. Write drawer x3 for three identical drawers.</p>
+        <ul id="partshints" class="parthints"></ul>
+      </div>
+    </div>
+    <div id="partsbar" class="stickybar">
+      <button id="partsbuild" type="button">Build with these parts</button>
+      <button id="partsreset" class="small secondary" type="button" hidden>Undo my edits</button>
+      <span id="partsmsg" class="msg" role="status"></span>
+    </div>
+  </div>
+
+  <div id="results" class="panel" hidden>
+    <h3>Results</h3>
+    <div id="downloads" class="downloads"></div>
+    <div id="viewers" class="viewers"></div>
+    <div id="facts2"></div>
+    <div id="partchecks"></div>
+  </div>
+
+  <details id="frames" class="panel" hidden>
+    <summary><h3 id="framesum">Frames and build settings</h3></summary>
+    <p id="topicrow" hidden>Camera topic <code id="topicname"></code> <button id="chtopic" class="small secondary" type="button">Change topic</button></p>
+    <p id="hdr" class="warn" hidden>HDR video gives flatter colors; record with HDR off for best textures.</p>
+    <div id="strayinfo" hidden>
+      <p id="strayfacts"></p>
+      <ul id="straywarn" class="warnings"></ul>
+    </div>
+    <details id="videoinfo" class="sub">
+      <summary id="vsum">Video</summary>
+      <p id="facts"></p>
+      <svg id="spark" viewBox="0 0 600 60" preserveAspectRatio="none" role="img" aria-label="sharpness over time"></svg>
+      <p class="hint">Sharpness over time (dashed line: 0.6 of the local median; dots: candidate views).</p>
+    </details>
+    <form id="startform" autocomplete="off">
+      <label>Object noun (SAM 3 prompt) <input id="prompt" maxlength="60" required placeholder="coffee cup"></label>
+      <fieldset class="chips">
+        <legend>Views</legend>
+        <label><input type="radio" name="mode" value="auto" checked> Auto: the app picks them</label>
+        <label><input type="radio" name="mode" value="manual"> Manual: I pick the frames</label>
+      </fieldset>
+      <p id="autobox"><label for="nviews">Number of views</label> <input type="range" id="nviews" min="2" max="12" value="6"> <output id="nval" for="nviews">6</output></p>
+      <div id="manbox" hidden>
+        <p class="hint">Click a frame to pick it (it snaps to the sharpest frame within 0.25 s); click it again to unpick. Pick 2 to 12 frames and make one of them view 0.</p>
+        <p id="pickcount" role="status"></p>
+      </div>
+      <details id="gridbox" class="sub">
+        <summary>Candidate frames</summary>
+        <div id="grid" class="grid"></div>
+      </details>
+      <ol id="picks" class="picks" hidden></ol>
+      <fieldset id="agents" class="chips">
+        <legend>Agent: it refines the Stage A mesh, or sets the joints of an articulated object</legend>
+        <label><input type="radio" name="agent" value="astra" checked> GPT-6-Astra (your OpenAI key)</label>
+        <label><input type="radio" name="agent" value="opus"> Claude Opus 5.5 (your Anthropic key)</label>
+        <label><input type="radio" name="agent" value="none"> No agent (no key)</label>
+      </fieldset>
+      <label id="keylabel"><span id="keyname">OpenAI API key</span> <input id="key" type="password" autocomplete="off" required spellcheck="false" placeholder="sk-..."></label>
+      <label class="check"><input type="checkbox" id="articulated" aria-controls="partsbox"> Articulated object: it has parts that move, such as doors, drawers or a lid</label>
+      <div id="partsbox" class="partsbox" hidden>
+        <fieldset id="partsmodes" class="chips">
+          <legend>Who lists the moving parts (the VLM is the agent's model)</legend>
+          <label><input type="radio" name="partsmode" value="vlm" checked> The VLM lists the parts</label>
+          <label><input type="radio" name="partsmode" value="vlm_edit"> The VLM proposes, I edit the list</label>
+          <label><input type="radio" name="partsmode" value="user"> I type the parts</label>
+        </fieldset>
+        <p id="partsnoagent" class="hint" hidden>Without an agent the parts are split but get no joints, so physics welds them into one body.</p>
+        <p id="partspause" class="hint" hidden>The build stops after the VLM lists the parts, so you can check the list.</p>
+        <div id="partlistbox" hidden>
+          <label for="partlist">Parts, one per line</label>
+          <textarea id="partlist" rows="5" spellcheck="false" autocomplete="off" aria-describedby="partlisthint"
+            placeholder="cabinet body&#10;door > cabinet body : revolute&#10;drawer x3 > cabinet body : prismatic"></textarea>
+          <p id="partlisthint" class="hint">Write each part as name &gt; parent : joint. The first line is the base, which does not move, so it has no parent.
+            The joint is revolute (it turns), prismatic (it slides), fixed or unknown. Write drawer x3 for three identical drawers.</p>
+        </div>
+      </div>
+      <div id="lidarbox" class="lidarbox" hidden>
+        <label class="check"><input type="checkbox" id="uselidar" aria-controls="lidaropts" aria-describedby="lidarhint"> Use LiDAR for metric scale</label>
+        <p id="lidarhint" class="hint"></p>
+        <div id="lidaropts" class="partsbox" hidden>
+          <label for="lidartopic">LiDAR topic</label>
+          <select id="lidartopic" aria-describedby="lidarlink"></select>
+          <p id="lidarlink" class="hint" role="status"></p>
+          <p id="lidarskipped" class="hint"></p>
+          <p class="calrow">
+            <label class="button small secondary"><span id="calbtn">Upload a calibration</span><input type="file" id="calfile" class="sr-only" accept=".yaml,.yml,.json" aria-describedby="calhelp"></label>
+            <button id="calremove" class="small secondary" type="button" aria-label="Remove the calibration" hidden>Remove</button>
+          </p>
+          <p id="calsum" hidden></p>
+          <p id="calmsg" class="msg" role="status"></p>
+          <p id="calhelp" class="hint">The calibration is a .yaml, .yml or .json file. Its T_cam_lidar takes LiDAR points to the camera's optical frame
+            before rectification, in meters. Give camera_axes: body for x forward, y left, z up. It may also give K and D. It replaces the bag's TF.</p>
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" id="pause" checked> Pause to review the views before the build</label>
+      <p id="rebuildhint" class="hint" hidden></p>
+      <div class="stickybar"><button id="start">Start</button> <span id="startmsg" class="msg" role="status"></span></div>
+    </form>
+  </details>
+
+  <details id="run" class="panel" hidden>
+    <summary><h3>Stages and log</h3> <span id="runsum" class="hint"></span></summary>
+    <div class="runbody">
+      <div class="stagecol"><ol id="stages"></ol></div>
+      <div class="logcol">
+        <p class="loghead"><span id="logname" class="hint"></span> <a id="rawlog" class="hint" target="_blank" rel="noopener" hidden>Open the full log</a></p>
+        <pre id="log" tabindex="0" role="region" aria-label="Log"></pre>
+      </div>
+    </div>
+  </details>
+</section>
+
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

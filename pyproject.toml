@@ -1,0 +1,13 @@
+[project]
+name = "gator"
+version = "0.0.1"
+description = "Re-implementation of GATOR (arXiv 2610.11215v1). See docs/build_plan.md."
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "trimesh", "torch"]
+
+[tool.setuptools.packages.find]
+include = ["gator*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

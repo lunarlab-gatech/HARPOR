@@ -1,0 +1,19 @@
+# Codex CLI 0.162.1 settings for the agent (build_plan.md note 5), read from CODEX_HOME=/session/codex_home.
+# The paper ran GPT-6-Astra through the Codex CLI at extra-high reasoning effort. Every key is checked by
+# --strict-config. Sources: codex-rs at tag rust-v0.162.1 (config/src/config_toml.rs and others).
+model = "gpt-6-astra"
+model_reasoning_effort = "xhigh"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+# The default is "cached", and it becomes "live" without a sandbox. The agent gets no web search.
+web_search = "disabled"
+
+[shell_environment_policy]
+# The default (true) passes variables such as CODEX_API_KEY to the agent's shell commands.
+ignore_default_excludes = false
+
+[analytics]
+enabled = false
+
+[feedback]
+enabled = false

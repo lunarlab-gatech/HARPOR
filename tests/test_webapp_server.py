@@ -1,0 +1,2063 @@
+import hashlib
+import io
+import json
+import os
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+import textwrap
+import time
+import zipfile
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+pytest.importorskip("fastapi")
+pytest.importorskip("av")
+from fastapi.testclient import TestClient  # noqa: E402
+
+from gator.webapp import jobs, server, steps  # noqa: E402
+
+TOKEN = "tok-" + secrets.token_hex(16)
+KEY = "sk-test-" + secrets.token_hex(16)
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def client(tmp_path):
+    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=True)
+    with TestClient(server.make_app(cfg, TOKEN, key_dir=tmp_path / "keys")) as c:
+        yield c, cfg
+
+
+def login(c):
+    r = c.get(f"/?token={TOKEN}", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    return r
+
+
+def write_video(path, n=64, size=(192, 128)):
+    import av
+
+    rng = np.random.default_rng(0)
+    bg = (rng.random((size[1] // 4, size[0] // 4, 3)) * 180 + 30).astype(np.uint8).repeat(4, 0).repeat(4, 1)
+    with av.open(str(path), "w", format="mp4") as c:
+        s = c.add_stream("libx264", rate=24, options={"crf": "12"})
+        s.width, s.height, s.pix_fmt = size[0], size[1], "yuv420p"
+        for i in range(n):
+            a = bg.copy()
+            a[40:80, 10 + 2 * i:50 + 2 * i] = 240
+            for p in s.encode(av.VideoFrame.from_ndarray(a, format="rgb24")):
+                c.mux(p)
+        for p in s.encode():
+            c.mux(p)
+    return path
+
+
+def write_bag(path, topics, n=48, size=(192, 128)):
+    """A ROS1 bag with one CompressedImage (JPEG) topic per name in topics: n frames at 10 Hz of a textured
+    background with a white square moving right, with header stamps."""
+    from PIL import Image
+    from rosbags.rosbag1 import Writer
+    from rosbags.typesys import Stores, get_typestore
+
+    ts = get_typestore(Stores.ROS1_NOETIC)
+    T = ts.types
+    rng = np.random.default_rng(0)
+    bg = (rng.random((size[1] // 4, size[0] // 4, 3)) * 180 + 30).astype(np.uint8).repeat(4, 0).repeat(4, 1)
+    with Writer(path) as w:
+        conns = [w.add_connection(t, "sensor_msgs/msg/CompressedImage", typestore=ts) for t in topics]
+        for i in range(n):
+            a = bg.copy()
+            a[40:80, 10 + 2 * i:50 + 2 * i] = 240
+            buf = io.BytesIO()
+            Image.fromarray(a).save(buf, "JPEG", quality=90)
+            ns = 1_749_907_120_000_000_000 + i * 100_000_000
+            header = T["std_msgs/msg/Header"](seq=i, stamp=T["builtin_interfaces/msg/Time"](sec=ns // 10**9, nanosec=ns % 10**9),
+                                              frame_id="camera")
+            msg = T["sensor_msgs/msg/CompressedImage"](header=header, format="jpeg", data=np.frombuffer(buf.getvalue(), np.uint8))
+            for conn in conns:
+                w.write(conn, ns + 50_000_000, ts.serialize_ros1(msg, conn.msgtype))
+    return path
+
+
+def wait(c, job_id, *statuses, timeout=90):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        job = c.get(f"/api/jobs/{job_id}").json()
+        if job["status"] in statuses:
+            return job
+        time.sleep(0.2)
+    raise AssertionError(f"job is {job['status']}, not {statuses}: {job['error']}")
+
+
+def uploaded(c, tmp_path, name="clip one.mp4"):
+    video = write_video(tmp_path / "src.mp4")
+    r = c.put("/api/upload", params={"name": name}, content=video.read_bytes())
+    assert r.status_code == 200, r.text
+    job_id = r.json()["id"]
+    wait(c, job_id, "ready")
+    return job_id
+
+
+def events(c, job_id, last_id=None):
+    """(event, data, id) of the job's event stream until its end event."""
+    out, ev = [], {}
+    headers = {"Last-Event-ID": last_id} if last_id else {}
+    with c.stream("GET", f"/api/jobs/{job_id}/events", headers=headers) as r:
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+        for line in r.iter_lines():
+            if not line:
+                if ev:
+                    out.append((ev.get("event"), json.loads(ev["data"]), ev.get("id")))
+                    if ev.get("event") == "end":
+                        return out
+                ev = {}
+            elif not line.startswith(":"):
+                k, _, v = line.partition(": ")
+                ev[k] = v
+    return out
+
+
+def all_files(root):
+    return [p for p in Path(root).rglob("*") if p.is_file() and not p.is_symlink()]
+
+
+def test_token_gate(client):
+    c, _ = client
+    for path in ("/", "/static/app.js", "/api/jobs", "/api/jobs/x/file/selection.json"):
+        assert c.get(path).status_code == 401
+    assert c.put("/api/upload?name=a.mp4", content=b"x").status_code == 401
+    assert c.get("/?token=wrong").status_code == 401 and c.get("/?token=").status_code == 401
+    cookie = login(c).headers["set-cookie"].lower()
+    assert "httponly" in cookie and "samesite=strict" in cookie
+    assert "/static/app.js" in c.get("/").text and c.get("/static/app.js").status_code == 200
+    assert c.get("/api/jobs").json() == [] and c.get("/api/jobs/20260101-000000-abcdef").status_code == 404
+    c.cookies.set(server.COOKIE, "wrong")
+    assert c.get("/api/jobs").status_code == 401
+
+
+def test_upload_review_overrides_and_results(client, tmp_path):
+    c, cfg = client
+    login(c)
+    assert c.put("/api/upload", content=b"").status_code == 400  # no name
+    job_id = uploaded(c, tmp_path)
+    J = cfg.runs / job_id
+    assert c.get("/api/jobs").json()[0]["video"] == "clip_one.mp4" and not list(cfg.runs.glob("*/video/*.part"))
+    meta = c.get(f"/api/jobs/{job_id}/frames").json()
+    assert len(meta["times"]) == 64 and meta["candidates"] and meta["video"]["width"] == 192
+    r = c.get(f"/api/jobs/{job_id}/thumb/{meta['thumbs'][0]}")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+
+    start = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": False}
+    bad = "bad-" + secrets.token_hex(8)
+    r = c.post(f"/api/jobs/{job_id}/start", json={**start, "api_key": bad})
+    assert r.status_code == 400 and bad not in r.text and c.get(f"/api/jobs/{job_id}").json()["status"] == "ready"
+    for wrong in ({"n_views": 13}, {"prompt": ""}, {"mode": "manual", "picks": [3]}, {"picks": [0, 99]}):
+        assert c.post(f"/api/jobs/{job_id}/start", json={**start, **wrong, "api_key": KEY}).status_code == 400, wrong
+    assert c.post(f"/api/jobs/{job_id}/start", content=b"[1, 2]").status_code == 400
+    r = c.post(f"/api/jobs/{job_id}/start", json={**start, "api_key": KEY})
+    assert r.status_code == 200 and KEY not in r.text
+
+    seen = events(c, job_id)  # the build up to the review, live
+    kinds = {e for e, _, _ in seen}
+    assert {"state", "log", "end"} <= kinds and seen[-1][1] == {"status": "review"}
+    logs = [(d, i) for e, d, i in seen if e == "log"]
+    assert all(i == f"{d['stage']}:{i.split(':')[1]}" for d, i in logs)
+    assert {d["stage"] for d, _ in logs} >= {"extract", "masks", "prep", "da3", "select"}  # also stages between two looks
+    again = events(c, job_id, last_id=logs[-1][1])  # resumed after the last log line: nothing twice
+    assert [e for e, _, _ in again] == ["state", "end"]
+
+    job = c.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "review" and job["slug"] == "wooden_box" and job["key_ok"] is True
+    sel = c.get(f"/api/jobs/{job_id}/selection").json()
+    assert sel["ok"] and len(sel["picks"]) >= 3 and set(sel["sam3"]) == {x["name"] for x in sel["candidates"]}
+    assert sel["lidar"] is None and sel["metric_scale"] is None and job["lidar"] is None and job["calibration"] is None
+    check = f"{sel['check_dir']}/{sel['picks'][0]['name']}.jpg"
+    assert c.get(f"/api/jobs/{job_id}/file/{check}").headers["content-type"] == "image/jpeg"
+
+    # Leave one pick out and say another frame does not show the object: masks, prep and select rerun.
+    out, gone = sel["picks"][1]["name"], sel["picks"][2]["name"]
+    bad_ov = [{"excluded": ["f99999"]}, {"locked": [out], "excluded": [out]}, {"instance": {gone: "7"}},
+              {"instance": {gone: "x"}}, {"view0": "nope"}]
+    for ov in bad_ov:
+        assert c.post(f"/api/jobs/{job_id}/overrides", json=ov).status_code == 400, ov
+    r = c.post(f"/api/jobs/{job_id}/overrides", json={"locked": [], "excluded": [out], "instance": {gone: "none"}})
+    assert r.json() == {"status": "queued", "from": "masks"}
+    job = wait(c, job_id, "review")
+    sel = c.get(f"/api/jobs/{job_id}/selection").json()
+    status = {x["name"]: x["status"] for x in sel["candidates"]}
+    assert status[out] == "excluded" and status[gone] == "no_mask" and sel["overrides"]["excluded"] == [out]
+    assert sel["sam3"][gone]["mask"] is False and job["stages"]["da3"]["status"] == "done"
+
+    assert c.post(f"/api/jobs/{job_id}/continue", json={}).json() == {"status": "queued", "from": "sam3d"}
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done", job["error"]
+    # A rigid object without LiDAR has every output but the split parts and the LiDAR record.
+    assert set(job["files"]) == set(server.OUTPUTS) - {"run/parts.glb", "run/parts.json", "pool/lidar.json"}
+    assert job["agent_result"]["verdict"] == "complete" and job["articulated"] is False and job["parts_review"] is False
+    assert [job["stages"][s]["note"] for s in ("propose", "parts")] == ["turned off: rigid object"] * 2
+    names = set(zipfile.ZipFile(io.BytesIO(c.get(f"/api/jobs/{job_id}/file/results.zip").content)).namelist())
+    assert {"posed.glb", "refined.glb", "aligned.glb", "summary.json", "selection.json", "mjcf/mjcf.json",
+            "urdf/model.urdf"} <= names and "parts.glb" not in names
+    for p in ("run/posed.glb", "refined.glb", "physics/aligned.glb"):
+        r = c.get(f"/api/jobs/{job_id}/file/{p}")
+        assert r.status_code == 200 and r.headers["content-type"] == "model/gltf-binary" and r.content[:4] == b"glTF"
+    assert c.get(f"/api/jobs/{job_id}/file/refined.glb").content == (J / "agent/s/work/exports/001.glb").read_bytes()
+    assert "== package" in c.get(f"/api/jobs/{job_id}/file/logs/package.log").text
+
+    # Only the allowlist is served: no job.json, no video, no way out of the job folder.
+    (tmp_path / "outside.jpg").write_bytes(b"secret")
+    (J / "frames" / "thumbs" / "9999.jpg").symlink_to(tmp_path / "outside.jpg")
+    for p in ("job.json", "video/clip_one.mp4", "frames/thumbs/../../job.json", "%2e%2e/%2e%2e/outside.jpg",
+              "..%2F..%2Foutside.jpg", "/etc/passwd", "frames/thumbs/9999.jpg", "agent/result.json", "logs/../job.json"):
+        assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
+    assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))
+
+
+def test_rosbag_upload_topic_choice_and_no_agent(client, tmp_path):
+    """A bag with two camera topics waits for the choice; the build without the agent needs no key and
+    gives physics the Stage A mesh."""
+    pytest.importorskip("rosbags")
+    c, cfg = client
+    login(c)
+    raw, rect = "/cam_a/image_raw/compressed", "/cam_b/image_rect/compressed"
+    bag = write_bag(tmp_path / "src.bag", [raw, rect])
+    r = c.put("/api/upload", params={"name": "test.bag"}, content=bag.read_bytes())
+    assert r.status_code == 200, r.text
+    job_id, J = r.json()["id"], cfg.runs / r.json()["id"]
+    job = wait(c, job_id, "choose_topic", "failed")
+    assert job["status"] == "choose_topic", job["error"]
+    assert job["source"] == {"kind": "rosbag", "topic": None} and job["agent"] == "astra"
+    assert job["stages"]["topics"]["status"] == "done" and job["stages"]["frames"]["status"] == "pending"
+    assert c.get("/api/jobs").json()[0]["kind"] == "rosbag"
+    found = c.get(f"/api/jobs/{job_id}/file/frames/topics.json").json()
+    assert [t["topic"] for t in found["topics"]] == [rect, raw]  # rectified first
+    assert [t["rectified"] for t in found["topics"]] == [True, None] and found["topics"][0]["count"] == 48
+    r = c.get(f"/api/jobs/{job_id}/file/{found['topics'][0]['preview']}")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    assert c.get(f"/api/jobs/{job_id}/frames").status_code == 404
+    assert c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "box", "agent": False}).status_code == 409
+
+    for wrong in ({"topic": "/lidar/points"}, {"topic": None}, {}):
+        assert c.post(f"/api/jobs/{job_id}/topic", json=wrong).status_code == 400, wrong
+    assert c.post(f"/api/jobs/{job_id}/topic", json={"topic": raw}).json() == {"status": "analyzing", "topic": raw}
+    job = wait(c, job_id, "ready", "failed")
+    assert job["status"] == "ready", job["error"]
+    meta = c.get(f"/api/jobs/{job_id}/frames").json()
+    assert meta["video"]["kind"] == "rosbag" and meta["video"]["topic"] == raw and len(meta["times"]) == 48
+
+    # Another topic while ready: frames runs again on it, topics does not.
+    started = {s: job["stages"][s]["started"] for s in ("topics", "frames")}
+    assert c.post(f"/api/jobs/{job_id}/topic", json={"topic": rect}).status_code == 200
+    job = wait(c, job_id, "ready", "failed")
+    assert job["source"]["topic"] == rect and job["stages"]["frames"]["started"] > started["frames"]
+    assert job["stages"]["topics"]["started"] == started["topics"]
+    assert c.get(f"/api/jobs/{job_id}/frames").json()["video"]["topic"] == rect
+
+    start = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": False, "agent": False}
+    assert c.post(f"/api/jobs/{job_id}/start", json={**start, "agent": "no"}).status_code == 400
+    r = c.post(f"/api/jobs/{job_id}/start", json=start)  # no api_key at all
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "review", "failed")
+    assert job["status"] == "review", job["error"]
+    assert job["agent"] == "none" and job["key_ok"] is False
+    assert c.post(f"/api/jobs/{job_id}/topic", json={"topic": raw}).status_code == 409
+    assert c.post(f"/api/jobs/{job_id}/continue", json={}).json() == {"status": "queued", "from": "sam3d"}
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done", job["error"]
+    assert job["stages"]["agent"]["status"] == "skipped" and job["stages"]["agent"]["note"] == "turned off: physics uses the Stage A mesh"
+    assert job["agent_result"] is None and "refined.glb" not in job["files"] and "physics/aligned.glb" in job["files"]
+    up = json.loads((J / "physics" / "up.json").read_text())
+    assert up["glb"] == str(J / "run" / "posed.glb") and up["glb_rule"] == "turned off: physics uses the Stage A mesh"
+    names = set(zipfile.ZipFile(io.BytesIO(c.get(f"/api/jobs/{job_id}/file/results.zip").content)).namelist())
+    assert {"posed.glb", "aligned.glb", "summary.json", "mjcf/mjcf.json"} <= names
+    assert "refined.glb" not in names and "agent_result.json" not in names
+    assert c.post(f"/api/jobs/{job_id}/topic", json={"topic": raw}).status_code == 409  # done
+    assert not list((tmp_path / "keys").iterdir())
+
+
+def test_rosbag_with_one_topic_goes_straight_to_frames(client, tmp_path):
+    pytest.importorskip("rosbags")
+    c, cfg = client
+    login(c)
+    bag = write_bag(tmp_path / "src.bag", ["/cam/image_rect/compressed"], n=20)
+    job_id = c.put("/api/upload", params={"name": "one.BAG"}, content=bag.read_bytes()).json()["id"]
+    job = wait(c, job_id, "ready", "failed", "choose_topic")
+    assert job["status"] == "ready", job["error"]
+    assert job["source"] == {"kind": "rosbag", "topic": "/cam/image_rect/compressed"}
+    assert [job["stages"][s]["status"] for s in ("topics", "frames")] == ["done", "done"]
+    assert len(c.get(f"/api/jobs/{job_id}/frames").json()["times"]) == 20
+    # A video job has no topic to choose.
+    vid = uploaded(c, tmp_path)
+    r = c.post(f"/api/jobs/{vid}/topic", json={"topic": "/cam/image_rect/compressed"})
+    assert r.status_code == 409 and "video" in r.json()["detail"]
+    assert c.get(f"/api/jobs/{vid}").json()["stages"]["topics"]["note"] == "video input"
+
+
+def scene_bag(path, **kw):
+    """A bag of fake_steps' scene with a LiDAR (test_webapp_lidar.write_scene_bag): 48 frames at 10 Hz,
+    192x128, like write_bag's."""
+    pytest.importorskip("rosbags")
+    from test_webapp_lidar import write_scene_bag
+
+    return write_scene_bag(path, n=48, size=(192, 128), dt=0.1, step=2, **kw)
+
+
+def test_calibration_upload_and_the_lidar_start(client, tmp_path):
+    """A bag whose TF does not link the camera to the LiDAR: Start with LiDAR asks for the calibration; the
+    calibration's upload is checked, saved and summarised; then the build finds the scale with it."""
+    from test_webapp_lidar import POINTS, T_CAM_LIDAR
+
+    bag = scene_bag(tmp_path / "no_tf.bag", tf=None)
+    c, cfg = client
+    login(c)
+    start = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": False, "agent": "none"}
+    good = json.dumps({"T_cam_lidar": T_CAM_LIDAR.tolist()})
+    vid = uploaded(c, tmp_path)
+    r = c.post(f"/api/jobs/{vid}/start", json={**start, "lidar": {"topic": POINTS}})
+    assert r.status_code == 400
+    assert r.json()["detail"] == "LiDAR needs a rosbag or a Stray Scanner input; this job's input is a video, so turn LiDAR off"
+    r = c.put(f"/api/jobs/{vid}/calibration", params={"name": "calib.json"}, content=good)
+    assert r.status_code == 409 and "video" in r.json()["detail"]
+
+    job_id = c.put("/api/upload", params={"name": "no_tf.bag"}, content=bag.read_bytes()).json()["id"]
+    J = cfg.runs / job_id
+    job = wait(c, job_id, "ready", "failed")
+    assert job["status"] == "ready", job["error"]
+    assert job["lidar"] is None and job["calibration"] is None
+    found = c.get(f"/api/jobs/{job_id}/file/frames/topics.json").json()
+    assert [x["topic"] for x in found["lidar"]] == [POINTS] and found["topics"][0]["tf_links"] == {POINTS: None}
+    for lidar, why in (({"topic": "/nope"}, "/nope is not a LiDAR topic of the bag; its LiDAR topics are /lidar/points"),
+                       ({"topic": POINTS}, "the bag's TF does not link camera_optical_frame to lidar; upload the calibration"),
+                       (POINTS, 'lidar is null or {"topic": T}, a LiDAR topic of the bag')):
+        r = c.post(f"/api/jobs/{job_id}/start", json={**start, "lidar": lidar})
+        assert r.status_code == 400 and r.json()["detail"] == why, lidar
+
+    # Refused uploads change nothing.
+    url = f"/api/jobs/{job_id}/calibration"
+    for params, content, code, detail in (
+            ({"name": "calib.txt"}, good, 415, "upload the calibration as .yaml, .yml, .json"),
+            ({"name": "calib.yaml"}, b"x" * (64 * 1024 + 1), 413, "a calibration file has at most 64 KB"),
+            ({"name": "calib.yaml"}, b"T_cam_lidar: [1, 2, 3]", 400,
+             "T_cam_lidar has 3 numbers; give a 4x4 matrix or 16 numbers"),
+            ({"name": "calib.yaml"}, b"", 400, "the calibration file is empty"),
+            ({}, good, 400, "name the file: ?name=<file name>")):
+        r = c.put(url, params=params, content=content)
+        assert (r.status_code, r.json()["detail"]) == (code, detail), params
+    r = c.put(url, params={"name": "calib.yaml"}, content=(b"#" * 8192 for _ in range(9)))  # streamed, no length
+    assert "content-length" not in r.request.headers and r.status_code == 413
+    assert c.get(f"/api/jobs/{job_id}").json()["calibration"] is None and not (J / "lidar").exists()
+    runner = c.app.app.state.runner
+    busy, _ = runner.new_upload("busy.bag")  # while a job's upload runs, its calibration cannot change
+    for refused in (c.put(f"/api/jobs/{busy}/calibration", params={"name": "calib.json"}, content=good),
+                    c.delete(f"/api/jobs/{busy}/calibration")):
+        assert (refused.status_code, refused.json()["detail"]) == (409, "the job is still uploading")
+    runner.upload_done(busy, None)
+
+    # A good one is saved (0600) and summarised; it can be removed and given again.
+    r = c.put(url, params={"name": "my calib.json"}, content=good)
+    assert r.status_code == 200, r.text
+    summary = r.json()
+    angle = np.degrees(np.arccos((np.trace(T_CAM_LIDAR[:3, :3]) - 1) / 2))
+    assert summary == {"name": "my_calib.json", "bytes": len(good), "translation_m": round(np.linalg.norm(T_CAM_LIDAR[:3, 3]), 4),
+                       "rotation_deg": pytest.approx(angle, abs=0.01), "has_intrinsics": False, "camera_axes": "optical",
+                       "time_offset_s": 0.0}
+    f = J / "lidar" / "calibration" / "my_calib.json"
+    assert f.read_text() == good and stat.S_IMODE(f.stat().st_mode) == 0o600
+    assert stat.S_IMODE((J / "lidar").stat().st_mode) == stat.S_IMODE(f.parent.stat().st_mode) == 0o700
+    assert c.get(f"/api/jobs/{job_id}").json()["calibration"] == summary
+    cal = jobs.load(J)["calibration"]
+    assert cal["sha256"] == hashlib.sha256(good.encode()).hexdigest() and np.allclose(cal["T_cam_lidar"], T_CAM_LIDAR)
+    assert c.delete(url).json() == {"calibration": None} and not f.exists()
+    assert c.get(f"/api/jobs/{job_id}").json()["calibration"] is None
+    assert c.post(f"/api/jobs/{job_id}/start", json={**start, "lidar": {"topic": POINTS}}).status_code == 400
+
+    # T_lidar_cam given as T_cam_lidar: the lidar stage fails with the estimate's reason. With the right
+    # calibration, a retry from the lidar stage stops at the review.
+    inverted = json.dumps({"T_cam_lidar": np.linalg.inv(T_CAM_LIDAR).tolist()})
+    assert c.put(url, params={"name": "calib.json"}, content=inverted).status_code == 200
+    r = c.post(f"/api/jobs/{job_id}/start", json={**start, "lidar": {"topic": POINTS}})
+    assert r.status_code == 200, r.text
+    for refused in (c.put(url, params={"name": "calib.json"}, content=good), c.delete(url)):  # queued or running
+        assert refused.status_code == 409 and refused.json()["detail"].startswith("the job is ")
+    job = wait(c, job_id, "failed", "review")
+    assert job["status"] == "failed" and job["error"].startswith("lidar: LiDAR scale: LiDAR points cover the object in only")
+    assert job["stages"]["lidar"]["note"] == job["error"][len("lidar: "):] and job["stages"]["select"]["status"] == "pending"
+    assert c.get(f"/api/jobs/{job_id}/file/pool/lidar.json").json()["ok"] is False
+    yaml = "T_cam_lidar:\n" + "".join(f"  - [{', '.join(f'{x:.12f}' for x in row)}]\n" for row in T_CAM_LIDAR)
+    r = c.put(url, params={"name": "calib.yaml"}, content=yaml)
+    assert r.status_code == 200 and r.json()["name"] == "calib.yaml" and [p.name for p in f.parent.iterdir()] == ["calib.yaml"]
+    assert c.post(f"/api/jobs/{job_id}/continue", json={"from": "lidar"}).json() == {"status": "queued", "from": "lidar"}
+    job = wait(c, job_id, "review", "failed")
+    assert job["status"] == "review", job["error"]
+    assert job["lidar"] == {"kind": "rosbag", "topic": POINTS} and job["stages"]["lidar"]["status"] == "done"
+    assert job["calibration"]["name"] == "calib.yaml" and "pool/lidar.json" in job["files"]
+
+    # The review page's LiDAR record and the files it shows.
+    sel = c.get(f"/api/jobs/{job_id}/selection").json()
+    lid = sel["lidar"]
+    assert lid["ok"] and lid["s"] == pytest.approx(1.25, rel=0.02) and sel["metric_scale"]["s"] == lid["s"]
+    assert (lid["extrinsic"], lid["check_dir"], lid["reason"], lid["warnings"]) == ("calibration", "lidar/check", None, [])
+    assert lid["source"]["topic"] == POINTS and lid["counts"]["views_used"] == len(lid["views"]) >= 3
+    assert set(lid["counts"]) == set(server.LIDAR_COUNTS) and lid["spread_rel"] < 0.02
+    assert all(set(v) == {"name", "s", "points_used", "status"} and v["status"] == "used" for v in lid["views"])
+    r = c.get(f"/api/jobs/{job_id}/file/pool/lidar.json")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/json" and r.json()["s"] == lid["s"]
+    r = c.get(f"/api/jobs/{job_id}/file/lidar/check/{lid['views'][0]['name']}.jpg")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    for p in ("lidar/samples.npz", "lidar/samples.json", "lidar/calibration/calib.yaml", "lidar/check/../../job.json",
+              "lidar/check/x.jpg", "lidar/check/f1.jpg", "pool/da3_output.npz", "pool/prep.json"):
+        assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
+
+    # A calibration uploaded in review makes the scale stale: Build finds it again first (and here the
+    # inverted one fails); after the right one, Build finds the scale again and stops in review.
+    assert c.put(url, params={"name": "calib.json"}, content=inverted).status_code == 200
+    assert c.get(f"/api/jobs/{job_id}/selection").json()["lidar"]["calibration_changed"] is True
+    assert c.post(f"/api/jobs/{job_id}/continue", json={}).json() == {"status": "queued", "from": "lidar"}
+    job = wait(c, job_id, "failed", "review", "done")
+    assert job["status"] == "failed" and job["error"].startswith("lidar: LiDAR scale: LiDAR points cover the object")
+    assert c.put(url, params={"name": "calib.yaml"}, content=yaml).status_code == 200
+    assert c.post(f"/api/jobs/{job_id}/continue", json={}).json() == {"status": "queued", "from": "lidar"}
+    job = wait(c, job_id, "review", "failed", "done")
+    assert job["status"] == "review", job["error"]
+    lid = c.get(f"/api/jobs/{job_id}/selection").json()["lidar"]
+    assert lid["ok"] and lid["calibration_changed"] is False and lid["s"] == pytest.approx(1.25, rel=0.02)
+    assert c.get(f"/api/jobs/{job_id}/file/pool/lidar.json").json()["extrinsic"]["file"] == "calib.yaml"
+
+
+def test_fake_rosbag_job_with_lidar_end_to_end(client, tmp_path):
+    """A bag whose /tf_static links the camera to the LiDAR and whose camera_info is rectified: the
+    LiDAR scale undoes the fake DA3's 0.8, and every later stage works in meters."""
+    from test_webapp_lidar import POINTS
+
+    bag = scene_bag(tmp_path / "scene.bag")
+    c, cfg = client
+    login(c)
+    job_id = c.put("/api/upload", params={"name": "scene.bag"}, content=bag.read_bytes()).json()["id"]
+    J = cfg.runs / job_id
+    job = wait(c, job_id, "ready", "failed")
+    assert job["status"] == "ready", job["error"]
+    found = c.get(f"/api/jobs/{job_id}/file/frames/topics.json").json()
+    assert found["topics"][0]["tf_links"] == {POINTS: "static"} and found["topics"][0]["camera_axes"] == "optical"
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "Wooden box", "n_views": 4,
+                                                  "auto_continue": True, "agent": "none", "lidar": {"topic": POINTS}})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done", job["error"]
+    assert job["stages"]["lidar"]["status"] == "done" and job["stages"]["lidar"]["note"] is None
+    rec = c.get(f"/api/jobs/{job_id}/file/pool/lidar.json").json()
+    assert rec["ok"] and rec["s"] == pytest.approx(1.25, rel=0.02), rec["reason"]
+    assert (rec["extrinsic"]["source"], rec["extrinsic"]["link"], rec["time"]["base"]) == ("tf", "static", "header")
+    assert rec["intrinsics"]["source"] == "/cam/camera_info: P (rectified)" and rec["source"]["type"] == "PointCloud2"
+    with np.load(J / "run" / "da3_output.npz") as run:
+        assert float(run["metric_scale"]) == pytest.approx(rec["s"])
+    placement = c.get(f"/api/jobs/{job_id}/file/run/placement.json").json()
+    assert placement["metric_scale"] == pytest.approx(rec["s"]) and placement["units"].startswith("meters")
+    # The fake box is posed in the run's DA3 units (fake_steps.run_scale): with the scale applied it has
+    # the scene's size, as does the aligned GLB (without it, both would be 0.8 x).
+    assert placement["posed_extent_W"] == pytest.approx([0.3, 0.2, 0.2], rel=0.02)
+    aligned = json.loads((J / "physics" / "aligned.json").read_text())
+    assert sorted(aligned["extent_s"]) == pytest.approx([0.2, 0.2, 0.3], rel=0.02)
+    assert c.get(f"/api/jobs/{job_id}/selection").json()["lidar"]["s"] == rec["s"]
+    with zipfile.ZipFile(io.BytesIO(c.get(f"/api/jobs/{job_id}/file/results.zip").content)) as z:
+        assert json.loads(z.read("lidar.json")) == rec
+    assert "pool/lidar.json" in job["files"]
+
+
+def test_fake_stray_job_end_to_end(client, tmp_path):
+    """A zipped Stray Scanner export of a portrait capture: the upload is a Stray job with LiDAR on, the
+    analysis skips the topics and turns the frames upright, a calibration is refused, and the build's
+    LiDAR scale from the depth images undoes the fake DA3's 0.8."""
+    from test_webapp_stray import write_stray
+
+    zipped = write_stray(tmp_path / "src", n=48, portrait=3)
+    c, cfg = client
+    login(c)
+    r = c.put("/api/upload", params={"name": "my capture.zip"}, content=zipped.read_bytes())
+    assert r.status_code == 200, r.text
+    job_id = r.json()["id"]
+    J = cfg.runs / job_id
+    job = wait(c, job_id, "ready", "failed")
+    assert job["status"] == "ready", job["error"]
+    assert (job["kind"], job["source"], job["lidar"], job["calibration"]) == ("stray", {"kind": "stray", "topic": None},
+                                                                             {"kind": "stray"}, None)
+    assert job["video"]["name"] == "my_capture.zip" and job["stages"]["topics"]["status"] == "skipped"
+    assert job["stages"]["topics"]["note"] == "Stray Scanner capture"
+    assert next(j for j in c.get("/api/jobs").json() if j["id"] == job_id)["kind"] == "stray"
+    v = c.get(f"/api/jobs/{job_id}/frames").json()["video"]
+    assert (v["kind"], v["rotation"], v["width"], v["height"], v["n_depth"]) == ("stray", 270, 240, 320, 48)
+    assert (J / "video" / "stray" / "export" / "rgb.mp4").is_file()
+
+    # No calibration and no topic for a capture; LiDAR is on or off, nothing else.
+    url = f"/api/jobs/{job_id}/calibration"
+    for r in (c.put(url, params={"name": "calib.json"}, content=json.dumps({"T_cam_lidar": np.eye(4).tolist()})),
+              c.delete(url)):
+        assert (r.status_code, r.json()["detail"]) == (
+            409, "a Stray Scanner capture needs no calibration: its depth is aligned with the color camera")
+    r = c.post(f"/api/jobs/{job_id}/topic", json={"topic": "/cam"})
+    assert (r.status_code, r.json()["detail"]) == (409, "this job's input is a Stray Scanner capture, not a rosbag")
+    start = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": True, "agent": "none"}
+    r = c.post(f"/api/jobs/{job_id}/start", json={**start, "lidar": {"topic": "/lidar/points"}})
+    assert (r.status_code, r.json()["detail"]) == (400, 'lidar is null or {"kind": "stray"} for a Stray Scanner capture')
+
+    # Start without "lidar": the capture keeps its LiDAR on.
+    r = c.post(f"/api/jobs/{job_id}/start", json=start)
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done", job["error"]
+    assert job["lidar"] == {"kind": "stray"} and job["stages"]["lidar"]["status"] == "done"
+    rec = c.get(f"/api/jobs/{job_id}/file/pool/lidar.json").json()
+    assert rec["ok"] and rec["s"] == pytest.approx(1.25, rel=0.02), rec["reason"]
+    assert (rec["source"]["kind"], rec["extrinsic"]["source"], rec["time"]["base"], rec["intrinsics"]["turns"]) == \
+        ("stray", "stray (depth aligned with the color camera)", "frame index", 3)
+    with np.load(J / "run" / "da3_output.npz") as run:
+        assert float(run["metric_scale"]) == pytest.approx(rec["s"])
+    placement = c.get(f"/api/jobs/{job_id}/file/run/placement.json").json()
+    assert placement["metric_scale"] == pytest.approx(rec["s"]) and placement["units"].startswith("meters")
+    assert placement["posed_extent_W"] == pytest.approx([0.3, 0.2, 0.2], rel=0.02)
+    sel = c.get(f"/api/jobs/{job_id}/selection").json()
+    assert sel["lidar"]["s"] == rec["s"] and sel["lidar"]["extrinsic"] == "stray (depth aligned with the color camera)"
+    with zipfile.ZipFile(io.BytesIO(c.get(f"/api/jobs/{job_id}/file/results.zip").content)) as z:
+        assert json.loads(z.read("lidar.json")) == rec
+    assert "pool/lidar.json" in job["files"]
+
+    # Built again with LiDAR off: the lidar stage is skipped and select applies no scale.
+    r = c.post(f"/api/jobs/{job_id}/start", json={**start, "lidar": None})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done", job["error"]
+    assert job["lidar"] is None and job["stages"]["lidar"]["note"] == "turned off: no LiDAR"
+    assert "pool/lidar.json" not in job["files"] and c.get(f"/api/jobs/{job_id}/selection").json()["lidar"] is None
+    placement = c.get(f"/api/jobs/{job_id}/file/run/placement.json").json()
+    assert placement["metric_scale"] is None and placement["units"] == "DA3 units (meters)"
+
+
+def test_upload_refuses_other_files_and_too_large_uploads(client, monkeypatch, tmp_path):
+    c, cfg = client
+    login(c)
+    for name in ("notes.txt", "bag", "clip.mp4.tar", "clip.mKv"):  # the Kelvin sign lowercases to k, but is saved as _
+        r = c.put("/api/upload", params={"name": name}, content=b"x")
+        assert r.status_code == 415 and r.json()["detail"] == (
+            "upload a video (.mp4 .mov .m4v .avi .mkv .webm), a rosbag (.bag .mcap .db3) or a Stray Scanner export "
+            f"(.zip); {Path(name).suffix or 'a file without a suffix'} is none of these"), name
+    r = c.put("/api/upload", params={"name": "big.bag"}, content=b"x", headers={"Content-Length": str(server.MAX_UPLOAD + 1)})
+    assert r.status_code == 413 and "larger than 20 GB" in r.json()["detail"]
+    r = c.put("/api/upload", params={"name": "a.bag"}, content=iter([b"x" * 1000]))  # chunked: no Content-Length
+    assert r.status_code == 411 and "Content-Length" in r.json()["detail"] and "content-length" not in r.request.headers
+    monkeypatch.setattr(server.shutil, "disk_usage", lambda p: shutil._ntuple_diskusage(100 << 30, 99 << 30, 1 << 30))
+    r = c.put("/api/upload", params={"name": "a.mcap"}, content=b"x" * 1000)
+    assert r.status_code == 413 and "1.0 GB free" in r.json()["detail"]
+    # A zip is unpacked next to itself, so it needs 2.2 x its size free (+ 2 GB) where a bag needs 1.2 x.
+    for name, need in (("a.bag", 3.2), ("capture.zip", 4.2)):
+        r = c.put("/api/upload", params={"name": name}, content=b"x", headers={"Content-Length": str(1 << 30)})
+        assert (r.status_code, r.json()["detail"]) == (413, f"the server has 1.0 GB free and this upload needs {need} GB")
+    assert c.get("/api/jobs").json() == [] and not list(cfg.runs.glob("*/video"))
+    monkeypatch.undo()
+    # The kind is that of the name the file is saved under: "..bag" is kept as video.bag, a rosbag.
+    pytest.importorskip("rosbags")
+    bag = write_bag(tmp_path / "src.bag", ["/cam/image_rect/compressed"], n=20)
+    job = wait(c, c.put("/api/upload", params={"name": "..bag"}, content=bag.read_bytes()).json()["id"], "ready", "failed")
+    assert job["video"]["name"] == "video.bag" and job["source"] == {"kind": "rosbag", "topic": "/cam/image_rect/compressed"}
+
+
+def test_start_without_the_agent_needs_no_key(client, tmp_path):
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "box", "agent": False, "api_key": "not checked"})
+    assert r.status_code == 200 and r.json()["key"] == "no key: the agent is turned off"
+    job = wait(c, job_id, "review", "failed")
+    assert job["status"] == "review" and job["agent"] == "none" and job["key_ok"] is False
+    assert not list((tmp_path / "keys").iterdir())
+
+
+def test_opus_build_and_a_change_of_agent(client, tmp_path):
+    """A build with Claude Opus 5.5 takes an Anthropic key and shows the model, tokens and cost; back to
+    GPT-6-Astra, the agent and the stages after it run again, with an OpenAI key."""
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    opus = "sk-ant-test-" + secrets.token_hex(16)
+    start = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": True, "agent": "opus"}
+    r = c.post(f"/api/jobs/{job_id}/start", json={**start, "api_key": KEY})  # an OpenAI key for Opus
+    assert r.status_code == 400 and r.json()["detail"] == "fake mode: Anthropic keys start with sk-ant-" and KEY not in r.text
+    for wrong in ("gpt", None, 1):
+        r = c.post(f"/api/jobs/{job_id}/start", json={**start, "agent": wrong, "api_key": opus})
+        assert r.status_code == 400 and r.json()["detail"] == "agent is astra, opus, none", wrong
+    r = c.post(f"/api/jobs/{job_id}/start", json={**start, "api_key": opus})
+    assert r.status_code == 200 and r.json()["key"] == "fake mode: key accepted"
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done", job["error"]
+    a = job["agent_result"]
+    assert job["agent"] == "opus" and (a["agent"], a["model"], a["verdict"]) == ("claude", "claude-opus-5-5", "complete")
+    assert a["tokens"]["cache_read_input_tokens"] > 0 and a["cost_usd"] > 0 and a["turns"] == 12
+    assert "agent (fake claude-opus-5-5)" in c.get(f"/api/jobs/{job_id}/file/logs/agent.log").text
+
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "package", "agent": "astra"})
+    assert r.status_code == 400 and "no OpenAI API key" in r.json()["detail"]
+    assert c.post(f"/api/jobs/{job_id}/continue", json={"agent": "maybe"}).status_code == 400
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "package", "agent": "astra", "api_key": KEY})
+    assert r.json() == {"status": "queued", "from": "agent"}  # the other agent's stage runs first
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done", job["error"]
+    assert job["agent"] == "astra" and job["agent_result"]["model"] == "gpt-6-astra" and "tokens" not in job["agent_result"]
+    assert c.get(f"/api/jobs/{job_id}/file/logs/agent.log").text.count("== agent ") == 2
+    assert not list((tmp_path / "keys").iterdir())
+    assert not any(k.encode() in p.read_bytes() for p in all_files(tmp_path) for k in (KEY, opus))
+
+
+ARTICULATED = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": True, "articulated": True}
+TYPED = [{"name": "box body"}, {"name": "lid", "parent": "box body", "joint": "revolute"},
+         {"name": "drawer", "parent": "box body", "joint": "prismatic", "count": 2}]
+
+
+def test_start_takes_the_parts_of_an_articulated_object(client, tmp_path):
+    """articulated, parts_mode and parts of the start request, in each mode: the VLM modes keep no typed
+    list, agent none means "user", and a list that breaks a rule gives 400 with gator.parts.propose's
+    reason before the key is checked."""
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    J = cfg.runs / job_id
+    start = {**ARTICULATED, "auto_continue": False, "agent": "astra", "api_key": KEY}
+    no_list = "type the parts of the object: without an agent there is no VLM to list them"
+    for wrong, why in [({"articulated": "yes"}, "articulated is true or false"),
+                       ({"parts_mode": "auto"}, "the parts mode is one of vlm, vlm_edit, user"),
+                       ({"parts_mode": "user"}, "type the parts of the object"),
+                       ({"agent": "none"}, no_list), ({"agent": "none", "parts_mode": "vlm_edit", "parts": []}, no_list),
+                       ({"parts_mode": "user", "parts": "box body"}, "parts is a list of parts"),
+                       ({"parts_mode": "user", "parts": [TYPED[0], {**TYPED[1], "parent": "box"}]},
+                        "part 'lid': its parent 'box' is not in the list"),
+                       ({"parts_mode": "user", "parts": [{"name": "body"}, {"name": "lid"}]},
+                        "exactly one part, the base, has no parent; here 2 have none: ['body', 'lid']"),
+                       ({"parts_mode": "user", "parts": [{"name": "wooden box"}]},
+                        "part 'wooden box' has the name of the whole object; call its main body 'Wooden box body'"),
+                       ({"parts_mode": "user", "parts": [TYPED[0], {**TYPED[1], "joint": "hinge"}], "api_key": "bad"},
+                        "part 'lid': joint is one of revolute, prismatic, fixed, unknown, not 'hinge'")]:
+        r = c.post(f"/api/jobs/{job_id}/start", json={**start, **wrong})
+        assert r.status_code == 400 and r.json()["detail"] == why, (wrong, r.text)
+    assert c.get(f"/api/jobs/{job_id}").json()["status"] == "ready"
+
+    normal = [{"name": "box body", "parent": None, "joint": "fixed", "count": 1, "axis_hint": None},
+              {"name": "lid", "parent": "box body", "joint": "revolute", "count": 1, "axis_hint": None},
+              {"name": "drawer", "parent": "box body", "joint": "prismatic", "count": 2, "axis_hint": None}]
+    for extra, mode, typed in [({}, "vlm", []), ({"parts_mode": "vlm_edit", "parts": TYPED}, "vlm_edit", []),
+                               ({"parts_mode": "user", "parts": TYPED}, "user", normal),
+                               ({"agent": "none", "parts_mode": "vlm", "parts": TYPED}, "user", normal)]:
+        r = c.post(f"/api/jobs/{job_id}/start", json={**start, **extra})
+        assert r.status_code == 200, (extra, r.text)
+        job = c.get(f"/api/jobs/{job_id}").json()
+        assert (job["articulated"], job["parts_mode"], job["parts_review"]) == (True, mode, False)
+        assert job["parts"] == {"mode": mode, "list": typed, "confirmed": False}, extra
+        wait(c, job_id, "running", "review")  # a queued job could still be taken by the worker
+        assert c.post(f"/api/jobs/{job_id}/cancel").status_code == 200
+        wait(c, job_id, "cancelled", timeout=20)
+    assert r.json()["key"] == "no key: the agent is turned off"
+    r = c.post(f"/api/jobs/{job_id}/start", json={**start, "articulated": False, "parts_mode": "user", "parts": TYPED})
+    assert r.status_code == 200 and jobs.load(J)["parts"] == {"mode": "user", "list": [], "confirmed": False}
+    assert jobs.load(J)["articulated"] is False  # a rigid object keeps no part list
+    wait(c, job_id, "running", "review")
+    assert c.post(f"/api/jobs/{job_id}/cancel").status_code == 200
+    wait(c, job_id, "cancelled", timeout=20)
+    assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))
+
+
+def test_part_list_review_confirms_or_edits_the_list(client, tmp_path):
+    """"The VLM proposes, I edit the list": the job waits after propose, whatever auto_continue says. Build
+    (continue) takes the VLM's list as it is; POST /parts takes an edited one and refuses a bad one (400)
+    or a job that does not wait for its list (409)."""
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    J, runner = cfg.runs / job_id, c.app.app.state.runner
+    opus = "sk-ant-test-" + secrets.token_hex(16)
+    r = c.post(f"/api/jobs/{job_id}/start", json={**ARTICULATED, "agent": "opus", "api_key": opus, "parts_mode": "vlm_edit"})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "review", "failed")
+    assert job["status"] == "review", job["error"]
+    assert (job["parts_review"], job["parts_mode"], job["stages"]["parts"]["status"]) == (True, "vlm_edit", "pending")
+    assert server.state(J, jobs.load(J))["parts_review"] is True  # the event stream's state
+    got = c.get(f"/api/jobs/{job_id}/parts").json()
+    assert got["waiting"] is True and got["parts"] == {"mode": "vlm_edit", "list": [], "confirmed": False}
+    assert [p["name"] for p in got["proposal"]["parts"]] == ["body", "lid"] and got["proposal"]["model"] == "claude-opus-5-5"
+    assert got["noun"] == "Wooden box" and got["checks"] == []  # the parts stage has not run
+    anchor = json.loads((J / "selection.json").read_text())["anchor"]
+    assert got["photo"] == f"scene/sam3_wooden_box/check/{anchor}.jpg"
+    assert c.get(f"/api/jobs/{job_id}/file/{got['photo']}").headers["content-type"] == "image/jpeg"
+
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "agent"})
+    assert r.status_code == 409 and r.json()["detail"] == "the job waits for its part list; confirm or edit it first"
+    for wrong, why in [([{"name": "body"}, {"name": "lid", "parent": "box"}], "part 'lid': its parent 'box' is not in the list"),
+                       ([], "a part list has 1 to 12 parts"), ({"parts": [{"name": "body"}]}, "parts is a list of parts")]:
+        r = c.post(f"/api/jobs/{job_id}/parts", json={"parts": wrong})
+        assert r.status_code == 400 and r.json()["detail"] == why, wrong
+    r = c.post(f"/api/jobs/{job_id}/parts", json={"parts": [{"name": "a" * 5000}]})  # the reason quotes the name
+    from gator.parts.propose import MAX_NAME
+    assert r.status_code == 400 and r.json()["detail"] == f"part name '{'a' * 37}...' is longer than {MAX_NAME} characters"
+    assert server.part_reason(ValueError("x" * 500)) == "x" * (server.PART_REASON - 3) + "..."
+    assert jobs.load(J)["status"] == "review" and "confirmed" not in json.loads((J / "run" / "proposal.json").read_text())
+
+    # Cancel while the list waits, then Retry (from parts, as the page sends it): the job stops at the list again.
+    assert c.post(f"/api/jobs/{job_id}/cancel").status_code == 200
+    assert wait(c, job_id, "cancelled", timeout=20)["parts_review"] is False
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "parts", "api_key": opus})
+    assert r.json() == {"status": "queued", "from": "propose"}
+    job = wait(c, job_id, "review", "failed")
+    assert job["parts_review"] is True and job["stages"]["parts"]["status"] == "pending"
+    assert "confirmed" not in json.loads((J / "run" / "proposal.json").read_text())
+
+    # Build: the VLM's list as it is.
+    assert c.post(f"/api/jobs/{job_id}/continue", json={}).json() == {"status": "queued", "from": "parts"}
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done", job["error"]
+    proposal = json.loads((J / "run" / "proposal.json").read_text())
+    assert (proposal["confirmed"], proposal["edited"], job["parts"]["confirmed"], job["parts_review"]) == (True, False, True, False)
+    assert set(server.OUTPUTS) - {"pool/lidar.json"} <= set(job["files"])  # every output but the LiDAR record
+    a = job["agent_result"]
+    assert (a["mode"], a["verdict"], a["joints_delivered"]) == ("articulation", "articulated", 1)
+    assert set(a["counts"]) == {"exports", "reviews", "checkpoints", "joints", "articulation_reviews"}
+    assert c.get(f"/api/jobs/{job_id}/file/refined.glb").content == (J / "agent/s/work/exports/001.glb").read_bytes()
+    r = c.post(f"/api/jobs/{job_id}/parts", json={"parts": [{"name": "body"}]})
+    assert r.status_code == 409 and r.json()["detail"] == "the job does not wait for its part list"
+
+    # From select again: the VLM lists the parts anew (the server forgot the key when the job was done), and an
+    # edited list goes on from the parts stage. Without a key held for the job, POST /parts asks for it.
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "select", "api_key": opus})
+    assert r.json() == {"status": "queued", "from": "select"}
+    job = wait(c, job_id, "review", "failed")
+    assert job["parts_review"] is True and job["parts"]["confirmed"] is False
+    runner._keys.pop(job_id)  # as after a restart of the server
+    edited = [{"name": "body"}, {"name": "top lid", "parent": "body", "joint": "revolute", "axis_hint": "the back top edge"}]
+    r = c.post(f"/api/jobs/{job_id}/parts", json={"parts": edited})
+    assert r.status_code == 400 and "holds no Anthropic API key" in r.json()["detail"]
+    r = c.post(f"/api/jobs/{job_id}/parts", json={"parts": edited, "api_key": opus})
+    assert r.json() == {"status": "queued", "from": "parts"}
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done", job["error"]
+    proposal = json.loads((J / "run" / "proposal.json").read_text())
+    assert [p["name"] for p in proposal["parts"]] == ["body", "top lid"] and proposal["edited"] is True
+    assert proposal["parts"][1]["axis_hint"] == "the back top edge" and job["parts"]["list"] == proposal["parts"]
+    found = [p["name"] for p in c.get(f"/api/jobs/{job_id}/file/run/parts.json").json()["parts"] if p["status"] == "found"]
+    mj = c.get(f"/api/jobs/{job_id}/file/physics/mjcf/mjcf.json").json()
+    assert found == ["body", "top_lid"] and [(j["child"], j["type"]) for j in mj["joints"]] == [("top_lid", "revolute")]
+    checks = c.get(f"/api/jobs/{job_id}/parts").json()["checks"]
+    assert checks and all(c.get(f"/api/jobs/{job_id}/file/{p}").headers["content-type"] == "image/jpeg" for p in checks)
+    urdf = c.get(f"/api/jobs/{job_id}/file/physics/urdf/model.urdf")
+    assert urdf.headers["content-type"] == "application/xml" and b'<joint name="top_lid_joint"' in urdf.content
+    assert not list((tmp_path / "keys").iterdir())
+    assert not any(opus.encode() in p.read_bytes() for p in all_files(tmp_path))
+
+
+def test_articulated_job_without_an_agent_and_the_new_files(client, tmp_path):
+    """The user's list without an agent: the parts are split but get no joints, so refined.glb is not served
+    (physics uses run/parts.glb). The new outputs are served, and nothing else of the parts or the URDF."""
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    J = cfg.runs / job_id
+    r = c.post(f"/api/jobs/{job_id}/start", json={**ARTICULATED, "agent": "none", "parts": TYPED[:2]})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done", job["error"]
+    assert (job["articulated"], job["parts_mode"], job["agent_result"]) == (True, "user", None)
+    assert job["stages"]["agent"]["note"].startswith("turned off: without the agent the parts get no joints")
+    assert set(job["files"]) == set(server.OUTPUTS) - {"refined.glb", "pool/lidar.json"}
+    assert steps.next_glb(J) == J / "run" / "parts.glb"
+    assert c.get(f"/api/jobs/{job_id}/file/refined.glb").status_code == 404
+    assert "links" not in c.get(f"/api/jobs/{job_id}/file/physics/mjcf/mjcf.json").json()  # one body
+    got = c.get(f"/api/jobs/{job_id}/parts").json()
+    assert got["waiting"] is False and got["proposal"]["source"] == "user" and got["parts"]["mode"] == "user"
+    assert c.post(f"/api/jobs/{job_id}/parts", json={"parts": TYPED[:2]}).status_code == 409
+
+    for p, kind in [("run/parts.glb", "model/gltf-binary"), ("run/parts.json", "application/json"),
+                    ("physics/mjcf/mjcf.json", "application/json"), ("physics/urdf/model.urdf", "application/xml"),
+                    ("run/parts/sam3/check/0.jpg", "image/jpeg")]:
+        r = c.get(f"/api/jobs/{job_id}/file/{p}")
+        assert r.status_code == 200 and r.headers["content-type"] == kind, p
+    assert "run/parts/sam3/check/0.jpg" in got["checks"]
+    (tmp_path / "outside.jpg").write_bytes(b"secret")
+    (J / "run" / "parts" / "sam3" / "check" / "99.jpg").symlink_to(tmp_path / "outside.jpg")
+    assert "run/parts/sam3/check/99.jpg" not in c.get(f"/api/jobs/{job_id}/parts").json()["checks"]
+    for p in ("run/proposal.json", "run/parts/faces.npz", "run/parts/vote.json", "run/parts/split_report.json",
+              "run/parts/sam3/part_masks.json", "run/parts/sam3/lid/0_0.png", "run/parts/sam3/check/lid.jpg",
+              "run/parts/sam3/check/99.jpg", "run/parts/sam3/check/../../../job.json", "run/parts/sam3/check/..%2F..%2F..%2Fjob.json",
+              "physics/urdf/urdf.json", "physics/urdf/meshes/link_0.obj", "physics/urdf/../../job.json",
+              "physics/mjcf/scene.xml", "physics/links/lid.glb", "physics/mjcf/../../job.json"):
+        assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
+
+
+def test_manual_start_cancel_and_delete(client, tmp_path):
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "manual", "prompt": "box", "picks": [5, 30, 50], "view0": 30,
+                                                  "api_key": KEY})
+    assert r.status_code == 200
+    wait(c, job_id, "running")
+    assert c.delete(f"/api/jobs/{job_id}").status_code == 409
+    assert c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "box", "api_key": KEY}).status_code == 409
+    assert c.post(f"/api/jobs/{job_id}/cancel").status_code == 200
+    job = wait(c, job_id, "cancelled", timeout=20)
+    assert job["key_ok"] is False and job["picks"] == [5, 30, 50] and job["view0"] == 30
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "extract"})
+    assert r.status_code == 400 and "paste the key" in r.json()["detail"]
+    assert c.delete(f"/api/jobs/{job_id}").status_code == 200 and not (cfg.runs / job_id).exists()
+    assert c.get(f"/api/jobs/{job_id}").status_code == 404
+    assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))
+
+
+def test_main_writes_the_login_file(tmp_path, monkeypatch, capsys):
+    import uvicorn
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("GATOR_ROOT", str(tmp_path / "G"))
+    monkeypatch.setenv("SLURM_JOB_ID", "4242")
+    monkeypatch.setenv("SLURMD_NODENAME", "atl1-1-02-003-19-2")
+    monkeypatch.setattr(jobs, "default_key_dir", lambda: tmp_path / "keys")
+    info = tmp_path / "home" / ".config" / "gator" / "webapp.json"
+    ran = []  # (port, webapp.json, its mode) while the server runs
+    monkeypatch.setattr(uvicorn.Server, "run", lambda self, sockets: ran.append(
+        (sockets[0].getsockname()[1], json.loads(info.read_text()), oct(info.stat().st_mode & 0o777))))
+    args = ["--fake", "--runs", str(tmp_path / "runs"), "--host", "127.0.0.1"]
+    server.main(args)
+    port, d, mode = ran[0]
+    assert mode == "0o600" and d["port"] == port > 0
+    assert d["url_path"] == f"/?token={d['token']}" and len(d["token"]) >= 40
+    assert d["slurm_job"] == "4242" and d["slurm_node"] == "atl1-1-02-003-19-2"
+    out = capsys.readouterr().out
+    assert f"8765:{d['node']}:{d['port']} ali497@login-ice.pace.gatech.edu" in out and d["token"] in out
+    assert (tmp_path / "runs").is_dir()
+    assert not info.exists()  # the server stopped, so start_ice.sh must not find it
+    # A later start replaced the file meanwhile: it stays.
+    monkeypatch.setattr(uvicorn.Server, "run", lambda self, sockets: info.write_text(json.dumps({"token": "later"})))
+    server.main(args)
+    assert json.loads(info.read_text()) == {"token": "later"}
+
+
+def test_sigterm_deletes_the_login_file(tmp_path):
+    """The real server process: SIGTERM (scancel, the end of the Slurm job) stops it through main's
+    finally, so webapp.json is gone; uvicorn raises the signal again after its shutdown."""
+    import signal
+
+    home = tmp_path / "home"
+    info = home / ".config" / "gator" / "webapp.json"
+    env = {**os.environ, "HOME": str(home), "TMPDIR": str(tmp_path), "PYTHONPATH": str(ROOT)}
+    p = subprocess.Popen([sys.executable, "-m", "gator.webapp", "--fake", "--runs", str(tmp_path / "runs"),
+                          "--host", "127.0.0.1"], cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        lines = _lines_until(p.stdout, b"Application startup complete")
+        assert b"Application startup complete" in lines[-1], b"".join(lines)
+        assert info.is_file()
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(30) == 128 + signal.SIGTERM
+        assert not info.exists()
+    finally:
+        p.kill()
+        p.wait()
+
+
+def _lines_until(f, text, limit=200):
+    """The lines of f up to the first that holds text."""
+    out = []
+    for line in iter(f.readline, b""):
+        out.append(line)
+        if text in line or len(out) >= limit:
+            break
+    return out
+
+
+def test_start_ice_reuses_only_a_server_of_the_same_job(tmp_path):
+    """start_ice.sh with a stand-in squeue: a webapp.json left by another job, or naming another node, is
+    not trusted, even when something on its node and port answers 401 as the server does."""
+    import http.server
+    import threading
+
+    if shutil.which("curl") is None:
+        pytest.skip("no curl")
+    home, bin_ = tmp_path / "home", tmp_path / "bin"
+    web = home / "scratch" / "gator" / "envs" / "web" / "bin"
+    web.mkdir(parents=True)
+    (web / "python").symlink_to(sys.executable)
+    bin_.mkdir()
+    (bin_ / "squeue").write_text("#!/bin/bash\necho 'RUNNING atl1-node-07'\n")
+    (bin_ / "setsid").write_text("#!/bin/bash\nexit 1\n")  # no new server starts here
+    for f in bin_.iterdir():
+        f.chmod(0o755)
+
+    class Gate(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(401)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    other = http.server.HTTPServer(("127.0.0.1", 0), Gate)
+    threading.Thread(target=other.serve_forever, daemon=True).start()
+    port = other.server_address[1]
+    info = home / ".config" / "gator" / "webapp.json"
+    info.parent.mkdir(parents=True)
+
+    def start(**recorded):
+        info.write_text(json.dumps({"node": "127.0.0.1", "port": port, "token": "tok", **recorded}))
+        return subprocess.run(["bash", str(ROOT / "gator" / "webapp" / "start_ice.sh"), "222"], capture_output=True,
+                              text=True, timeout=60, env={**os.environ, "HOME": str(home), "PATH": f"{bin_}:{os.environ['PATH']}"})
+
+    try:
+        p = start(slurm_job="222", slurm_node="atl1-node-07")
+        assert p.returncode == 0 and "reusing it" in p.stderr, p.stderr
+        assert p.stdout.splitlines()[-3:] == ["NODE=127.0.0.1", f"PORT={port}", "TOKEN=tok"]
+        for stale in ({"slurm_job": "111", "slurm_node": "atl1-node-07"}, {"slurm_job": "222", "slurm_node": "atl1-node-08"}):
+            p = start(**stale)
+            assert p.returncode == 1 and "reusing" not in p.stderr and "starting the server in job 222" in p.stderr, p.stderr
+            assert "TOKEN=" not in p.stdout and not info.exists()
+    finally:
+        other.shutdown()
+
+
+def test_job_api_leaves_out_agent_text_that_held_the_key(client):
+    c, cfg = client
+    login(c)
+    job_id, _ = jobs.create_job(cfg.runs, "v.mp4")
+    (cfg.runs / job_id / "agent").mkdir()
+    r = {"source": "finish", "verdict": "complete", "reason": "the cup is done", "limitations": ["no handle"],
+         "exit": "finished", "key_found_in": []}
+    (cfg.runs / job_id / "agent" / "result.json").write_text(json.dumps(r))
+    assert c.get(f"/api/jobs/{job_id}").json()["agent_result"]["limitations"] == ["no handle"]
+    (cfg.runs / job_id / "agent" / "result.json").write_text(json.dumps({**r, "key_found_in": ["result.json"]}))
+    assert c.get(f"/api/jobs/{job_id}").json()["agent_result"] == {
+        "source": "finish", "verdict": "complete", "reason": "left out: the agent's result held the API key",
+        "limitations": [], "exit": "finished"}
+
+
+def test_events_send_a_rerun_stage_once(tmp_path):
+    """A client that joins while a stage's earlier run is its newest (a retry waits in the queue) gets
+    the lines of the new run once, also after the cursor moves on to the new run."""
+    job_id, _ = jobs.create_job(tmp_path, "v.mp4")
+    J = tmp_path / job_id
+    t = time.time() - 100
+    for k, s in enumerate(steps.NAMES[:6]):
+        jobs.update_stage(J, s, status="done", started=t - 50 + k, ended=t - 40)
+    jobs.update_stage(J, "sam3d", status="failed", started=t, ended=t + 5, note="cancelled")
+    jobs.update(J, status="queued")
+    log = J / "logs" / "sam3d.log"
+    log.write_text("== sam3d earlier\nold line\n")
+    sent, cursor, last = [], None, None
+
+    def look():
+        nonlocal cursor, last
+        out, cursor, last, _ = server.tick(J, cursor, last)
+        sent.extend(json.loads(e.split("\ndata: ", 1)[1])["text"] for e in out if e.startswith("id: "))
+
+    look()
+    look()
+    with open(log, "a") as f:
+        f.write("== sam3d now\nline A\n")
+    jobs.update_stage(J, "sam3d", status="running", started=time.time(), ended=None)
+    jobs.update(J, status="running", current="sam3d")
+    look()
+    with open(log, "a") as f:
+        f.write("line B\n")
+    for _ in range(3):  # line B, a quiet look (the cursor moves to the new run), another look
+        look()
+    assert "".join(sent) == "== sam3d earlier\nold line\n== sam3d now\nline A\nline B\n"
+
+
+def test_frames_retry_analyzes_the_video_again(client, tmp_path):
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    J = cfg.runs / job_id
+    # As after a cancel during the analysis: frames failed, and the video is still there.
+    (J / "frames" / "meta.json").unlink()
+    jobs.update_stage(J, "frames", status="failed", note="cancelled", returncode=-15)
+    jobs.update(J, status="cancelled")
+    assert c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "box", "api_key": KEY}).status_code == 409
+    assert c.post(f"/api/jobs/{job_id}/continue", json={"from": "frames"}).json() == {"status": "analyzing", "from": "frames"}
+    job = wait(c, job_id, "ready", "failed")
+    assert job["status"] == "ready" and job["stages"]["frames"]["status"] == "done" and (J / "frames" / "meta.json").is_file()
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "frames"})
+    assert r.status_code == 409 and "already analyzed" in r.json()["detail"]
+    jobs.update_stage(J, "frames", status="failed", note="cancelled", returncode=-15)
+    Path(job["video"]["path"]).unlink()
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "frames"})
+    assert r.status_code == 409 and "upload it again" in r.json()["detail"]
+
+
+def test_no_delete_while_uploading(tmp_path):
+    """The jobs list shows a job as soon as its upload starts; deleting it must wait for the upload."""
+    import anyio
+    import httpx
+
+    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=True)
+    app = server.make_app(cfg, TOKEN, key_dir=tmp_path / "keys")
+    video = write_video(tmp_path / "src.mp4").read_bytes()
+    seen = {}
+
+    async def main():
+        first, rest = anyio.Event(), anyio.Event()
+
+        async def body():
+            yield video[:1000]
+            first.set()  # the server has the first chunk and waits for more
+            await rest.wait()
+            yield video[1000:]
+
+        async def put():
+            seen["put"] = await c.put("/api/upload", params={"name": "slow.mp4"}, content=body(),
+                                      headers={"Content-Length": str(len(video))})  # as the page's XHR sends
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://app",
+                                     headers={"Cookie": f"{server.COOKIE}={TOKEN}"}) as c:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(put)
+                await first.wait()
+                seen["list"] = (await c.get("/api/jobs")).json()
+                seen["delete"] = await c.delete(f"/api/jobs/{seen['list'][0]['id']}")
+                rest.set()
+
+    try:
+        anyio.run(main)
+        [row] = seen["list"]
+        assert row["status"] == "uploading" and seen["delete"].status_code == 409
+        assert "still uploading" in seen["delete"].json()["detail"]
+        assert seen["put"].status_code == 200 and seen["put"].json() == {"id": row["id"], "bytes": len(video)}
+        t0 = time.time()
+        while jobs.load(cfg.runs / row["id"])["status"] != "ready" and time.time() - t0 < 60:
+            time.sleep(0.1)
+        assert (cfg.runs / row["id"] / "video" / "slow.mp4").read_bytes() == video
+    finally:
+        app.app.state.runner.shutdown(timeout=5)
+
+
+# static/app.js in node, with a stand-in DOM in which every element accepts anything and every call
+# records its string arguments (so the text that the page would show is in `texts`).
+NODE_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const texts = [], replies = JSON.parse(process.argv[3]);
+const el = () => new Proxy(function () {}, {
+  get: (t, k) => k === Symbol.iterator ? [][Symbol.iterator] : k in t ? t[k] : (t[k] = el()),
+  apply: (t, self, args) => { texts.push(...args.filter((a) => typeof a === "string")); return el(); },
+});
+const ctx = vm.createContext({ console, texts, document: el(), window: el(), location: { hash: "" },
+  setInterval() {}, EventSource: el(), fetch: async (url) => ({ ok: true, status: 200, json: async () => replies[url] }) });
+Promise.resolve(vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "\n" + process.argv[4], ctx))
+  .catch((e) => { console.error(e.stack); process.exitCode = 1; });
+"""
+
+
+def run_app_js(replies, code):
+    """Load app.js, then run code (an expression that may be a promise) in its scope; returns the JSON
+    that code printed last."""
+    if shutil.which("node") is None:
+        pytest.skip("no node")
+    p = subprocess.run(["node", "-e", NODE_HARNESS, "-", str(server.STATIC / "app.js"), json.dumps(replies),
+                        textwrap.dedent(code)], capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout.splitlines()[-1])
+
+
+# The start form of static/app.js in node: every selector gives one stand-in element that keeps what
+# app.js sets on it (so the form's handlers stay), the agent, mode and parts mode radios are plain
+# objects, calls record their string arguments in `texts`, and fetch records every request's URL and
+# method in `requests` and the POST bodies in `posts`, and answers with the replies (by URL). A reply
+# with "__status" answers that HTTP error, with the reply as its JSON body.
+FORM_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const texts = [], replies = JSON.parse(process.argv[4] || "{}");
+const el = () => new Proxy(function () {}, {
+  get: (t, k) => k === Symbol.iterator ? [][Symbol.iterator] : k in t ? t[k] : (t[k] = el()),
+  apply: (t, self, args) => { texts.push(...args.filter((a) => typeof a === "string")); return el(); },
+});
+const radios = (values) => values.map((value, i) => ({ value, checked: i === 0 }));
+const agents = radios(["astra", "opus", "none"]), modes = radios(["auto", "manual"]);
+const partsModes = radios(["vlm", "vlm_edit", "user"]), byId = {}, posts = [], requests = [];
+const lists = { "input[name=agent]": agents, "input[name=mode]": modes, "input[name=partsmode]": partsModes };
+const document = new Proxy({}, { get: (t, k) => k === "querySelector"
+  ? (sel) => sel === "input[name=mode]:checked" ? modes.find((r) => r.checked) : (byId[sel] = byId[sel] || el())
+  : k === "querySelectorAll" ? (sel) => lists[sel] || []
+  : (t[k] = t[k] || el()) });
+const fetch = async (url, opt) => {
+  const method = (opt && opt.method) || "GET";
+  requests.push({ url, method });
+  if (method === "POST") posts.push({ url, body: JSON.parse(opt.body) });
+  const reply = url in replies ? replies[url] : url === "/api/jobs" ? [] : {}, status = (reply && reply.__status) || 200;
+  return { ok: status < 400, status, statusText: "", json: async () => reply };
+};
+const ctx = vm.createContext({ console, document, window: el(), location: { hash: "" }, setInterval() {}, EventSource: el(),
+  fetch, agents, partsModes, posts, requests, texts });
+Promise.resolve(vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "\n" + process.argv[3], ctx))
+  .catch((e) => { console.error(e.stack); process.exitCode = 1; });
+"""
+
+
+def run_form_js(code, replies=None):
+    """Load app.js in FORM_HARNESS, then run code in its scope; returns the JSON that code printed last."""
+    if shutil.which("node") is None:
+        pytest.skip("no node")
+    p = subprocess.run(["node", "-e", FORM_HARNESS, "-", str(server.STATIC / "app.js"), textwrap.dedent(code),
+                        json.dumps(replies or {})], capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout.splitlines()[-1])
+
+
+def test_app_js_start_form_follows_the_agent():
+    """The key field names the chosen agent's provider and its key prefix; with no agent it is hidden,
+    not required, and no key is sent."""
+    code = """
+        (async () => {
+          const form = [], sent = [];
+          for (const [i, a] of agents.entries()) {
+            agents.forEach((r, j) => { r.checked = j === i; });
+            a.onchange();
+            form.push([a.value, $("#keyname").textContent, $("#key").placeholder, $("#keylabel").hidden, $("#key").required]);
+            V = { id: "j", picks: [], view0: null };
+            Object.assign($("#key"), { value: "sk-typed" });
+            Object.assign($("#prompt"), { value: "box" });
+            Object.assign($("#nviews"), { value: "4" });
+            Object.assign($("#pause"), { checked: true });
+            posts.length = 0;
+            await $("#startform").onsubmit({ preventDefault() {} });
+            sent.push(posts[0]);
+          }
+          console.log(JSON.stringify({ form, sent }));
+        })()
+        """
+    out = run_form_js(code)
+    assert out["form"] == [["astra", "OpenAI API key", "sk-...", False, True],
+                           ["opus", "Anthropic API key", "sk-ant-...", False, True],
+                           ["none", "", "", True, False]]
+    assert [s["url"] for s in out["sent"]] == ["/api/jobs/j/start"] * 3
+    assert [(s["body"]["agent"], s["body"]["api_key"]) for s in out["sent"]] == \
+        [("astra", "sk-typed"), ("opus", "sk-typed"), ("none", None)]
+    assert all(s["body"]["mode"] == "auto" and s["body"]["prompt"] == "box" and s["body"]["auto_continue"] is False
+               for s in out["sent"])
+
+
+def test_app_js_view0_retry_and_delete():
+    times = [round(0.1 * i, 1) for i in range(50)]
+    meta = {"times": times, "rel": [2.0 if i == 26 else 1.0 for i in range(50)], "candidates": [], "thumbs": [],
+            "thumb_size": [32, 18], "video": {"n_frames": 50, "duration_s": 5.0, "fps": 10, "width": 64, "height": 36,
+                                              "codec": "h264", "hdr": None}}
+    rows = [{"id": "a", "created": "2026-10-15T10:00:00", "status": "uploading", "prompt": None, "video": "a.mp4"},
+            {"id": "b", "created": "2026-10-15T09:00:00", "status": "done", "prompt": "cup", "video": "b.mp4"}]
+    out = run_app_js({"/api/jobs": rows, "/api/jobs/j/frames": meta}, """
+        (async () => {
+          const view0 = [];
+          for (const v of [25, "f00026", "f00045", "f00099", null]) {  // a pick, two pool names, a non-pick, none
+            V = { id: "j", picks: [], view0: null, job: { mode: "manual", picks: [5, 25, 45], view0: v, n_views: 6 } };
+            await loadFrames();
+            view0.push(V.view0);
+          }
+          const stages = (o) => ["frames", ...BUILD].map((name) => ({ name, status: o[name] || "pending" }));
+          const retry = [{ frames: "failed" }, { frames: "pending" }, { frames: "done", extract: "done", masks: "failed" },
+            { frames: "done" }].map((o) => retryFrom({ stages: stages(o) }));
+          // Stopped at the part list: back to the list until it is confirmed, then from parts. A job without
+          // LiDAR has its lidar stage skipped; a failed lidar stage is retried from lidar.
+          const atList = { frames: "done", extract: "done", masks: "done", prep: "done", da3: "done", lidar: "skipped",
+            select: "done", sam3d: "done", place: "done", propose: "done", parts: "failed" };
+          const st = { articulated: true, parts_mode: "vlm_edit", stages: stages(atList) };
+          V = { job: { parts: { mode: "vlm_edit", confirmed: false } } };
+          retry.push(retryFrom(st));
+          V = { job: { parts: { mode: "vlm_edit", confirmed: true } } };
+          retry.push(retryFrom(st), retryFrom({ ...st, parts_mode: "vlm" }));
+          retry.push(retryFrom({ stages: stages({ frames: "done", extract: "done", masks: "done", prep: "done", da3: "done",
+            lidar: "failed" }) }));
+          texts.length = 0;
+          await showList();
+          console.log(JSON.stringify({ view0, retry, deletes: texts.filter((t) => t === "Delete").length }));
+        })()
+        """)
+    assert out["view0"] == [25, 25, 45, None, None]  # the pool name of a snapped pick is that pick (25 -> 26)
+    assert out["retry"] == ["frames", "frames", "masks", None, "propose", "parts", "parts", "lidar"]
+    assert out["deletes"] == 1  # none for the job that is still uploading
+
+
+def test_app_js_topics_and_the_agent_off():
+    topics = {"topics": [
+        {"topic": "/cam_a/image_rect/compressed", "type": "CompressedImage", "format": "jpeg", "count": 300, "rate_hz": 10.0,
+         "width": 1280, "height": 1024, "rectified": True, "preview": "frames/topic_previews/0.jpg"},
+        {"topic": "/cam_b/image/compressed", "type": "CompressedImage", "format": "jpeg", "count": 300, "rate_hz": 10.0,
+         "width": 1280, "height": 1024, "rectified": False, "preview": "frames/topic_previews/1.jpg"},
+        {"topic": "/cam_c/image", "type": "Image", "format": "rgb8", "count": 3, "rate_hz": None, "width": 8, "height": 6,
+         "rectified": None, "preview": "frames/topic_previews/2.jpg"}],
+        "skipped": [{"topic": "/depth", "type": "Image", "why": "16UC1"}]}
+    stages = [{"name": n, "status": "done"} for n in ("topics", "frames", "extract")] + [
+        {"name": "agent", "status": "skipped", "note": "turned off: physics uses the Stage A mesh"}]
+    job = {"source": {"kind": "rosbag", "topic": None}, "agent": False, "agent_result": None, "files": ["run/posed.glb"],
+           "stages": {"frames": {"status": "pending"}, "agent": stages[-1]}}
+    out = run_app_js({"/api/jobs": [], "/api/jobs/j/file/frames/topics.json": topics}, """
+        (async () => {
+          V = { id: "j" };
+          await loadTopics(""" + json.dumps(job) + """);
+          const table = [...texts];
+          texts.length = 0;
+          renderState({ status: "done", stages: """ + json.dumps(stages) + """, agent: false });
+          const state = [...texts];
+          texts.length = 0;
+          await renderResults(""" + json.dumps(job) + """);
+          console.log(JSON.stringify({ table, state, results: [...texts] }));
+        })()
+        """)
+    assert {"rectified", "raw lens distortion", "unknown", "/cam_a", "/image_rect", "/compressed", "CompressedImage jpeg", "1280x1024",
+            "10.0 Hz", "Use this topic"} <= set(out["table"])
+    assert "MV-SAM3D expects undistorted images; pick a rectified topic if the bag has one" in out["table"]
+    assert "no camera_info next to it, so the lens distortion is not known. MV-SAM3D expects undistorted images; " \
+           "pick a rectified topic if the bag has one" in out["table"]  # a raw bag without camera_info gets the hint too
+    assert out["table"].count("Use this topic") == 3 and "Not usable: /depth (16UC1)" not in out["table"]  # textContent
+    assert "skipped (turned off)" in out["state"]
+    assert out["results"].count("not refined (agent turned off)") == 2  # in the viewers and in the facts
+
+
+def test_app_js_shows_the_opus_agent_and_its_cost():
+    astra = {"agent": "codex", "model": "gpt-6-astra", "source": "finish", "verdict": "complete", "reason": "fixed the lid",
+             "limitations": [], "exit": "exited"}
+    job = {"source": {"kind": "video"}, "agent": "opus", "files": ["run/posed.glb", "refined.glb"],
+           "stages": {"frames": {"status": "done"}, "agent": {"status": "done"}},
+           "agent_result": {"source": "finish", "verdict": "complete", "reason": "fixed the lid", "limitations": [],
+                            "exit": "exited", "agent": "claude", "model": "claude-opus-5-5", "turns": 12, "cost_usd": 0.672,
+                            "tokens": {"input_tokens": 41000, "output_tokens": 9000, "cache_read_input_tokens": 380000,
+                                       "cache_creation_input_tokens": 52000}}}
+    out = run_app_js({"/api/jobs": []}, """
+        (async () => {
+          V = { id: "j" };
+          await renderResults(""" + json.dumps(job) + """);
+          const opus = [...texts];
+          texts.length = 0;
+          await renderResults(""" + json.dumps({**job, "agent": "astra", "agent_result": astra}) + """);
+          console.log(JSON.stringify({ opus, astra: [...texts] }));
+        })()
+        """)
+    assert "Refined by Claude Opus 5.5" in out["opus"] and "Claude Opus 5.5 (claude-opus-5-5)" in out["opus"]
+    assert "41,000 input, 9,000 output, 380,000 cache read, 52,000 cache write in 12 turns" in out["opus"]
+    assert "about $0.67" in out["opus"] and "fixed the lid" in out["opus"]
+    assert "GPT-6-Astra (gpt-6-astra)" in out["astra"] and "Agent tokens" not in out["astra"]
+
+
+def test_app_js_parse_parts():
+    """parseParts reads "name > parent : joint" lines (and "name x3" for a count); formatParts writes them back."""
+    out = run_app_js({"/api/jobs": []}, r"""
+        (() => {
+          const parts = parseParts("cabinet body\n\n  door > cabinet body : Revolute \r\ndrawer x3 > cabinet body : prismatic\nknob × 2 > door");
+          const errors = ["door > : revolute", "door > body : hinge", "> body", "a > b > c", "body\nlid > body :"].map((t) => {
+            try { parseParts(t); return null; } catch (e) { return e.message; }
+          });
+          console.log(JSON.stringify({ parts, text: formatParts(parts), again: parseParts(formatParts(parts)), errors,
+            empty: parseParts(" \n"), box: parseParts("box x") }));
+        })()
+        """)
+    assert out["parts"] == [{"name": "cabinet body", "parent": None, "joint": None, "count": 1},
+                            {"name": "door", "parent": "cabinet body", "joint": "revolute", "count": 1},
+                            {"name": "drawer", "parent": "cabinet body", "joint": "prismatic", "count": 3},
+                            {"name": "knob", "parent": "door", "joint": None, "count": 2}]
+    assert out["text"] == ("cabinet body\ndoor > cabinet body : revolute\ndrawer x3 > cabinet body : prismatic\n"
+                           "knob x2 > door : unknown")
+    assert out["again"][:3] == out["parts"][:3] and out["again"][3]["joint"] == "unknown"
+    assert out["errors"] == ["line 1: write the parent's name after >",
+                             "line 1: the joint is one of revolute, prismatic, fixed, unknown",
+                             "line 1: the part needs a name", "line 1: write the part as name > parent : joint",
+                             "line 2: the joint is one of revolute, prismatic, fixed, unknown"]
+    assert out["empty"] == [] and out["box"] == [{"name": "box x", "parent": None, "joint": None, "count": 1}]
+
+
+def test_app_js_start_form_sends_the_parts():
+    """The default start body is a rigid object (articulated false, no parts). The toggle shows who lists
+    the parts; "I type the parts" sends the parsed list; without an agent only "I type the parts" is left,
+    and the user's own choice comes back with the agent."""
+    out = run_form_js("""
+        (async () => {
+          const sent = [], form = [];
+          const state = () => ({ box: $("#partsbox").hidden, list: $("#partlistbox").hidden, pause: $("#partspause").hidden,
+            noagent: $("#partsnoagent").hidden, required: $("#partlist").required,
+            checked: partsModes.filter((r) => r.checked).map((r) => r.value), disabled: partsModes.map((r) => r.disabled) });
+          const pick = (i) => { agents.forEach((r, j) => { r.checked = j === i; }); agents[i].onchange(); };
+          const submit = async () => {
+            V = { id: "j", picks: [], view0: null };
+            Object.assign($("#key"), { value: "sk-typed" });
+            Object.assign($("#prompt"), { value: "box" });
+            Object.assign($("#nviews"), { value: "4" });
+            Object.assign($("#pause"), { checked: true });
+            posts.length = 0;
+            await $("#startform").onsubmit({ preventDefault() {} });
+            sent.push(posts.length ? posts[0].body : $("#startmsg").textContent);
+          };
+          pick(0);
+          await submit();
+          $("#articulated").checked = true;
+          $("#articulated").onchange();
+          form.push(state());
+          partsModes[1].onchange();
+          form.push(state());
+          await submit();
+          pick(2);
+          form.push(state());
+          pick(0);
+          form.push(state());
+          partsModes[2].onchange();
+          $("#partlist").value = "box body\\nlid > box body : revolute\\ndrawer x2 > box body : prismatic";
+          await submit();
+          $("#partlist").value = "box body\\nlid > box body : hinge";
+          await submit();
+          pick(2);
+          $("#partlist").value = "box body\\nlid > box body";
+          await submit();
+          console.log(JSON.stringify({ form, sent }));
+        })()
+        """)
+    rigid, vlm_edit, user, bad, none = out["sent"]
+    assert rigid["articulated"] is False and "parts_mode" not in rigid and "parts" not in rigid
+    assert out["form"] == [
+        {"box": False, "list": True, "pause": True, "noagent": True, "required": False, "checked": ["vlm"],
+         "disabled": [False, False, False]},
+        {"box": False, "list": True, "pause": False, "noagent": True, "required": False, "checked": ["vlm_edit"],
+         "disabled": [False, False, False]},
+        {"box": False, "list": False, "pause": True, "noagent": False, "required": True, "checked": ["user"],
+         "disabled": [True, True, False]},
+        {"box": False, "list": True, "pause": False, "noagent": True, "required": False, "checked": ["vlm_edit"],
+         "disabled": [False, False, False]}]
+    assert (vlm_edit["articulated"], vlm_edit["parts_mode"], vlm_edit["parts"], vlm_edit["api_key"]) == (True, "vlm_edit", [], "sk-typed")
+    assert (user["parts_mode"], user["agent"]) == ("user", "astra") and user["parts"] == [
+        {"name": "box body", "parent": None, "joint": None, "count": 1},
+        {"name": "lid", "parent": "box body", "joint": "revolute", "count": 1},
+        {"name": "drawer", "parent": "box body", "joint": "prismatic", "count": 2}]
+    assert bad == "line 2: the joint is one of revolute, prismatic, fixed, unknown"
+    assert (none["agent"], none["api_key"], none["parts_mode"]) == ("none", None, "user")
+    assert none["parts"] == [{"name": "box body", "parent": None, "joint": None, "count": 1},
+                             {"name": "lid", "parent": "box body", "joint": None, "count": 1}]
+
+
+def test_app_js_part_list_panel():
+    """The panel of a job that waits for its part list: the VLM's list as text, its notes and view 0's
+    photo. Build sends the list as it is through continue, an edited list through POST /parts (a kept part
+    keeps the VLM's axis hint), and a typing error stays on the page."""
+    proposal = {"source": "vlm", "agent": "opus", "model": "claude-opus-5-5", "base": "body", "warnings": ["a warning"],
+                "parts": [{"name": "body", "parent": None, "joint": "fixed", "count": 1, "axis_hint": None},
+                          {"name": "lid", "parent": "body", "joint": "revolute", "count": 1,
+                           "axis_hint": "a hinge along the back top edge"}]}
+    replies = {"/api/jobs/j/parts": {"articulated": True, "noun": "wooden box", "waiting": True, "proposal": proposal,
+                                     "parts": {"mode": "vlm_edit", "list": [], "confirmed": False}, "checks": [],
+                                     "photo": "scene/sam3_wooden_box/check/f00012.jpg"}}
+    out = run_form_js("""
+        (async () => {
+          V = { id: "j" };
+          await loadParts();
+          const shown = { texts: [...texts], text: $("#partsedit").value, fig: $("#partsfig").hidden, photo: $("#partsphoto").src,
+            reset: $("#partsreset").hidden };
+          const stages = ["frames", ...BUILD].map((name) => ({ name, status: name === "propose" || BUILD.indexOf(name) < 7 ? "done" : "pending" }));
+          renderState({ status: "review", stages, agent: "opus", key_ok: true, warnings: [], articulated: true, parts_mode: "vlm_edit",
+            parts_review: true });
+          const next = $("#jnext").textContent;
+          $("#key2").value = "";
+          posts.length = 0;
+          await $("#partsbuild").onclick();
+          $("#partsedit").value = shown.text + "\\nflap > body : prismatic";
+          $("#partsedit").oninput();
+          const reset = $("#partsreset").hidden;
+          await $("#partsbuild").onclick();
+          $("#partsedit").value = "body\\nlid > body : hinge";
+          await $("#partsbuild").onclick();
+          const error = $("#partsmsg").textContent, sent = [...posts];
+          // A VLM's name may hold ":" or ">": the list as shown is confirmed without parsing it here.
+          V.parts = { proposal: { parts: [{ name: "body", parent: null, joint: "fixed", count: 1 },
+            { name: "door: left", parent: "body", joint: "revolute", count: 1 }] } };
+          V.partsText = formatParts(V.parts.proposal.parts);
+          $("#partsedit").value = V.partsText + "\\n";
+          posts.length = 0;
+          await $("#partsbuild").onclick();
+          $("#partsedit").value = "body\\nleft door > body : revolute";
+          await $("#partsbuild").onclick();
+          const labels = [stageLabel("agent", true), stageLabel("agent", false), stageLabel("agent", true, true),
+            stageLabel("propose"), stageLabel("parts"), stageLabel("urdf")];
+          V = { id: "j" };  // act's refresh left a stand-in job
+          renderState({ status: "running", current: "agent", stages, agent: "opus", key_ok: true, warnings: [], articulated: true });
+          console.log(JSON.stringify({ shown, next, reset, posts: sent, colon: posts, error, labels, build: BUILD,
+            running: texts.filter((t) => t.startsWith("Running ")) }));
+        })()
+        """, replies)
+    shown = out["shown"]
+    assert "Claude Opus 5.5 listed 1 moving part of the wooden box. The base, which does not move, is body." in shown["texts"]
+    assert {"a warning", "lid", ": a hinge along the back top edge"} <= set(shown["texts"])
+    assert shown["text"] == "body\nlid > body : revolute" and shown["reset"] is True and shown["fig"] is False
+    assert shown["photo"] == "/api/jobs/j/file/scene/sam3_wooden_box/check/f00012.jpg"
+    assert out["next"] == "Check the part list, edit it if it is wrong, then Build with these parts."
+    assert out["reset"] is False
+    assert out["posts"] == [
+        {"url": "/api/jobs/j/continue", "body": {"api_key": None}},
+        {"url": "/api/jobs/j/parts", "body": {"api_key": None, "parts": [
+            {"name": "body", "parent": None, "joint": None, "count": 1},
+            {"name": "lid", "parent": "body", "joint": "revolute", "count": 1, "axis_hint": "a hinge along the back top edge"},
+            {"name": "flap", "parent": "body", "joint": "prismatic", "count": 1}]}}]
+    assert out["error"] == "line 2: the joint is one of revolute, prismatic, fixed, unknown"
+    assert out["colon"] == [{"url": "/api/jobs/j/continue", "body": {"api_key": None}},
+                            {"url": "/api/jobs/j/parts", "body": {"api_key": None, "parts": [
+                                {"name": "body", "parent": None, "joint": None, "count": 1},
+                                {"name": "left door", "parent": "body", "joint": "revolute", "count": 1}]}}]
+    assert out["labels"] == ["agent sets the joints, 15 min budget", "agent refinement, 10 min budget",
+                             "agent sets the joints", "part list", "split into parts", "URDF"]
+    assert out["running"] == ["Running agent (agent sets the joints, 15 min budget)"]
+    assert out["build"] == steps.NAMES[steps.NAMES.index("extract"):] == jobs.BUILD  # lidar after da3
+
+
+def test_app_js_results_of_an_articulated_job():
+    """The split parts and the agent's parts with joints side by side, the links, base and joints of the MJCF,
+    the agent's joint count, the mass of every link, the parts the split missed, and the new downloads;
+    without the agent the parts are welded into one body. A rigid job's part stages show as turned off."""
+    mjcf = {"name": "wooden_box", "root": "body", "fixed_base": False, "welded": {},
+            "inertial": {"mass": 2.5, "com": [0.0, 0.01, 0.1], "fullinertia": [0.01] * 6},
+            "links": {"body": {"source": "vomp", "inertial": {"mass": 2.0, "com": [0, 0, 0.1], "fullinertia": [0.01] * 6}},
+                      "lid": {"source": "hull", "inertial": {"mass": 0.5, "com": [0, 0, 0.2], "fullinertia": [0.001] * 6}}},
+            "joints": [{"child": "lid", "parent": "body", "type": "revolute", "pos": [0, 0.1, 0.2], "axis": [-1, 0, 0],
+                        "range": [0.0, 1.5]}]}
+    summary = {"rigid_body": {"mass": 2.0, "com": [0, 0, 0.1]}, "median": {"density_kg_m3": 600.0},
+               "links_skipped": {"lid": "no occupied voxel"}, "rigid_body_covers": ["body"]}
+    parts = {"parts": [{"name": "body", "status": "found"}, {"name": "lid", "status": "found"},
+                       {"name": None, "prompt": "drawer", "status": "not_found", "why": "no SAM 3 mask in any view"}]}
+    files = ["run/posed.glb", "run/parts.glb", "run/parts.json", "refined.glb", "physics/summary.json",
+             "physics/mjcf/mjcf.json", "physics/urdf/model.urdf", "results.zip"]
+    job = {"id": "j", "articulated": True, "agent": "opus", "files": files, "stages": {"agent": {"status": "done"}},
+           "agent_result": {"source": "finish", "verdict": "articulated", "reason": "the lid hinges", "limitations": [],
+                            "exit": "exited", "agent": "claude", "model": "claude-opus-5-5", "mode": "articulation",
+                            "counts": {"exports": 1, "reviews": 0, "checkpoints": 0, "joints": 2, "articulation_reviews": 1},
+                            "joints_delivered": 1}}
+    off = {"id": "k", "articulated": True, "agent": "none", "files": ["run/posed.glb", "run/parts.glb", "physics/summary.json",
+                                                                       "physics/mjcf/mjcf.json"], "agent_result": None,
+           "stages": {"agent": {"status": "skipped", "note": "turned off: without the agent the parts get no joints, "
+                                                              "so physics welds them into one body"}}}
+    replies = {"/api/jobs": [], "/api/jobs/j/file/physics/mjcf/mjcf.json": mjcf, "/api/jobs/j/file/physics/summary.json": summary,
+               "/api/jobs/j/file/run/parts.json": parts,
+               "/api/jobs/j/parts": {"checks": ["run/parts/sam3/check/0.jpg", "run/parts/sam3/check/1.jpg"]},
+               "/api/jobs/k/file/physics/mjcf/mjcf.json": {"name": "wooden_box", "inertial": mjcf["inertial"]},
+               "/api/jobs/k/file/physics/summary.json": summary}
+    unchanged = {**job, "agent_result": {**job["agent_result"], "verdict": "unchanged", "joints_delivered": 0}}
+    stages = [{"name": "frames", "status": "done"}] + [
+        {"name": n, "status": "skipped", "note": "turned off: rigid object"} for n in ("propose", "parts")] + [
+        {"name": "agent", "status": "done"}]
+    out = run_app_js(replies, """
+        (async () => {
+          V = { id: "j" };
+          await renderResults(""" + json.dumps(job) + """);
+          const art = [...texts];
+          texts.length = 0;
+          V = { id: "k" };
+          await renderResults(""" + json.dumps(off) + """);
+          const none = [...texts];
+          texts.length = 0;
+          renderState({ status: "done", stages: """ + json.dumps(stages) + """, agent: "astra" });
+          const state = [...texts];
+          texts.length = 0;
+          V = { id: "j" };  // the agent kept the split parts as they were: no joints
+          await renderResults(""" + json.dumps(unchanged) + """);
+          console.log(JSON.stringify({ art, none, state, unchanged: [...texts] }));
+        })()
+        """)
+    art = out["art"]
+    for t in ("Parts (split, before rigging)", "Parts with joints, by Claude Opus 5.5", "articulated: the parts have joints (finish)",
+              "Joints", "1", "Joint changes by the agent", "2", "Links", "2: body, lid", "Base", "body, free to move",
+              "Joint of lid", "turns on body, 0 to 86 deg", "Mass", "2.50 kg", "Link masses",
+              "body 2.00 kg, lid 0.500 kg (from its collision hulls)", "Parts not split off", "drawer (no SAM 3 mask in any view)",
+              "parts.glb", "model.urdf", "Part masks in the views (2)"):
+        assert t in art, t
+    assert "Mass note" not in art  # the MJCF's mass covers the link that VoMP skipped
+    assert any("and the split parts (parts.glb, parts.json)" in t for t in art)
+    welded = "no joints (agent turned off), so physics welds the parts into one body"
+    assert out["none"].count(welded) == 2 and "1: the parts have no joints, so physics welds them into one body" in out["none"]
+    assert "Mass note" in out["none"] and "VoMP could not voxelize lid, so the mass covers only body." in out["none"]
+    assert out["state"].count("skipped (turned off)") == 2 and "agent refinement, 10 min budget" in out["state"]
+    assert "Agent result without joints, by Claude Opus 5.5" in out["unchanged"]
+    assert not any(t.startswith("Parts with joints") for t in out["unchanged"])
+
+
+# ---- the LiDAR UI (build_plan.md note 12): upload kinds, the LiDAR box, the review, the failure, the results ----
+
+CAM = "/cam/image_rect/compressed"
+LIVOX = {"topic": "/livox/lidar", "type": "CustomMsg", "msgtype": "livox_ros_driver2/msg/CustomMsg", "frame_id": "livox_frame",
+         "points": 19968, "fields": ["x", "y", "z", "reflectivity", "tag", "line", "offset_time"], "point_time": True,
+         "count": 120, "rate_hz": 10.0}
+CLOUD = {"topic": "/lidar/points", "type": "PointCloud2", "msgtype": "sensor_msgs/msg/PointCloud2", "frame_id": "lidar",
+         "points": 4000, "fields": ["x", "y", "z", "intensity"], "point_time": False, "count": 118, "rate_hz": 9.87}
+EYE = np.eye(4).tolist()
+
+
+def camera_entry(links):
+    return {"topic": CAM, "type": "CompressedImage", "format": "jpeg", "count": 48, "rate_hz": 10.0, "width": 192,
+            "height": 128, "rectified": True, "frame_id": "camera_optical_frame", "camera_axes": "optical", "tf_links": links}
+
+
+def frames_meta(**video):
+    """frames/meta.json of 20 frames; video adds or replaces fields of "video"."""
+    return {"times": [round(0.1 * i, 1) for i in range(20)], "rel": [1.0] * 20, "candidates": [3, 9, 15], "thumbs": [3, 9, 15],
+            "thumb_size": [32, 18], "video": {"n_frames": 20, "duration_s": 2.0, "fps": 10, "width": 192, "height": 128,
+                                              "codec": "h264", "bit_depth": 8, "hdr": None, **video}}
+
+
+def test_app_js_upload_kinds_and_the_jobs_list():
+    """A .zip is a Stray Scanner upload; another suffix is refused with the three kinds named. The jobs list
+    names each job's kind, and the stage list has the lidar stage after da3."""
+    rows = [{"id": "a", "created": "2026-10-21T09:00:00", "status": "ready", "prompt": None, "video": "a.mp4", "kind": "video"},
+            {"id": "b", "created": "2026-10-21T08:00:00", "status": "ready", "prompt": None, "video": "b.bag", "kind": "rosbag"},
+            {"id": "c", "created": "2026-10-21T07:00:00", "status": "done", "prompt": "box", "video": "c.zip", "kind": "stray"}]
+    out = run_form_js("""
+        (async () => {
+          const kinds = ["clip.MP4", "scan.bag", "run.db3", "my capture.zip", "Capture.ZIP", "notes.txt", "capture.zip.txt"]
+            .map((n) => KINDS.test(n));
+          const opened = [];
+          globalThis.XMLHttpRequest = class { constructor() { this.upload = {}; } open(m, u) { opened.push([m, u]); } send(f) { opened.push(f.name); } };
+          upload({ name: "notes.txt", size: 3 });
+          const refused = $("#upmsg").textContent;
+          upload({ name: "my capture.zip", size: 3e6 });
+          texts.length = 0;
+          renderJobs(""" + json.dumps(rows) + """);
+          console.log(JSON.stringify({ kinds, refused, opened, list: [...texts], label: stageLabel("lidar"), build: BUILD }));
+        })()
+        """)
+    assert out["kinds"] == [True, True, True, True, True, False, False]
+    assert out["refused"] == ("notes.txt is not a video (.mp4 .mov .m4v .avi .mkv .webm), a rosbag (.bag .mcap .db3) or a "
+                              "Stray Scanner export (.zip). For a ROS 2 bag folder, upload the .mcap or .db3 file in it. "
+                              "For a Stray Scanner export folder, zip the folder first.")
+    assert out["opened"] == [["PUT", "/api/upload?name=my%20capture.zip"], "my capture.zip"]
+    assert {"video", "rosbag", "Stray capture"} <= set(out["list"]) and "stray" not in out["list"]
+    assert out["label"] == "metric scale (LiDAR)"
+    assert out["build"][out["build"].index("da3") + 1] == "lidar" and out["build"].index("lidar") + 1 == out["build"].index("select")
+
+
+def test_app_js_lidar_box_per_kind():
+    """The LiDAR box of the start form and the start body's "lidar" for each kind of input: hidden for a
+    video (null); a bag with one LiDAR topic preselects it, and its TF chain shows; a bag with two asks for
+    one and says when TF does not link it; a bag without LiDAR topics, or listed before they were, has the
+    box turned off with the reason; a Stray capture starts with LiDAR on, and its turn and depth show."""
+    static_tf = [{"parent": "base_link", "child": "camera_link", "static": True, "T_parent_child": EYE},
+                 {"parent": "camera_link", "child": "camera_optical_frame", "static": True, "T_parent_child": EYE},
+                 {"parent": "base_link", "child": "livox_frame", "static": True, "T_parent_child": EYE},
+                 {"parent": "odom", "child": "base_link", "static": False, "T_parent_child": EYE}]
+    dynamic_tf = [{"parent": "base_link", "child": "camera_optical_frame", "static": True, "T_parent_child": EYE},
+                  {"parent": "/base_link", "child": "livox_frame", "static": False, "T_parent_child": EYE}]
+    skipped = [{"topic": "/ouster/points", "type": "PointCloud2", "why": "no messages"}]
+    topics = {
+        "b1": {"topics": [camera_entry({"/livox/lidar": "static"})], "skipped": [], "lidar": [LIVOX], "lidar_skipped": skipped,
+               "tf": static_tf},
+        "b2": {"topics": [camera_entry({"/lidar/points": None, "/livox/lidar": "dynamic"})], "skipped": [],
+               "lidar": [LIVOX, CLOUD], "lidar_skipped": [], "tf": dynamic_tf},
+        "b4": {"topics": [camera_entry({})], "skipped": [], "lidar": [], "lidar_skipped": skipped, "tf": []},
+        "b5": {"topics": [camera_entry({})], "skipped": []}}  # listed before LiDAR topics were
+    stray_video = {"kind": "stray", "rotation": 270, "rotation_source": "gravity", "container_rotation": 0, "n_depth": 19,
+                   "n_confidence": 19, "n_odometry": 20, "depth_size": [256, 192], "upright_agreement": 0.9583,
+                   "warnings": ["1 of the 20 frames have no depth image, so they have no LiDAR samples"]}
+    replies = {f"/api/jobs/{i}/frames": frames_meta() for i in ("v", "b1", "b2", "b3", "b4", "b5", "b6")}
+    replies.update({f"/api/jobs/{i}/file/frames/topics.json": t for i, t in topics.items()})
+    replies.update({"/api/jobs/b3/file/frames/topics.json": topics["b2"], "/api/jobs/b6/file/frames/topics.json": topics["b5"],
+                    "/api/jobs/s1/frames": frames_meta(**stray_video),
+                    "/api/jobs/s2/frames": frames_meta(**{**stray_video, "rotation": 0, "upright_agreement": None, "warnings": []})})
+    job = {"status": "ready", "mode": "auto", "picks": [], "n_views": 4, "auto_continue": True, "agent": "none",
+           "prompt": None, "lidar": None, "calibration": None}
+    bag = {**job, "kind": "rosbag", "source": {"kind": "rosbag", "topic": CAM}}
+    jobs_ = {"v": {**job, "kind": "video", "source": {"kind": "video", "topic": None}}, "b1": bag, "b2": bag,
+             "b3": {**bag, "lidar": {"kind": "rosbag", "topic": "/livox/lidar"}}, "b4": bag, "b5": bag,
+             "b6": {**bag, "status": "done"},
+             "s1": {**job, "kind": "stray", "source": {"kind": "stray", "topic": None}, "lidar": {"kind": "stray"}},
+             "s2": {**job, "kind": "stray", "source": {"kind": "stray", "topic": None}}}
+    out = run_form_js("""
+        (async () => {
+          const JOBS = """ + json.dumps(jobs_) + """, out = {};
+          // The link and the skipped topics only while the topic box shows (a stand-in keeps an old text).
+          const shown = (x) => $("#lidaropts").hidden === true ? null : x;
+          const box = () => ({ hidden: $("#lidarbox").hidden, on: $("#uselidar").checked, off: $("#uselidar").disabled,
+            hint: $("#lidarhint").textContent, opts: $("#lidaropts").hidden, topic: $("#lidartopic").value,
+            link: shown($("#lidarlink").textContent),
+            warn: shown($("#lidarlink").className === "warn"), skipped: shown($("#lidarskipped").textContent) });
+          const submit = async () => {  // the refresh after a Start gets the same job back on the page
+            const job = V.job;
+            Object.assign($("#prompt"), { value: "box" });
+            posts.length = 0;
+            await $("#startform").onsubmit({ preventDefault() {} });
+            V.job = job;
+            return posts.length ? posts[0].body.lidar : $("#startmsg").textContent;
+          };
+          const open = async (id) => {
+            V = { id, picks: [], view0: null, job: JOBS[id] };
+            texts.length = 0;
+            await loadFrames();
+            return [...texts];
+          };
+          const check = (on) => { $("#uselidar").checked = on; $("#uselidar").onchange(); };
+          const label = (t) => t.startsWith("/") && t.endsWith(")");  // an option's text, not its value or a thumbnail
+          const choose = (t) => { $("#lidartopic").value = t; $("#lidartopic").onchange(); };
+          await open("v");
+          out.v = { box: box(), sent: await submit() };
+          const b1 = await open("b1");
+          out.b1 = { labels: b1.filter(label), box: box(), sent: await submit() };
+          check(true);
+          out.b1.on = box();
+          out.b1.sent_on = await submit();
+          const b2 = await open("b2");
+          out.b2 = { labels: b2.filter((t) => label(t) || t.startsWith("Choose")), box: box() };
+          check(true);
+          out.b2.none = box();
+          $("#lidartopic").focus = () => { out.b2.focused = true; };
+          out.b2.error = await submit();
+          choose("/lidar/points");
+          out.b2.cloud = box();
+          choose("/livox/lidar");
+          out.b2.livox = box();
+          out.b2.sent = await submit();
+          await open("b3");
+          out.b3 = box();
+          for (const id of ["b4", "b5", "b6"]) {
+            await open(id);
+            out[id] = { box: box(), sent: await submit() };
+          }
+          // A turned-off box (b6, open now) sends null even with its checkbox checked.
+          $("#uselidar").checked = true;
+          out.b6.checked_off = [$("#uselidar").disabled, lidarChoice()];
+          const s1 = await open("s1");
+          out.s1 = { box: box(), sent: await submit(), facts: $("#strayfacts").textContent, info: $("#strayinfo").hidden,
+            warn: s1.filter((t) => t.includes("depth image")), vsum: $("#vsum").textContent };
+          check(false);
+          out.s1.off = box();
+          out.s1.sent_off = await submit();
+          await open("s2");
+          out.s2 = { box: box(), facts: $("#strayfacts").textContent };
+          await open("b1");
+          out.b1.stray_hidden = $("#strayinfo").hidden;
+          out.topics = requests.filter((r) => r.url.endsWith("topics.json")).map((r) => r.url.split("/")[3]);
+          // The camera topic table: an old listing offers the topic in use again, so that its LiDAR topics get listed.
+          const read = { source: JOBS.b1.source, stages: { frames: { status: "done" } } };
+          for (const id of ["b5", "b1"]) {
+            V = { id };
+            texts.length = 0;
+            await loadTopics(read);
+            out["table_" + id] = texts.filter((t) => t === "Use this topic" || t === "in use");
+          }
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    off = "Off: Depth Anything 3 estimates the scale."
+    v = out["v"]
+    assert v["box"]["hidden"] is True and v["sent"] is None
+
+    b1 = out["b1"]
+    assert b1["labels"] == ["/livox/lidar (Livox, 10 Hz, livox_frame)"]
+    assert b1["box"] == {"hidden": False, "on": False, "off": False, "hint": off, "opts": True, "topic": "/livox/lidar",
+                         "link": None, "warn": None, "skipped": None}
+    assert b1["sent"] is None  # off by default for a bag
+    assert b1["on"] == {"hidden": False, "on": True, "off": False, "hint": "The LiDAR's points set the metric scale.",
+                        "opts": False, "topic": "/livox/lidar", "warn": False,
+                        "link": "linked by /tf_static: camera_optical_frame <- camera_link <- base_link <- livox_frame",
+                        "skipped": "Not usable: /ouster/points (no messages)"}
+    assert b1["sent_on"] == {"topic": "/livox/lidar"} and b1["stray_hidden"] is True
+
+    b2 = out["b2"]
+    assert b2["labels"] == ["Choose a LiDAR topic", "/livox/lidar (Livox, 10 Hz, livox_frame)",
+                            "/lidar/points (PointCloud2, 9.9 Hz, lidar)"]
+    assert (b2["box"]["topic"], b2["box"]["on"]) == ("", False)  # two topics: none preselected
+    assert b2["none"]["link"] == "choose a LiDAR topic to see its link to the camera"
+    assert b2["error"] == "choose a LiDAR topic, or turn LiDAR off" and b2["focused"] is True  # the page's text, not a bubble
+    assert (b2["cloud"]["link"], b2["cloud"]["warn"]) == ("no TF link: upload the calibration", True)
+    assert (b2["livox"]["link"], b2["livox"]["warn"]) == ("linked by /tf: camera_optical_frame <- base_link <- livox_frame", False)
+    assert b2["sent"] == {"topic": "/livox/lidar"}
+    assert (out["b3"]["on"], out["b3"]["topic"], out["b3"]["opts"]) == (True, "/livox/lidar", False)  # the job's own setting
+
+    no_lidar, old, old_done = out["b4"], out["b5"], out["b6"]
+    assert no_lidar["box"]["off"] is True and no_lidar["box"]["on"] is False and no_lidar["box"]["opts"] is True
+    assert no_lidar["box"]["hint"] == ("This bag has no LiDAR topic (PointCloud2 or Livox). Not usable: /ouster/points "
+                                       "(no messages).")
+    assert old["box"]["off"] is True and old["box"]["hint"] == (
+        "This bag was read before the app listed LiDAR topics. To list them, choose its camera topic again with Change topic.")
+    assert old_done["box"]["hint"] == ("This bag was read before the app listed LiDAR topics. To use its LiDAR, upload the "
+                                       "bag again.")
+    assert no_lidar["sent"] is None and old["sent"] is None and old_done["sent"] is None
+    assert old_done["checked_off"] == [True, None]
+
+    s1 = out["s1"]
+    assert s1["box"] == {"hidden": False, "on": True, "off": False, "hint": "The iPhone's LiDAR depth sets the metric scale.",
+                         "opts": True, "topic": "", "link": None, "warn": None, "skipped": None}
+    assert s1["sent"] == {"kind": "stray"}
+    assert (s1["off"]["on"], s1["off"]["hint"], s1["sent_off"]) == (False, off, None)
+    assert s1["info"] is False and s1["vsum"] == "Stray capture: 20 frames, 2.0 s, 3 candidate views"
+    assert s1["facts"] == ("The frames are turned 270 deg counterclockwise to stand upright. Gravity gives this turn in 96% "
+                           "of the frames that show it. 19 of 20 frames have a depth image (256x192). 19 have a confidence image.")
+    assert s1["warn"] == ["1 of the 20 frames have no depth image, so they have no LiDAR samples"]
+    s2 = out["s2"]
+    assert s2["box"]["on"] is False and s2["box"]["hint"] == off  # a Start turned it off
+    assert s2["facts"].startswith("No frame shows gravity, so the frames stay as stored. 19 of 20 frames")
+    # Only a bag's frames load its topics.json, once per load.
+    assert out["topics"] == ["b1", "b2", "b3", "b4", "b5", "b6", "b1"]
+    assert out["table_b5"] == ["Use this topic"] and out["table_b1"] == ["in use"]
+
+
+def test_app_js_calibration_upload():
+    """The calibration uploads as soon as it is chosen: the box shows the server's summary, or its reason
+    for refusing the file; Remove deletes it. The status line says when it worked. The upload, Start, Retry
+    and Build wait for the request, and the focus comes back (to the upload after a Remove). In review, the
+    scale's summary says when it is stale."""
+    found = {"topics": [camera_entry({"/lidar/points": None})], "skipped": [], "lidar": [CLOUD], "lidar_skipped": [], "tf": []}
+    summary = {"name": "my_calib.json", "bytes": 412, "translation_m": 0.1234, "rotation_deg": 120.0, "has_intrinsics": False,
+               "camera_axes": "optical", "time_offset_s": 0.0}
+    lid = {"ok": True, "s": 1.25, "reason": None, "spread_rel": 0.004, "warnings": [], "views": [], "calibration_changed": False,
+           "counts": {"views": 6, "views_used": 6}, "check_dir": "lidar/check"}
+    replies = {"/api/jobs/b/calibration?name=my%20calib.json": summary,
+               "/api/jobs/b/calibration?name=bad.yaml": {"__status": 400,
+                                                         "detail": "T_cam_lidar has 3 numbers; give a 4x4 matrix or 16 numbers"},
+               "/api/jobs/b/calibration": {"calibration": None},
+               "/api/jobs/b/calibration?name=k.yaml": {**summary, "name": "k.yaml", "has_intrinsics": True,
+                                                       "camera_axes": "body", "time_offset_s": 0.02},
+               "/api/jobs/b/selection": {"lidar": {**lid, "calibration_changed": True}}}
+    out = run_form_js("""
+        (async () => {
+          V = { id: "b", picks: [], view0: null, topics: """ + json.dumps(found) + """,
+            job: { kind: "rosbag", status: "failed", source: { kind: "rosbag", topic: \"""" + CAM + """\" },
+              lidar: { kind: "rosbag", topic: "/lidar/points" }, calibration: null } };
+          lidarSetup(V.job);
+          lidarToggle();
+          const str = (x) => typeof x === "string" ? x : "";  // a text never set is "" on the page
+          const box = () => ({ link: $("#lidarlink").textContent, warn: $("#lidarlink").className === "warn",
+            sum: $("#calsum").hidden ? null : $("#calsum").textContent, btn: $("#calbtn").textContent,
+            remove: $("#calremove").hidden, msg: str($("#calmsg").textContent), bad: $("#calmsg").className === "msg" });
+          const pick = (name) => { const target = { files: [{ name }], value: "C:/fakepath/" + name };
+            return $("#calfile").onchange({ target }).then(() => target.value); };
+          // The controls' disabled state while each request runs, and the focus calls.
+          const ids = ["#calfile", "#calremove", "#start", "#retry", "#build"], during = [], focused = [];
+          ids.forEach((id) => { $(id).disabled = false; $(id).focus = () => focused.push(id); });
+          const fetch0 = fetch;
+          globalThis.fetch = (url, opt) => { during.push(ids.map((id) => $(id).disabled)); return fetch0(url, opt); };
+          const out = { before: box() };
+          document.activeElement = $("#calfile");
+          out.cleared = await pick("my calib.json");
+          out.good = box();
+          await pick("bad.yaml");
+          out.bad = box();
+          out.job = V.job.calibration.name;
+          document.activeElement = $("#calremove");
+          await $("#calremove").onclick();
+          out.removed = box();
+          out.during = during.splice(0);
+          out.after = ids.map((id) => $(id).disabled);
+          out.focused = focused.splice(0);
+          await pick("k.yaml");
+          out.k = box().sum;
+          Object.assign($("#prompt"), { value: "box" });
+          Object.assign($("#nviews"), { value: "4" });
+          await $("#startform").onsubmit({ preventDefault() {} });
+          out.sent = posts[0].body.lidar;
+          // In review the scale's summary is fetched again: an upload makes it stale.
+          V.sel = { lidar: """ + json.dumps(lid) + """ };
+          $("#review").hidden = false;
+          texts.length = 0;
+          await pick("my calib.json");
+          out.review = [...texts];
+          out.requests = requests.filter((r) => r.url.includes("/calibration") || r.url.endsWith("/selection"))
+            .map((r) => r.method + " " + r.url);
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    assert out["before"] == {"link": "no TF link: upload the calibration", "warn": True, "sum": None, "btn": "Upload a calibration",
+                             "remove": True, "msg": "", "bad": False}
+    assert out["cleared"] == ""  # the same file can be chosen again
+    assert out["good"] == {"link": "no TF link: the calibration links them", "warn": False, "remove": False,
+                           "msg": "The calibration my_calib.json is saved.", "bad": False, "btn": "Replace the calibration",
+                           "sum": "Calibration my_calib.json: the LiDAR is 12.3 cm from the camera, turned 120.0 deg. "
+                                  "K comes from the camera_info."}
+    # A refused file changes nothing on the server: the summary stays, and the reason shows.
+    assert out["bad"] == {**out["good"], "msg": "T_cam_lidar has 3 numbers; give a 4x4 matrix or 16 numbers", "bad": True}
+    assert out["job"] == "my_calib.json"
+    assert out["removed"] == {**out["before"], "msg": "The calibration is removed."}
+    assert out["during"] == [[True] * 5] * 3 and out["after"] == [False] * 5
+    # The upload keeps the focus; Remove hides after a delete, so the upload button takes it.
+    assert out["focused"] == ["#calfile", "#calfile", "#calfile"]
+    assert out["k"] == ("Calibration k.yaml: the LiDAR is 12.3 cm from the camera, turned 120.0 deg. It gives K. Its camera "
+                        "axes are body axes (x forward, y left, z up). Its time offset is 0.02 s.")
+    assert out["sent"] == {"topic": "/lidar/points"}
+    assert "The calibration changed after this scale was found. Build finds the scale again first, then stops here." \
+        in out["review"]
+    assert out["requests"] == ["PUT /api/jobs/b/calibration?name=my%20calib.json", "PUT /api/jobs/b/calibration?name=bad.yaml",
+                               "DELETE /api/jobs/b/calibration", "PUT /api/jobs/b/calibration?name=k.yaml",
+                               "PUT /api/jobs/b/calibration?name=my%20calib.json", "GET /api/jobs/b/selection"]
+
+
+LIDAR_VIEWS = [{"name": "f00003", "s": 1.0498, "points_used": 280, "status": "used"},
+               {"name": "f00009", "s": 1.2104, "points_used": 1200, "status": "outlier"},
+               {"name": "f00015", "s": None, "points_used": 12, "status": "few_points"}]
+
+
+def test_app_js_review_shows_the_lidar_scale():
+    """The review header gives the LiDAR scale with its views and spread (or DA3's own scale without LiDAR),
+    the record's warnings and the folded check images with each view's s and points; each card has its view's
+    LiDAR scale. A bag's review offers "Change the calibration": the build settings show (not in manual mode)
+    until a Build."""
+    counts = {"views": 16, "views_with_points": 15, "views_used": 14, "outliers": 1, "scattered": 0, "few_points": 1,
+              "no_mask": 0, "no_samples": 0}
+    lid = {"ok": True, "s": 1.04321, "reason": None, "counts": counts, "spread_rel": 0.0213, "source": {"kind": "rosbag"},
+           "extrinsic": "tf", "calibration_changed": False, "warnings": ["a LiDAR warning"], "views": LIDAR_VIEWS,
+           "check_dir": "lidar/check"}
+    cand = [{"name": n, "frame": int(n[1:]), "time_s": int(n[1:]) / 10, "status": st, "q": 0.9, "consistency": 0.8,
+             "angle_to_nearest_pick": 40} for n, st in (("f00003", "picked"), ("f00009", "picked"), ("f00015", "candidate"))]
+    sel = {"ok": True, "picks": [{"name": "f00003"}, {"name": "f00009"}], "n_requested": 2, "coverage_deg": 40,
+           "min_spacing_deg": 90, "warnings": [], "overrides": {"locked": [], "excluded": [], "instance": {}}, "view0": None,
+           "anchor": "f00003", "ring": {"center": None, "points": []}, "candidates": cand, "sam3": {},
+           "check_dir": "scene/sam3_box/check"}
+    stages = [{"name": n, "status": "done"} for n in ("topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select")]
+    job = {"id": "j", "kind": "rosbag", "status": "review", "video": {"name": "scan.bag"}, "prompt": "box", "current": None,
+           "error": None, "warnings": [], "key_ok": False, "agent": "none", "articulated": False, "parts_mode": "vlm",
+           "parts_review": False, "mode": "auto", "picks": [], "view0": None, "n_views": 2, "auto_continue": False,
+           "parts": {}, "calibration": None, "lidar": {"kind": "rosbag", "topic": "/livox/lidar"},
+           "source": {"kind": "rosbag", "topic": CAM}, "files": ["selection.json", "pool/lidar.json"], "progress": stages,
+           "stages": {x["name"]: {"status": "done"} for x in stages}}
+    found = {"topics": [camera_entry({"/livox/lidar": "static"})], "skipped": [], "lidar": [LIVOX], "lidar_skipped": [], "tf": []}
+    replies = {"/api/jobs/j/selection": {**sel, "lidar": lid}, "/api/jobs/k/selection": {**sel, "lidar": None},
+               "/api/jobs/m/selection": {**sel, "lidar": None}, "/api/jobs/j": job, "/api/jobs/j/frames": frames_meta(),
+               "/api/jobs/j/file/frames/topics.json": found, "/api/jobs/j/continue": {"status": "queued", "from": "lidar"}}
+    out = run_form_js("""
+        (async () => {
+          const out = {}, JOB = """ + json.dumps(job) + """;
+          for (const [id, kind, lidar] of [["j", "rosbag", JOB.lidar], ["k", "rosbag", null], ["m", "stray", { kind: "stray" }]]) {
+            V = { id, state: { warnings: [] }, job: { kind, lidar } };
+            texts.length = 0;
+            await loadReview();
+            out[id] = [...texts];
+          }
+          // "Change the calibration" shows the build settings in review, opens them and focuses the upload.
+          globalThis.matchMedia = () => ({ matches: true });
+          let focused = null;
+          $("#calfile").focus = () => { focused = "#calfile"; };
+          $("#log").textContent = "a log";
+          V = { id: "j", picks: [], view0: null };
+          await refresh();
+          out.before = $("#frames").hidden;
+          $("#frames").open = false;
+          await editCalibration();
+          out.edit = [$("#frames").hidden, $("#frames").open, focused, $("#framesum").textContent, $("#start").textContent,
+            mode(), $("#lidaropts").hidden];
+          await refresh();  // still there after a refresh, until a Build
+          out.kept = $("#frames").hidden;
+          await $("#build").onclick();
+          out.built = [V.lidarEdit, $("#frames").hidden];
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    j = out["j"]
+    for t in ("Metric scale from LiDAR: x1.043 (14 of 16 views, spread 2.1%)", "a LiDAR warning", "LiDAR check images (3)",
+              "f00003: x1.05 (280 pts)", "f00009: x1.21 (1,200 pts, outlier)", "f00015: few points (12 pts)",
+              "LiDAR x1.05 (280 pts)", "LiDAR x1.21 (1,200 pts, outlier)", "LiDAR: few points (12 pts)",
+              "/api/jobs/j/file/lidar/check/f00009.jpg", "LiDAR points in f00009"):
+        assert t in j, t
+    assert not any("calibration changed" in t for t in j)
+    assert ("The green line is the mask outline. Blue points are nearer than the scaled depth, and red points are farther. "
+            "White points agree with it. Open an image to see it larger.") in j
+    assert "Scale: Depth Anything 3's estimate (no LiDAR)" in out["k"] and not any("LiDAR x" in t for t in out["k"])
+    # LiDAR is on, but its record is not there yet (Build runs the lidar stage first).
+    assert "Metric scale from LiDAR: not found yet. Build finds it first, then stops here." in out["m"]
+    # Only a bag with LiDAR on can change its calibration in review.
+    assert "Change the calibration" in j and "Change the calibration" not in out["k"] + out["m"]
+    assert out["before"] is True
+    assert out["edit"] == [False, True, "#calfile", "Start over with other settings", "Start over", "auto", False]
+    assert out["kept"] is False and out["built"] == [False, True]
+
+
+def test_app_js_lidar_failure_panel():
+    """A job that failed at the lidar stage: a panel with the reason from pool/lidar.json and the check
+    images, and the next step (a calibration for a bag, another one when it has one; not for a Stray capture).
+    Retry starts at lidar. refresh() shows the panel only for a job that failed there."""
+    reason = ("LiDAR points cover the object in only 2 of 6 views (at least 3 are needed); the object may be outside the "
+              "LiDAR's view, or the time window or T_cam_lidar is wrong (see the check images)")
+    rec = {"version": 1, "ok": False, "s": None, "reason": reason, "warnings": ["a stage warning"],
+           "views": [{**v, "frame": int(v["name"][1:]), "points": 400, "iqr_rel": 0.1} for v in LIDAR_VIEWS[:2]],
+           "combine": {"views": 6, "views_with_points": 2, "views_used": 0, "spread_rel": None, "outliers": 0},
+           "extrinsic": {"source": "calibration"}, "source": {"kind": "rosbag", "topic": "/lidar/points"}}
+    stages = [{"name": n, "status": "done"} for n in ("topics", "frames", "extract", "masks", "prep", "da3")] + [
+        {"name": "lidar", "status": "failed", "note": "LiDAR scale: " + reason}] + [
+        {"name": n, "status": "pending"} for n in ("select", "sam3d", "place", "propose", "parts", "agent")]
+    masks = [{**s, "status": "failed"} if s["name"] == "masks" else s for s in stages[:4]] + [
+        {"name": n, "status": "pending"} for n in ("prep", "da3", "lidar", "select")]
+    job = {"id": "j", "kind": "rosbag", "status": "failed", "video": {"name": "scan.bag"}, "files": ["pool/lidar.json"],
+           "progress": stages}
+    # The same job as GET /api/jobs/j gives it, and a done job (d) with the same record.
+    full = {**job, "prompt": "box", "current": None, "error": "lidar: " + reason, "warnings": [], "key_ok": False,
+            "agent": "none", "articulated": False, "parts_mode": "vlm", "parts_review": False, "mode": "auto", "picks": [],
+            "view0": None, "n_views": 4, "auto_continue": True, "parts": {}, "calibration": None,
+            "lidar": {"kind": "rosbag", "topic": "/lidar/points"}, "source": {"kind": "rosbag", "topic": CAM},
+            "stages": {x["name"]: {"status": x["status"]} for x in stages}}
+    done = {**full, "id": "d", "status": "done", "error": None, "progress": [{**x, "status": "done"} for x in stages],
+            "stages": {x["name"]: {"status": "done"} for x in stages}}
+    found = {"topics": [camera_entry({"/lidar/points": None})], "skipped": [], "lidar": [CLOUD], "lidar_skipped": [], "tf": []}
+    replies = {"/api/jobs/j/file/pool/lidar.json": rec, "/api/jobs/d/file/pool/lidar.json": rec, "/api/jobs/j": full,
+               "/api/jobs/d": done, "/api/jobs/j/frames": frames_meta(), "/api/jobs/d/frames": frames_meta(),
+               "/api/jobs/j/file/frames/topics.json": found, "/api/jobs/d/file/frames/topics.json": found}
+    out = run_form_js("""
+        (async () => {
+          const job = """ + json.dumps(job) + """, out = {};
+          const state = (stages) => ({ status: "failed", stages, agent: "none", key_ok: false, warnings: [], error: "lidar: x" });
+          V = { id: "j", job };
+          texts.length = 0;
+          await renderLidarFail(job);
+          out.panel = [...texts];
+          renderState(state(job.progress));
+          out.next = $("#jnext").textContent;
+          out.retry = [$("#retry").hidden, $("#retry").textContent];
+          V.job = { ...job, calibration: { name: "c.yaml" } };
+          renderState(state(job.progress));
+          out.cal = $("#jnext").textContent;
+          V.job = { ...job, kind: "stray" };
+          renderState(state(job.progress));
+          out.stray = $("#jnext").textContent;
+          renderState(state(""" + json.dumps(masks) + """));
+          out.masks = $("#jnext").textContent;
+          texts.length = 0;
+          await renderLidarFail({ ...job, files: [] });
+          out.norecord = [...texts];
+          out.failed = [lidarFailed("failed", job.progress), lidarFailed("cancelled", job.progress), lidarFailed("failed", [])];
+          // The page as refresh() draws it: the panel for the job that failed at lidar, not for a done job.
+          out.shown = [];
+          for (const id of ["j", "d"]) {
+            V = { id, picks: [], view0: null };
+            $("#log").textContent = "a log";  // not fetched again
+            $("#lidarfail").hidden = true;
+            texts.length = 0;
+            await refresh();
+            out.shown.push([$("#lidarfail").hidden, texts.some((x) => x.startsWith("No metric scale from LiDAR: "))]);
+          }
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    for t in ("No metric scale from LiDAR: " + reason, "a stage warning", "LiDAR check images (2)", "f00003: x1.05 (280 pts)",
+              "Go to the LiDAR settings"):
+        assert t in out["panel"], t
+    # The scale failed, so each view's points are coloured by its own scale (white without one).
+    assert ("The green line is the mask outline. Blue points are nearer than the scaled depth, and red points are farther. "
+            "White points agree with it. Each view uses its own scale here. A view without one shows all its points white. "
+            "Open an image to see it larger.") in out["panel"]
+    assert out["next"] == "Upload a calibration, then Retry; or Build again with LiDAR off."
+    assert out["cal"] == "Replace the calibration, then Retry; or Build again with LiDAR off."
+    assert out["retry"] == [False, "Retry from lidar"]
+    assert out["stray"] == ("Build again with LiDAR off, or with other views. Retry helps only after a file or disk "
+                            "error.")
+    assert out["masks"] == "Read the log of the failed stage, then Retry."
+    assert "The stage stopped before it wrote its record. The reason is above, and its log is below." in out["norecord"]
+    assert out["failed"] == [True, False, False]
+    assert out["shown"] == [[False, True], [True, False]]
+
+
+def test_app_js_changed_calibration_retries_from_lidar():
+    """A failed or cancelled bag job whose scale was found with another calibration: the server retries from
+    lidar (Runner.resume), so Retry says so, sends from lidar, and the next step and the Build again hint say
+    why. The page learns it from /selection's calibration_changed after a load or an upload, or, without a
+    selection, from pool/lidar.json's calibration file. A reply that starts earlier than asked is shown."""
+    stages = [{"name": n, "status": "done"} for n in ("topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select")] + [
+        {"name": "sam3d", "status": "failed"}] + [{"name": n, "status": "pending"} for n in ("place", "propose", "parts", "agent")]
+    job = {"id": "c", "kind": "rosbag", "status": "failed", "video": {"name": "scan.bag"}, "prompt": "box", "current": None,
+           "error": "sam3d: out of memory", "warnings": [], "key_ok": False, "agent": "none", "articulated": False,
+           "parts_mode": "vlm", "parts_review": False, "mode": "auto", "picks": [], "view0": None, "n_views": 4,
+           "auto_continue": True, "parts": {}, "calibration": None, "lidar": {"kind": "rosbag", "topic": "/lidar/points"},
+           "source": {"kind": "rosbag", "topic": CAM}, "files": ["selection.json", "pool/lidar.json"], "progress": stages,
+           "stages": {x["name"]: {"status": x["status"]} for x in stages}}
+    found = {"topics": [camera_entry({"/lidar/points": None})], "skipped": [], "lidar": [CLOUD], "lidar_skipped": [], "tf": []}
+    summary = {"name": "c.yaml", "bytes": 300, "translation_m": 0.1, "rotation_deg": 90.0, "has_intrinsics": False,
+               "camera_axes": "optical", "time_offset_s": 0.0}
+    replies = {"/api/jobs/c": job, "/api/jobs/c/frames": frames_meta(), "/api/jobs/c/file/frames/topics.json": found,
+               "/api/jobs/c/calibration?name=c.yaml": summary, "/api/jobs/c/calibration": {"calibration": None},
+               "/api/jobs/c/continue": {"status": "queued", "from": "lidar"}}
+    out = run_form_js("""
+        (async () => {
+          // /selection and pool/lidar.json as the server has them now.
+          let stale = false, ext = null;
+          const fetch0 = fetch, reply = (x) => Promise.resolve({ ok: true, status: 200, json: async () => x });
+          globalThis.fetch = (url, opt) => url === "/api/jobs/c/selection" ? reply({ lidar: { ok: true, calibration_changed: stale } })
+            : url === "/api/jobs/c/file/pool/lidar.json" ? reply({ ok: true, extrinsic: ext })
+              : url.includes("/file/logs/") ? Promise.resolve({ ok: false, status: 404, text: async () => "" }) : fetch0(url, opt);
+          const page = () => [$("#retry").textContent, $("#jnext").textContent, $("#rebuildhint").textContent];
+          const out = {};
+          $("#log").textContent = "a log";
+          V = { id: "c", picks: [], view0: null };
+          await refresh();
+          out.current = page();
+          stale = true;  // what an upload does on the server
+          const target = { files: [{ name: "c.yaml" }], value: "c.yaml" };
+          await $("#calfile").onchange({ target });
+          out.upload = [...page(), $("#calmsg").textContent];
+          posts.length = 0;
+          await $("#retry").onclick();
+          out.sent = posts[0].body.from;
+          out.runmsg = $("#runmsg").textContent;
+          stale = false;  // removed again: the scale is current
+          await $("#calremove").onclick();
+          out.removed = [...page(), $("#calmsg").textContent];
+          stale = true;  // a reload of the page finds it stale
+          V = { id: "c", picks: [], view0: null };
+          await refresh();
+          out.reload = page();
+          // The page asked for sam3d, but the server starts from lidar (it knew better): the reply says so.
+          stale = false;
+          await refresh();
+          posts.length = 0;
+          await $("#retry").onclick();
+          out.asked = [posts[0].body.from, $("#runmsg").textContent];
+          // Without a selection: pool/lidar.json's calibration file against the job's.
+          const J = """ + json.dumps(job) + """, nosel = { ...J, files: ["pool/lidar.json"] }, tf = { source: "tf" };
+          const cal = (name) => ({ source: "calibration", file: name });
+          out.bylidar = [];
+          for (const [e, c] of [[tf, null], [cal("a.yaml"), null], [cal("a.yaml"), "a.yaml"], [cal("a.yaml"), "b.yaml"], [tf, "a.yaml"]]) {
+            ext = e;
+            out.bylidar.push(await scaleStale({ ...nosel, calibration: c && { name: c } }));
+          }
+          ext = tf;
+          out.never = [await scaleStale({ ...nosel, kind: "stray", lidar: { kind: "stray" } }), await scaleStale({ ...nosel, lidar: null }),
+            await scaleStale({ ...nosel, calibration: { name: "a.yaml" }, stages: { ...J.stages, lidar: { status: "failed" } } }),
+            await scaleStale({ ...nosel, calibration: { name: "a.yaml" }, files: [] })];
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    stopped = " Retry, at the top, continues from the stage that stopped instead."
+    changed = (" Retry, at the top, starts from the lidar stage instead, because the calibration changed since the scale was "
+               "found.")
+    again = "This runs every stage again with these settings."
+    stale_next = "The calibration changed since the scale was found. Retry starts again from the lidar stage."
+    assert out["current"] == ["Retry from sam3d", "Read the log of the failed stage, then Retry.", again + stopped]
+    assert out["upload"] == ["Retry from lidar", stale_next, again + changed,
+                             "The calibration c.yaml is saved. The scale was found with the old calibration, so Retry starts "
+                             "from the lidar stage."]
+    assert out["sent"] == "lidar" and out["runmsg"] == ""  # the server started where the page said
+    assert out["removed"] == [*out["current"], "The calibration is removed."]
+    assert out["reload"] == out["upload"][:3]
+    assert out["asked"] == ["sam3d", "The calibration changed since the scale was found, so the run starts from lidar."]
+    assert out["bylidar"] == [False, True, False, True, True]
+    assert out["never"] == [False, False, False, False]
+
+
+def test_app_js_results_show_the_metric_scale():
+    """The results give the metric scale that select applied (placement.json) with its LiDAR source, views
+    and spread, or DA3's own estimate; results.zip's note names lidar.json when the job has it."""
+    place = {"metric_scale": 1.04321, "units": "meters (LiDAR scale applied in select)", "check": {"mean_mask_iou": 0.91}}
+    rec = {"ok": True, "s": 1.04321, "source": {"kind": "rosbag", "topic": "/livox/lidar"},
+           "combine": {"views": 16, "views_used": 14, "spread_rel": 0.0213}}
+    files = ["run/posed.glb", "run/placement.json", "pool/lidar.json", "results.zip"]
+    base = {"id": "j", "agent": "none", "agent_result": None, "kind": "rosbag", "lidar": {"kind": "rosbag", "topic": "/livox/lidar"},
+            "stages": {"agent": {"status": "skipped", "note": "turned off: physics uses the Stage A mesh"}}}
+    replies = {"/api/jobs": [], "/api/jobs/j/file/run/placement.json": place, "/api/jobs/j/file/pool/lidar.json": rec,
+               "/api/jobs/s/file/run/placement.json": {**place, "metric_scale": 1.25},
+               "/api/jobs/s/file/pool/lidar.json": {"ok": True, "s": 1.25, "source": {"kind": "stray", "file": "c.zip"},
+                                                    "combine": {"views_used": 6, "spread_rel": 0.004}},
+               "/api/jobs/n/file/run/placement.json": {**place, "metric_scale": None, "units": "DA3 units (meters)"},
+               "/api/jobs/o/file/run/placement.json": {"check": {"mean_mask_iou": 0.9}}}  # made before LiDAR
+    cases = {"j": {**base, "files": files}, "s": {**base, "id": "s", "kind": "stray", "lidar": {"kind": "stray"}, "files": files},
+             "n": {**base, "id": "n", "lidar": None, "files": [f for f in files if f != "pool/lidar.json"]},
+             "o": {**base, "id": "o", "lidar": None, "files": ["run/posed.glb", "run/placement.json"]}}
+    out = run_app_js(replies, """
+        (async () => {
+          const out = {}, cases = """ + json.dumps(cases) + """;
+          for (const [id, job] of Object.entries(cases)) {
+            V = { id };
+            texts.length = 0;
+            await renderResults(job);
+            const k = texts.indexOf("Metric scale");
+            out[id] = { row: k >= 0 ? texts[k + 2] : null, zip: texts.find((t) => t.startsWith("results.zip holds")) || null };
+          }
+          console.log(JSON.stringify(out));
+        })()
+        """)
+    assert out["j"]["row"] == "x1.043 from LiDAR (/livox/lidar, 14 views, spread 2.1%)"
+    assert ", the view selection, the LiDAR scale (lidar.json) and the agent result" in out["j"]["zip"]
+    assert out["s"]["row"] == "x1.250 from LiDAR (iPhone LiDAR depth, 6 views, spread 0.4%)"
+    assert out["n"]["row"] == out["o"]["row"] == "Depth Anything 3's estimate (no LiDAR)"
+    assert "lidar.json" not in out["n"]["zip"] and out["o"]["zip"] is None
