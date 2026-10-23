@@ -119,6 +119,7 @@
 
   <div id="tabs" class="tabs" role="tablist" aria-label="Job sections" hidden>
     <button type="button" role="tab" id="tab-results" data-tab="results" aria-controls="results" aria-selected="false" tabindex="-1">Results</button>
+    <button type="button" role="tab" id="tab-downloads" data-tab="downloads" aria-controls="downloads" aria-selected="false" tabindex="-1">Downloads</button>
     <button type="button" role="tab" id="tab-inputs" data-tab="inputs" aria-controls="input" aria-selected="false" tabindex="-1">Inputs</button>
     <button type="button" role="tab" id="tab-settings" data-tab="settings" aria-controls="frames" aria-selected="false" tabindex="-1">Settings</button>
     <button type="button" role="tab" id="tab-log" data-tab="log" aria-controls="run" aria-selected="false" tabindex="-1">Stages and log</button>
@@ -127,11 +128,16 @@
   <div id="results" class="panel tabpanel" role="tabpanel" aria-labelledby="tab-results" tabindex="0" hidden>
     <p id="resultsnone" class="emptytab">The results appear here when the build has made them.</p>
     <div id="resultsbody" hidden>
-      <div id="downloads" class="downloads"></div>
+      <p id="todl" class="todl">Download the files from the <button type="button" id="todlbtn" class="link" aria-controls="downloads">Downloads</button> tab.</p>
       <div id="viewers" class="viewers"></div>
       <div id="facts2"></div>
       <div id="partchecks"></div>
     </div>
+  </div>
+
+  <div id="downloads" class="panel tabpanel" role="tabpanel" aria-labelledby="tab-downloads" tabindex="0" hidden>
+    <p id="downloadsnone" class="emptytab">The files appear here when the build has made them.</p>
+    <div id="downloadsbody" hidden></div>
   </div>
 
   <div id="input" class="panel tabpanel" role="tabpanel" aria-labelledby="tab-inputs" tabindex="0" hidden>

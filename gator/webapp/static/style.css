@@ -297,12 +297,7 @@ th { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
 .parthints b { color: var(--fg); font-weight: 500; }
 
 /* results */
-.downloads { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.downloads .hint { flex-basis: 100%; }
-a.dl { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid var(--line-strong); border-radius: var(--r2);
-  color: var(--fg); text-decoration: none; font-weight: 500; }
-a.dl::before { content: "\2193"; }
-a.dl.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.todl { margin: 0 0 12px; }  /* "Download the files from the Downloads tab." */
 .viewers { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 12px 0; }
 .viewers.single { grid-template-columns: minmax(0, 760px); }
 .viewers figure { margin: 0; border: 1px solid var(--line); border-radius: var(--r2); overflow: hidden; background: var(--surface); }
@@ -318,7 +313,24 @@ dt, dd { padding: 6px 0; border-bottom: 1px solid var(--line); }
 #partchecks:empty { display: none; }
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.dlitem { display: inline-flex; align-items: center; }
+
+/* the Downloads tab (app.js renderDownloads): a heading per group, its sentence, then one row per file: the download
+   link, its size and its info button. The link's min-width lines the sizes up; a row wraps on a narrow phone. */
+.dlgroup + .dlgroup { margin-top: 20px; }
+.dlgroup h4 { margin: 0 0 4px; }
+.dlgroup > .hint { margin: 0 0 8px; max-width: 640px; overflow-wrap: anywhere; }
+.dlist { list-style: none; margin: 0; padding: 0; }
+.dlrow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 4px 0; }
+a.dl { display: inline-flex; align-items: center; gap: 6px; min-width: 10.5em; min-height: 36px; padding: 6px 12px;
+  border: 1px solid var(--line-strong); border-radius: var(--r2); background: var(--surface); color: var(--fg);
+  text-decoration: none; font-weight: 500; overflow-wrap: anywhere; }
+a.dl::before { content: "\2193"; color: var(--muted); }
+a.dl:hover { border-color: var(--accent); }
+a.dl.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+a.dl.primary::before { color: inherit; }
+a.dl.primary:hover { filter: brightness(1.08); }
+.dlsize { min-width: 5.5em; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.dlrow button.infobtn { margin-left: -6px; }  /* the row's gap already parts it from the size */
 
 /* info buttons (app.js info()): a small "i" in a circle after a label; its note is fixed to the window next to it, so
    it moves no layout and no figure clips it. The ::before is a larger target that takes no room. */
@@ -406,6 +418,7 @@ button.infobtn:hover:not(:disabled), .info.on button.infobtn { filter: none; col
   .chips label { padding: 8px 12px; }
   input, select, textarea { font-size: 16px; }
   .card select { min-height: 40px; }
+  a.dl { min-height: 44px; }
   button.infobtn { min-height: 0; }
   button.infobtn::before { inset: -13px -8px; }  /* a 44 x 34 px target for a finger */
   dt button.infobtn::before { bottom: -6px; }  /* it stops above the row's value, which a phone puts under the label */

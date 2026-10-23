@@ -1,6 +1,7 @@
 // HARPOR web app UI: jobs list and upload; a job page with the panels that wait for the user (camera topic, review of
-// the views and of the part list, a LiDAR failure) above four tabs: Results, Inputs (the input's facts, its preview
-// video and the views the build used), Settings (the build settings, with LiDAR for the metric scale) and Stages and log.
+// the views and of the part list, a LiDAR failure) above five tabs: Results (the viewers and the facts), Downloads (the
+// files, by group), Inputs (the input's facts, its preview video and the views the build used), Settings (the build
+// settings, with LiDAR for the metric scale) and Stages and log.
 // Plain DOM code, no build step. The API key is only read from the password fields and sent once.
 "use strict";
 
@@ -36,7 +37,7 @@ const NEXT = { choose_topic: "Pick the camera topic below.", ready: "Name the ob
   queued: "The job waits for the GPU. You can close this page; the job keeps going.",
   running: "This runs on the GPU node. You can close this page; the job keeps going.",
   review: "Check the picked views, then Build.",
-  done: "Download results.zip from the Results tab, or look at the meshes there.",
+  done: "Download results.zip from the Downloads tab, or look at the meshes in the Results tab.",
   failed: "Read the log of the failed stage, then Retry.", cancelled: "Retry continues from the first stage that is not done.",
   parts: "Check the part list, edit it if it is wrong, then Build with these parts.",  // a review of the part list
   // The lidar stage failed (a rosbag); ... that has a calibration.
@@ -52,7 +53,7 @@ const OFFLINE = "Cannot reach the server. Is the SSH tunnel up?";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 // The job page's tabs by their name in the hash (#/job/<id>/<name>), with the id of each one's panel. The tab buttons
 // are #tab-<name>.
-const TABS = { results: "results", inputs: "input", settings: "frames", log: "run" };
+const TABS = { results: "results", downloads: "downloads", inputs: "input", settings: "frames", log: "run" };
 const TAB_NAMES = Object.keys(TABS);
 // The tab that shows first for each job status. A tab that the user picks stays until the status changes.
 const TAB_OF = { ready: "settings", analyzing: "log", queued: "log", running: "log", review: "inputs", choose_topic: "inputs",
@@ -61,9 +62,11 @@ const tabOf = (status) => TAB_OF[status] || "log";
 // The statuses of a job that runs (analyzing, queued, running) count as one for the tabs: a tab picked while the job
 // waits for the GPU stays when it starts.
 const phase = (status) => ACTIVE.includes(status) ? "active" : status;
-// What the Settings tab and the views strip of the Inputs tab say while they have nothing to show.
+// What the Settings and Downloads tabs and the views strip of the Inputs tab say while they have nothing to show.
 const SETTINGS_LATER = "The settings appear here after the app reads the frames.";
 const SETTINGS_BUSY = "You can change the settings when the job stops.";
+const FILES_LATER = "The files appear here when the build has made them.";
+const FILES_BUSY = "The files appear here when the build stops.";  // a build replaces the files as it runs
 const NO_VIEWS = "The views used appear here after the app selects them.";
 // The open job page: id, job, meta, picks, view0, sel, ov (pending overrides), es, state, scaleStale (the LiDAR scale
 // ran with another calibration); tab (the tab shown), pick (the tab the user picked), tabPhase (the phase of the status
@@ -165,7 +168,7 @@ function refocus() {
 
 function show(id) {
   for (const x of ["list", "job"]) $("#" + x).hidden = x !== id;
-  tipClose();  // an open info note of the Results tab goes with its page
+  tipClose();  // an open info note of the Results or Downloads tab goes with its page
 }
 // A job page's hash, "#/job/<id>" or "#/job/<id>/<tab>": [id, the tab's name or null]; null for another hash.
 function jobHash(hash) {
@@ -290,7 +293,7 @@ async function openJob(id, tab) {
   V = { id, picks: [], view0: null, hashTab: tab || null };
   // The last job's, until refresh draws this one's: the waiting panels, the tabs and what the tabs show.
   for (const x of ["review", "partsreview", "lidarfail", "topics", "tabs", ...Object.values(TABS), "resultsnone", "resultsbody",
-    "inputnone", "inputbody", "framesnone", "framesbody"]) $("#" + x).hidden = true;
+    "downloadsnone", "downloadsbody", "inputnone", "inputbody", "framesnone", "framesbody"]) $("#" + x).hidden = true;
   clearInput();
   $("#log").textContent = "";
   $("#logname").textContent = "";
@@ -344,6 +347,7 @@ async function drawJob(job) {  // refresh's panels: the waiting panels and what 
   else tipClose();  // its button hides with the old results
   $("#resultsbody").hidden = !results;
   $("#resultsnone").hidden = results;
+  renderDownloads(job);  // the files, by group, once the job stops
   // The input's preview video, and the views used once they are selected (in review, during the build and after).
   V.inputAsked = false;
   V.selected = (job.stages.select || {}).status === "done";
@@ -375,7 +379,7 @@ function selectTab(name, pick) {
   const old = V.tab && V.tab !== name ? $("#" + TABS[V.tab]) : null, had = document.activeElement, tab = $("#tab-" + name);
   const lost = !!had && had !== tab && ((!!old && old.contains(had) === true) || $("#tabs").contains(had) === true);
   if (V.tab === "inputs" && name !== "inputs" && V.video) V.video.pause();
-  if (V.tab !== name) tipClose();  // an open info note of the Results tab
+  if (V.tab !== name) tipClose();  // an open info note of the Results or Downloads tab
   V.tab = name;
   V.pick = pick ? name : null;
   for (const n of TAB_NAMES) {
@@ -433,6 +437,9 @@ $("#tabs").onclick = (e) => {
   const tab = e.target && e.target.closest ? e.target.closest("[role=tab]") : null;
   if (tab) selectTab(tab.dataset.tab, true);
 };
+// "Download the files from the Downloads tab." at the top of the Results tab: the tab name opens that tab. The button
+// hides with its panel, so the Downloads tab takes the focus (selectTab).
+$("#todlbtn").onclick = () => selectTab("downloads", true);
 $("#tabs").onkeydown = (e) => {  // Left and Right go to the tab before or after (round), Home and End to the first or last
   const i = TAB_NAMES.indexOf(e.target && e.target.dataset ? e.target.dataset.tab : null);
   const to = i < 0 || e.altKey || e.ctrlKey || e.metaKey ? undefined
@@ -1258,9 +1265,10 @@ $("#partsbuild").onclick = () => {  // the VLM's list as it is (continue), or th
 
 // ---- 5. results ----
 
-// What each item of the Results tab is and how it was found, shown by its info button (info()): the rows of the facts
-// list, the viewers and the downloads. One to three plain sentences each. Sources: build_plan.md notes 4b, 5, 9, 11
-// and 12, and the code they name (mvsam3d.place, lidar_scale, steps, agent_step, controller, vomp_run, mjcf, urdf).
+// What each item of the Results and Downloads tabs is and how it was found, shown by its info button (info()): the rows
+// of the facts list, the viewers and the files to download (dl_). One to three plain sentences each. Sources:
+// build_plan.md notes 4b, 5, 9, 11 and 12, and the code they name (mvsam3d.place, lidar_scale, views, steps,
+// agent_step, controller, vomp_run, mjcf, urdf, parts.stage, jobs.package).
 const INFO = {
   metric_scale: "With LiDAR, each view's scale is the median, over the LiDAR points inside the object's mask, of the " +
     "LiDAR depth divided by Depth Anything 3's depth at the same pixel. The number shown is the weighted median of " +
@@ -1361,6 +1369,24 @@ const INFO = {
     "joints, else one link per part. Each part but the base gets a joint to its parent, a fixed one when the agent " +
     "gave it none, and a fixed base adds a world link. Its mesh files are only in results.zip (urdf/meshes), so this " +
     "file alone does not load.",
+  dl_placement: "The record of the place step: the pose that puts the MV-SAM3D mesh in view 0's camera frame, the " +
+    "scale and pose fitted to the SAM 3 masks, and the metric scale. Its check gives each view's mask IoU and how " +
+    "close view 0's DA3 points lie to the mesh.",
+  dl_summary: "VoMP's summary of the aligned mesh: the voxel counts, the median and the 5th to 95th percentile of " +
+    "Young's modulus, Poisson ratio and density, and the mass, center of mass and inertia of the rigid body. For an " +
+    "articulated object it adds each link's numbers and the links that VoMP could not voxelize.",
+  dl_lidar: "The record of the lidar stage: the metric scale, each view's scale, point count and status, how the " +
+    "views were combined, the LiDAR source, and the link to the camera (the TF chain or the calibration file). When " +
+    "no scale was found, ok is false and reason says why.",
+  dl_selection: "The view selection: every candidate frame with its status and quality, the picks in run order with " +
+    "view 0 first, the frames you locked or excluded, the cameras seen from above, and the metric scale that select " +
+    "applied (null without LiDAR). ok is false when the automatic selection needs your help.",
+  dl_parts_json: "The record of the parts stage: each part's name, parent, guessed joint, share of the surface and " +
+    "box, then the parts that were not split off, with the reason. It also gives the seams between parts that touch, " +
+    "with up to 4 fitted lines that may be hinge axes.",
+  dl_mjcf: "The record of the MuJoCo model: its inputs, versions, counts and start height. For an object with joints " +
+    "it also lists the links with their masses, the joints, the base, the welded parts and the pairs that do not " +
+    "collide. The model itself (the XML and its meshes) comes only in results.zip.",
   part_masks: "SAM 3 ran on each view used with each part's name as the prompt, the base included, and every mask " +
     "with a score of at least 0.4 is shown. The face vote starts from all of them, then drops the masks that lie " +
     "outside the object, cover the whole object, are the union of two or more others, or repeat a mask with a higher " +
@@ -1540,17 +1566,6 @@ async function renderResults(job) {
       info("part_masks", "Part masks in the views")),
     h("div", { class: "checks" }, ...checks.map((c) => h("a", { href: file(c), target: "_blank", rel: "noopener" },
       h("img", { src: file(c), loading: "lazy", alt: "part masks in view " + /(\d+)\.jpg$/.exec(c)[1] }))))) : null);
-  const link = (p, label, name, key, primary) => has(p) ? [h("span", { class: "dlitem" },
-    h("a", { href: file(p), download: name, class: primary ? "dl primary" : "dl" }, label), info(key, label))] : [];
-  fill($("#downloads"), ...link("results.zip", "results.zip", `${job.id}_results.zip`, "dl_zip", true),
-    ...link("run/posed.glb", "posed.glb", "posed.glb", "dl_posed"), ...link("run/parts.glb", "parts.glb", "parts.glb", "dl_parts"),
-    ...link("refined.glb", "refined.glb", "refined.glb", "dl_refined"),
-    ...link("physics/aligned.glb", "aligned.glb", "aligned.glb", "dl_aligned"),
-    ...link("physics/urdf/model.urdf", "model.urdf", "model.urdf", "dl_urdf"),
-    has("results.zip") ? h("p", { class: "hint" }, "results.zip holds the MJCF, USD and URDF models, the GLB meshes, the physics summary, " +
-      "the placement, the view selection" + (has("pool/lidar.json") ? ", the LiDAR scale (lidar.json)" : "") + " and the agent result" +
-      (has("run/parts.glb") ? ", and the split parts (parts.glb, parts.json)" : "") +
-      ". The URDF's meshes are only in results.zip, in urdf/meshes.") : null);
 }
 // The "Metric scale" row: placement.json metric_scale (select applied it), with lidar.json's source, views and spread.
 function metricScale(place, rec, job) {
@@ -1562,6 +1577,55 @@ function metricScale(place, rec, job) {
     same && c.views_used != null ? `${c.views_used} views` : null, same && c.spread_rel != null ? "spread " + pct(c.spread_rel) : null];
   const shown = facts.filter(Boolean);
   return `x${m.toFixed(3)} from LiDAR` + (shown.length ? ` (${shown.join(", ")})` : "");
+}
+
+// ---- 5a. the Downloads tab: the job's files by group ----
+
+// The groups in order, each with its files as [path in the job folder, the name it downloads as, the key of its note
+// in INFO]. They are server.OUTPUTS, which server.ALLOW serves; the tab lists those that exist (job.files). The MJCF
+// and USD models, the URDF's meshes and the agent's result are not served alone: they come only in results.zip.
+const DOWNLOADS = [
+  ["Everything", [["results.zip", "results.zip", "dl_zip"]]],
+  ["Meshes", [["run/posed.glb", "posed.glb", "dl_posed"], ["run/parts.glb", "parts.glb", "dl_parts"],
+    ["refined.glb", "refined.glb", "dl_refined"], ["physics/aligned.glb", "aligned.glb", "dl_aligned"]]],
+  ["Simulation", [["physics/urdf/model.urdf", "model.urdf", "dl_urdf"]]],
+  ["Records", [["run/placement.json", "placement.json", "dl_placement"], ["physics/summary.json", "summary.json", "dl_summary"],
+    ["pool/lidar.json", "lidar.json", "dl_lidar"], ["selection.json", "selection.json", "dl_selection"],
+    ["run/parts.json", "parts.json", "dl_parts_json"], ["physics/mjcf/mjcf.json", "mjcf.json", "dl_mjcf"]]]];
+// What the Simulation group says above its one file.
+const SIM_TEXT = "The URDF's meshes come only in results.zip, in urdf/meshes, so model.urdf does not load alone. " +
+  "The MuJoCo (MJCF) and USD models come only in results.zip.";
+// A file's size: "512 B", "3.4 KB", "35 KB", "1.2 MB", "2.50 GB" (1 KB is 1000 bytes, as in size()).
+const fileSize = (b) => b < 1e3 ? b + " B" : b < 999.5e3 ? (b / 1e3).toFixed(b < 1e4 ? 1 : 0) + " KB" : size(b);
+// What results.zip holds (jobs.package): the LiDAR record, the agent's result and the split parts only when the job
+// has them.
+function zipText(job, has) {
+  const parts = ["the MuJoCo (MJCF), USD and URDF models with their meshes", "the GLB meshes", "the physics summary",
+    "the placement", "the view selection", has("pool/lidar.json") ? "the LiDAR scale (lidar.json)" : null,
+    job.agent_result ? "the agent's result" : null, has("run/parts.glb") ? "the split parts (parts.glb, parts.json)" : null]
+    .filter(Boolean);
+  return `results.zip holds ${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}.`;
+}
+// The files of the job that exist, by group: each a download link, its size (job.sizes) and its info button. While a
+// build runs the tab lists none, since the build replaces them as it goes (jobs.DERIVED); it says one sentence then,
+// and when there is no file yet.
+function renderDownloads(job) {
+  tipClose();  // the button of an open note is about to go
+  const files = ACTIVE.includes(job.status) ? [] : job.files || [], sizes = job.sizes || {};
+  const has = (p) => files.includes(p);
+  const groups = DOWNLOADS.map(([title, rows]) => [title, rows.filter(([p]) => has(p))]).filter(([, rows]) => rows.length);
+  const row = ([p, name, key]) => h("li", { class: "dlrow" },
+    h("a", { href: file(p), download: p === "results.zip" ? `${job.id}_results.zip` : name,
+      class: p === "results.zip" ? "dl primary" : "dl" }, name),
+    typeof sizes[p] === "number" ? h("span", { class: "dlsize" }, fileSize(sizes[p])) : null, info(key, name));
+  fill($("#downloadsbody"), groups.map(([title, rows]) => {
+    const id = "dl-" + title.toLowerCase(), text = title === "Everything" ? zipText(job, has) : title === "Simulation" ? SIM_TEXT : null;
+    return h("div", { class: "dlgroup" }, h("h4", { id }, title), text ? h("p", { class: "hint" }, text) : null,
+      h("ul", { class: "dlist", "aria-labelledby": id }, rows.map(row)));
+  }));
+  $("#downloadsbody").hidden = !groups.length;
+  $("#downloadsnone").hidden = groups.length > 0;
+  $("#downloadsnone").textContent = ["queued", "running"].includes(job.status) ? FILES_BUSY : FILES_LATER;
 }
 
 // ---- 5b. the input: its preview video and the views the build used ----

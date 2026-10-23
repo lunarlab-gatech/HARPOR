@@ -32,7 +32,8 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       the agent's verdict, model and, for opus, tokens and cost estimate
                                       ("agent_result"; "agent" is the job's choice: astra, opus or none;
                                       an articulation result adds mode, counts and joints_delivered), the
-                                      output files that exist,
+                                      output files that exist ("files") and their sizes in bytes ("sizes",
+                                      sizes_of),
                                       "articulated", "parts_mode" and "parts_review" (the job waits for its
                                       part list), "lidar" (steps.lidar), "calibration" (the uploaded
                                       calibration's summary, calibration_summary, or null) and "preview"
@@ -253,6 +254,17 @@ def resolve(J, rel):
     return real if real.is_file() and real.is_relative_to(J.resolve()) else None
 
 
+def sizes_of(found):
+    """{path: bytes} of the files in found ({path: the file that resolve gave, or None}), one stat each, for
+    the Downloads tab. A file that goes between resolve and the stat is left out."""
+    out = {}
+    for rel, p in found.items():
+        if p is not None:
+            with suppress(OSError):
+                out[rel] = p.stat().st_size
+    return out
+
+
 def read_log(log, pos, limit=1 << 16):
     """(text, new pos): the whole lines of log after byte pos (a cut line if one is longer than limit)."""
     try:
@@ -467,7 +479,9 @@ def make_app(cfg, token, key_dir=None):
                    parts_review=steps.waits_for_parts(J, job), lidar=lidar_of(job),
                    calibration=calibration_summary(job.get("calibration")), preview=preview_of(J))
         job["progress"] = jobs.progress(J)
-        job["files"] = [f for f in OUTPUTS if resolve(J, f)]
+        found = {f: resolve(J, f) for f in OUTPUTS}
+        job["files"] = [f for f, p in found.items() if p]
+        job["sizes"] = sizes_of(found)
         r = read_json(J / "agent" / "result.json")
         if r and "result.json" in (r.get("key_found_in") or []):  # the agent's own text held the key
             r = {**r, "reason": "left out: the agent's result held the API key", "limitations": []}
