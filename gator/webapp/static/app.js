@@ -1,6 +1,6 @@
-// HARPOR web app UI: jobs list and upload, camera topic, frames and build settings (with LiDAR for the metric
-// scale), stages and log, review of the views and of the part list (an articulated object), results, and the
-// input with the views the build used.
+// HARPOR web app UI: jobs list and upload; a job page with the panels that wait for the user (camera topic, review of
+// the views and of the part list, a LiDAR failure) above four tabs: Results, Inputs (the input's facts, its preview
+// video and the views the build used), Settings (the build settings, with LiDAR for the metric scale) and Stages and log.
 // Plain DOM code, no build step. The API key is only read from the password fields and sent once.
 "use strict";
 
@@ -35,21 +35,41 @@ const NEXT = { choose_topic: "Pick the camera topic below.", ready: "Name the ob
   analyzing: "Reading the input. This takes a few seconds to a minute.",
   queued: "The job waits for the GPU. You can close this page; the job keeps going.",
   running: "This runs on the GPU node. You can close this page; the job keeps going.",
-  review: "Check the picked views, then Build.", done: "Download results.zip below, or look at the meshes.",
+  review: "Check the picked views, then Build.",
+  done: "Download results.zip from the Results tab, or look at the meshes there.",
   failed: "Read the log of the failed stage, then Retry.", cancelled: "Retry continues from the first stage that is not done.",
   parts: "Check the part list, edit it if it is wrong, then Build with these parts.",  // a review of the part list
-  lidar: "Upload a calibration, then Retry; or Build again with LiDAR off.",  // the lidar stage failed (a rosbag)
-  lidar_cal: "Replace the calibration, then Retry; or Build again with LiDAR off.",  // ... that has a calibration
+  // The lidar stage failed (a rosbag); ... that has a calibration.
+  lidar: "Upload a calibration in the Settings tab, then Retry. Or turn LiDAR off there and build again.",
+  lidar_cal: "Replace the calibration in the Settings tab, then Retry. Or turn LiDAR off there and build again.",
   // A Stray capture takes no calibration, and a retry reads the same depth and masks again.
-  lidar_stray: "Build again with LiDAR off, or with other views. Retry helps only after a file or disk error.",
+  lidar_stray: "Turn LiDAR off or change the views in the Settings tab, then build again. Retry helps only after a file " +
+    "or disk error.",
   // A failed or cancelled job whose scale ran with another calibration (V.scaleStale).
   stale: "The calibration changed since the scale was found. Retry starts again from the lidar stage." };
 const KIND_LABEL = { video: "video", rosbag: "rosbag", stray: "Stray capture" };  // job.json source kind, in the jobs list
 const OFFLINE = "Cannot reach the server. Is the SSH tunnel up?";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// The job page's tabs by their name in the hash (#/job/<id>/<name>), with the id of each one's panel. The tab buttons
+// are #tab-<name>.
+const TABS = { results: "results", inputs: "input", settings: "frames", log: "run" };
+const TAB_NAMES = Object.keys(TABS);
+// The tab that shows first for each job status. A tab that the user picks stays until the status changes.
+const TAB_OF = { ready: "settings", analyzing: "log", queued: "log", running: "log", review: "inputs", choose_topic: "inputs",
+  done: "results", failed: "log", cancelled: "log" };
+const tabOf = (status) => TAB_OF[status] || "log";
+// The statuses of a job that runs (analyzing, queued, running) count as one for the tabs: a tab picked while the job
+// waits for the GPU stays when it starts.
+const phase = (status) => ACTIVE.includes(status) ? "active" : status;
+// What the Settings tab and the views strip of the Inputs tab say while they have nothing to show.
+const SETTINGS_LATER = "The settings appear here after the app reads the frames.";
+const SETTINGS_BUSY = "You can change the settings when the job stops.";
+const NO_VIEWS = "The views used appear here after the app selects them.";
 // The open job page: id, job, meta, picks, view0, sel, ov (pending overrides), es, state, scaleStale (the LiDAR scale
-// ran with another calibration), lidarEdit (the build settings show in review for the calibration), and input,
-// inputKey, inputPlaced, inputAsked, placeAsked and overlay (the input panel: renderInput).
+// ran with another calibration); tab (the tab shown), pick (the tab the user picked), tabPhase (the phase of the status
+// that the tab follows) and hashTab (the hash's tab when the page opened); logAtEnd and logTop (where the log was
+// left); and input, inputKey, videoKey, video, selected, inputPlaced, inputAsked, placeAsked and overlay (the Inputs
+// tab: renderInput).
 let V = {};
 let listKey = null, upXhr = null;  // the jobs list as last drawn; the running upload
 
@@ -134,15 +154,31 @@ async function act(btns, msg, text, fn, after, always) {
   btns.forEach((b, i) => { b.disabled = was[i]; });
   if (ok && after) after();
   if (ok || always) await refresh().catch((e) => say(msg, e.message));
+  refocus();
+}
+// A button that had the focus was disabled or hidden by its action, so the focus fell to the page: the tab shown takes
+// it (for Start, Build, Retry and Cancel, the tab that the new status shows).
+function refocus() {
+  const a = document.activeElement;
+  if ((!a || a === document.body) && V.tab && $("#tabs").hidden === false) $("#tab-" + V.tab).focus({ preventScroll: true });
 }
 
 function show(id) {
   for (const x of ["list", "job"]) $("#" + x).hidden = x !== id;
 }
+// A job page's hash, "#/job/<id>" or "#/job/<id>/<tab>": [id, the tab's name or null]; null for another hash.
+function jobHash(hash) {
+  const m = /^#\/job\/([\w-]+)(?:\/([a-z]+))?$/.exec(hash || "");
+  return m ? [m[1], TAB_NAMES.includes(m[2]) ? m[2] : null] : null;
+}
 function route() {
+  const at = jobHash(location.hash);
+  if (at && at[0] === V.id && V.state && !$("#job").hidden) {  // the same job: only the tab changed (a typed URL)
+    selectTab(at[1] || tabOf(V.state.status), !!at[1]);
+    return;
+  }
   closeStream();
-  const m = location.hash.match(/^#\/job\/([\w-]+)$/);
-  if (m) openJob(m[1]).then(() => { if (V.id === m[1]) $("#jtitle").focus({ preventScroll: true }); })
+  if (at) openJob(at[0], at[1]).then(() => { if (V.id === at[0]) $("#jtitle").focus({ preventScroll: true }); })
     .catch((e) => { $("#jstatus").textContent = e.message; });
   else showList();
 }
@@ -248,14 +284,13 @@ window.addEventListener("drop", (e) => e.preventDefault());
 
 // ---- the job page ----
 
-async function openJob(id) {
+async function openJob(id, tab) {
   show("job");
-  V = { id, picks: [], view0: null };
-  // The last job's, until refresh draws this one's.
-  $("#review").hidden = $("#partsreview").hidden = $("#results").hidden = $("#lidarfail").hidden = $("#input").hidden = true;
-  fill($("#inputvideo"));
-  fill($("#inputviews"));
-  say($("#inputmsg"), "", true);
+  V = { id, picks: [], view0: null, hashTab: tab || null };
+  // The last job's, until refresh draws this one's: the waiting panels, the tabs and what the tabs show.
+  for (const x of ["review", "partsreview", "lidarfail", "topics", "tabs", ...Object.values(TABS), "resultsnone", "resultsbody",
+    "inputnone", "inputbody", "framesnone", "framesbody"]) $("#" + x).hidden = true;
+  clearInput();
   $("#log").textContent = "";
   $("#logname").textContent = "";
   $("#rawlog").hidden = true;
@@ -270,28 +305,28 @@ async function refresh() {
   V.scaleStale = ["failed", "cancelled"].includes(job.status) ? await scaleStale(job).catch(() => false) : false;
   renderState({ status: job.status, current: job.current, error: job.error, warnings: job.warnings, key_ok: job.key_ok,
     agent: job.agent, articulated: job.articulated, parts_mode: job.parts_mode, parts_review: job.parts_review,
-    stages: job.progress });
-  // After a failure the stages and log come first; else the section to act on does.
-  const runFirst = ["failed", "cancelled"].includes(job.status);
-  if (runFirst !== V.runFirst) {
-    V.runFirst = runFirst;
-    if (runFirst) $("#topics").before($("#run")); else $("#job").append($("#run"));
-    $("#log").scrollTop = $("#log").scrollHeight;  // a moved box starts at the top; the error lines are at the end
-  }
+    stages: job.progress }, false);
+  // The tab follows the status at the end, once its panel is drawn; also when a panel could not be drawn.
+  try { await drawJob(job); } finally { if (V.job === job) followStatus(job.status); }
+}
+async function drawJob(job) {  // refresh's panels: the waiting panels and what the tabs show
   const analyzed = job.stages.frames.status === "done", rosbag = job.source && job.source.kind === "rosbag";
-  // A rosbag job chooses its camera topic when it has several, after a failed frames run, or on "Change topic".
+  // A rosbag job chooses its camera topic when it has several, after a failed frames run, or on "Change the camera topic".
   const idle = !ACTIVE.includes(job.status) && !["review", "done"].includes(job.status);
   $("#topics").hidden = !rosbag || !job.stages.topics || job.stages.topics.status !== "done" || !(job.status === "choose_topic" ||
     (idle && (V.pickTopic || (["failed", "cancelled"].includes(job.status) && !analyzed))));
   if (!$("#topics").hidden) await loadTopics(job).catch((e) => { say($("#topicmsg"), e.message); });
   $("#tkeep").hidden = !(V.pickTopic && analyzed);
-  // In review the settings show only after "Start over in manual mode" or "Change the calibration".
-  $("#frames").hidden = !analyzed || ACTIVE.includes(job.status) || (job.status === "review" && !V.manual && !V.lidarEdit);
-  if ($("#frames").hidden) V.framesFor = null;
-  $("#topicrow").hidden = !rosbag;
-  $("#topicname").textContent = rosbag ? job.source.topic : "";
-  $("#chtopic").hidden = !idle || !$("#topics").hidden;
-  if (!$("#frames").hidden) await settings(job);
+  // "Change the camera topic", in the Inputs tab (whose label names the topic), while the table does not show.
+  $("#topicrow").hidden = !rosbag || !idle || !$("#topics").hidden;
+  // Once the frames are read, the Inputs tab has the input's facts and the Settings tab the build settings. The
+  // settings change only while the job does not run; in review they start over.
+  if (analyzed) await settings(job);
+  else V.meta = null;  // the frames are read again
+  const form = analyzed && !ACTIVE.includes(job.status);
+  $("#framesbody").hidden = !form;
+  $("#framesnone").hidden = form;
+  $("#framesnone").textContent = analyzed ? SETTINGS_BUSY : SETTINGS_LATER;
   // A job in review waits for the views, or (parts_review) for its part list after the VLM listed the parts.
   const views = job.status === "review" && job.parts_review !== true, partList = job.status === "review" && job.parts_review === true;
   $("#review").hidden = !views;
@@ -302,35 +337,109 @@ async function refresh() {
   // The lidar stage failed: its record (pool/lidar.json, ok false) with the reason and the check images.
   $("#lidarfail").hidden = !lidarFailed(job.status, job.progress);
   if (!$("#lidarfail").hidden) await renderLidarFail(job).catch((e) => fill($("#lidarfailbody"), h("p", { class: "msg" }, e.message)));
-  $("#results").hidden = ACTIVE.includes(job.status) || !job.files.includes("run/posed.glb");
-  if (!$("#results").hidden) await renderResults(job);
-  // The input and the views used, once the views are selected: in review, during the build and after a failure.
-  const selected = (job.stages.select || {}).status === "done";
+  // The results, once a build made them; a new build hides the old ones.
+  const results = !ACTIVE.includes(job.status) && job.files.includes("run/posed.glb");
+  if (results) await renderResults(job);
+  $("#resultsbody").hidden = !results;
+  $("#resultsnone").hidden = results;
+  // The input's preview video, and the views used once they are selected (in review, during the build and after).
   V.inputAsked = false;
-  $("#input").hidden = !selected;
-  if (selected) await renderInput(job).catch((e) => fill($("#inputviews"), h("p", { class: "msg" }, e.message)));
-  else if (V.input) {  // a new selection runs: the old views go
-    V.input = V.inputKey = null;
-    fill($("#inputvideo"));
-    fill($("#inputviews"));
-    say($("#inputmsg"), "", true);
-  }
+  V.selected = (job.stages.select || {}).status === "done";
+  if (analyzed) await renderInput(job).catch((e) => fill($("#inputviews"), h("p", { class: "msg" }, e.message)));
+  else clearInput();
+  $("#inputbody").hidden = !analyzed;
+  $("#inputnone").hidden = analyzed;
   if (job.status === "failed" && !V.es && !$("#log").textContent) {
     const failed = job.progress.find((x) => x.status === "failed");
     if (failed) await showLog(failed.name);
   }
 }
-async function settings(job) {  // the frames and build settings, once they show
+async function settings(job) {  // the build settings (Settings tab) and the input's facts (Inputs tab)
   const again = job.status !== "ready";
   $("#framesum").textContent = !again ? "Frames and build settings" : job.status === "review" ? "Start over with other settings"
     : "Build again with other settings";
   $("#start").textContent = !again ? "Start" : job.status === "review" ? "Start over" : "Build again";
   $("#rebuildhint").hidden = !again;
   rebuildHint();
-  if (V.framesFor !== job.status) $("#frames").open = job.status === "ready" || !!V.manual;  // keep the user's toggle
-  V.framesFor = job.status;
   await loadFrames();
 }
+
+// ---- the tabs (the WAI-ARIA tabs pattern) ----
+
+// Show the tab `name` and hide the other panels. pick: the user chose it, so the hash keeps it (a reload shows it
+// again) until the job's status changes. When the focus was in the panel that hides, or on a tab that is no longer
+// selected (the status changed), the new tab takes it. The preview video stops when its tab hides.
+function selectTab(name, pick) {
+  const old = V.tab && V.tab !== name ? $("#" + TABS[V.tab]) : null, had = document.activeElement, tab = $("#tab-" + name);
+  const lost = !!had && had !== tab && ((!!old && old.contains(had) === true) || $("#tabs").contains(had) === true);
+  if (V.tab === "inputs" && name !== "inputs" && V.video) V.video.pause();
+  V.tab = name;
+  V.pick = pick ? name : null;
+  for (const n of TAB_NAMES) {
+    const on = n === name, tab = $("#tab-" + n);
+    tab.setAttribute("aria-selected", String(on));
+    tab.tabIndex = on ? 0 : -1;
+    $("#" + TABS[n]).hidden = !on;
+  }
+  tabHash(V.pick);
+  if (lost) tab.focus({ preventScroll: true });
+  revealTab(tab);
+  if (name === "log") showRun();
+}
+// The hash of the open job with the picked tab (or none), by replaceState: a tab adds no step to the back button.
+// history.state keeps the status that the tab was picked in, so a reload after a change of status shows its own tab.
+function tabHash(pick) {
+  const at = jobHash(location.hash);
+  if (!at || at[0] !== V.id) return;  // another page came meanwhile
+  try {
+    history.replaceState(pick ? { tab: pick, status: V.state ? V.state.status : null } : null, "",
+      `#/job/${V.id}` + (pick ? "/" + pick : ""));
+  } catch (e) { /* no history: the tab still shows */ }
+}
+// The tab follows the job's status: at first the hash's tab (unless it was picked while the job had a status of another
+// phase), else the status's own tab; after a change of phase, the new status's own tab.
+function followStatus(status) {
+  if (V.tabPhase === phase(status)) return;
+  const first = V.tabPhase == null;
+  V.tabPhase = phase(status);
+  $("#tabs").hidden = false;
+  let was = null;
+  try { was = history.state; } catch (e) { /* no history */ }
+  const keep = first && V.hashTab && !(was && was.status && phase(was.status) !== phase(status)) ? V.hashTab : null;
+  selectTab(keep || tabOf(status), !!keep);
+}
+const EDGE = 24;  // px: the faded edge of a tab bar that scrolls (style.css .tabs.more-l and .more-r)
+function revealTab(tab) {  // on a phone the tab bar scrolls sideways: bring the tab into it, without moving the page
+  const bar = $("#tabs"), x = tab.offsetLeft, w = tab.offsetWidth, left = bar.scrollLeft, bw = bar.clientWidth;
+  if ([x, w, left, bw, bar.scrollWidth].every((v) => typeof v === "number") && bar.scrollWidth > bw) {
+    if (x < left + EDGE) bar.scrollLeft = Math.max(0, x - EDGE);
+    else if (x + w > left + bw - EDGE) bar.scrollLeft = x + w - bw + EDGE;
+  }
+  tabEdges();
+}
+function tabEdges() {  // a faded edge where more tabs are off the bar
+  const bar = $("#tabs"), left = bar.scrollLeft, sw = bar.scrollWidth, bw = bar.clientWidth;
+  if (![left, sw, bw].every((v) => typeof v === "number")) return;
+  bar.classList.toggle("more-l", left > 1);
+  bar.classList.toggle("more-r", left < sw - bw - 1);
+}
+$("#tabs").addEventListener("scroll", tabEdges, { passive: true });
+// A narrower window (a phone turned) can push the shown tab off the bar.
+window.addEventListener("resize", () => { if (V.tab && $("#job").hidden === false) revealTab($("#tab-" + V.tab)); });
+$("#tabs").onclick = (e) => {
+  const tab = e.target && e.target.closest ? e.target.closest("[role=tab]") : null;
+  if (tab) selectTab(tab.dataset.tab, true);
+};
+$("#tabs").onkeydown = (e) => {  // Left and Right go to the tab before or after (round), Home and End to the first or last
+  const i = TAB_NAMES.indexOf(e.target && e.target.dataset ? e.target.dataset.tab : null);
+  const to = i < 0 || e.altKey || e.ctrlKey || e.metaKey ? undefined
+    : { ArrowLeft: i - 1, ArrowRight: i + 1, Home: 0, End: TAB_NAMES.length - 1 }[e.key];
+  if (to === undefined) return;
+  e.preventDefault();
+  const name = TAB_NAMES[(to + TAB_NAMES.length) % TAB_NAMES.length];
+  selectTab(name, true);
+  $("#tab-" + name).focus();
+};
 function rebuildHint() {  // under "Build again": what Retry, at the top, does instead
   const from = $("#retry").hidden || !V.state ? null : retryFrom(V.state);
   $("#rebuildhint").textContent = "This runs every stage again with these settings." + (from === null ? ""
@@ -366,13 +475,25 @@ async function useTopic(topic, btn) {
     $("#log").textContent = "";
   });
 }
-$("#chtopic").onclick = () => { V.pickTopic = true; refresh(); };
-$("#tkeep").onclick = () => { V.pickTopic = false; refresh(); };
+const smooth = () => matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+$("#chtopic").onclick = async () => {  // the topic table, above the tabs, takes the focus
+  V.pickTopic = true;
+  await refresh().catch((e) => say($("#topicmsg"), e.message));
+  if ($("#topics").hidden) return;
+  $("#topicshead").focus({ preventScroll: true });
+  $("#topics").scrollIntoView({ block: "start", behavior: smooth() });
+};
+$("#tkeep").onclick = async () => {  // back to "Change the camera topic", in the Inputs tab
+  V.pickTopic = false;
+  await refresh().catch((e) => say($("#topicmsg"), e.message));
+  if ($("#input").hidden === false && $("#topicrow").hidden === false) $("#chtopic").focus({ preventScroll: true });
+  else refocus();  // the button hid with the table: the tab shown takes the focus
+};
 
 // ---- 3. stages, log and the event stream ----
 
-function renderState(st) {
-  const changed = !V.state || V.state.status !== st.status;
+// The job's status, its stages, the actions and the next step. follow (true unless false): the tab follows the status.
+function renderState(st, follow) {
   V.state = st;
   const build = st.stages.filter((x) => BUILD.includes(x.name));
   const nDone = build.filter((x) => ["done", "skipped"].includes(x.status)).length;
@@ -387,7 +508,7 @@ function renderState(st) {
     h("span", { class: "hint" }, `${nDone} of ${build.length} build stages done`)) : null;
   fill($("#jstatus"), badge(st.status), " ", sum, overall, st.error ? h("div", { class: "msg errbox" }, st.error) : null);
   const from = retryFrom(st);
-  let next = ["failed", "cancelled"].includes(st.status) && from === null ? "Build again with the settings below."
+  let next = ["failed", "cancelled"].includes(st.status) && from === null ? "Build again from the Settings tab."
     : partList ? NEXT.parts : lidarFailed(st.status, st.stages)
       ? NEXT[!V.job ? "lidar" : V.job.kind === "stray" ? "lidar_stray" : V.job.calibration ? "lidar_cal" : "lidar"]
       : V.scaleStale === true && from === "lidar" && ["failed", "cancelled"].includes(st.status) ? NEXT.stale
@@ -407,8 +528,9 @@ function renderState(st) {
     review: partList ? "Part list waiting" : "Review waiting", done: "Done", failed: "Failed", cancelled: "Cancelled", ready: "Ready", analyzing: "Reading",
     choose_topic: "Choose topic" }[st.status] || st.status) + (name ? " · " + name : "") + " · HARPOR";
 
-  $("#run").hidden = !st.stages.some((x) => x.started || x.status !== "pending");
-  if (changed) $("#run").open = ACTIVE.includes(st.status) || ["failed", "cancelled"].includes(st.status);
+  const started = st.stages.some((x) => x.started || x.status !== "pending");
+  $("#runbody").hidden = !started;
+  $("#runnone").hidden = started;
   const nFailed = st.stages.filter((x) => x.status === "failed").length;
   $("#runsum").textContent = `${nDone} of ${build.length} build stages done` + (nFailed ? `, ${nFailed} failed` : "") +
     (st.status === "running" && cur ? `, running ${cur}` : "");
@@ -420,8 +542,7 @@ function renderState(st) {
         onclick: () => showLog(x.name) }, x.name),
     h("span", { class: "label" }, stageLabel(x.name, art, x.status === "skipped"))),
     h("span", { class: "gpu" }, x.gpu ? "GPU" : ""),
-    // The agent without one, and the part stages of a rigid object.
-    x.status === "skipped" && /^turned off/.test(x.note || "") ? badge("skipped", "skipped (turned off)") : badge(x.status),
+    badge(x.status),  // a stage that is turned off says so in its note ("turned off: rigid object")
     h("span", { class: "secs", "data-started": x.started || null, "data-ended": x.ended || null },
       x.started ? fmt(Math.max(0, (x.ended || now) - x.started)) : ""),
     x.status === "running" && x.progress != null ? h("progress", { max: 1, value: x.progress, "aria-label": x.name + " progress" }) : null,
@@ -442,6 +563,7 @@ function renderState(st) {
   // The key goes next to the button that sends it.
   const home = st.status === "review" ? partList ? $("#partsbar") : $("#revbar") : $("#actions");
   if ($("#keyrow").parentElement !== home) home.prepend($("#keyrow"));
+  if (follow !== false) followStatus(st.status);
 }
 function retryFrom(st) {  // "frames" analyzes the input again (no key needed); else the first build stage not done
   const stage = (name) => st.stages.find((y) => y.name === name);
@@ -455,24 +577,41 @@ function retryFrom(st) {  // "frames" analyzes the input again (no key needed); 
   // A scale found with another calibration (V.scaleStale): the server starts from lidar (Runner.resume).
   return V.scaleStale === true && BUILD.indexOf(name) > BUILD.indexOf("lidar") ? "lidar" : name;
 }
-setInterval(() => {  // the clocks of running stages, without drawing the list again
+// The clocks of running stages, without drawing the list again. They only set text, so a hidden tab costs no layout.
+function tick() {
   if (!V.state || !ACTIVE.includes(V.state.status)) return;
   const now = Date.now() / 1000;
   for (const e of document.querySelectorAll("#stages .secs[data-started]:not([data-ended])"))
     e.textContent = fmt(Math.max(0, now - Number(e.dataset.started)));
-}, 1000);
+}
+setInterval(tick, 1000);
 
 const quiet = (text) => text.replace(/^PROGRESS [\d.]+\r?\n/gm, "");  // the stage list shows progress already
+// The live log follows its end unless the user scrolled up. While its tab is hidden it only takes the text, with no
+// layout; showRun puts it at its end (or where the user left it) when the tab opens.
 function appendLog(text) {
-  const log = $("#log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+  const log = $("#log"), shown = $("#run").hidden === false;
+  const atEnd = shown ? log.scrollTop + log.clientHeight >= log.scrollHeight - 30 : V.logAtEnd !== false;
   log.textContent = (log.textContent + quiet(text)).slice(-200000);
-  if (atEnd) log.scrollTop = log.scrollHeight;
+  if (shown && atEnd) log.scrollTop = log.scrollHeight;
+}
+$("#log").onscroll = () => {  // where the user left the log, for when its tab opens again
+  const log = $("#log");
+  if ($("#run").hidden !== false) return;
+  V.logTop = log.scrollTop;
+  V.logAtEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+};
+function showRun() {  // the Stages and log tab opens: the log where it was left, the clocks current
+  const log = $("#log");
+  log.scrollTop = V.logAtEnd === false ? V.logTop || 0 : log.scrollHeight;
+  tick();
 }
 function openStream() {
   if (V.es) return;
   const id = V.id, es = V.es = new EventSource(`/api/jobs/${id}/events`);
   $("#logname").textContent = "live log (connecting)";
   V.logStage = null;
+  V.logAtEnd = true;
   $("#rawlog").hidden = true;
   es.onopen = () => { if (V.id === id) $("#logname").textContent = "live log"; };
   es.onerror = () => {
@@ -481,11 +620,12 @@ function openStream() {
   es.addEventListener("state", (e) => {
     if (V.id !== id) return;
     const st = JSON.parse(e.data);
-    renderState(st);
-    // The views were selected while the page is open: refresh draws the input panel. place ended: refresh adds the
-    // mesh fit toggle to it (once per place run).
+    // The tab stays: the refresh after "end" (the job stopped) draws the new tab's panel, then shows it.
+    renderState(st, false);
+    // The views were selected while the page is open: refresh draws them in the Inputs tab. place ended: refresh adds
+    // the mesh fit toggle to them (once per place run).
     const sel = st.stages.find((x) => x.name === "select"), place = st.stages.find((x) => x.name === "place");
-    if (sel && sel.status === "done" && $("#input").hidden && !V.inputAsked) {
+    if (sel && sel.status === "done" && !V.selected && !V.inputAsked) {
       V.inputAsked = true;
       refresh().catch(() => { V.inputAsked = false; });
     } else if (place && place.status === "done" && V.input && !V.input.placed && V.placeAsked !== place.ended) {
@@ -513,6 +653,7 @@ async function showLog(stage) {
   V.logStage = stage;
   $("#rawlog").href = file(`logs/${stage}.log`);
   $("#rawlog").hidden = !r.ok;
+  V.logAtEnd = true;  // the error lines are at the end; a hidden log goes there when its tab opens
   $("#log").scrollTop = 1e9;
   for (const b of document.querySelectorAll("#stages button.name")) b.setAttribute("aria-pressed", String(b.dataset.stage === stage));
 }
@@ -579,10 +720,20 @@ async function loadFrames() {
   $("#strayinfo").hidden = !stray;
   $("#strayfacts").textContent = stray ? strayFacts(v) : "";
   $("#straywarn").replaceChildren(...(stray ? v.warnings || [] : []).map((w) => h("li", {}, w)));
+  // The Settings tab points to the input's warnings in the Inputs tab: some bear on the settings, such as LiDAR.
+  const nWarn = (v.hdr ? 1 : 0) + (stray ? (v.warnings || []).length : 0);
+  $("#inputwarn").hidden = !nWarn;
+  $("#inputwarntext").textContent = nWarn === 1 ? "The input has a warning." : `The input has ${nWarn} warnings.`;
   lidarToggle();
   sparkline(m);
   renderFrames();
 }
+$("#towarn").onclick = () => {  // the Inputs tab at the input's first warning
+  const to = $("#hdr").hidden === false ? $("#hdr") : $("#straywarn");
+  selectTab("inputs", true);
+  to.scrollIntoView({ block: "center", behavior: smooth() });
+  to.focus({ preventScroll: true });
+};
 function strayFacts(v) {  // frames/meta.json "video" of a Stray capture (stray.probe)
   const a = v.upright_agreement, d = v.depth_size || [];
   // stray.upright_turns: counterclockwise quarter turns; the agreement counts only the frames that show gravity.
@@ -638,7 +789,8 @@ const LIDAR_ON = { rosbag: "The LiDAR's points set the metric scale.", stray: "T
 const LIDAR_OFF = "Off: Depth Anything 3 estimates the scale.";
 // topics.json from before LiDAR topics were listed (lidar.OLD_TOPICS); POST /topic lists them, but not in review or done.
 const OLD_TOPICS = {
-  idle: "This bag was read before the app listed LiDAR topics. To list them, choose its camera topic again with Change topic.",
+  idle: "This bag was read before the app listed LiDAR topics. To list them, use Change the camera topic in the Inputs tab, " +
+    "and choose the same topic again.",
   late: "This bag was read before the app listed LiDAR topics. To use its LiDAR, upload the bag again." };
 // A topics.json "lidar" entry: "/livox/lidar (Livox, 10 Hz, livox_frame)".
 const lidarLabel = (t) => `${t.topic} (${t.type === "CustomMsg" ? "Livox" : t.type || "?"}, ` +
@@ -859,10 +1011,14 @@ $("#startform").onsubmit = async (e) => {
     say($("#startmsg"), "", true);
     $("#log").textContent = "";
     V.meta = null;
-    V.manual = V.lidarEdit = false;
+    V.manual = false;
     await refresh();
   } catch (err) { say($("#startmsg"), err.message); }
   $("#start").disabled = false;
+  // Disabled while it ran, Start lost the focus: it takes it back when it still shows (a refused start), else the tab.
+  if (document.activeElement === document.body && $("#frames").hidden === false && $("#framesbody").hidden === false)
+    $("#start").focus({ preventScroll: true });
+  else refocus();
 };
 
 // ---- 4. review ----
@@ -935,15 +1091,9 @@ function renderSelLidar() {  // the review header: LiDAR's scale, or DA3's own
   const lid = V.sel.lidar, job = V.job || {};
   fill($("#sellidar"), lid ? lidarView(lid) : h("p", {}, job.lidar
     ? "Metric scale from LiDAR: not found yet. Build finds it first, then stops here." : NO_LIDAR),
-  // A bag's calibration can change in review: the build settings show for it, without a start over.
+  // A bag's calibration can change in review, in the Settings tab, without a start over.
   job.kind === "rosbag" && job.lidar ? h("p", {}, h("button", { class: "small secondary", type: "button",
-    onclick: editCalibration }, "Change the calibration")) : null);
-}
-async function editCalibration() {
-  V.lidarEdit = true;
-  $("#frames").hidden = false;
-  await settings(V.job).catch((e) => say($("#revmsg"), e.message));
-  toLidarSettings();
+    onclick: toLidarSettings }, "Change the calibration")) : null);
 }
 // The job failed at the lidar stage (stages: job.progress or the state's stages).
 const lidarFailed = (status, stages) => status === "failed"
@@ -951,12 +1101,13 @@ const lidarFailed = (status, stages) => status === "failed"
 async function renderLidarFail(job) {
   const rec = job.files.includes("pool/lidar.json") ? lidarCompact(await api(file("pool/lidar.json"))) : null;
   fill($("#lidarfailbody"), rec ? lidarView(rec)
-    : h("p", { class: "hint" }, "The stage stopped before it wrote its record. The reason is above, and its log is below."),
+    : h("p", { class: "hint" }, "The stage stopped before it wrote its record. The reason is above, and its log is in the " +
+      "Stages and log tab."),
   h("p", {}, h("button", { class: "small secondary", type: "button", onclick: toLidarSettings }, "Go to the LiDAR settings")));
 }
-function toLidarSettings() {  // the LiDAR box in the build settings: the calibration upload, or LiDAR off
-  $("#frames").open = true;
-  $("#lidarbox").scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+function toLidarSettings() {  // the LiDAR box in the Settings tab: the calibration upload, or LiDAR off
+  selectTab("settings", true);
+  $("#lidarbox").scrollIntoView({ block: "center", behavior: smooth() });
   ($("#lidaropts").hidden ? $("#uselidar") : $("#calfile")).focus({ preventScroll: true });
 }
 
@@ -1038,20 +1189,21 @@ function edit(name, what, value, el) {
   say($("#revmsg"), "select again to apply your changes before the build", true);
 }
 $("#discard").onclick = () => loadReview().catch((e) => say($("#revmsg"), e.message));
-$("#manualstart").onclick = async () => {
+$("#manualstart").onclick = async () => {  // the Settings tab in manual mode, with the frames open
   V.manual = true;
   V.meta = null;
   await refresh().catch((e) => say($("#revmsg"), e.message));
-  $("#frames").open = $("#gridbox").open = true;
-  $("#frames > summary").focus({ preventScroll: true });
-  $("#frames").scrollIntoView({ block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  selectTab("settings", true);
+  $("#gridbox").open = true;
+  $("#framesum").focus({ preventScroll: true });
+  $("#tabs").scrollIntoView({ block: "start", behavior: smooth() });
 };
 $("#reselect").onclick = () => act([$("#reselect"), $("#build")], $("#revmsg"), "selecting the views again",
   () => post(`/api/jobs/${V.id}/overrides`, { ...V.ov, api_key: $("#key2").value || null }),
   () => { $("#key2").value = ""; $("#log").textContent = ""; });
 $("#build").onclick = () => act([$("#build"), $("#reselect")], $("#revmsg"), "checking the key and queuing the build",
   () => post(`/api/jobs/${V.id}/continue`, { api_key: $("#key2").value || null }),
-  () => { $("#key2").value = ""; $("#log").textContent = ""; V.lidarEdit = false; });
+  () => { $("#key2").value = ""; $("#log").textContent = ""; });
 
 // ---- 4b. the part list ("The VLM proposes, I edit the list": the job waits after propose) ----
 
@@ -1221,12 +1373,44 @@ function previewSpot(pk, p) {
 }
 const viewText = (pk, i) => `view ${i}, frame ${pk.frame}, ${Number(pk.time_s).toFixed(1)} s`;  // a selection.json pick
 const viewSrc = (i) => file(V.overlay === true && V.input.placed ? `run/overlay_${i}.png` : `run/input/images/${i}.png`);
+function clearInput() {  // the frames are read again, or another job opens: the old video and views go
+  V.input = V.inputKey = V.videoKey = V.video = null;
+  fill($("#inputvideo"));
+  fill($("#inputviews"));
+  say($("#inputmsg"), "", true);
+}
+// The Inputs tab once the frames are read: the preview video, and the views used once they are selected.
 async function renderInput(job) {
   const p = job.preview && job.preview.file ? job.preview : null;
+  // The video is drawn once per preview file, so a refresh or a new selection does not stop it. Its "seek" follows the
+  // selection, so it does not count.
+  const vkey = JSON.stringify([job.id, job.preview && { ...job.preview, seek: null }]);
+  if (vkey !== V.videoKey) {
+    V.videoKey = vkey;
+    V.inputKey = null;  // the views are buttons only next to a video
+    const video = V.video = p ? h("video", { src: file("frames/preview.mp4"), controls: true, preload: "metadata",
+      playsinline: true, muted: true, width: p.width, height: p.height, style: `--ar: ${p.width} / ${p.height}`,
+      "aria-label": "Preview of " + job.video.name }) : null;
+    if (video) video.muted = true;  // the attribute only sets the default
+    const fps = p && p.fps ? `, ${Number(Number(p.fps).toFixed(1))} fps` : "";
+    const why = !job.preview ? NO_PREVIEW : job.preview.missing ? MISSING_PREVIEW
+      : `The app could not make a preview video: ${job.preview.error}`;
+    fill($("#inputvideo"), video ? h("figure", { class: "inputfig" }, video, h("figcaption", {}, inputLabel(job),
+      h("span", { class: "hint" }, ` Preview at ${p.width}x${p.height}${fps}.`)))
+      : [h("p", {}, inputLabel(job)), h("p", { class: "hint" }, why)]);
+  }
   V.inputPlaced = job.files.includes("run/placement.json");  // place drew run/overlay_<i>.png for every view first
-  // Drawn once per selection, so a refresh does not stop the video. A place run that ends or goes changes only the
-  // heading (its mesh fit toggle).
-  const key = JSON.stringify([job.id, (job.stages.select || {}).ended, job.preview]);
+  if ((job.stages.select || {}).status !== "done") {  // no views yet, or a new selection runs: the old views go
+    if (V.inputKey !== "none") {
+      V.input = null;
+      V.inputKey = "none";
+      fill($("#inputviews"), h("p", { class: "hint" }, NO_VIEWS));
+      say($("#inputmsg"), "", true);
+    }
+    return;
+  }
+  // The views are drawn once per selection. A place run that ends or goes changes only the heading (its mesh fit toggle).
+  const key = JSON.stringify([job.id, (job.stages.select || {}).ended, vkey]);
   if (key === V.inputKey) {
     if (V.input && V.input.placed !== V.inputPlaced) {
       V.input.placed = V.inputPlaced;
@@ -1245,16 +1429,7 @@ async function renderInput(job) {
     throw e;
   }
   if (gone()) return;
-  const video = p ? h("video", { src: file("frames/preview.mp4"), controls: true, preload: "metadata", playsinline: true,
-    muted: true, width: p.width, height: p.height, style: `--ar: ${p.width} / ${p.height}`,
-    "aria-label": "Preview of " + job.video.name }) : null;
-  if (video) video.muted = true;  // the attribute only sets the default
-  const fps = p && p.fps ? `, ${Number(Number(p.fps).toFixed(1))} fps` : "";
-  const why = !job.preview ? NO_PREVIEW : job.preview.missing ? MISSING_PREVIEW
-    : `The app could not make a preview video: ${job.preview.error}`;
-  fill($("#inputvideo"), video ? h("figure", { class: "inputfig" }, video, h("figcaption", {}, inputLabel(job),
-    h("span", { class: "hint" }, ` Preview at ${p.width}x${p.height}${fps}.`)))
-    : [h("p", {}, inputLabel(job)), h("p", { class: "hint" }, why)]);
+  const video = V.video;
   say($("#inputmsg"), "", true);
   const picks = sel && Array.isArray(sel.picks) ? sel.picks : [];  // in run order: view 0 first
   V.input = { picks, video, preview: p, placed: V.inputPlaced, imgs: [], btns: [], figs: [],

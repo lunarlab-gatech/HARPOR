@@ -54,13 +54,32 @@ main { max-width: 1120px; margin: 0 auto; padding: 16px 16px 48px; }
 
 /* panels */
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r3); padding: 16px; margin: 16px 0; }
-details.panel > summary { cursor: pointer; list-style: none; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
-details.panel > summary::-webkit-details-marker { display: none; }
-details.panel > summary::before { content: "\25B8"; color: var(--muted); transition: transform 0.15s; display: inline-block; }
-details.panel[open] > summary::before { transform: rotate(90deg); }
-details.panel[open] > summary { margin-bottom: 12px; }
 details.sub > summary { cursor: pointer; color: var(--muted); font-size: 14px; }
 details.sub { margin: 8px 0; }
+.emptytab { margin: 0; color: var(--muted); }  /* what a tab says while it has nothing */
+
+/* the job page's tabs: the bar scrolls sideways inside itself when it does not fit, with no scrollbar (it would sit on
+   the selected tab's line) and a faded edge where more tabs are (app.js tabEdges; 24px is app.js EDGE) */
+.tabs { position: relative; display: flex; gap: 4px; margin: 24px 0 0; overflow-x: auto; overscroll-behavior-x: contain;
+  scrollbar-width: none; box-shadow: inset 0 -1px 0 var(--line); }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs.more-r { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); }
+.tabs.more-l { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to left, #000 calc(100% - 24px), transparent); }
+.tabs.more-l.more-r { -webkit-mask-image: linear-gradient(to right, transparent, #000 24px, #000 calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 24px, #000 calc(100% - 24px), transparent); }
+.tabs [role=tab] { flex: none; min-height: 40px; padding: 8px 14px; border: 0; border-radius: var(--r2) var(--r2) 0 0;
+  background: transparent; color: var(--muted); font-weight: 500; white-space: nowrap; }
+.tabs [role=tab]:hover { filter: none; color: var(--fg); background: var(--surface-2); }
+.tabs [role=tab][aria-selected=true] { color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
+.tabs [role=tab]:focus-visible { outline-offset: -2px; }
+.tabpanel.panel { margin-top: 12px; }
+.tabpanel:focus-visible { outline-offset: -2px; }  /* inside: on a phone the panel runs to the screen's edges */
+.tabpanel:not(:has(> :not([hidden]))) { display: none; }  /* while the page loads, no empty box */
+/* the Settings tab's pointer to the input's warnings, in the look of a warning */
+.warnline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 12px; border-left: 3px solid var(--warn);
+  border-radius: var(--r1); background: var(--warn-soft); }
 
 /* buttons */
 button, .button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; font: inherit;
@@ -91,7 +110,7 @@ label.button:focus-within { outline: 2px solid var(--accent); outline-offset: 2p
 .badge.queued::before { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
 .badge.running::before, .badge.analyzing::before, .badge.uploading::before { animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.25; } }
-@media (prefers-reduced-motion: reduce) { .badge::before { animation: none !important; } details.panel > summary::before { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .badge::before { animation: none !important; } }
 
 /* forms */
 input, select, textarea { font: inherit; color: inherit; }
@@ -127,7 +146,7 @@ label.check:has(input:disabled) { color: var(--muted); }
 #calmsg { overflow-wrap: anywhere; }
 #calhelp { max-width: 640px; }
 #strayfacts { margin-top: 0; }
-#startform { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 8px; }
+#framesum { margin-bottom: 4px; }
 #startform > label { font-weight: 500; }
 #startform > label > input { display: block; margin-top: 4px; font-weight: 400; }
 #autobox { display: flex; gap: 12px; align-items: center; }
@@ -184,7 +203,7 @@ th { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
 #ttable td.lens { white-space: normal; min-width: 160px; }
 #ttable tr.current td { background: var(--accent-soft); }
 
-/* frames and build settings */
+/* the input's facts and the build settings */
 #spark { width: 100%; height: 60px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r2); display: block; }
 #spark line { stroke: var(--bad); }
 #spark polyline { stroke: var(--accent); }
@@ -206,10 +225,11 @@ th { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
   background: var(--surface-2); font-size: 13px; }
 
 /* stages and log */
-.runbody > * + * { margin-top: 16px; }
+#runsum { margin: 0 0 12px; }
+.runcols > * + * { margin-top: 16px; }
 @media (min-width: 900px) {
-  .runbody { display: grid; grid-template-columns: minmax(300px, 380px) 1fr; gap: 24px; align-items: start; }
-  .runbody > * + * { margin-top: 0; }
+  .runcols { display: grid; grid-template-columns: minmax(300px, 380px) 1fr; gap: 24px; align-items: start; }
+  .runcols > * + * { margin-top: 0; }
 }
 #stages { list-style: none; padding: 0; margin: 0; counter-reset: stage; }
 #stages li { counter-increment: stage; display: grid; grid-template-columns: 1.6em minmax(0, 1fr) 2.6em auto 4.8em; column-gap: 8px;
@@ -296,7 +316,9 @@ dt, dd { padding: 6px 0; border-bottom: 1px solid var(--line); }
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 
-/* the input: its preview video and the views the build used */
+/* the Inputs tab: the input's facts, its preview video and the views the build used */
+#inputfacts { margin: 12px 0; }
+#inputfacts > * { margin: 0 0 8px; }
 .inputfig { margin: 0; }
 /* --ar: the preview's width / height, so a portrait video gets a narrow box and no black bars */
 .inputfig video { display: block; width: 100%; max-width: min(100%, 640px, calc(60vh * var(--ar, 16 / 9))); height: auto;
@@ -325,6 +347,11 @@ dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
   main { padding: 12px 12px 48px; }
   .panel { margin-inline: -12px; border-radius: 0; border-inline: 0; padding: 14px 12px; }
   .stickybar { margin: 16px -12px -14px; border-radius: 0; }
+  .tabs { margin-inline: -12px; padding-inline: 6px; gap: 2px; }
+  .tabs [role=tab] { padding-inline: 10px; }
+  .tabpanel.panel { margin-top: 0; border-top: 0; }  /* the panel joins the tab bar's line */
+  /* the GPU mark and the clock take only their room, so the stage's name keeps some */
+  #stages li { grid-template-columns: 1.6em minmax(0, 1fr) auto auto 4.2em; }
   h2 { font-size: 21px; }
   html { scroll-padding-bottom: 50vh; }
   .tablewrap, .scroll { overflow: visible; padding: 0; }
@@ -357,6 +384,7 @@ dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 @media (pointer: coarse) {
   button, .button { min-height: 44px; }
   button.small, .button.small { min-height: 40px; }
+  .tabs [role=tab] { min-height: 44px; }
   button.link { min-height: 0; padding: 10px 0; }
   input[type=radio], input[type=checkbox] { width: 22px; height: 22px; }
   .chips label { padding: 8px 12px; }

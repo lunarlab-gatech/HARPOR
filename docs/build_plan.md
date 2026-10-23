@@ -1053,20 +1053,50 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    has transmission or alpha. For an articulated object, `align` also writes one GLB per link. Then
    VoMP (once per link for an articulated object), MJCF, USD, URDF and `results.zip`.
 
-**UI** (`static/`, plain HTML, CSS and JS with no build step; reworked 2026-10-17):
-- Each job page puts the section to act on first. The order is topic, review, results, settings,
-  then stages and log. After a failure the stages and log move to the top, and the failed stage's
-  log loads by itself.
+**UI** (`static/`, plain HTML, CSS and JS with no build step; reworked 2026-10-17, tabs 2026-10-22):
+- Tabs (2026-10-22). A job page shows the header, the status line, the next step, the warnings,
+  Retry and Cancel, and the panels that wait for the user (the camera topic, the view review, the
+  part list and the LiDAR failure). Under them are four tabs: Results, Inputs (the input's facts,
+  its preview video and the views used), Settings (the build settings) and Stages and log.
+  - The first tab follows the job's status. A ready job shows Settings. A job in review or
+    choose_topic shows Inputs, under its waiting panel. A done job shows Results. Any other job
+    (analyzing, queued, running, failed or cancelled) shows Stages and log. After a failure the
+    failed stage's log loads by itself.
+  - A tab that the user picks stays until the status changes. The statuses of a run (analyzing,
+    queued and running) count as one, so a tab picked while the job waits for the GPU stays when
+    the job starts. The hash keeps the pick as `#/job/<id>/<tab>`, where the tab is `results`,
+    `inputs`, `settings` or `log`, so a reload shows it again. `#/job/<id>` opens the status's own
+    tab. The page writes the hash with `history.replaceState`, so the tabs add no steps to the back
+    button. `history.state` keeps the status that the tab was picked in. A reload after a change of
+    status shows the new status's tab.
+  - When a run stops, the event stream's state event changes only the header. The Stages and log
+    tab stays while the stream sends the last lines of the log. The refresh after the stream's end
+    draws the new tab's panel first, then shows the tab.
+  - A tab with nothing to show says so in one sentence, for example "The results appear here when
+    the build has made them." While a job runs, Settings says "You can change the settings when the
+    job stops."
+  - The tabs follow the WAI-ARIA tabs pattern: a roving tabindex, and Left, Right, Home and End. On
+    a narrow phone the tab bar scrolls sideways, and the page does not. The bar has no scrollbar,
+    and its edge fades where more tabs are off the bar. On a phone the panel joins the tab bar.
+  - A hidden Stages and log tab still takes the live log and runs the stage clocks. It reads no
+    layout while hidden. When the tab opens, the log is at its end, or where the user left it.
+  - When an action hides or disables the focused button (Start, Build, Retry or Cancel), the tab
+    shown takes the focus. A refused Start keeps it. When the status changes the tab and the focus
+    is on a tab or in the panel that hides, the new tab takes the focus.
 - A status line names the next step. While a job runs, a progress bar counts the build stages. The
   header and the tab title show the job's status. Retry names the stage it continues from, and
   Cancel asks first.
-- The settings form keeps Start in a bar fixed to the bottom of the screen. Video facts and the
-  frame grid fold away. Manual mode shows a pick count and the picks as chips.
+- The Settings tab keeps Start in a bar fixed to the bottom of the screen. The frame grid folds
+  away. Manual mode shows a pick count and the picks as chips. In review the tab holds the
+  "Start over with other settings" form. When the input has warnings (HDR, or a Stray export's
+  warnings), the tab says how many, for example "The input has 3 warnings.", and "Show the
+  warnings" opens the Inputs tab at the first one.
 - The review page shows the ring and the summary side by side and the picked views apart from the
   other candidates, with Build in a fixed bottom bar. Edited cards are marked, there is Discard
-  changes, and "Start over in manual mode" opens the settings in manual mode.
-- Results put the downloads first. The viewers show the model size in cm. With the agent off and no
-  split parts (a rigid object), one viewer fills the row.
+  changes, and "Start over in manual mode" opens the Settings tab in manual mode.
+- The Results tab puts the downloads first. The viewers show the model size in cm. With the agent
+  off and no split parts (a rigid object), one viewer fills the row. A viewer drawn while its tab
+  is hidden loads when the tab opens.
 - The jobs list shows a thumbnail, the input kind and a short time, and marks jobs that wait for the
   user. It is redrawn only when it changed.
 - Uploads show their speed and time left, and can be cancelled.
@@ -1083,8 +1113,8 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   names its task and budget ("agent sets the joints, 15 min budget").
 - Metric scale from LiDAR (2026-10-21, note 12):
   - The upload box takes a Stray Scanner export as a `.zip`, and the jobs list names its kind "Stray
-    capture". A Stray job's settings show the turn from gravity, the number of depth and confidence
-    images, and the export's warnings.
+    capture". A Stray job's Inputs tab shows the turn from gravity, the number of depth and
+    confidence images, and the export's warnings.
   - The settings form has the box "Use LiDAR for metric scale", which is hidden for a video and on by
     default for a Stray capture. For a bag it shows the LiDAR topic select, the TF link (the TF topic
     and the chain of frames, or "no TF link: upload the calibration") and the calibration upload. An
@@ -1094,39 +1124,45 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   - The review page shows the scale, the views used and the spread ("Metric scale from LiDAR: x1.250
     (8 of 8 views, spread 0.0%)"), the warnings, and the check images folded. Each candidate's card
     also shows its own LiDAR scale, its used point count and its status, such as outlier or few
-    points. For a bag the page has "Change the calibration", which opens the settings in review.
+    points. For a bag the page has "Change the calibration", which opens the Settings tab at the
+    calibration upload.
     After a calibration change, the page says that Build finds the scale again first and then stops
     in review.
   - When the `lidar` stage fails, the panel "Metric scale from LiDAR" shows the reason, the check
-    images and "Go to the LiDAR settings". The status line names the next step, for example "Upload a
-    calibration, then Retry; or Build again with LiDAR off." For a Stray capture it says to build
-    again with LiDAR off or with other views.
+    images and "Go to the LiDAR settings" (in the Settings tab). The status line names the next
+    step, for example "Upload a calibration in the Settings tab, then Retry. Or turn LiDAR off there
+    and build again." For a Stray capture it says to build again with LiDAR off or with other views.
   - Results add the row "Metric scale": the scale with the LiDAR topic (or "iPhone LiDAR depth"), the
     views used and the spread, or "Depth Anything 3's estimate (no LiDAR)".
-- Input panel (2026-10-22): once the views are selected (in review, during the build, and after a
-  failure later in the build), the panel "Input" shows the preview video (muted, with controls,
-  loading only its metadata first) with the input's name and kind, such as "table.MOV (video)" or
-  "scan.bag (rosbag, camera topic /cam/image_rect)", and its size and rate. Under it, "Views used"
-  shows one figure per view in run order: the view's image (`run/input/images/<i>.png`, loaded
-  lazily) and a caption such as "view 0, frame 152, 15.2 s" from `selection.json`; a star marks view
-  0. Each view is a button that puts the video at the frame that the preview shows for it, paused
-  (it never plays by itself), marks it as current, and says in a live region which frame the video
-  shows and at what time in the video (the kept frame before the view's frame when the preview
-  skipped it). After `place`, the button "Show the mesh fit" swaps every image for place's overlay
-  (`run/overlay_<i>.png`: the posed mesh in red, the mask outline in green); it looks pressed while
-  it is on. A job analyzed before previews says "This job has no preview video, because its input
-  was read before the app made previews." A job whose preview file is gone says so. The video is
-  drawn once per selection, so a refresh does not stop it; on a running job's page, the event that
-  says `select` is done draws the panel, and the event that says `place` is done adds the toggle
-  without drawing the video again. A portrait preview gets a narrow box, without black bars.
+- Inputs tab (2026-10-22): once the frames are read, the tab shows the preview video (muted, with
+  controls, loading only its metadata first) with the input's name and kind, such as "table.MOV
+  (video)" or "scan.bag (rosbag, camera topic /cam/image_rect)", and its size and rate. Under it are
+  "Change the camera topic" (a bag that can change it), the HDR warning, a Stray capture's facts,
+  and the video facts with the sharpness plot (folded). Once the views are selected (in review,
+  during the build and after), "Views used" shows one figure per view in run order: the view's image
+  (`run/input/images/<i>.png`, loaded lazily) and a caption such as "view 0, frame 152, 15.2 s" from
+  `selection.json`; a star marks view 0. Each view is a button that puts the video at the frame that
+  the preview shows for it, paused (it never plays by itself), marks it as current, and says in a
+  live region which frame the video shows and at what time in the video (the kept frame before the
+  view's frame when the preview skipped it). After `place`, the button "Show the mesh fit" swaps
+  every image for place's overlay (`run/overlay_<i>.png`: the posed mesh in red, the mask outline in
+  green); it looks pressed while it is on. A job analyzed before previews says "This job has no
+  preview video, because its input was read before the app made previews." A job whose preview file
+  is gone says so. Before the views are selected, and while a new selection runs, the strip says
+  "The views used appear here after the app selects them." The video is drawn once per preview file,
+  so a refresh or a new selection does not stop it. The views are drawn once per selection. On a
+  running job's page, the event that says `select` is done draws the views, and the event that says
+  `place` is done adds the toggle without drawing them again. A portrait preview gets a narrow box,
+  without black bars. The video stops when the Inputs tab hides.
   The server serves `frames/preview.mp4` as `video/mp4`, and the run's view images. Starlette's
   `FileResponse` answers Range requests (206 with Content-Range, 416 for a range past the end), so
   the browser can seek; the file route also answers HEAD.
   `GET /api/jobs/{id}` adds "preview" (`server.preview_of`): the record with "seek" (for each view of
   `selection.json`, the frame that the preview shows and its time in the preview), `{"error": ...}`,
   `{"missing": true}`, or null for an older job.
-- The 17 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
-  does not have, so run them on the Mac.
+- The 24 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
+  does not have, so run them on the Mac. One more test there checks the tabs and panels of
+  `index.html`.
 
 **Security.** The server port on the compute node is open to other ICE users, so every request
 needs the login cookie (a random token). The API key lives only in the server's memory. For the

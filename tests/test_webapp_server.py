@@ -1140,7 +1140,8 @@ const el = () => new Proxy(function () {}, {
   get: (t, k) => k === Symbol.iterator ? [][Symbol.iterator] : k in t ? t[k] : (t[k] = el()),
   apply: (t, self, args) => { texts.push(...args.filter((a) => typeof a === "string")); return el(); },
 });
-const ctx = vm.createContext({ console, texts, document: el(), window: el(), location: { hash: "" },
+const location = { hash: "" }, history = { state: null, replaceState(state, title, url) { this.state = state; location.hash = url; } };
+const ctx = vm.createContext({ console, texts, document: el(), window: el(), location, history,
   setInterval() {}, EventSource: el(), fetch: async (url) => ({ ok: true, status: 200, json: async () => replies[url] }) });
 Promise.resolve(vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "\n" + process.argv[4], ctx))
   .catch((e) => { console.error(e.stack); process.exitCode = 1; });
@@ -1162,7 +1163,9 @@ def run_app_js(replies, code):
 # app.js sets on it (so the form's handlers stay), the agent, mode and parts mode radios are plain
 # objects, calls record their string arguments in `texts`, and fetch records every request's URL and
 # method in `requests` and the POST bodies in `posts`, and answers with the replies (by URL). A reply
-# with "__status" answers that HTTP error, with the reply as its JSON body.
+# with "__status" answers that HTTP error, with the reply as its JSON body. querySelectorAll answers
+# from `lists` (by selector). `history` keeps its state; its replaceState and pushState calls go to
+# `historyCalls` ([kind, url]), and assignments to location.hash go to `hashSets`.
 FORM_HARNESS = r"""
 const fs = require("fs"), vm = require("vm");
 const texts = [], replies = JSON.parse(process.argv[4] || "{}");
@@ -1185,8 +1188,13 @@ const fetch = async (url, opt) => {
   const reply = url in replies ? replies[url] : url === "/api/jobs" ? [] : {}, status = (reply && reply.__status) || 200;
   return { ok: status < 400, status, statusText: "", json: async () => reply };
 };
-const ctx = vm.createContext({ console, document, window: el(), location: { hash: "" }, setInterval() {}, EventSource: el(),
-  fetch, agents, partsModes, posts, requests, texts });
+const hashSets = [], historyCalls = [];
+const location = { _hash: "", get hash() { return this._hash; }, set hash(v) { hashSets.push(v); this._hash = v; } };
+const history = { state: null,
+  replaceState(state, title, url) { historyCalls.push(["replace", url]); this.state = state; location._hash = url; },
+  pushState(state, title, url) { historyCalls.push(["push", url]); this.state = state; location._hash = url; } };
+const ctx = vm.createContext({ console, document, window: el(), location, history, setInterval() {}, EventSource: el(),
+  fetch, agents, partsModes, posts, requests, texts, lists, hashSets, historyCalls });
 Promise.resolve(vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "\n" + process.argv[3], ctx))
   .catch((e) => { console.error(e.stack); process.exitCode = 1; });
 """
@@ -1306,7 +1314,9 @@ def test_app_js_topics_and_the_agent_off():
     assert "no camera_info next to it, so the lens distortion is not known. MV-SAM3D expects undistorted images; " \
            "pick a rectified topic if the bag has one" in out["table"]  # a raw bag without camera_info gets the hint too
     assert out["table"].count("Use this topic") == 3 and "Not usable: /depth (16UC1)" not in out["table"]  # textContent
-    assert "skipped (turned off)" in out["state"]
+    # A stage that is turned off shows the plain "skipped" badge; its note says why (a longer badge broke the row on a phone).
+    assert "skipped" in out["state"] and "turned off: physics uses the Stage A mesh" in out["state"]
+    assert "skipped (turned off)" not in out["state"]
     assert out["results"].count("not refined (agent turned off)") == 2  # in the viewers and in the facts
 
 
@@ -1563,7 +1573,8 @@ def test_app_js_results_of_an_articulated_job():
     welded = "no joints (agent turned off), so physics welds the parts into one body"
     assert out["none"].count(welded) == 2 and "1: the parts have no joints, so physics welds them into one body" in out["none"]
     assert "Mass note" in out["none"] and "VoMP could not voxelize lid, so the mass covers only body." in out["none"]
-    assert out["state"].count("skipped (turned off)") == 2 and "agent refinement, 10 min budget" in out["state"]
+    assert out["state"].count("turned off: rigid object") == 2 and out["state"].count("skipped") == 2
+    assert "agent refinement, 10 min budget" in out["state"]
     assert "Agent result without joints, by Claude Opus 5.5" in out["unchanged"]
     assert not any(t.startswith("Parts with joints") for t in out["unchanged"])
 
@@ -1762,7 +1773,8 @@ def test_app_js_lidar_box_per_kind():
     assert no_lidar["box"]["hint"] == ("This bag has no LiDAR topic (PointCloud2 or Livox). Not usable: /ouster/points "
                                        "(no messages).")
     assert old["box"]["off"] is True and old["box"]["hint"] == (
-        "This bag was read before the app listed LiDAR topics. To list them, choose its camera topic again with Change topic.")
+        "This bag was read before the app listed LiDAR topics. To list them, use Change the camera topic in the Inputs tab, "
+        "and choose the same topic again.")
     assert old_done["box"]["hint"] == ("This bag was read before the app listed LiDAR topics. To use its LiDAR, upload the "
                                        "bag again.")
     assert no_lidar["sent"] is None and old["sent"] is None and old_done["sent"] is None
@@ -1882,8 +1894,8 @@ LIDAR_VIEWS = [{"name": "f00003", "s": 1.0498, "points_used": 280, "status": "us
 def test_app_js_review_shows_the_lidar_scale():
     """The review header gives the LiDAR scale with its views and spread (or DA3's own scale without LiDAR),
     the record's warnings and the folded check images with each view's s and points; each card has its view's
-    LiDAR scale. A bag's review offers "Change the calibration": the build settings show (not in manual mode)
-    until a Build."""
+    LiDAR scale. A bag's review offers "Change the calibration": it opens the Settings tab (not in manual
+    mode) at the calibration upload, and the tab stays after a refresh."""
     counts = {"views": 16, "views_with_points": 15, "views_used": 14, "outliers": 1, "scattered": 0, "few_points": 1,
               "no_mask": 0, "no_samples": 0}
     lid = {"ok": True, "s": 1.04321, "reason": None, "counts": counts, "spread_rel": 0.0213, "source": {"kind": "rosbag"},
@@ -1915,22 +1927,21 @@ def test_app_js_review_shows_the_lidar_scale():
             await loadReview();
             out[id] = [...texts];
           }
-          // "Change the calibration" shows the build settings in review, opens them and focuses the upload.
+          // In review the Settings tab holds the start-over form; "Change the calibration" opens that tab (a pick, so
+          // the hash keeps it) and focuses the upload.
           globalThis.matchMedia = () => ({ matches: true });
           let focused = null;
           $("#calfile").focus = () => { focused = "#calfile"; };
           $("#log").textContent = "a log";
+          location._hash = "#/job/j";
           V = { id: "j", picks: [], view0: null };
           await refresh();
-          out.before = $("#frames").hidden;
-          $("#frames").open = false;
-          await editCalibration();
-          out.edit = [$("#frames").hidden, $("#frames").open, focused, $("#framesum").textContent, $("#start").textContent,
-            mode(), $("#lidaropts").hidden];
-          await refresh();  // still there after a refresh, until a Build
-          out.kept = $("#frames").hidden;
-          await $("#build").onclick();
-          out.built = [V.lidarEdit, $("#frames").hidden];
+          out.before = [V.tab, $("#frames").hidden, $("#framesbody").hidden];
+          toLidarSettings();
+          out.edit = [V.tab, V.pick, $("#frames").hidden, focused, $("#framesum").textContent, $("#start").textContent,
+            mode(), $("#lidaropts").hidden, location.hash];
+          await refresh();  // the same status: the tab stays
+          out.kept = [V.tab, $("#frames").hidden, $("#review").hidden];
           console.log(JSON.stringify(out));
         })()
         """, replies)
@@ -1948,9 +1959,10 @@ def test_app_js_review_shows_the_lidar_scale():
     assert "Metric scale from LiDAR: not found yet. Build finds it first, then stops here." in out["m"]
     # Only a bag with LiDAR on can change its calibration in review.
     assert "Change the calibration" in j and "Change the calibration" not in out["k"] + out["m"]
-    assert out["before"] is True
-    assert out["edit"] == [False, True, "#calfile", "Start over with other settings", "Start over", "auto", False]
-    assert out["kept"] is False and out["built"] == [False, True]
+    assert out["before"] == ["inputs", True, False]  # the review sits above the Inputs tab; the form waits in Settings
+    assert out["edit"] == ["settings", "settings", False, "#calfile", "Start over with other settings", "Start over", "auto",
+                           False, "#/job/j/settings"]
+    assert out["kept"] == ["settings", False, False]
 
 
 def test_app_js_lidar_failure_panel():
@@ -2025,13 +2037,15 @@ def test_app_js_lidar_failure_panel():
     assert ("The green line is the mask outline. Blue points are nearer than the scaled depth, and red points are farther. "
             "White points agree with it. Each view uses its own scale here. A view without one shows all its points white. "
             "Open an image to see it larger.") in out["panel"]
-    assert out["next"] == "Upload a calibration, then Retry; or Build again with LiDAR off."
-    assert out["cal"] == "Replace the calibration, then Retry; or Build again with LiDAR off."
+    # The next step names the tab where the calibration and the LiDAR box are.
+    assert out["next"] == "Upload a calibration in the Settings tab, then Retry. Or turn LiDAR off there and build again."
+    assert out["cal"] == "Replace the calibration in the Settings tab, then Retry. Or turn LiDAR off there and build again."
     assert out["retry"] == [False, "Retry from lidar"]
-    assert out["stray"] == ("Build again with LiDAR off, or with other views. Retry helps only after a file or disk "
-                            "error.")
+    assert out["stray"] == ("Turn LiDAR off or change the views in the Settings tab, then build again. Retry helps only "
+                            "after a file or disk error.")
     assert out["masks"] == "Read the log of the failed stage, then Retry."
-    assert "The stage stopped before it wrote its record. The reason is above, and its log is below." in out["norecord"]
+    assert ("The stage stopped before it wrote its record. The reason is above, and its log is in the Stages and log "
+            "tab.") in out["norecord"]
     assert out["failed"] == [True, False, False]
     assert out["shown"] == [[False, True], [True, False]]
 
@@ -2316,10 +2330,11 @@ def test_app_js_input_panel_and_views():
 
 
 def test_app_js_input_panel_follows_the_selection():
-    """refresh() shows the input panel once the views are selected (here after a failure at sam3d), and hides and
-    empties it while a new selection runs. On a running job's page, the event that says select is done draws it
-    (by one refresh), and later events do not draw it again. The event that says place is done adds the mesh fit
-    toggle (by one refresh) and keeps the video."""
+    """refresh() draws the Inputs tab's video once the frames are read, and its views once they are selected (here
+    after a failure at sam3d). While a new selection runs the old views go, with a sentence in their place, and the
+    video stays. On a running job's page, the event that says select is done draws the views (by one refresh), and
+    later events do not draw them again. The event that says place is done adds the mesh fit toggle (by one
+    refresh) and keeps the video."""
     failed = input_job("j")
     pending = input_job("j", select="running", sam3d="pending", status="running", current="select", error=None)
     running = input_job("j", sam3d="running", status="running", current="sam3d", error=None)
@@ -2344,16 +2359,18 @@ def test_app_js_input_panel_follows_the_selection():
           $("#log").textContent = "a log";
           V = { id: "j", picks: [], view0: null };
           await refresh();
-          out.failed = [$("#input").hidden, views().map((f) => text(f.kids[1])), made.filter((e) => e.tag === "video").length];
+          const videos = () => made.filter((e) => e.tag === "video").length;
+          const noViews = () => made.filter((e) => e.tag === "p" && text(e) === NO_VIEWS).length;
+          out.failed = [$("#inputbody").hidden, $("#inputnone").hidden, views().map((f) => text(f.kids[1])), videos(), noViews()];
           now = "pending";  // Build again: select runs
           await refresh();
-          out.pending = [$("#input").hidden, V.input, V.inputKey];
+          out.pending = [$("#inputbody").hidden, V.input, V.inputKey, videos(), noViews()];
           made.length = streams.length = 0;
           selections = 0;
           refreshes = 0;
           V = { id: "j", picks: [], view0: null };
           await refresh();
-          out.live = [$("#input").hidden, streams.length];
+          out.live = [V.selected, V.input, videos(), noViews(), streams.length];
           now = "running";
           const state = (job) => ({ data: JSON.stringify({ status: job.status, current: job.current, error: null, warnings: [],
             key_ok: false, agent: "none", articulated: false, parts_mode: "vlm", parts_review: false, stages: job.progress }) });
@@ -2361,7 +2378,7 @@ def test_app_js_input_panel_follows_the_selection():
           out.before = refreshes;
           streams[0].on.state(state(jobs.running));
           await pending;
-          out.after = [refreshes, $("#input").hidden, selections, made.filter((e) => e.tag === "video").length];
+          out.after = [refreshes, V.selected, selections, videos()];
           streams[0].on.state(state(jobs.running));
           out.again = refreshes;
           now = "placed";
@@ -2374,8 +2391,513 @@ def test_app_js_input_panel_follows_the_selection():
           console.log(JSON.stringify(out));
         })()
         """, {"/api/jobs/j/frames": frames_meta()})
-    assert out["failed"] == [False, ["view 0, frame 152, 15.2 s", "view 1, frame 40, 4.0 s", "view 2, frame 301, 30.1 s"], 1]
-    assert out["pending"] == [True, None, None]
-    assert out["live"] == [True, 1] and out["before"] == 1
-    assert out["after"] == [2, False, 1, 1] and out["again"] == 2
+    assert out["failed"] == [False, True, ["view 0, frame 152, 15.2 s", "view 1, frame 40, 4.0 s", "view 2, frame 301, 30.1 s"],
+                             1, 0]
+    assert out["pending"] == [False, None, "none", 1, 1]  # the same video; the views' sentence
+    assert out["live"] == [False, None, 1, 1, 1] and out["before"] == 1
+    assert out["after"] == [2, True, 1, 1] and out["again"] == 2
     assert out["placed"] == [3, 1, 1, 1] and out["placedAgain"] == [3, 1]
+
+
+# ---- the job page's tabs: Results, Inputs, Settings, Stages and log ----
+
+# For FORM_HARNESS: the tab buttons keep their attributes in tabAttrs and their data-tab, and record focus calls in
+# focusedTabs; tabs() is the tab shown, the picked tab, the panels that show, the tabs with aria-selected="true",
+# each tab's tabindex (in tab order) and the hash.
+TAB_SETUP = """
+const tabAttrs = {}, focusedTabs = [];
+for (const n of TAB_NAMES) {
+  const t = $("#tab-" + n);
+  tabAttrs[n] = {};
+  t.setAttribute = (k, v) => { tabAttrs[n][k] = v; };
+  t.dataset = { tab: n };
+  t.focus = () => focusedTabs.push(n);
+}
+const tabs = () => ({ tab: V.tab, pick: V.pick, shown: TAB_NAMES.filter((n) => $("#" + TABS[n]).hidden === false),
+  selected: TAB_NAMES.filter((n) => tabAttrs[n]["aria-selected"] === "true"), roving: TAB_NAMES.map((n) => $("#tab-" + n).tabIndex),
+  hash: location.hash });
+// A state event of a video job with that status: topics and frames done, the rest pending (or as given).
+const st = (status, done) => ({ status, warnings: [], agent: "none", key_ok: true,
+  stages: ["topics", "frames", ...BUILD].map((name) => ({ name, status: (done || ["topics", "frames"]).includes(name) ? "done" : "pending" })) });
+const clickTab = (n) => $("#tabs").onclick({ target: { closest: (sel) => sel === "[role=tab]" ? $("#tab-" + n) : null } });
+"""
+TAB_ORDER = ["results", "inputs", "settings", "log"]
+
+
+def tab_job(job_id, status, files=("selection.json",), **stage_status):
+    """GET /api/jobs/<job_id> of a video job (input_job's) with that status; stage_status gives the stages' statuses
+    (the others are pending)."""
+    job = input_job(job_id, status=status, error=None, current=None, files=list(files))
+    names = [x["name"] for x in job["progress"]]
+    job["progress"] = [{"name": n, "status": stage_status.get(n, "pending")} for n in names]
+    job["stages"] = {n: {"status": stage_status.get(n, "pending")} for n in names}
+    return job
+
+
+def page_ids():
+    """index.html's elements that have an id, in page order: [(tag, attributes)]."""
+    from html.parser import HTMLParser
+
+    class Ids(HTMLParser):
+        found = []
+
+        def handle_starttag(self, tag, attrs):
+            if dict(attrs).get("id"):
+                self.found.append((tag, dict(attrs)))
+
+    p = Ids()
+    p.found = []
+    p.feed((server.STATIC / "index.html").read_text())
+    return p.found
+
+
+def test_index_html_tabs_and_their_panels():
+    """The job page: the waiting panels, then the tab bar (Results, Inputs, Settings, Stages and log) with the
+    WAI-ARIA roles and links, then the four panels in tab order, hidden until app.js picks one. Each panel has
+    the sentence it shows while it has nothing (the Settings one is set by app.js)."""
+    els = page_ids()
+    order = [a["id"] for _, a in els]
+    at = {a["id"]: (tag, a) for tag, a in els}
+    panels = ["results", "input", "frames", "run"]
+    for waiting in ("lidarfail", "topics", "review", "partsreview"):
+        assert order.index(waiting) < order.index("tabs"), waiting
+    assert [order.index(p) for p in panels] == sorted(order.index(p) for p in panels) and order.index("tabs") < order.index("results")
+    assert at["tabs"][1]["role"] == "tablist" and at["tabs"][1]["aria-label"] == "Job sections" and "hidden" in at["tabs"][1]
+    html = (server.STATIC / "index.html").read_text()
+    import re
+    assert re.findall(r'role="tab" id="tab-(\w+)"[^>]*>([^<]+)</button>', html) == [
+        ("results", "Results"), ("inputs", "Inputs"), ("settings", "Settings"), ("log", "Stages and log")]
+    for name, panel in zip(TAB_ORDER, panels):
+        tag, tab = at["tab-" + name]
+        assert (tag, tab["type"], tab["role"], tab["data-tab"], tab["aria-controls"], tab["aria-selected"], tab["tabindex"]) == \
+            ("button", "button", "tab", name, panel, "false", "-1")
+        p = at[panel][1]
+        assert (p["role"], p["aria-labelledby"], p["tabindex"], "hidden" in p) == ("tabpanel", "tab-" + name, "0", True)
+    for none, text in (("resultsnone", "The results appear here when the build has made them."),
+                       ("inputnone", "The input's facts appear here after the app reads its frames."),
+                       ("framesnone", ""),
+                       ("runnone", "The stages and the log appear here when the job starts.")):
+        assert re.search(rf'<p id="{none}" class="emptytab">([^<]*)</p>', html).group(1) == text, none
+    # The input's facts sit in the Inputs panel, the start form in the Settings panel, the log in Stages and log.
+    def inside(child, parent):
+        start = html.index(f'id="{parent}"')
+        return start < html.index(f'id="{child}"') < html.index(f'id="{panels[panels.index(parent) + 1]}"') \
+            if parent != "run" else start < html.index(f'id="{child}"')
+    for child in ("topicrow", "hdr", "strayinfo", "videoinfo", "inputvideo", "inputviews"):
+        assert inside(child, "input"), child
+    for child in ("framesum", "inputwarn", "towarn", "startform", "grid", "lidarbox", "start"):
+        assert inside(child, "frames"), child
+    assert at["hdr"][1]["tabindex"] == at["straywarn"][1]["tabindex"] == "-1"  # "Show the warnings" focuses them
+    for child in ("runsum", "stages", "log"):
+        assert inside(child, "run"), child
+    assert order.index("retry") < order.index("tabs") and order.index("cancel") < order.index("tabs")  # in the job's header
+
+
+def test_app_js_tabs_follow_the_status():
+    """The tab that shows first follows the job's status. Only the shown tab has aria-selected and tabindex 0
+    (a roving tabindex), and only its panel shows. A tab that the user picks stays while the status stays (a
+    refresh draws the same status again) or moves within a run (queued to running), goes into the hash, and goes
+    when the job stops or starts. When the panel that hides holds the focus, or the focus is on a tab that is no
+    longer selected, the new tab takes it. The preview video stops when the Inputs tab hides. Every hash change is
+    a replaceState."""
+    out = run_form_js(TAB_SETUP + """
+        (() => {
+          const out = { first: {} };
+          for (const status of ["ready", "analyzing", "queued", "running", "review", "choose_topic", "done", "failed", "cancelled",
+            "uploading"]) {
+            V = { id: "j" };
+            location._hash = "#/job/j";
+            history.state = null;
+            renderState(status === "uploading" ? { ...st(status), stages: st(status).stages.map((x) => ({ ...x, status: "pending" })) }
+              : st(status));
+            out.first[status] = { ...tabs(), bar: $("#tabs").hidden, none: $("#runnone").hidden, body: $("#runbody").hidden };
+          }
+          // One page through a build.
+          let pauses = 0;
+          V = { id: "j", video: { pause: () => { pauses++; } } };
+          location._hash = "#/job/j";
+          historyCalls.length = 0;
+          renderState(st("ready"));
+          clickTab("inputs");
+          out.picked = [tabs(), history.state];
+          renderState(st("ready"));  // a refresh: the same status
+          out.again = [tabs(), pauses];
+          clickTab("settings");  // the Inputs tab hides: its video stops
+          out.paused = pauses;
+          document.activeElement = $("#start");  // the form had the focus: its panel hides, so the new tab takes it
+          $("#frames").contains = (x) => x === $("#start");
+          renderState(st("queued"));
+          out.queued = [tabs(), history.state, focusedTabs.splice(0)];
+          clickTab("results");
+          out.clicked = [tabs(), focusedTabs.splice(0)];  // a click moves no focus
+          renderState(st("running"));  // the job starts: the same phase, so the pick stays
+          out.running = [tabs(), history.state, focusedTabs.splice(0)];
+          clickTab("log");
+          document.activeElement = $("#tab-log");  // the focus is on the picked tab when the job ends
+          $("#tabs").contains = (x) => x === $("#tab-log");
+          renderState(st("done", ["topics", "frames", ...BUILD]));
+          out.done = [tabs(), focusedTabs.splice(0), pauses];
+          out.history = historyCalls;
+          out.hashSets = hashSets;
+          console.log(JSON.stringify(out));
+        })()
+        """)
+    expect = {"ready": "settings", "analyzing": "log", "queued": "log", "running": "log", "review": "inputs",
+              "choose_topic": "inputs", "done": "results", "failed": "log", "cancelled": "log", "uploading": "log"}
+    for status, name in expect.items():
+        k = TAB_ORDER.index(name)
+        assert out["first"][status] == {"tab": name, "pick": None, "shown": [name], "selected": [name],
+                                         "roving": [0 if i == k else -1 for i in range(4)], "hash": "#/job/j", "bar": False,
+                                         "none": status != "uploading", "body": status == "uploading"}, status
+    picked, state = out["picked"]
+    assert (picked["tab"], picked["pick"], picked["shown"], picked["hash"]) == ("inputs", "inputs", ["inputs"], "#/job/j/inputs")
+    assert state == {"tab": "inputs", "status": "ready"} and out["again"] == [picked, 0] and out["paused"] == 1
+    queued, state, focused = out["queued"]
+    assert (queued["tab"], queued["pick"], queued["hash"], state, focused) == ("log", None, "#/job/j", None, ["log"])
+    assert out["clicked"][0]["tab"] == "results" and out["clicked"][1] == []
+    running, state, focused = out["running"]
+    assert (running["tab"], running["pick"], running["shown"], running["hash"], state, focused) == \
+        ("results", "results", ["results"], "#/job/j/results", {"tab": "results", "status": "queued"}, [])
+    done, focused, pauses = out["done"]
+    assert (done["tab"], done["pick"], done["selected"], done["roving"]) == ("results", None, ["results"], [0, -1, -1, -1])
+    assert focused == ["results"] and pauses == 1  # the selected tab took the focus from the tab that is no longer
+    # The first draw, the pick, (nothing for the same status), the pick, the change, the pick, (nothing for the
+    # same phase), the pick, the change.
+    assert out["history"] == [["replace", u] for u in ("#/job/j", "#/job/j/inputs", "#/job/j/settings", "#/job/j",
+                                                      "#/job/j/results", "#/job/j/log", "#/job/j")]
+    assert out["hashSets"] == []  # no history step per tab
+
+
+def test_app_js_tabs_keep_the_hash():
+    """The hash names the picked tab: #/job/<id>/<tab>, and the old #/job/<id> opens the status's own tab. A reload
+    keeps the pick unless the job's status changed since (history.state says which status it was picked in), where
+    queued, running and analyzing count as one; a pasted link with a tab shows it. A typed hash on the open page
+    changes only the tab. A refresh keeps the pick."""
+    done = tab_job("d", "done", files=["selection.json", "run/posed.glb"],
+                   **{n: "done" for n in ("frames", "extract", "masks", "prep", "da3", "select", "sam3d", "place", "agent")},
+                   lidar="skipped")
+    replies = {"/api/jobs/d": done, "/api/jobs/d/frames": frames_meta(),
+               "/api/jobs/d/file/selection.json": {"ok": True, "picks": PICKS, "anchor": "f00152"}}
+    out = run_form_js(ELEMENTS + TAB_SETUP + """
+        (async () => {
+          const out = {};
+          out.parse = ["#/job/abc", "#/job/abc/log", "#/job/abc/inputs", "#/job/abc/bogus", "#/job/abc/constructor", "#/", "",
+            "#/job/a/b/c"].map(jobHash);
+          const open = async (hash, state) => {  // a reload of the page at this hash, with this history.state
+            location._hash = hash;
+            history.state = state;
+            await openJob(...jobHash(location.hash));
+            return [V.tab, V.pick, location.hash, history.state, $("#tabs").hidden];
+          };
+          out.reload = await open("#/job/d/settings", { tab: "settings", status: "done" });
+          out.stale = await open("#/job/d/settings", { tab: "settings", status: "running" });
+          out.link = await open("#/job/d/settings", null);
+          out.old = await open("#/job/d", null);
+          out.bogus = await open("#/job/d/bogus", null);
+          // A typed hash on the open page (hashchange): only the tab changes, and the job does not load again.
+          const n = requests.length;
+          location._hash = "#/job/d/log";
+          route();
+          out.typed = [V.tab, V.pick, requests.length - n];
+          location._hash = "#/job/d";
+          route();
+          out.typedOld = [V.tab, V.pick, requests.length - n];
+          clickTab("inputs");
+          await refresh();
+          out.refreshed = [V.tab, V.pick, location.hash];
+          // A tab picked while the job waited for the GPU, and a reload once it runs, or once it failed.
+          const reload = (status) => {
+            V = { id: "q", hashTab: "inputs" };
+            location._hash = "#/job/q/inputs";
+            history.state = { tab: "inputs", status: "queued" };
+            renderState(st(status));
+            return [V.tab, V.pick, location.hash];
+          };
+          out.phase = [reload("running"), reload("failed")];
+          out.history = historyCalls.map((x) => x[0]);
+          out.hashSets = hashSets;
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    assert out["parse"] == [["abc", None], ["abc", "log"], ["abc", "inputs"], ["abc", None], ["abc", None], None, None, None]
+    assert out["reload"] == ["settings", "settings", "#/job/d/settings", {"tab": "settings", "status": "done"}, False]
+    assert out["stale"] == ["results", None, "#/job/d", None, False]  # picked while it ran; it is done now
+    assert out["link"] == ["settings", "settings", "#/job/d/settings", {"tab": "settings", "status": "done"}, False]
+    assert out["old"] == ["results", None, "#/job/d", None, False]
+    assert out["bogus"] == ["results", None, "#/job/d", None, False]
+    assert out["typed"] == ["log", "log", 0] and out["typedOld"] == ["results", None, 0]
+    assert out["refreshed"] == ["inputs", "inputs", "#/job/d/inputs"]
+    assert out["phase"] == [["inputs", "inputs", "#/job/q/inputs"], ["log", None, "#/job/q"]]
+    assert set(out["history"]) == {"replace"} and out["hashSets"] == []
+
+
+def test_app_js_tabs_keyboard():
+    """The tab bar follows the WAI-ARIA tabs pattern: Left and Right go to the tab before or after (and wrap),
+    Home and End to the first and last; each key shows its tab at once, focuses it and moves the tabindex 0.
+    Other keys, keys with Ctrl, Alt or Meta, and keys outside a tab do nothing. A click shows a tab without
+    moving the focus."""
+    out = run_form_js(TAB_SETUP + """
+        (() => {
+          V = { id: "j" };
+          location._hash = "#/job/j";
+          renderState(st("done", ["topics", "frames", ...BUILD]));
+          const key = (from, key, mods) => {
+            let prevented = false;
+            $("#tabs").onkeydown({ key, target: from ? $("#tab-" + from) : { dataset: {} }, preventDefault: () => { prevented = true; },
+              ...mods });
+            return [V.tab, focusedTabs.splice(0).join(), prevented];
+          };
+          const out = { keys: [key("results", "ArrowRight"), key("inputs", "ArrowRight"), key("settings", "ArrowRight"),
+            key("log", "ArrowRight"), key("results", "ArrowLeft"), key("log", "Home"), key("results", "End"),
+            key("log", "ArrowDown"), key("log", "ArrowLeft", { ctrlKey: true }), key("log", "Home", { altKey: true }),
+            key("log", "ArrowRight", { metaKey: true }), key("log", "Enter"), key(null, "ArrowRight")] };
+          out.end = tabs();
+          clickTab("settings");
+          out.click = [tabs(), focusedTabs.splice(0)];
+          $("#tabs").onclick({ target: { closest: () => null } });  // the bar around the tabs
+          out.between = tabs().tab;
+          console.log(JSON.stringify(out));
+        })()
+        """)
+    assert out["keys"] == [["inputs", "inputs", True], ["settings", "settings", True], ["log", "log", True],
+                           ["results", "results", True], ["log", "log", True], ["results", "results", True],
+                           ["log", "log", True], ["log", "", False], ["log", "", False], ["log", "", False],
+                           ["log", "", False], ["log", "", False], ["log", "", False]]
+    assert out["end"] == {"tab": "log", "pick": "log", "shown": ["log"], "selected": ["log"], "roving": [-1, -1, -1, 0],
+                          "hash": "#/job/j/log"}
+    assert out["click"][0]["tab"] == "settings" and out["click"][0]["roving"] == [-1, -1, 0, -1] and out["click"][1] == []
+    assert out["between"] == "settings"
+
+
+def test_app_js_tabs_say_when_they_are_empty():
+    """Each tab shows one sentence while it has nothing: Results until a build made them (and while a new build
+    runs), Inputs until the frames are read, Settings until the frames are read and while the job runs, Stages
+    and log until a stage started. The Inputs tab's views strip says when the views are not selected yet."""
+    all_done = {n: "done" for n in ("frames", "extract", "masks", "prep", "da3", "select", "sam3d", "place", "agent")}
+    cases = {"a": tab_job("a", "analyzing", frames="running"), "u": tab_job("u", "uploading"),
+             "r": tab_job("r", "running", frames="done", extract="done", masks="running"),
+             "y": tab_job("y", "ready", frames="done"),
+             "d": tab_job("d", "done", files=["selection.json", "run/posed.glb"], lidar="skipped", **all_done),
+             "b": tab_job("b", "running", files=["selection.json", "run/posed.glb"], lidar="skipped",
+                          **{**all_done, "sam3d": "running", "place": "pending", "agent": "pending"})}
+    replies = {f"/api/jobs/{i}": j for i, j in cases.items()}
+    replies.update({f"/api/jobs/{i}/frames": frames_meta() for i in cases})
+    replies.update({f"/api/jobs/{i}/file/selection.json": {"ok": True, "picks": PICKS} for i in cases})
+    out = run_form_js(ELEMENTS + TAB_SETUP + """
+        (async () => {
+          globalThis.EventSource = class { addEventListener() {} close() {} };
+          const out = { texts: [SETTINGS_LATER, SETTINGS_BUSY, NO_VIEWS] };
+          for (const id of """ + json.dumps(list(cases)) + """) {
+            made.length = 0;
+            V = { id, picks: [], view0: null };
+            await refresh();
+            out[id] = { tab: V.tab, results: [$("#resultsnone").hidden, $("#resultsbody").hidden],
+              inputs: [$("#inputnone").hidden, $("#inputbody").hidden],
+              settings: [$("#framesnone").hidden, $("#framesbody").hidden, $("#framesnone").textContent],
+              log: [$("#runnone").hidden, $("#runbody").hidden],
+              noViews: made.filter((e) => e.tag === "p" && text(e) === NO_VIEWS).length };
+            closeStream();
+          }
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    later, busy, no_views = out["texts"]
+    assert later == "The settings appear here after the app reads the frames."
+    assert busy == "You can change the settings when the job stops."
+    assert no_views == "The views used appear here after the app selects them."
+    none, shown = [False, True], [True, False]  # [the sentence hidden, the content hidden]
+    assert out["a"] == {"tab": "log", "results": none, "inputs": none, "settings": [*none, later], "log": shown, "noViews": 0}
+    assert out["u"] == {"tab": "log", "results": none, "inputs": none, "settings": [*none, later], "log": none, "noViews": 0}
+    assert out["r"] == {"tab": "log", "results": none, "inputs": shown, "settings": [*none, busy], "log": shown, "noViews": 1}
+    assert out["y"] == {"tab": "settings", "results": none, "inputs": shown, "settings": [*shown, busy], "log": shown,
+                        "noViews": 1}
+    assert out["d"] == {"tab": "results", "results": shown, "inputs": shown, "settings": [*shown, busy], "log": shown,
+                        "noViews": 0}
+    assert out["b"]["results"] == none and out["b"]["noViews"] == 0  # a new build hides the old results
+
+
+def test_app_js_hidden_log_keeps_up_without_layout():
+    """While the Stages and log tab is hidden, the live log takes its text and the stage clocks tick without
+    reading any layout. When the tab opens, the log is at its end, or where the user left it."""
+    out = run_form_js(TAB_SETUP + """
+        (() => {
+          // The log's layout reads are recorded; each new text makes it 50 px taller.
+          const log = $("#log"), reads = [];
+          Object.assign(log, { _scrollTop: 0, _clientHeight: 0, _scrollHeight: 0, _text: "" });  // plain values, not stand-ins
+          for (const k of ["scrollTop", "clientHeight", "scrollHeight"]) Object.defineProperty(log, k, { configurable: true,
+            get() { reads.push(k); return this["_" + k] || 0; }, set(v) { this["_" + k] = v; } });
+          Object.defineProperty(log, "textContent", { configurable: true, get() { return this._text; },
+            set(v) { this._text = v; this._scrollHeight = (this._scrollHeight || 0) + 50; } });
+          log.textContent = "";
+          Object.assign(log, { _scrollHeight: 900, _clientHeight: 300 });
+          V = { id: "j" };
+          location._hash = "#/job/j";
+          renderState(st("running", ["topics", "frames", "extract"]));
+          clickTab("inputs");
+          const clock = { dataset: { started: String(Date.now() / 1000 - 75) }, textContent: "" };
+          lists["#stages .secs[data-started]:not([data-ended])"] = [clock];
+          reads.length = 0;
+          appendLog("masks: frame 1\\nPROGRESS 0.5\\n");
+          appendLog("masks: frame 2\\n");
+          tick();
+          const out = { hidden: [log.textContent, [...reads], clock.textContent] };
+          clickTab("log");
+          out.opened = [log._scrollTop, reads.includes("scrollHeight")];
+          log._scrollTop = 100;  // the user scrolls up
+          log.onscroll();
+          clickTab("results");
+          reads.length = 0;
+          appendLog("masks: frame 3\\n");
+          out.hidden2 = [reads.length, log.textContent.endsWith("frame 3\\n")];
+          clickTab("log");
+          out.left = [log._scrollTop, V.logAtEnd];
+          log._scrollTop = 750;  // back at the end: new lines keep it there
+          log.onscroll();
+          appendLog("masks: frame 4\\n");
+          out.follow = log._scrollTop;
+          console.log(JSON.stringify(out));
+        })()
+        """)
+    assert out["hidden"] == ["masks: frame 1\nmasks: frame 2\n", [], "1 min 15 s"]
+    assert out["opened"] == [1000, True]  # two lines came while it was hidden
+    assert out["hidden2"] == [0, True]
+    assert out["left"] == [100, False]
+    assert out["follow"] == 1100
+
+
+def test_app_js_tabs_wait_for_the_end_of_a_run():
+    """A running job's state event that says done changes the header but not the tab: the Stages and log tab stays
+    while the stream sends the last lines of the log. The refresh after the stream's end draws the results, then
+    shows the Results tab with them."""
+    built = {n: "done" for n in ("frames", "extract", "masks", "prep", "da3", "select", "sam3d", "place")}
+    files = ["selection.json", "run/placement.json"]
+    running = tab_job("r", "running", files=files, lidar="skipped", agent="running", **built)
+    done = tab_job("r", "done", files=[*files, "run/posed.glb"], lidar="skipped", agent="done", **built)
+    out = run_form_js(ELEMENTS + TAB_SETUP + """
+        (async () => {
+          const jobs = { running: """ + json.dumps(running) + """, done: """ + json.dumps(done) + """ };
+          let now = "running";
+          const fetch0 = fetch;
+          globalThis.fetch = (url, opt) => url === "/api/jobs/r"
+            ? Promise.resolve({ ok: true, status: 200, json: async () => jobs[now] }) : fetch0(url, opt);
+          const streams = [];
+          globalThis.EventSource = class { constructor() { this.on = {}; streams.push(this); }
+            addEventListener(k, f) { this.on[k] = f; } close() {} };
+          const refresh0 = refresh;
+          let pending = null, refreshes = 0;
+          refresh = () => { refreshes++; return (pending = refresh0()); };
+          V = { id: "r", picks: [], view0: null };
+          location._hash = "#/job/r";
+          await refresh();
+          const out = { running: [V.tab, streams.length, $("#resultsbody").hidden] };
+          const event = (job) => ({ data: JSON.stringify({ status: job.status, current: null, error: null, warnings: [],
+            key_ok: true, agent: "none", articulated: false, parts_mode: "vlm", parts_review: false, stages: job.progress }) });
+          streams[0].on.state(event(jobs.done));
+          out.state = [V.tab, $("#jnext").textContent, $("#tab-log").tabIndex, refreshes, $("#resultsbody").hidden];
+          now = "done";
+          streams[0].on.end();
+          await pending;
+          out.end = [V.tab, V.pick, refreshes, $("#resultsbody").hidden, $("#resultsnone").hidden, location.hash];
+          console.log(JSON.stringify(out));
+        })()
+        """, {"/api/jobs/r/frames": frames_meta(), "/api/jobs/r/file/selection.json": {"ok": True, "picks": PICKS}})
+    assert out["running"] == ["log", 1, True]
+    assert out["state"] == ["log", "Download results.zip from the Results tab, or look at the meshes there.", 0, 1, True]
+    assert out["end"] == ["results", None, 2, False, True, "#/job/r"]
+
+
+def test_app_js_tabs_take_the_focus_after_actions():
+    """When an action hides or disables the focused button, the focus goes where the page goes. After Build, the
+    tab that the new status shows takes it; after a refused Start, Start takes it back. "Start over in manual
+    mode" opens the Settings tab (a pick) with the frames open and focuses its heading. "Change the camera topic"
+    focuses the topic table's heading, and "Keep the current topic" gives the focus back to the button, or to the
+    tab shown when the Inputs tab does not show. The Settings tab counts the input's warnings, and "Show the
+    warnings" opens the Inputs tab at the first one."""
+    analyzed = {n: "done" for n in ("frames", "extract", "masks", "prep", "da3", "select")}
+    review = tab_job("v", "review", lidar="skipped", **analyzed)
+    queued = tab_job("v", "queued", lidar="skipped", **analyzed)
+    bag = {**tab_job("t", "ready", frames="done"), "kind": "rosbag", "video": {"name": "scan.bag"},
+           "source": {"kind": "rosbag", "topic": CAM}}
+    bag["stages"]["topics"] = {"status": "done"}
+    stray = {**tab_job("s", "ready", frames="done"), "kind": "stray", "video": {"name": "capture.zip"},
+             "source": {"kind": "stray"}, "lidar": {"kind": "stray"}}
+    stray_video = {"kind": "stray", "hdr": True, "rotation": 0, "n_depth": 19, "n_confidence": 0, "depth_size": [256, 192],
+                   "upright_agreement": 1.0, "warnings": ["1 of the 20 frames have no depth image", "no confidence/ images"]}
+    replies = {"/api/jobs/v/frames": frames_meta(), "/api/jobs/t/frames": frames_meta(), "/api/jobs/t": bag,
+               "/api/jobs/t/file/frames/topics.json": {"topics": [camera_entry({})], "skipped": [], "lidar": [],
+                                                       "lidar_skipped": [], "tf": []},
+               "/api/jobs/t/start": {"__status": 400, "detail": "the OpenAI key was refused"},
+               "/api/jobs/s": stray, "/api/jobs/s/frames": frames_meta(**stray_video)}
+    out = run_form_js(ELEMENTS + TAB_SETUP + """
+        (async () => {
+          globalThis.EventSource = class { addEventListener() {} close() {} };
+          globalThis.matchMedia = () => ({ matches: true });
+          const jobs = { review: """ + json.dumps(review) + """, queued: """ + json.dumps(queued) + """ };
+          let now = "review";
+          const fetch0 = fetch;
+          globalThis.fetch = (url, opt) => url === "/api/jobs/v"
+            ? Promise.resolve({ ok: true, status: 200, json: async () => jobs[now] }) : fetch0(url, opt);
+          const focused = [], spy = (sel) => { $(sel).focus = () => focused.push(sel); };
+          ["#framesum", "#start", "#topicshead", "#chtopic", "#hdr", "#straywarn"].forEach(spy);
+          const out = {};
+          const open = async (id) => {
+            V = { id, picks: [], view0: null };
+            location._hash = "#/job/" + id;
+            $("#log").textContent = "a log";
+            await refresh();
+          };
+          // Build in review: the button is disabled while it runs, so the focus falls to the page.
+          await open("v");
+          out.review = V.tab;
+          document.activeElement = document.body;
+          now = "queued";
+          await $("#build").onclick();
+          out.build = [V.tab, focusedTabs.splice(0), posts.map((x) => x.url)];
+          closeStream();
+          // Start over in manual mode.
+          now = "review";
+          await open("v");
+          $("#gridbox").open = false;
+          focused.length = 0;
+          await $("#manualstart").onclick();
+          out.manual = [V.tab, V.pick, location.hash, $("#gridbox").open, focused.splice(0), V.manual];
+          // A refused Start on a ready bag job.
+          await open("t");
+          Object.assign($("#prompt"), { value: "box" });
+          Object.assign($("#nviews"), { value: "4" });
+          Object.assign($("#key"), { value: "sk-x" });
+          document.activeElement = document.body;
+          focused.length = focusedTabs.length = 0;
+          await $("#startform").onsubmit({ preventDefault() {} });
+          out.refused = [V.tab, focused.splice(0), focusedTabs.splice(0), $("#startmsg").textContent];
+          // The camera topic: the table's heading, then back to the button in the Inputs tab.
+          clickTab("inputs");
+          await $("#chtopic").onclick();
+          out.change = [$("#topics").hidden, $("#tkeep").hidden, focused.splice(0)];
+          await $("#tkeep").onclick();
+          out.keep = [$("#topics").hidden, $("#topicrow").hidden, focused.splice(0), focusedTabs.splice(0)];
+          await $("#chtopic").onclick();
+          focused.length = 0;
+          clickTab("settings");  // the user went to another tab, then back up to the table
+          document.activeElement = document.body;
+          await $("#tkeep").onclick();
+          out.keepElsewhere = [V.tab, focused.splice(0), focusedTabs.splice(0)];
+          out.bagWarn = $("#inputwarn").hidden;
+          // A Stray capture with HDR and two export warnings.
+          await open("s");
+          out.warn = [V.tab, $("#inputwarn").hidden, $("#inputwarntext").textContent];
+          $("#towarn").onclick();
+          out.towarn = [V.tab, V.pick, location.hash, focused.splice(0)];
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    assert out["review"] == "inputs"
+    assert out["build"] == ["log", ["log"], ["/api/jobs/v/continue"]]
+    assert out["manual"] == ["settings", "settings", "#/job/v/settings", True, ["#framesum"], True]
+    assert out["refused"] == ["settings", ["#start"], [], "the OpenAI key was refused"]
+    assert out["change"] == [False, False, ["#topicshead"]]
+    assert out["keep"] == [True, False, ["#chtopic"], []]
+    assert out["keepElsewhere"] == ["settings", [], ["settings"]]
+    assert out["bagWarn"] is True
+    assert out["warn"] == ["settings", False, "The input has 3 warnings."]
+    assert out["towarn"] == ["inputs", "inputs", "#/job/s/inputs", ["#hdr"]]
