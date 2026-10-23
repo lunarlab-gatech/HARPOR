@@ -1160,9 +1160,25 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   `GET /api/jobs/{id}` adds "preview" (`server.preview_of`): the record with "seek" (for each view of
   `selection.json`, the frame that the preview shows and its time in the preview), `{"error": ...}`,
   `{"missing": true}`, or null for an older job.
-- The 24 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
-  does not have, so run them on the Mac. One more test there checks the tabs and panels of
-  `index.html`.
+- Info buttons (2026-10-22): every item of the Results tab has a small "i" button after its label:
+  each row of the facts list, each viewer's caption, the viewers' placeholder when the agent was off,
+  each download and the part-mask check images. The button is a real `<button>` with the label
+  "About <item>" and `aria-describedby` on its note. The note shows on hover and on keyboard focus.
+  A click, a tap, Enter or Space toggles it: a note that showed before the press hides, and one that
+  did not shows and stays open. Escape, a click elsewhere, focus that moves on, another tab and the
+  jobs list close it, and so does a scroll that moves its button under the sticky header. One note
+  shows at a time. The note is fixed to the window, so it moves no layout, and it stays 12 px inside
+  the window's edges. A facts row's note sits under the row's value, from the value's left edge, or
+  above the label when only that fits, so it covers neither the value nor the column of info buttons.
+  Other notes sit under their button, or above it. The note uses the color tokens, so it follows
+  dark mode. The notes are one table in `app.js`, `INFO`, keyed by item, with one to three plain
+  sentences each. They say what the value is and how it was found, with the rules and numbers of the
+  code (for example the 0.5 mask IoU guard, VoMP's 64^3 grid and the agent's 600 s and 900 s
+  budgets), and what a missing or skipped value means. The node test reads those numbers from the
+  code, so a changed constant fails it until the note is fixed.
+- The 26 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
+  does not have, so run them on the Mac. Two more tests there check the tabs and panels of
+  `index.html` and the info buttons' styles in `style.css`.
 
 **Security.** The server port on the compute node is open to other ICE users, so every request
 needs the login cookie (a random token). The API key lives only in the server's memory. For the

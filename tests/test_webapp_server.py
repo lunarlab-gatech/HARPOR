@@ -2901,3 +2901,510 @@ def test_app_js_tabs_take_the_focus_after_actions():
     assert out["bagWarn"] is True
     assert out["warn"] == ["settings", False, "The input has 3 warnings."]
     assert out["towarn"] == ["inputs", "inputs", "#/job/s/inputs", ["#hdr"]]
+
+
+# ---- the Results tab's info buttons (app.js info()) ----
+
+# static/app.js in node with a small DOM: every element keeps its tag, attributes, children and parent, its class
+# names, a style and a box (rect, which the test sets) for getBoundingClientRect; `hidden` is the attribute. Every
+# selector gives one such element (byId). document's and window's addEventListener calls go to `listeners` as
+# [target, type, handler, options], and setTimeout's callbacks to `timers` ({f, ms}; clearTimeout empties f). The
+# window is 375 x 700 px. fetch answers with the replies, by URL.
+INFO_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const replies = JSON.parse(process.argv[4] || "{}");
+const made = [], listeners = [], timers = [], byId = {};
+class Elem {
+  constructor(tag) {
+    Object.assign(this, { tag, attrs: {}, kids: [], parent: null, style: {}, cls: new Set(),
+      rect: { left: 0, top: 0, width: 0, height: 0 } });
+    made.push(this);
+  }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  removeAttribute(k) { delete this.attrs[k]; }
+  get hidden() { return "hidden" in this.attrs; }
+  set hidden(v) { if (v) this.attrs.hidden = ""; else delete this.attrs.hidden; }
+  get className() { return [...this.cls].join(" "); }
+  set className(v) { this.cls = new Set(String(v).split(/\s+/).filter(Boolean)); }
+  get classList() {
+    const c = this.cls;
+    return { add: (x) => c.add(x), remove: (x) => c.delete(x), contains: (x) => c.has(x),
+      toggle: (x, on) => { on = on === undefined ? !c.has(x) : !!on; if (on) c.add(x); else c.delete(x); return on; } };
+  }
+  append(...k) { for (const x of k) { if (x && typeof x === "object") x.parent = this; this.kids.push(x); } }
+  replaceChildren(...k) { this.kids = []; this.append(...k); }
+  contains(x) { for (let e = x; e; e = e.parent) if (e === this) return true; return false; }
+  get parentElement() { return this.parent; }
+  getBoundingClientRect() { const r = this.rect; return { ...r, right: r.left + r.width, bottom: r.top + r.height }; }
+  get textContent() { return this.kids.map((k) => typeof k === "string" ? k : k.textContent).join(""); }
+  set textContent(v) { this.kids = [String(v)]; }
+  addEventListener() {}
+  focus() {}
+  scrollIntoView() {}
+}
+const document = { title: "", activeElement: null, body: {}, documentElement: { clientWidth: 375 },
+  querySelector: (sel) => byId[sel] || (byId[sel] = new Elem("div")), querySelectorAll: () => [],
+  createElement: (tag) => new Elem(tag), createElementNS: (ns, tag) => new Elem(tag),
+  addEventListener: (type, fn, opt) => listeners.push(["document", type, fn, opt]) };
+const window = { innerWidth: 375, innerHeight: 700,
+  addEventListener: (type, fn, opt) => listeners.push(["window", type, fn, opt]) };
+const location = { hash: "" }, history = { state: null, replaceState() {} };
+const setTimeout = (f, ms) => timers.push({ f, ms }), clearTimeout = (i) => { if (timers[i - 1]) timers[i - 1].f = null; };
+const fetch = async (url) => ({ ok: true, status: 200, json: async () => url in replies ? replies[url] : url === "/api/jobs" ? [] : {} });
+const ctx = vm.createContext({ console, document, window, location, history, setInterval() {}, setTimeout, clearTimeout,
+  EventSource: class { addEventListener() {} close() {} }, fetch, matchMedia: () => ({ matches: false }), confirm: () => true,
+  Elem, made, listeners, timers, byId });
+Promise.resolve(vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "\n" + process.argv[3], ctx))
+  .catch((e) => { console.error(e.stack); process.exitCode = 1; });
+"""
+
+
+def run_info_js(code, replies=None):
+    """Load app.js in INFO_HARNESS, then run code in its scope; returns the JSON that code printed last."""
+    if shutil.which("node") is None:
+        pytest.skip("no node")
+    p = subprocess.run(["node", "-e", INFO_HARNESS, "-", str(server.STATIC / "app.js"), textwrap.dedent(code),
+                        json.dumps(replies or {})], capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout.splitlines()[-1])
+
+
+# Helpers for INFO_HARNESS: the rendered results as [kind, label, the info wrapper, its parent] for every row (dt),
+# viewer (figcaption), the viewers' placeholder when the agent was off (p.hint), download (.dlitem) and the part masks'
+# hint; the info wrapper's button and note; a row's dd; the key of a note's text in INFO; and whether a placed note
+# (its style's left and top, its rect's size) meets a box.
+INFO_ITEMS = """
+const walk = (e, out = []) => { if (e && typeof e === "object") { out.push(e); e.kids.forEach((k) => walk(k, out)); } return out; };
+const isInfo = (e) => e && typeof e === "object" && e.cls.has("info");
+const items = () => [
+  ...walk($("#facts2")).filter((e) => e.tag === "dt").map((e) => ["row", e.kids[0], e.kids.find(isInfo), e]),
+  ...walk($("#viewers")).filter((e) => e.tag === "figcaption").map((e) => ["viewer", e.kids[0].textContent, e.kids.find(isInfo), e]),
+  ...walk($("#viewers")).filter((e) => e.tag === "p" && e.cls.has("hint")).map((e) => ["placeholder", "Agent result", e.kids.find(isInfo), e]),
+  ...walk($("#downloads")).filter((e) => e.cls.has("dlitem")).map((e) => ["download", e.kids[0].textContent, e.kids.find(isInfo), e]),
+  ...walk($("#partchecks")).filter((e) => e.tag === "p" && e.cls.has("hint"))  // the item is the folded check images
+    .map((e) => ["masks", "Part masks in the views", e.kids.find(isInfo), e])];
+const parts = (wrap) => ({ btn: wrap.kids[0], note: wrap.kids[1] });
+const ddOf = (dt) => dt.parent.kids[dt.parent.kids.indexOf(dt) + 1];
+const meets = (note, box) => {
+  const n = { left: parseFloat(note.style.left), top: parseFloat(note.style.top), width: note.rect.width, height: note.rect.height };
+  const b = box.rect;
+  return n.left < b.left + b.width && b.left < n.left + n.width && n.top < b.top + b.height && b.top < n.top + n.height;
+};
+const keyOf = (text) => Object.keys(INFO).find((k) => INFO[k] === text) || null;
+const shown = () => made.filter((e) => e.cls.has("infonote") && !e.hidden).map((e) => e.attrs.id);
+const describe = (kind, label, wrap, owner) => {
+  if (!wrap) return { kind, label, missing: true };
+  const { btn, note } = parts(wrap);
+  return { kind, label, last: owner.kids[owner.kids.length - 1] === wrap, wrap: wrap.tag, btn: btn.tag, type: btn.attrs.type,
+    cls: btn.className, aria: btn.attrs["aria-label"], text: btn.textContent, describedby: btn.attrs["aria-describedby"],
+    id: note.attrs.id, role: note.attrs.role, hidden: note.hidden, noteCls: note.className, key: keyOf(note.textContent),
+    note: note.textContent };
+};
+"""
+
+ART_MJCF = {"name": "cabinet", "root": "body", "fixed_base": True,
+            "inertial": {"mass": 12.5, "com": [0.0, 0.01, 0.4], "fullinertia": [0.1] * 6},
+            "links": {"body": {"source": "vomp", "inertial": {"mass": 10.0, "com": [0, 0, 0.4], "fullinertia": [0.1] * 6}},
+                      "door": {"source": "vomp", "inertial": {"mass": 1.5, "com": [0, 0.2, 0.4], "fullinertia": [0.01] * 6}},
+                      "drawer": {"source": "vomp", "inertial": {"mass": 0.9, "com": [0, 0, 0.2], "fullinertia": [0.01] * 6}},
+                      "knob": {"source": "hull", "inertial": {"mass": 0.1, "com": [0, 0.3, 0.4], "fullinertia": [1e-4] * 6}}},
+            "joints": [{"child": "door", "parent": "body", "type": "revolute", "range": [0.0, 1.5]},
+                       {"child": "drawer", "parent": "body", "type": "prismatic", "range": [0.0, 0.3]},
+                       {"child": "body", "parent": "world", "type": "fixed"}],
+            "welded": {"knob": "door"}}
+ART_RESULT = {"source": "finish", "verdict": "articulated", "reason": "the door hinges and the drawer slides",
+              "limitations": ["the door's range is a guess", "the drawer has no tray"], "exit": "exited", "agent": "claude",
+              "model": "claude-opus-5-5", "mode": "articulation", "counts": {"joints": 4}, "joints_delivered": 3,
+              "turns": 9, "cost_usd": 0.31, "tokens": {"input_tokens": 1000, "output_tokens": 500,
+                                                       "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 800}}
+
+
+def info_jobs():
+    """(jobs, replies) for INFO_HARNESS: an articulated Opus job with every row, the same job without an agent (its
+    parts welded, a link VoMP skipped), a rigid Astra job with a refined mesh, and a rigid job whose agent was skipped
+    for its mask IoU."""
+    place = {"metric_scale": 1.25, "check": {"mean_mask_iou": 0.82}}
+    lidar = {"ok": True, "s": 1.25, "source": {"kind": "rosbag", "topic": "/lidar/points"},
+             "combine": {"views": 8, "views_used": 8, "spread_rel": 0.01}}
+    summary = {"rigid_body": {"mass": 12.4, "com": [0, 0.01, 0.4]}, "rigid_body_covers": ["body", "door", "drawer"],
+               "median": {"youngs_modulus_pa": 4.1e9, "poisson_ratio": 0.3, "density_kg_m3": 990.0},
+               "links_skipped": {"knob": "no occupied voxel"}}
+    parts = {"parts": [{"name": "body", "status": "found"}, {"name": "door", "status": "found"},
+                       {"name": None, "prompt": "handle", "status": "dropped_small", "why": "under 0.3% of the surface"}]}
+    every = ["run/posed.glb", "run/parts.glb", "run/parts.json", "refined.glb", "run/placement.json", "pool/lidar.json",
+             "physics/aligned.glb", "physics/summary.json", "physics/mjcf/mjcf.json", "physics/urdf/model.urdf", "results.zip"]
+    jobs = {
+        "a": {"id": "a", "articulated": True, "agent": "opus", "files": every, "stages": {"agent": {"status": "done"}},
+              "agent_result": ART_RESULT},
+        "w": {"id": "w", "articulated": True, "agent": "none", "agent_result": None,
+              "files": [f for f in every if f not in ("refined.glb", "pool/lidar.json")],
+              "stages": {"agent": {"status": "skipped", "note": "turned off"}}},
+        "r": {"id": "r", "articulated": False, "agent": "astra", "files": ["run/posed.glb", "refined.glb", "run/placement.json",
+                                                                             "physics/summary.json", "results.zip"],
+              "stages": {"agent": {"status": "done"}},
+              "agent_result": {"source": "checkpoint", "verdict": "needs_review", "reason": "seams on the lid", "limitations": [],
+                               "agent": "codex", "model": "gpt-6-astra", "mode": "refinement"}},
+        "s": {"id": "s", "articulated": False, "agent": "astra", "agent_result": None, "files": ["run/posed.glb", "run/placement.json"],
+              "stages": {"agent": {"status": "skipped", "note": "Stage A mean mask IoU 0.41 is below 0.5; physics uses "
+                                                               "run/posed.glb"}}}}
+    replies = {}
+    for i in jobs:
+        replies.update({f"/api/jobs/{i}/file/run/placement.json": place, f"/api/jobs/{i}/file/pool/lidar.json": lidar,
+                        f"/api/jobs/{i}/file/physics/summary.json": summary, f"/api/jobs/{i}/file/run/parts.json": parts,
+                        f"/api/jobs/{i}/parts": {"checks": ["run/parts/sam3/check/0.jpg"]}})
+    replies["/api/jobs/a/file/physics/mjcf/mjcf.json"] = ART_MJCF
+    replies["/api/jobs/w/file/physics/mjcf/mjcf.json"] = {"name": "cabinet", "inertial": ART_MJCF["inertial"]}
+    return jobs, replies
+
+
+def test_app_js_results_have_an_info_button_per_item():
+    """Every row of the Results tab's facts list, every viewer, the viewers' placeholder when the agent was off,
+    every download and the part masks' hint end with an info button: a real button with the text "i", the label
+    "About <item>" and aria-describedby on its note, a hidden tooltip with the item's text from INFO. Every note of
+    INFO shows for some item, each id is unique, and the notes hold the numbers of the code they explain."""
+    jobs, replies = info_jobs()
+    out = run_info_js(INFO_ITEMS + """
+        (async () => {
+          const out = { info: INFO }, jobs = """ + json.dumps(jobs) + """;
+          for (const [id, job] of Object.entries(jobs)) {
+            V = { id };
+            made.length = 0;
+            await renderResults(job);
+            out[id] = items().map(([kind, label, wrap, owner]) => describe(kind, label, wrap, owner));
+          }
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    notes = out.pop("info")
+    assert all(isinstance(v, str) and v.strip() for v in notes.values())
+    used, ids = set(), []
+    for job_id, found in out.items():
+        assert found, job_id
+        for it in found:
+            assert not it.get("missing"), (job_id, it)
+            assert (it["wrap"], it["btn"], it["type"], it["cls"], it["text"]) == ("span", "button", "button", "infobtn", "i"), it
+            assert it["aria"] == "About " + it["label"] and it["describedby"] == it["id"], it
+            assert (it["role"], it["hidden"], it["noteCls"], it["last"]) == ("tooltip", True, "infonote", True), it
+            assert it["key"] in notes and it["note"].strip(), it
+            used.add(it["key"])
+            ids.append(it["id"])
+    assert used == set(notes), set(notes) - used
+    assert len(ids) == len(set(ids))
+    keys = lambda found, kind: [(it["label"], it["key"]) for it in found if it["kind"] == kind]  # noqa: E731
+    assert keys(out["a"], "row") == [
+        ("Metric scale", "metric_scale"), ("Stage A mean mask IoU", "mask_iou"), ("Parts not split off", "parts_lost"),
+        ("Agent", "agent"), ("Agent verdict", "agent_verdict"), ("Agent reason", "agent_reason"),
+        ("Limitation", "limitation"), ("Limitation", "limitation"), ("Joints", "joints"),
+        ("Joint changes by the agent", "joint_changes"), ("Agent tokens", "agent_tokens"),
+        ("Agent cost (estimate)", "agent_cost"), ("Links", "links"), ("Base", "base"), ("Joint of door", "joint"),
+        ("Joint of drawer", "joint"), ("Joint of body", "joint"), ("Joint of knob", "joint_welded"), ("Mass", "mass"),
+        ("Center of mass", "com"), ("Link masses", "link_masses"), ("Young's modulus (median)", "youngs"),
+        ("Poisson ratio (median)", "poisson"), ("Density (median)", "density")]
+    assert keys(out["a"], "viewer") == [("Stage A (MV-SAM3D, posed)", "view_posed"),
+                                        ("Parts (split, before rigging)", "view_parts"),
+                                        ("Parts with joints, by Claude Opus 5.5", "view_rigged")]
+    assert keys(out["a"], "download") == [("results.zip", "dl_zip"), ("posed.glb", "dl_posed"), ("parts.glb", "dl_parts"),
+                                          ("refined.glb", "dl_refined"), ("aligned.glb", "dl_aligned"),
+                                          ("model.urdf", "dl_urdf")]
+    assert keys(out["a"], "masks") == [("Part masks in the views", "part_masks")]
+    assert ("Links", "links_welded") in keys(out["w"], "row") and ("Mass note", "mass_note") in keys(out["w"], "row")
+    assert ("Agent", "agent") in keys(out["w"], "row")
+    assert keys(out["w"], "placeholder") == [("Agent result", "view_none")]  # no agent result to view
+    assert all(not keys(out[j], "placeholder") for j in ("a", "r", "s"))
+    assert keys(out["r"], "viewer")[1] == ("Refined by GPT-6-Astra", "view_refined")
+    assert keys(out["s"], "row") == [("Metric scale", "metric_scale"), ("Stage A mean mask IoU", "mask_iou"),
+                                     ("Agent", "agent")]
+    # The notes give the rules and numbers of the code they explain (read from the code, so a changed constant fails
+    # here), and what a missing value means.
+    import inspect
+
+    from gator.agent import controller, tools
+    from gator.parts import vote
+    from gator.stage_a import part_masks
+    from gator.webapp import agent_step
+    num = lambda x: f"{x:g}"  # noqa: E731
+    usd = lambda x: f"${x:.2f}".removesuffix(".00")  # noqa: E731  4.0 -> $4, 0.2 -> $0.20
+    iou, small = num(steps.MIN_IOU), f"{vote.MIN_AREA:.1%}"
+    score = num(inspect.signature(part_masks.run).parameters["threshold"].default)
+    prices = [f"{usd(controller.PRICES[k])} {w}" for k, w in (("input_tokens", "input"), ("output_tokens", "output"),
+                                                                ("cache_read_input_tokens", "cache read"),
+                                                                ("cache_creation_input_tokens", "cache write"))]
+    facts = {"mask_iou": [f"Below {iou}"],
+             "agent": [f"{num(agent_step.BUDGET_S['refinement'])} s to edit",
+                       f"{num(agent_step.BUDGET_S['articulation'])} s to set", f"up to {num(tools.MAX_EXCLUDED_S)} s",
+                       f"{controller.CLAUDE_EFFORT} effort", f"below {iou}", "skipped"],
+             "mass": ["64^3", "density", "16%", "collision hulls", "left out"],
+             "metric_scale": ["median", "LiDAR", "before MV-SAM3D", "Without LiDAR"],
+             "agent_cost": [*prices, "A ? means", "refusal fallback"], "joints": ["A ? means", "With 0"],
+             "part_masks": [f"at least {score}", "outside the object", "union"],
+             "parts_lost": ["not found", f"at least {score}", f"less than {small}", "still have a part"],
+             "limitation": [f"at most {tools.MAX_LIMITATIONS}"], "link_masses": ["64^3", "median density"],
+             "agent_verdict": [*tools.VERDICTS["refinement"], "fallback_original", "checkpoint", "export"],
+             "agent_reason": ["API key"], "youngs": ["Pa"], "density": ["kg/m^3", "by its volume"],
+             "poisson": ["by its volume"], "view_posed": ["view 0's camera frame", "aligned.glb", "larger than"],
+             "view_rigged": ["without joints"], "dl_aligned": ["cameras' mean up"], "dl_urdf": ["fixed one"],
+             "mass_note": ["MuJoCo, USD and URDF"], "com": ["bottom of the object"], "view_none": ["turned off"]}
+    for key, want in facts.items():
+        assert all(f in notes[key] for f in want), (key, [f for f in want if f not in notes[key]])
+    # One to three short sentences each (a "?" that stands for a missing value ends none).
+    import re
+    sentences = {k: len(re.findall(r"[\w)%'\"][.!?](?:\s|$)", v)) for k, v in notes.items()}
+    assert all(1 <= n <= 3 for n in sentences.values()), sentences
+    assert max(len(v) for v in notes.values()) <= 450
+
+
+def test_app_js_info_notes_open_and_close():
+    """A note shows on hover (a mouse, with a short delay before it closes so the pointer can reach it; a touch is
+    no hover) and on focus. A click, a tap, Enter or Space toggles it: a note that showed before the press hides, and
+    one that did not shows and stays open (a tap that focuses the button first counts as not shown). Escape, a
+    pointer down outside the button and its note, and focus that moves on close it. One note shows at a time. A
+    viewer's or a download's note sits under its button, or above it when only that fits, inside the 375 px window; a
+    facts row's note sits under the row's value or above its label, so it covers neither the value nor another row's
+    info button. It follows a scroll, never goes above over the sticky header, and closes when its button goes under
+    the header. A new rendering of the results, the jobs list and another tab close it."""
+    jobs, replies = info_jobs()
+    out = run_info_js(INFO_ITEMS + """
+        (async () => {
+          const out = {};
+          V = { id: "s" };
+          await renderResults(""" + json.dumps(jobs["s"]) + """);
+          const all = items(), row = (x) => ({ wrap: x[2], ...parts(x[2]), dt: x[3], dd: ddOf(x[3]) });
+          const [A, B] = all.filter((x) => x[0] === "row").map(row);
+          const [W] = all.filter((x) => x[0] === "viewer").map((x) => ({ wrap: x[2], ...parts(x[2]) }));
+          const at = (x, left, top, width, height) => { x.rect = { left, top, width, height }; };
+          // A phone: one column, each value under its label.
+          at(A.dt, 12, 100, 351, 28); at(A.btn, 110, 106, 18, 18); at(A.dd, 12, 128, 351, 28);
+          at(B.dt, 12, 156, 351, 28); at(B.btn, 140, 162, 18, 18); at(B.dd, 12, 184, 351, 28);
+          at(W.btn, 300, 100, 18, 18);
+          for (const x of [A, B, W]) at(x.note, 0, 0, 320, 80);
+          const on = (x) => !x.note.hidden && x.wrap.cls.has("on");
+          const fire = (target, type, e) => listeners.filter((l) => l[0] === target && l[1] === type).forEach((l) => l[2](e));
+          const flush = () => timers.splice(0).forEach((t) => t.f && t.f());
+          const mouse = { pointerType: "mouse" }, touch = { pointerType: "touch" };
+          const press = (x, e) => { fire("document", "pointerdown", { target: x.btn }); x.btn.onpointerdown(e); };
+          const click = (x, detail) => x.btn.onclick({ detail });  // detail 0: Enter or Space
+          const pos = (x) => [x.note.style.left, x.note.style.top];
+          out.listeners = listeners.filter((l) => ["keydown", "pointerdown", "scroll"].includes(l[1]))
+            .map((l) => [l[0], l[1], l[2].name, l[3] === true || !!(l[3] && l[3].capture)]);
+          out.start = shown();
+          // Hover: open at once, closed TIP_DELAY ms after the pointer leaves, kept when it comes back (to the note).
+          A.wrap.onpointerenter(mouse);
+          out.hover = [on(A), ...pos(A), shown().length];
+          A.wrap.onpointerleave(mouse);
+          out.leave = [on(A), timers.map((t) => t.ms)];
+          flush();
+          out.left = on(A);
+          A.wrap.onpointerenter(mouse);
+          A.wrap.onpointerleave(mouse);
+          A.wrap.onpointerenter(mouse);
+          flush();
+          out.back = on(A);
+          A.wrap.onpointerleave(mouse);
+          flush();
+          A.wrap.onpointerenter(touch);
+          out.touch = on(A);
+          // Focus: open; another button's focus opens its note alone; blur closes.
+          A.btn.onfocus();
+          out.focus = [on(A), on(B)];
+          A.btn.onblur();
+          B.btn.onfocus();
+          out.other = [on(A), on(B), shown().length];
+          B.btn.onblur();
+          out.blur = on(B);
+          // A tap that does not focus the button (Safari) opens the note and keeps it; a second tap closes it.
+          press(A, touch);
+          click(A, 1);
+          A.wrap.onpointerleave(mouse);
+          flush();
+          out.tap = on(A);
+          press(A, touch);
+          click(A, 1);
+          out.tap2 = on(A);
+          // A tap that focuses the button first (Chrome): focus opens, the click keeps it; a second tap closes it.
+          press(A, touch);
+          A.btn.onfocus();
+          click(A, 1);
+          out.chromeTap = on(A);
+          press(A, touch);
+          click(A, 1);
+          out.chromeTap2 = on(A);
+          A.btn.onblur();
+          // A mouse: a click on a hovered note closes it; a second click opens it and keeps it after the pointer leaves.
+          A.wrap.onpointerenter(mouse);
+          press(A, mouse);
+          A.btn.onfocus();
+          click(A, 1);
+          out.mouse = on(A);
+          press(A, mouse);
+          click(A, 1);
+          A.wrap.onpointerleave(mouse);
+          flush();
+          out.mouse2 = on(A);
+          // The focus moves on from a clicked note: it closes.
+          A.btn.onblur();
+          out.moveOn = on(A);
+          // The keyboard: Tab opens the note, Enter closes it, Enter again opens it.
+          A.btn.onfocus();
+          click(A, 0);
+          out.key = on(A);
+          click(A, 0);
+          out.key2 = on(A);
+          A.btn.onblur();
+          // A press with no click (the pointer slid off) does not change what a later key does.
+          press(A, mouse);
+          A.btn.onfocus();
+          click(A, 0);
+          out.stale = on(A);
+          A.btn.onblur();
+          // Escape closes; another key does not.
+          press(A, touch);
+          click(A, 1);
+          fire("document", "keydown", { key: "Enter" });
+          out.enter = on(A);
+          fire("document", "keydown", { key: "Escape" });
+          out.escape = on(A);
+          // A pointer down on the button or the note keeps it; anywhere else closes it.
+          press(A, touch);
+          click(A, 1);
+          fire("document", "pointerdown", { target: A.note });
+          fire("document", "pointerdown", { target: A.btn });
+          out.inside = on(A);
+          fire("document", "pointerdown", { target: B.btn });
+          out.outside = on(A);
+          // One at a time: a clicked note closes when another one opens on hover.
+          press(A, touch);
+          click(A, 1);
+          B.wrap.onpointerenter(mouse);
+          out.one = [on(A), on(B), shown().length];
+          B.wrap.onpointerleave(mouse);
+          flush();
+          // A row on a phone: under its value (12 px in), and above its label near the bottom of the window.
+          press(A, touch);
+          click(A, 1);
+          out.phone = [...pos(A), meets(A.note, A.dd), meets(A.note, A.btn), meets(A.note, A.dt)];
+          at(A.dt, 12, 560, 351, 28); at(A.btn, 110, 566, 18, 18); at(A.dd, 12, 588, 351, 28);
+          fire("window", "scroll", {});
+          out.phoneAbove = [...pos(A), meets(A.note, A.dd), meets(A.note, A.btn), meets(A.note, A.dt)];
+          fire("document", "keydown", { key: "Escape" });
+          // A row at desktop width: from the value's left edge, under the row, clear of the column of info buttons, so
+          // the pointer goes straight down from one button to the next.
+          window.innerWidth = document.documentElement.clientWidth = 1280;
+          window.innerHeight = 800;
+          at(A.dt, 16, 100, 190, 34); at(A.btn, 182, 108, 18, 18); at(A.dd, 222, 100, 500, 34);
+          at(B.dt, 16, 134, 190, 34); at(B.btn, 160, 142, 18, 18); at(B.dd, 222, 134, 500, 34);
+          at(A.note, 0, 0, 320, 120);
+          A.wrap.onpointerenter(mouse);
+          out.desk = [...pos(A), meets(A.note, A.dd), meets(A.note, B.btn), meets(A.note, B.dt)];
+          A.wrap.onpointerleave(mouse);
+          B.wrap.onpointerenter(mouse);
+          out.deskNext = [on(A), on(B)];
+          B.wrap.onpointerleave(mouse);
+          flush();
+          window.innerWidth = document.documentElement.clientWidth = 375;
+          window.innerHeight = 700;
+          // A viewer's note sits under its button, or above it near the bottom of the window, 12 px in near the left edge.
+          W.wrap.onpointerenter(mouse);
+          out.button = pos(W);  // 375 - 12 - 320 = 43 px from the left, 100 + 18 + 6 = 124 px from the top
+          W.wrap.onpointerleave(mouse);
+          flush();
+          at(W.btn, 4, 650, 18, 18);
+          press(W, touch);
+          click(W, 1);
+          out.above = pos(W);
+          at(W.btn, 300, 100, 18, 18);
+          fire("window", "scroll", {});
+          out.scrolled = pos(W);
+          // A narrow note sits centred under its button.
+          fire("document", "keydown", { key: "Escape" });
+          at(W.note, 0, 0, 100, 40);
+          at(W.btn, 150, 100, 18, 18);
+          press(W, touch);
+          click(W, 1);
+          out.centred = pos(W);
+          fire("document", "keydown", { key: "Escape" });
+          at(W.note, 0, 0, 320, 80);
+          // The sticky header (48 px): a note does not go above over it, and it closes when its button goes under it.
+          at($("header"), 0, 0, 375, 48);
+          window.innerHeight = 220;
+          at(W.btn, 300, 120, 18, 18);
+          press(W, touch);
+          click(W, 1);
+          out.underHeader = pos(W);
+          window.innerHeight = 700;
+          at(W.btn, 300, 60, 18, 18);
+          fire("window", "scroll", {});
+          out.belowHeader = on(W);
+          at(W.btn, 300, 20, 18, 18);
+          fire("window", "scroll", {});
+          out.gone = [on(W), tip === null];
+          at($("header"), 0, 0, 0, 0);
+          await renderResults(""" + json.dumps(jobs["s"]) + """);
+          out.redrawn = [on(A), tip === null, shown()];
+          // The jobs list (show) and another tab close an open note too.
+          const [C, D] = items().filter((x) => x[0] === "row").map((x) => ({ wrap: x[2], ...parts(x[2]) }));
+          for (const x of [C, D]) { at(x.btn, 300, 100, 18, 18); at(x.note, 0, 0, 320, 80); }
+          press(C, touch);
+          click(C, 1);
+          out.page = [on(C)];
+          show("list");
+          out.page.push(on(C), tip === null);
+          V.tab = "results";
+          press(D, touch);
+          click(D, 1);
+          out.tab = [on(D)];
+          selectTab("log");
+          out.tab.push(on(D), tip === null);
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    assert out["listeners"] == [["document", "keydown", "tipKey", False], ["document", "pointerdown", "tipOutside", True],
+                                ["window", "scroll", "tipPlace", True]]
+    assert out["start"] == []
+    # A row's note: 12 px from the left (its value's edge), 6 px under its value (128 + 28 + 6).
+    assert out["hover"] == [True, "12px", "162px", 1]
+    assert out["leave"] == [True, [150]] and out["left"] is False and out["back"] is True and out["touch"] is False
+    assert out["focus"] == [True, False] and out["other"] == [False, True, 1] and out["blur"] is False
+    assert out["tap"] is True and out["tap2"] is False
+    assert out["chromeTap"] is True and out["chromeTap2"] is False
+    assert out["mouse"] is False and out["mouse2"] is True and out["moveOn"] is False
+    assert out["key"] is False and out["key2"] is True and out["stale"] is False
+    assert out["enter"] is True and out["escape"] is False
+    assert out["inside"] is True and out["outside"] is False
+    assert out["one"] == [False, True, 1]
+    assert out["phone"] == ["12px", "162px", False, False, False]
+    assert out["phoneAbove"] == ["12px", f"{560 - 6 - 80}px", False, False, False]  # above the whole label (dt)
+    assert out["desk"] == ["222px", f"{134 + 6}px", False, False, False]
+    assert out["deskNext"] == [False, True]
+    assert out["button"] == ["43px", "124px"]
+    assert out["above"] == ["12px", f"{650 - 6 - 80}px"] and out["scrolled"] == ["43px", "124px"]
+    assert out["centred"] == [f"{150 + 9 - 50}px", "124px"]
+    assert out["underHeader"] == ["43px", f"{120 + 18 + 6}px"]  # above would be 34 px, under the 48 px header
+    assert out["belowHeader"] is True and out["gone"] == [False, True]
+    assert out["redrawn"] == [False, True, []]
+    assert out["page"] == [True, False, True] and out["tab"] == [True, False, True]
+
+
+def test_style_css_info_buttons():
+    """The info button is a small circle whose larger target takes no room; on a touch screen it stays small (no
+    44 px min-height). Its note is fixed to the window above the header, at most the window less 24 px wide, and
+    uses the color tokens, with a shadow token for each scheme."""
+    import re
+    css = (server.STATIC / "style.css").read_text()
+
+    def rule(selector, text=css):
+        m = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", text)
+        assert m, selector
+        return m.group(1)
+    btn = rule("button.infobtn")
+    assert all(x in btn for x in ("width: 18px", "height: 18px", "min-height: 0", "border-radius: 50%", "position: relative"))
+    assert "position: absolute" in rule("button.infobtn::before")
+    note = rule(".infonote")
+    assert all(x in note for x in ("position: fixed", "max-width: min(320px, calc(100vw - 24px))", "z-index: 30",
+                                   "var(--surface)", "var(--fg)", "var(--line-strong)", "var(--shadow)"))
+    coarse = css[css.index("@media (pointer: coarse)"):]
+    assert "min-height: 0" in rule("button.infobtn", coarse)
+    assert "bottom: -6px" in rule("dt button.infobtn::before", coarse)  # a row's target stops above its value
+    assert "display: flex" in rule(".viewers figcaption")  # a long viewer name wraps beside its button
+    dark = css[css.index("@media (prefers-color-scheme: dark)"):css.index("* { box-sizing")]
+    assert "--shadow:" in css[:css.index("@media (prefers-color-scheme: dark)")] and "--shadow:" in dark

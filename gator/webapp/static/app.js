@@ -165,6 +165,7 @@ function refocus() {
 
 function show(id) {
   for (const x of ["list", "job"]) $("#" + x).hidden = x !== id;
+  tipClose();  // an open info note of the Results tab goes with its page
 }
 // A job page's hash, "#/job/<id>" or "#/job/<id>/<tab>": [id, the tab's name or null]; null for another hash.
 function jobHash(hash) {
@@ -340,6 +341,7 @@ async function drawJob(job) {  // refresh's panels: the waiting panels and what 
   // The results, once a build made them; a new build hides the old ones.
   const results = !ACTIVE.includes(job.status) && job.files.includes("run/posed.glb");
   if (results) await renderResults(job);
+  else tipClose();  // its button hides with the old results
   $("#resultsbody").hidden = !results;
   $("#resultsnone").hidden = results;
   // The input's preview video, and the views used once they are selected (in review, during the build and after).
@@ -373,6 +375,7 @@ function selectTab(name, pick) {
   const old = V.tab && V.tab !== name ? $("#" + TABS[V.tab]) : null, had = document.activeElement, tab = $("#tab-" + name);
   const lost = !!had && had !== tab && ((!!old && old.contains(had) === true) || $("#tabs").contains(had) === true);
   if (V.tab === "inputs" && name !== "inputs" && V.video) V.video.pause();
+  if (V.tab !== name) tipClose();  // an open info note of the Results tab
   V.tab = name;
   V.pick = pick ? name : null;
   for (const n of TAB_NAMES) {
@@ -1255,16 +1258,214 @@ $("#partsbuild").onclick = () => {  // the VLM's list as it is (continue), or th
 
 // ---- 5. results ----
 
+// What each item of the Results tab is and how it was found, shown by its info button (info()): the rows of the facts
+// list, the viewers and the downloads. One to three plain sentences each. Sources: build_plan.md notes 4b, 5, 9, 11
+// and 12, and the code they name (mvsam3d.place, lidar_scale, steps, agent_step, controller, vomp_run, mjcf, urdf).
+const INFO = {
+  metric_scale: "With LiDAR, each view's scale is the median, over the LiDAR points inside the object's mask, of the " +
+    "LiDAR depth divided by Depth Anything 3's depth at the same pixel. The number shown is the weighted median of " +
+    "the views that agree, and select multiplies DA3's depth and camera positions by it before MV-SAM3D, so later " +
+    "sizes are in meters. Without LiDAR, the sizes come from DA3's own depth estimate, which is not measured.",
+  mask_iou: "For each view, the app draws the posed mesh from that view's camera and compares it with the SAM 3 mask: " +
+    "the shared area divided by the area of both together, from 0 to 1. This number is the mean over the views used. " +
+    "Below 0.5 the agent is skipped, and physics uses the Stage A mesh or its split parts.",
+  parts_lost: "Each entry is a group of SAM 3 masks of a listed name that did not become a part, so a name can show " +
+    "here and still have a part. \"not found\" means that no mask of the name was left in any view, because SAM 3 " +
+    "found none with a score of at least 0.4 or the vote dropped them all. Otherwise the face vote gives the reason: " +
+    "the group covers less than 0.3% of the surface, or fewer than half of the views that see it well and found the " +
+    "name hold it.",
+  agent: "GPT-6-Astra (through the Codex CLI) or Claude Opus 5.5 (through the Anthropic API), both at xhigh effort. It " +
+    "has 600 s to edit the Stage A mesh in Blender, or 900 s to set the joints of an articulated object's split " +
+    "parts, and time spent exporting GLBs does not count, up to 600 s. It is skipped when it is turned off or the " +
+    "mean mask IoU is below 0.5, and physics then uses the Stage A mesh or the split parts without joints.",
+  agent_verdict: "The agent's verdict when it called finish: complete, unchanged or needs_review for a refined mesh, " +
+    "or articulated, unchanged or needs review for joints. In brackets is where the result came from: finish, " +
+    "checkpoint, export or fallback_original. A checkpoint or an export means that the session ended without a " +
+    "valid finish, so the verdict is needs review; fallback_original means that the agent left no valid result, so " +
+    "its input was kept.",
+  agent_reason: "The agent's own words when it called finish. When the session ended without a valid finish, it is " +
+    "the defect noted at the last checkpoint, or the app's note on the export or the fallback. When the agent's " +
+    "result held your API key, the reason and the limitations are left out.",
+  limitation: "A flaw that the agent says is still in its result, written when it called finish. The agent can list " +
+    "at most 3.",
+  joints: "The number of joints in the GLB that the agent delivered, fixed joints included. With 0, physics welds the " +
+    "parts into one body. A ? means that the app could not read the GLB's joints.",
+  joint_changes: "The joint changes (set_joint calls that set or removed a joint) that the app accepted during the " +
+    "session. A change that added a problem to the joint tree was refused and undone, and it is not counted.",
+  agent_tokens: "The tokens that the Claude agent used over the whole session, from its log: new input, output, " +
+    "cache reads and cache writes. A turn is one reply of the model.",
+  agent_cost: "An estimate from the token counts at Claude Opus 5.5's prices per million tokens: $4 input, $20 " +
+    "output, $0.20 cache read and $5 cache write. In a turn with a refusal fallback, both tries count, each at its " +
+    "own model's prices, but a try that failed and was sent again does not, so the estimate can be low. A ? means " +
+    "that the log gave no cost; your Anthropic bill gives the real cost.",
+  links: "The bodies of the MuJoCo model (mjcf.json), one for each part of the GLB that physics used. Each link " +
+    "has its own mass, which the Link masses row lists.",
+  links_welded: "The GLB that physics used has no joints, so the MuJoCo, USD and URDF models hold the whole object as " +
+    "one rigid body. This happens when the agent is off or skipped, or when it delivered no joints.",
+  base: "The link that the other links hang from. It is fixed to the world when the agent gave it a fixed joint to " +
+    "the world, and otherwise it can move freely.",
+  joint: "How this part moves on its parent, from the joint that the agent set: it turns about an axis (revolute), " +
+    "slides along one (prismatic) or is fixed. The range runs from the lower to the upper limit, where 0 is the " +
+    "part's pose in the mesh.",
+  joint_welded: "The agent gave this part no joint, so physics welds it to the named link: the nearest part above " +
+    "it in the GLB's node tree, or else the base.",
+  mass: "VoMP predicts a density for every occupied voxel of the aligned mesh on a 64^3 grid, and the mass is the sum " +
+    "of density times voxel volume. An articulated object adds up its links, each on its own grid; a link with no " +
+    "VoMP result counts with its collision hulls filled at the median density when the parts have joints, and is " +
+    "left out when they have none. Mass grows with the size cubed, so a 5% size error gives about a 16% mass error.",
+  com: "The mass-weighted mean of the voxel centers (and of any link filled from its collision hulls), as x, y and z " +
+    "in meters. The frame is that of the physics models: z up, x along the long side, and the origin at the center " +
+    "of the footprint at the bottom of the object.",
+  link_masses: "Each link's mass from VoMP, each link on its own 64^3 grid. A link with no VoMP result, such as a " +
+    "thin lid with no occupied voxel, gets its collision hulls filled at the object's median density instead.",
+  mass_note: "VoMP gave no result for these links, for example a thin lid with no occupied voxel on its 64^3 grid. " +
+    "The mass and center of mass above leave them out, and so do the MuJoCo, USD and URDF models, which still keep " +
+    "their shapes.",
+  youngs: "Stiffness: the median of VoMP's predicted Young's modulus over the object's voxels, in pascals (1 GPa is " +
+    "1e9 Pa). For an articulated object, the voxels of all links count, each by its volume. In our tests VoMP v1.1 " +
+    "gave about 4 GPa to most objects, steel and glass included.",
+  poisson: "How much the material bulges sideways when it is squeezed, with no unit (usually 0 to 0.5). It is the " +
+    "median of VoMP's prediction over the object's voxels; for an articulated object, each voxel counts by its volume.",
+  density: "The median of VoMP's predicted density over the object's voxels, in kg/m^3; for an articulated object, " +
+    "each voxel counts by its volume. The mass uses each voxel's own density, not this median. In our tests VoMP " +
+    "v1.1 gave about 1,000 kg/m^3 to most objects.",
+  view_posed: "MV-SAM3D's mesh from all the views used, with its size, position and a small turn fitted to the SAM 3 " +
+    "masks. It is in view 0's camera frame, where the viewer's up is the camera's forward axis, so the object looks " +
+    "tipped over; aligned.glb is the upright copy. The size is the box around it along view 0's camera axes, in cm, " +
+    "so a tilted object gives a box larger than the object.",
+  view_parts: "The posed mesh cut into parts: SAM 3 masked each part's name in the views, the masks voted on every " +
+    "face, and Blender cut the mesh and filled the holes. The parts have no joints yet, and they are in the same " +
+    "frame as the Stage A mesh. The size is the box around them along view 0's camera axes, in cm.",
+  view_refined: "The agent's GLB, in the same frame as the Stage A mesh: that mesh after the agent edited it in " +
+    "Blender, or as it was when the verdict is unchanged. Physics uses it. The size is the box around it along view " +
+    "0's camera axes, in cm.",
+  view_rigged: "The split parts as the agent delivered them, in one GLB in the Stage A mesh's frame, with the joints " +
+    "it set (none when the caption says without joints). Physics makes each part a link and each joint a joint, " +
+    "welds a part without a joint to the part above it, and makes one body when there are no joints. The size is " +
+    "the box around it along view 0's camera axes, in cm.",
+  view_none: "The agent was turned off for this job, so it made no refined mesh and set no joints. Physics uses the " +
+    "Stage A mesh as it is, or for an articulated object the split parts welded into one body.",
+  dl_zip: "The main outputs in one file: the MJCF, USD and URDF models with their meshes, the GLBs, summary.json, " +
+    "placement.json, selection.json and the agent result, plus lidar.json and parts.json when the job has them. The " +
+    "last stage (package) writes it. A file that holds your API key is left out.",
+  dl_posed: "The Stage A mesh in view 0's camera frame, in meters, with the scale from LiDAR when LiDAR is on, else " +
+    "from Depth Anything 3's estimate.",
+  dl_parts: "The split parts in one GLB, one node per part, without joints, in the same frame as posed.glb.",
+  dl_refined: "The agent's GLB, in the same frame as posed.glb. For an articulated object, each part's joint is in " +
+    "its node's extras (gator_joint).",
+  dl_aligned: "The GLB that physics used, turned upright, with the bottom at 0, the footprint centered on the origin " +
+    "and the long side on x (z up in MuJoCo, y up in glTF). Up is the object's own axis closest to the up of the " +
+    "table or floor under it in view 0, or to the cameras' mean up when no plane fits there. Materials that let " +
+    "light through are made opaque, because VoMP rejects them.",
+  dl_urdf: "A URDF of the object, built from the MuJoCo model's meshes and masses: one link when the GLB has no " +
+    "joints, else one link per part. Each part but the base gets a joint to its parent, a fixed one when the agent " +
+    "gave it none, and a fixed base adds a world link. Its mesh files are only in results.zip (urdf/meshes), so this " +
+    "file alone does not load.",
+  part_masks: "SAM 3 ran on each view used with each part's name as the prompt, the base included, and every mask " +
+    "with a score of at least 0.4 is shown. The face vote starts from all of them, then drops the masks that lie " +
+    "outside the object, cover the whole object, are the union of two or more others, or repeat a mask with a higher " +
+    "score.",
+};
+
+// The info button of an item: a small "i" after its label, and its note (INFO[key]) that shows on hover (a mouse or a
+// pen) and on keyboard focus. A click, a tap, Enter or Space toggles it: it shows and stays open, or it hides when it
+// showed. Escape, a click elsewhere and focus that moves on close it. One note shows at a time. The note is fixed to
+// the window, so it moves no layout and is not clipped by its figure; it stays TIP_EDGE px inside the window's edges.
+// row: for a facts row, a function that gives its dd; the note goes under that value or above the row's label, from
+// the value's left edge, so the value and the column of info buttons stay in view. Other notes go under or above
+// their button.
+const TIP_EDGE = 12, TIP_GAP = 6, TIP_DELAY = 150;  // px from the window's edge, px from the button, ms to reach the note
+let tipN = 0, tip = null, tipTimer = null;  // the notes' ids; the open note {t, pin, hover, focus}; the hover's close
+function info(key, label, row) {
+  const text = INFO[key];
+  if (!text) return null;
+  const id = "note-" + ++tipN, t = { row: row || null, down: null };
+  const hover = (e) => !e || e.pointerType !== "touch";  // a tap is a click, not a hover
+  t.note = h("span", { class: "infonote", id, role: "tooltip", hidden: true }, text);
+  t.btn = h("button", { type: "button", class: "infobtn", "aria-label": "About " + label, "aria-describedby": id,
+    onpointerdown: () => { t.down = !!tip && tip.t === t; },  // shown before the press, which may focus the button
+    onclick: (e) => tipClick(t, e), onfocus: () => tipOn(t, "focus"), onblur: () => tipOff(t, "focus") }, "i");
+  t.wrap = h("span", { class: "info", onpointerenter: (e) => { if (hover(e)) tipOn(t, "hover"); },
+    onpointerleave: (e) => { if (hover(e)) tipOff(t, "hover"); } }, t.btn, t.note);
+  return t.wrap;
+}
+function tipWait(fn) {  // fn after TIP_DELAY ms (the hover's close); tipWait() cancels it
+  if (tipTimer !== null) clearTimeout(tipTimer);
+  tipTimer = fn ? setTimeout(() => { tipTimer = null; fn(); }, TIP_DELAY) : null;
+}
+function tipOn(t, why) {  // why: "hover", "focus" or "pin" (a click)
+  tipWait();
+  if (!tip || tip.t !== t) {
+    tipClose();
+    tip = { t, pin: false, hover: false, focus: false };
+    t.note.hidden = false;
+    t.wrap.classList.toggle("on", true);
+  }
+  tip[why] = true;
+  tipPlace();
+}
+function tipOff(t, why) {
+  if (!tip || tip.t !== t) return;
+  tip[why] = false;
+  if (why === "focus") tip.pin = false;  // the focus moved on: a note kept open by a click closes too
+  if (tip.pin || tip.hover || tip.focus) return;
+  if (why !== "hover") tipClose();
+  else tipWait(() => { if (tip && tip.t === t && !tip.pin && !tip.hover && !tip.focus) tipClose(); });  // time to reach the note
+}
+// A click of a pointer (detail 1 or more) goes by the note as it was at pointerdown, before the press focused the
+// button (a tap in Chrome shows the note by focus first); a click of a key (detail 0) by the note as it is.
+function tipClick(t, e) {
+  const shown = e && e.detail > 0 && t.down !== null ? t.down : !!tip && tip.t === t;
+  t.down = null;
+  if (shown) tipClose();
+  else tipOn(t, "pin");
+}
+function tipClose() {
+  tipWait();
+  if (!tip) return;
+  tip.t.note.hidden = true;
+  tip.t.wrap.classList.toggle("on", false);
+  tip = null;
+}
+function tipPlace() {  // under its value or button, or above when only that fits; inside the window, below the header
+  if (!tip) return;
+  const { btn, note, wrap } = tip.t, row = tip.t.row && tip.t.row();
+  if (btn.isConnected === false) { tipClose(); return; }
+  const vw = document.documentElement.clientWidth || window.innerWidth, vh = window.innerHeight;
+  const head = $("header") ? $("header").getBoundingClientRect().bottom : 0, b = btn.getBoundingClientRect();
+  if (b.bottom <= head || b.top >= vh) { tipClose(); return; }  // the button went under the sticky header or off the window
+  note.style.left = note.style.top = "0px";  // measured at the corner, at its own width
+  const n = note.getBoundingClientRect(), r = row ? row.getBoundingClientRect() : b;
+  const label = row && wrap.parentElement ? wrap.parentElement.getBoundingClientRect() : b;  // a row's dt
+  const x = row ? r.left : b.left + b.width / 2 - n.width / 2;
+  const left = Math.max(TIP_EDGE, Math.min(x, vw - TIP_EDGE - n.width));
+  const above = Math.min(r.top, label.top, b.top) - TIP_GAP - n.height, below = Math.max(r.bottom, b.bottom) + TIP_GAP;
+  const top = below + n.height > vh - TIP_EDGE && above >= Math.max(TIP_EDGE, head + TIP_GAP) ? above : below;
+  note.style.left = Math.round(left) + "px";
+  note.style.top = Math.round(top) + "px";
+}
+function tipKey(e) {
+  if (e.key === "Escape" && tip) tipClose();
+}
+function tipOutside(e) {  // a click or a tap anywhere but the open note and its button
+  if (tip && !(e.target && tip.t.wrap.contains(e.target))) tipClose();
+}
+document.addEventListener("keydown", tipKey);
+document.addEventListener("pointerdown", tipOutside, true);
+window.addEventListener("scroll", tipPlace, { capture: true, passive: true });  // any box that scrolls moves the button
+window.addEventListener("resize", tipPlace);
+
 async function renderResults(job) {
+  tipClose();  // its button is about to go
   const has = (p) => job.files.includes(p), json = async (p) => has(p) ? (await fetch(file(p))).json() : null;
   const cm = (x) => (100 * x).toFixed(0);
-  const viewer = (p, title) => {
-    const cap = h("figcaption", {}, title), fig = h("figure", {}, cap);
+  const viewer = (p, title, key) => {
+    const name = h("span", {}, title), cap = h("figcaption", {}, name, info(key, title)), fig = h("figure", {}, cap);
     fig.append(h("model-viewer", { src: file(p), "camera-controls": true, "environment-image": "neutral", "shadow-intensity": "1",
       "interaction-prompt": "none", alt: title,
       onload: (e) => {  // the size of the model, in the GLB's meters
         const d = e.target.getDimensions && e.target.getDimensions();
-        if (d) cap.textContent = `${title}: ${cm(d.x)} x ${cm(d.y)} x ${cm(d.z)} cm`;
+        if (d) name.textContent = `${title}: ${cm(d.x)} x ${cm(d.y)} x ${cm(d.z)} cm`;
       },
       onerror: () => fig.replaceChildren(cap, h("p", { class: "msg" }, `Could not show ${p.split("/").pop()}: `,
         h("a", { href: file(p), download: p.split("/").pop() }, "download it"), ".")) }));
@@ -1276,65 +1477,76 @@ async function renderResults(job) {
   const by = ran ? ", by " + ran : "";
   const notRefined = art ? "no joints (agent turned off), so physics welds the parts into one body" : "not refined (agent turned off)";
   const refined = has("refined.glb") ? viewer("refined.glb", !rigged ? (ran ? "Refined by " + ran : "Refined by the agent")
-    : a.joints_delivered > 0 ? "Parts with joints" + by : "Agent result without joints" + by) : null;
-  const split = has("run/parts.glb") ? viewer("run/parts.glb", "Parts (split, before rigging)") : null;
+    : a.joints_delivered > 0 ? "Parts with joints" + by : "Agent result without joints" + by, rigged ? "view_rigged" : "view_refined")
+    : null;
+  const split = has("run/parts.glb") ? viewer("run/parts.glb", "Parts (split, before rigging)", "view_parts") : null;
   $("#viewers").classList.toggle("single", !refined && !split);
-  fill($("#viewers"), viewer("run/posed.glb", "Stage A (MV-SAM3D, posed)"), split, refined,
-    !refined && off ? h("p", { class: "hint" }, notRefined) : null);
+  fill($("#viewers"), viewer("run/posed.glb", "Stage A (MV-SAM3D, posed)", "view_posed"), split, refined,
+    !refined && off ? h("p", { class: "hint" }, notRefined, info("view_none", "Agent result")) : null);
   const [place, phys, mj, parts, pr, lid] = await Promise.all([json("run/placement.json"), json("physics/summary.json"),
     art ? json("physics/mjcf/mjcf.json") : null, art ? json("run/parts.json") : null,
     art && has("run/parts.json") ? api(`/api/jobs/${V.id}/parts`).catch(() => null) : null, json("pool/lidar.json")]);
+  // [label, value, the key of its note in INFO]
   const rows = [], num = (x, d = 3) => x == null ? "?" : Number(x).toPrecision(d);
-  if (place) rows.push(["Metric scale", metricScale(place, lid, job)]);
-  if (place) rows.push(["Stage A mean mask IoU", num(place.check && place.check.mean_mask_iou)]);
+  if (place) rows.push(["Metric scale", metricScale(place, lid, job), "metric_scale"]);
+  if (place) rows.push(["Stage A mean mask IoU", num(place.check && place.check.mean_mask_iou), "mask_iou"]);
   const lost = parts ? (parts.parts || []).filter((x) => x.status !== "found") : [];  // not_found, dropped_small, unconfirmed
-  if (lost.length) rows.push(["Parts not split off", lost.map((x) => `${x.prompt} (${x.why || x.status.replace("_", " ")})`).join("; ")]);
-  if (job.stages.agent.status === "skipped") rows.push(["Agent", off ? notRefined : "skipped: " + job.stages.agent.note]);
+  if (lost.length) rows.push(["Parts not split off", lost.map((x) => `${x.prompt} (${x.why || x.status.replace("_", " ")})`).join("; "), "parts_lost"]);
+  if (job.stages.agent.status === "skipped") rows.push(["Agent", off ? notRefined : "skipped: " + job.stages.agent.note, "agent"]);
   else if (a) {
-    if (a.model) rows.push(["Agent", `${ran || a.agent} (${a.model})`]);
-    rows.push(["Agent verdict", `${rigged && VERDICT[a.verdict] || a.verdict} (${a.source})`], ["Agent reason", a.reason || ""]);
-    for (const l of a.limitations || []) rows.push(["Limitation", l]);
-    if (rigged) rows.push(["Joints", a.joints_delivered != null ? String(a.joints_delivered) : "?"]);
-    if (rigged && a.counts && a.counts.joints != null) rows.push(["Joint changes by the agent", String(a.counts.joints)]);
+    if (a.model) rows.push(["Agent", `${ran || a.agent} (${a.model})`, "agent"]);
+    rows.push(["Agent verdict", `${rigged && VERDICT[a.verdict] || a.verdict} (${a.source})`, "agent_verdict"],
+      ["Agent reason", a.reason || "", "agent_reason"]);
+    for (const l of a.limitations || []) rows.push(["Limitation", l, "limitation"]);
+    if (rigged) rows.push(["Joints", a.joints_delivered != null ? String(a.joints_delivered) : "?", "joints"]);
+    if (rigged && a.counts && a.counts.joints != null) rows.push(["Joint changes by the agent", String(a.counts.joints), "joint_changes"]);
     if (a.tokens) {
       const t = a.tokens;
       rows.push(["Agent tokens", `${count(t.input_tokens)} input, ${count(t.output_tokens)} output, ` +
         `${count(t.cache_read_input_tokens)} cache read, ${count(t.cache_creation_input_tokens)} cache write` +
-        (a.turns != null ? ` in ${a.turns} turns` : "")],
-        ["Agent cost (estimate)", a.cost_usd != null ? "about $" + Number(a.cost_usd).toFixed(2) : "?"]);
+        (a.turns != null ? ` in ${a.turns} turns` : ""), "agent_tokens"],
+        ["Agent cost (estimate)", a.cost_usd != null ? "about $" + Number(a.cost_usd).toFixed(2) : "?", "agent_cost"]);
     }
   }
   if (mj && mj.links) {  // the MJCF of an object with joints: a body per link
     const names = Object.keys(mj.links), deg = (x) => (x * 180 / Math.PI).toFixed(0), cmr = (x) => (100 * x).toFixed(1);
-    rows.push(["Links", `${names.length}: ${names.join(", ")}`],
-      ["Base", `${mj.root}, ${mj.fixed_base ? "fixed to the world" : "free to move"}`]);
+    rows.push(["Links", `${names.length}: ${names.join(", ")}`, "links"],
+      ["Base", `${mj.root}, ${mj.fixed_base ? "fixed to the world" : "free to move"}`, "base"]);
     for (const j of mj.joints || []) rows.push([`Joint of ${j.child}`, j.type === "revolute"
       ? `turns on ${j.parent}, ${deg(j.range[0])} to ${deg(j.range[1])} deg` : j.type === "prismatic"
-        ? `slides on ${j.parent}, ${cmr(j.range[0])} to ${cmr(j.range[1])} cm` : `fixed to ${j.parent}`]);
-    for (const [k, to] of Object.entries(mj.welded || {})) rows.push([`Joint of ${k}`, `none, so it is welded to ${to}`]);
-  } else if (mj && art) rows.push(["Links", "1: the parts have no joints, so physics welds them into one body"]);
+        ? `slides on ${j.parent}, ${cmr(j.range[0])} to ${cmr(j.range[1])} cm` : `fixed to ${j.parent}`, "joint"]);
+    for (const [k, to] of Object.entries(mj.welded || {})) rows.push([`Joint of ${k}`, `none, so it is welded to ${to}`, "joint_welded"]);
+  } else if (mj && art) rows.push(["Links", "1: the parts have no joints, so physics welds them into one body", "links_welded"]);
   if (phys) {
     const whole = mj && mj.links ? mj.inertial : null;  // every link, also one that VoMP could not voxelize
     const rb = whole || phys.rigid_body || {}, md = phys.median || {}, skipped = Object.keys(phys.links_skipped || {});
-    rows.push(["Mass", num(rb.mass) + " kg"], ["Center of mass", (rb.com || []).map((x) => num(x)).join(", ") + " m"]);
+    rows.push(["Mass", num(rb.mass) + " kg", "mass"], ["Center of mass", (rb.com || []).map((x) => num(x)).join(", ") + " m", "com"]);
     if (whole) rows.push(["Link masses", Object.entries(mj.links).map(([k, l]) => `${k} ${num(l.inertial.mass)} kg` +
-      (l.source === "hull" ? " (from its collision hulls)" : "")).join(", ")]);
+      (l.source === "hull" ? " (from its collision hulls)" : "")).join(", "), "link_masses"]);
     else if (skipped.length) rows.push(["Mass note", `VoMP could not voxelize ${skipped.join(", ")}, so the mass covers only ` +
-      `${(phys.rigid_body_covers || []).join(", ")}.`]);
-    rows.push(["Young's modulus (median)", num(md.youngs_modulus_pa) + " Pa"], ["Poisson ratio (median)", num(md.poisson_ratio)],
-      ["Density (median)", num(md.density_kg_m3) + " kg/m3"]);
+      `${(phys.rigid_body_covers || []).join(", ")}.`, "mass_note"]);
+    rows.push(["Young's modulus (median)", num(md.youngs_modulus_pa) + " Pa", "youngs"],
+      ["Poisson ratio (median)", num(md.poisson_ratio), "poisson"], ["Density (median)", num(md.density_kg_m3) + " kg/m3", "density"]);
   }
-  $("#facts2").replaceChildren(h("dl", {}, ...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])));
+  // The label and its info button in one dt, then the value; the note goes by the value (the dd, made after the note).
+  $("#facts2").replaceChildren(h("dl", {}, ...rows.flatMap(([k, v, key]) => {
+    let dd = null;
+    const dt = h("dt", {}, k, info(key, k, () => dd));
+    return [dt, dd = h("dd", {}, v)];
+  })));
   const checks = (pr && pr.checks) || [];  // run/parts/sam3/check/<view>.jpg
   fill($("#partchecks"), checks.length ? h("details", { class: "sub" }, h("summary", {}, `Part masks in the views (${checks.length})`),
-    h("p", { class: "hint" }, "Each part's SAM 3 masks in its own color. Open one to see it larger."),
+    h("p", { class: "hint" }, "Each part's SAM 3 masks in its own color. Open one to see it larger.",
+      info("part_masks", "Part masks in the views")),
     h("div", { class: "checks" }, ...checks.map((c) => h("a", { href: file(c), target: "_blank", rel: "noopener" },
       h("img", { src: file(c), loading: "lazy", alt: "part masks in view " + /(\d+)\.jpg$/.exec(c)[1] }))))) : null);
-  const link = (p, label, name, primary) => has(p) ? [h("a", { href: file(p), download: name, class: primary ? "dl primary" : "dl" }, label)] : [];
-  fill($("#downloads"), ...link("results.zip", "results.zip", `${job.id}_results.zip`, true),
-    ...link("run/posed.glb", "posed.glb", "posed.glb"), ...link("run/parts.glb", "parts.glb", "parts.glb"),
-    ...link("refined.glb", "refined.glb", "refined.glb"), ...link("physics/aligned.glb", "aligned.glb", "aligned.glb"),
-    ...link("physics/urdf/model.urdf", "model.urdf", "model.urdf"),
+  const link = (p, label, name, key, primary) => has(p) ? [h("span", { class: "dlitem" },
+    h("a", { href: file(p), download: name, class: primary ? "dl primary" : "dl" }, label), info(key, label))] : [];
+  fill($("#downloads"), ...link("results.zip", "results.zip", `${job.id}_results.zip`, "dl_zip", true),
+    ...link("run/posed.glb", "posed.glb", "posed.glb", "dl_posed"), ...link("run/parts.glb", "parts.glb", "parts.glb", "dl_parts"),
+    ...link("refined.glb", "refined.glb", "refined.glb", "dl_refined"),
+    ...link("physics/aligned.glb", "aligned.glb", "aligned.glb", "dl_aligned"),
+    ...link("physics/urdf/model.urdf", "model.urdf", "model.urdf", "dl_urdf"),
     has("results.zip") ? h("p", { class: "hint" }, "results.zip holds the MJCF, USD and URDF models, the GLB meshes, the physics summary, " +
       "the placement, the view selection" + (has("pool/lidar.json") ? ", the LiDAR scale (lidar.json)" : "") + " and the agent result" +
       (has("run/parts.glb") ? ", and the split parts (parts.glb, parts.json)" : "") +

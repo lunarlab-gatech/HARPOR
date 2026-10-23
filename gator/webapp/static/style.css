@@ -6,6 +6,7 @@
   --accent: #1a66d6; --accent-fg: #fff; --accent-soft: #e8f0fd;
   --ok: #1a7431; --ok-soft: #e2f4e7; --bad: #c62828; --bad-soft: #fde8e8; --warn: #9a5b00; --warn-soft: #fdf1dc;
   --cand: #f0a500; --log-bg: #15171c; --log-fg: #d7dae0; --log-muted: #9aa1ac; --viewer-bg: #eceff3;
+  --shadow: 0 4px 16px rgb(0 0 0 / 0.14);
   --r1: 4px; --r2: 8px; --r3: 12px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -16,6 +17,7 @@
     --accent: #5b9dff; --accent-fg: #0b1220; --accent-soft: #1b2a44;
     --ok: #5fcf7e; --ok-soft: #173222; --bad: #ff7b72; --bad-soft: #3a1d1d; --warn: #f0b45a; --warn-soft: #3a2c14;
     --cand: #ffc24d; --log-bg: #0b0d10; --log-fg: #cfd3da; --log-muted: #9aa1ac; --viewer-bg: #262a31;
+    --shadow: 0 4px 16px rgb(0 0 0 / 0.5);
   }
 }
 
@@ -304,7 +306,8 @@ a.dl.primary { background: var(--accent); border-color: var(--accent); color: va
 .viewers { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 12px 0; }
 .viewers.single { grid-template-columns: minmax(0, 760px); }
 .viewers figure { margin: 0; border: 1px solid var(--line); border-radius: var(--r2); overflow: hidden; background: var(--surface); }
-.viewers figcaption { padding: 8px 12px; font-weight: 500; border-bottom: 1px solid var(--line); }
+.viewers figcaption { display: flex; align-items: baseline; padding: 8px 12px; font-weight: 500;
+  border-bottom: 1px solid var(--line); }  /* flex: a long name wraps, and its info button stays beside it */
 .viewers figure .msg { padding: 12px; }
 model-viewer { display: block; width: 100%; height: clamp(260px, 45vh, 420px); background: var(--viewer-bg); }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 0 16px; margin: 0; }
@@ -315,6 +318,19 @@ dt, dd { padding: 6px 0; border-bottom: 1px solid var(--line); }
 #partchecks:empty { display: none; }
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.dlitem { display: inline-flex; align-items: center; }
+
+/* info buttons (app.js info()): a small "i" in a circle after a label; its note is fixed to the window next to it, so
+   it moves no layout and no figure clips it. The ::before is a larger target that takes no room. */
+button.infobtn { position: relative; display: inline-flex; width: 18px; height: 18px; min-height: 0; margin: 0 0 0 6px;
+  padding: 0; border: 1.5px solid currentColor; border-radius: 50%; background: transparent; color: var(--muted);
+  font: 700 12px/1 Georgia, "Times New Roman", serif; vertical-align: -3px; }
+button.infobtn::before { content: ""; position: absolute; inset: -9px -6px; }
+button.infobtn:hover:not(:disabled), .info.on button.infobtn { filter: none; color: var(--accent); }
+.infonote { position: fixed; left: 0; top: 0; z-index: 30; width: max-content; max-width: min(320px, calc(100vw - 24px));
+  padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--r2); background: var(--surface);
+  box-shadow: var(--shadow); color: var(--fg); font: 400 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  text-align: left; white-space: normal; overflow-wrap: break-word; }
 
 /* the Inputs tab: the input's facts, its preview video and the views the build used */
 #inputfacts { margin: 12px 0; }
@@ -390,4 +406,7 @@ dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
   .chips label { padding: 8px 12px; }
   input, select, textarea { font-size: 16px; }
   .card select { min-height: 40px; }
+  button.infobtn { min-height: 0; }
+  button.infobtn::before { inset: -13px -8px; }  /* a 44 x 34 px target for a finger */
+  dt button.infobtn::before { bottom: -6px; }  /* it stops above the row's value, which a phone puts under the label */
 }
