@@ -1053,11 +1053,13 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    has transmission or alpha. For an articulated object, `align` also writes one GLB per link. Then
    VoMP (once per link for an articulated object), MJCF, USD, URDF and `results.zip`.
 
-**UI** (`static/`, plain HTML, CSS and JS with no build step; reworked 2026-10-17, tabs 2026-10-22):
+**UI** (`static/`, plain HTML, CSS and JS with no build step; reworked 2026-10-17, tabs 2026-10-22,
+Downloads tab 2026-10-23):
 - Tabs (2026-10-22). A job page shows the header, the status line, the next step, the warnings,
   Retry and Cancel, and the panels that wait for the user (the camera topic, the view review, the
-  part list and the LiDAR failure). Under them are four tabs: Results, Inputs (the input's facts,
-  its preview video and the views used), Settings (the build settings) and Stages and log.
+  part list and the LiDAR failure). Under them are five tabs: Results, Downloads (the files, by
+  group), Inputs (the input's facts, its preview video and the views used), Settings (the build
+  settings) and Stages and log.
   - The first tab follows the job's status. A ready job shows Settings. A job in review or
     choose_topic shows Inputs, under its waiting panel. A done job shows Results. Any other job
     (analyzing, queued, running, failed or cancelled) shows Stages and log. After a failure the
@@ -1065,7 +1067,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   - A tab that the user picks stays until the status changes. The statuses of a run (analyzing,
     queued and running) count as one, so a tab picked while the job waits for the GPU stays when
     the job starts. The hash keeps the pick as `#/job/<id>/<tab>`, where the tab is `results`,
-    `inputs`, `settings` or `log`, so a reload shows it again. `#/job/<id>` opens the status's own
+    `downloads`, `inputs`, `settings` or `log`, so a reload shows it again. `#/job/<id>` opens the status's own
     tab. The page writes the hash with `history.replaceState`, so the tabs add no steps to the back
     button. `history.state` keeps the status that the tab was picked in. A reload after a change of
     status shows the new status's tab.
@@ -1074,7 +1076,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
     draws the new tab's panel first, then shows the tab.
   - A tab with nothing to show says so in one sentence, for example "The results appear here when
     the build has made them." While a job runs, Settings says "You can change the settings when the
-    job stops."
+    job stops." and Downloads says "The files appear here when the build stops."
   - The tabs follow the WAI-ARIA tabs pattern: a roving tabindex, and Left, Right, Home and End. On
     a narrow phone the tab bar scrolls sideways, and the page does not. The bar has no scrollbar,
     and its edge fades where more tabs are off the bar. On a phone the panel joins the tab bar.
@@ -1094,9 +1096,32 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
 - The review page shows the ring and the summary side by side and the picked views apart from the
   other candidates, with Build in a fixed bottom bar. Edited cards are marked, there is Discard
   changes, and "Start over in manual mode" opens the Settings tab in manual mode.
-- The Results tab puts the downloads first. The viewers show the model size in cm. With the agent
-  off and no split parts (a rigid object), one viewer fills the row. A viewer drawn while its tab
-  is hidden loads when the tab opens.
+- The Results tab shows the viewers and the facts, under the line "Download the files from the
+  Downloads tab.", whose tab name is a button that opens that tab and scrolls it into view. The
+  viewers show the model size in cm. With the agent off and no split parts (a rigid object), there is
+  one viewer, and from 1100 px up the facts sit beside it. With the agent off, the facts' Agent row
+  says so, and no line under the viewers repeats it. A viewer drawn while its tab is hidden loads when
+  the tab opens. A result file that does not parse (a cut write after a kill or a full disk) gives
+  "Could not read the results: ..." in the facts; the Downloads and Inputs tabs still draw.
+- Downloads tab (2026-10-23): every output file of `server.OUTPUTS` that exists (all of them are in
+  `ALLOW`), in four groups, each under an h3 heading. Everything is `results.zip`, with a sentence on
+  what it holds (the URDF, the LiDAR record, the agent's result and the split parts only when the job
+  has them, and the agent's result not when it held the API key) and that the MJCF and USD models
+  come only in it. Meshes are `posed.glb`, `parts.glb`, `refined.glb` and `aligned.glb`.
+  Simulation is `model.urdf`, under the sentence that its meshes come only in `results.zip`, so it
+  does not load alone. Records are
+  `placement.json`, `summary.json`, `lidar.json`, `selection.json`, `parts.json` and `mjcf.json`.
+  The agent's result is not served alone. Each row is the file name as a download link (each file
+  downloads as `<job id>_<file>`, for example `<job id>_results.zip`), its size and its info button.
+  The download arrow is decoration with empty alternative text. A group without files is left
+  out. When the tab lists files but not `results.zip`, a sentence above the groups says why: in
+  review (or before a build) "results.zip and the other files appear here when the build has made
+  them.", and after a failed or cancelled build "The build stopped before it made results.zip, so the
+  tab lists only the files that it made." While a build runs the tab lists no files, because the
+  build replaces them as it goes. A done job's next step is "Look at the meshes in the Results tab.",
+  since the Results tab's first line names the Downloads tab.
+  `GET /api/jobs/{id}` adds "sizes" (`server.sizes_of`): the bytes of each file in "files", from one
+  stat each.
 - The jobs list shows a thumbnail, the input kind and a short time, and marks jobs that wait for the
   user. It is redrawn only when it changed.
 - Uploads show their speed and time left, and can be cancelled.
@@ -1109,7 +1134,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   view 0's photo, the VLM's list as editable text, its warnings, "Build with these parts" and "Undo
   my edits". Results add a "Parts (split, before rigging)" viewer, the parts that were not split off,
   the part-mask check images, the links, base and joints from `mjcf.json`, the number of joints
-  delivered, the link masses, and the `parts.glb` and `model.urdf` downloads. The agent stage's label
+  delivered and the link masses. The Downloads tab adds `parts.glb` and `parts.json`. The agent stage's label
   names its task and budget ("agent sets the joints, 15 min budget").
 - Metric scale from LiDAR (2026-10-21, note 12):
   - The upload box takes a Stray Scanner export as a `.zip`, and the jobs list names its kind "Stray
@@ -1160,9 +1185,9 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   `GET /api/jobs/{id}` adds "preview" (`server.preview_of`): the record with "seek" (for each view of
   `selection.json`, the frame that the preview shows and its time in the preview), `{"error": ...}`,
   `{"missing": true}`, or null for an older job.
-- Info buttons (2026-10-22): every item of the Results tab has a small "i" button after its label:
-  each row of the facts list, each viewer's caption, the viewers' placeholder when the agent was off,
-  each download and the part-mask check images. The button is a real `<button>` with the label
+- Info buttons (2026-10-22): every item of the Results and Downloads tabs has a small "i" button after
+  its label: each row of the facts list, each viewer's caption, the part-mask check images and each
+  file of the Downloads tab. The button is a real `<button>` with the label
   "About <item>" and `aria-describedby` on its note. The note shows on hover and on keyboard focus.
   A click, a tap, Enter or Space toggles it: a note that showed before the press hides, and one that
   did not shows and stays open. Escape, a click elsewhere, focus that moves on, another tab and the
@@ -1176,9 +1201,9 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   code (for example the 0.5 mask IoU guard, VoMP's 64^3 grid and the agent's 600 s and 900 s
   budgets), and what a missing or skipped value means. The node test reads those numbers from the
   code, so a changed constant fails it until the note is fixed.
-- The 26 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
-  does not have, so run them on the Mac. Two more tests there check the tabs and panels of
-  `index.html` and the info buttons' styles in `style.css`.
+- The 30 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
+  does not have, so run them on the Mac. Three more tests there check the tabs and panels of
+  `index.html`, and the styles of the info buttons and of the Downloads rows in `style.css`.
 
 **Security.** The server port on the compute node is open to other ICE users, so every request
 needs the login cookie (a random token). The API key lives only in the server's memory. For the

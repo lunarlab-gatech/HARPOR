@@ -300,6 +300,13 @@ th { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
 .todl { margin: 0 0 12px; }  /* "Download the files from the Downloads tab." */
 .viewers { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 12px 0; }
 .viewers.single { grid-template-columns: minmax(0, 760px); }
+/* One viewer (app.js renderResults sets .onefig): on a wide screen the facts sit beside it, not below the fold. */
+@media (min-width: 1100px) {
+  #resultsbody.onefig { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0 24px; align-items: start; }
+  #resultsbody.onefig > .todl, #resultsbody.onefig > #partchecks { grid-column: 1 / -1; }
+  #resultsbody.onefig > .viewers.single { grid-template-columns: minmax(0, 1fr); }
+  #resultsbody.onefig > #facts2 { margin-top: 12px; }
+}
 .viewers figure { margin: 0; border: 1px solid var(--line); border-radius: var(--r2); overflow: hidden; background: var(--surface); }
 .viewers figcaption { display: flex; align-items: baseline; padding: 8px 12px; font-weight: 500;
   border-bottom: 1px solid var(--line); }  /* flex: a long name wraps, and its info button stays beside it */
@@ -314,23 +321,27 @@ dt, dd { padding: 6px 0; border-bottom: 1px solid var(--line); }
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 
-/* the Downloads tab (app.js renderDownloads): a heading per group, its sentence, then one row per file: the download
-   link, its size and its info button. The link's min-width lines the sizes up; a row wraps on a narrow phone. */
+/* the Downloads tab (app.js renderDownloads): the sentence when results.zip is missing, then a heading per group, its
+   sentence and one row per file: the download link, its size and its info button. The link's min-width lines the
+   sizes up; a row wraps on a narrow phone. */
+.dlnote { margin: 0 0 16px; max-width: 640px; color: var(--muted); }
 .dlgroup + .dlgroup { margin-top: 20px; }
-.dlgroup h4 { margin: 0 0 4px; }
+.dlgroup h3 { margin: 0 0 4px; font-size: 16px; }
 .dlgroup > .hint { margin: 0 0 8px; max-width: 640px; overflow-wrap: anywhere; }
 .dlist { list-style: none; margin: 0; padding: 0; }
 .dlrow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 4px 0; }
 a.dl { display: inline-flex; align-items: center; gap: 6px; min-width: 10.5em; min-height: 36px; padding: 6px 12px;
   border: 1px solid var(--line-strong); border-radius: var(--r2); background: var(--surface); color: var(--fg);
   text-decoration: none; font-weight: 500; overflow-wrap: anywhere; }
-a.dl::before { content: "\2193"; color: var(--muted); }
+/* The arrow is decoration: its alternative text is empty, so a screen reader reads only the file name. A browser
+   without the alt-text syntax keeps the first content line. */
+a.dl::before { content: "\2193"; content: "\2193" / ""; color: var(--muted); }
 a.dl:hover { border-color: var(--accent); }
 a.dl.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 a.dl.primary::before { color: inherit; }
 a.dl.primary:hover { filter: brightness(1.08); }
 .dlsize { min-width: 5.5em; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
-.dlrow button.infobtn { margin-left: -6px; }  /* the row's gap already parts it from the size */
+.dlrow .infobtn { margin-left: -6px; }  /* the row's gap already parts it from the size */
 
 /* info buttons (app.js info()): a small "i" in a circle after a label; its note is fixed to the window next to it, so
    it moves no layout and no figure clips it. The ::before is a larger target that takes no room. */
