@@ -116,6 +116,7 @@ Known gaps in existing code:
 | File | Content |
 |---|---|
 | `docs/build_plan.md` | This file: overview, design and build notes |
+| `docs/public_site.md` | The public HARPOR site on Supabase: personal workers on users' own GPU machines, the owner's setup and the live checks |
 | `docs/research.md` | Research findings with sources: the paper and every results table, MV-SAM3D and SAM 3D, the agent harness, datasets, baselines and metrics, and the deferred generator design |
 | `paper/gator_2610.11215v1.pdf` | The paper. Its text layer is garbled, so read the rendered pages or the arXiv HTML (https://arxiv.org/html/2610.11215v1). `research.md` section 1 maps PDF table numbers to HTML numbers. |
 
@@ -1204,6 +1205,12 @@ Downloads tab 2026-10-23):
 - The 30 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
   does not have, so run them on the Mac. Three more tests there check the tabs and panels of
   `index.html`, and the styles of the info buttons and of the Downloads rows in `style.css`.
+
+**Public site.** `docs/public_site.md` describes the public site: a static page on Supabase, where users
+sign in with Google or GitHub. Jobs run only on users' own GPU machines: `python -m gator.webapp --worker`
+runs a personal worker in the server, on the same Runner, signed in as that user. Without `--worker` the server
+and the tunnel work as before, except that a second server on the same runs folder refuses to start while the
+first one is known to run (`.runner.json` in the runs folder; delete it when that server is gone).
 
 **Security.** The server port on the compute node is open to other ICE users, so every request
 needs the login cookie (a random token). The API key lives only in the server's memory. For the

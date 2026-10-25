@@ -13,9 +13,18 @@ venv/
 .vscode/
 .idea/
 
-# API keys (the real ones live in ~/.config/gator, never in the repo)
+# API keys (the real ones live in ~/.config/gator, never in the repo), and other secrets
 .env
 *.env
+.env.*
+!*.env.example
+*.pem
+*.key
+
+# The Supabase CLI's local state, and the public site that python -m gator.webapp.site build writes
+supabase/.temp/
+supabase/.branches/
+/site/
 
 # Things that live on ICE under $G, not in the repo: environments, the SIF, model weights,
 # caches, session runs and web-app jobs

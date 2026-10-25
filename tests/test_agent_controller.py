@@ -1553,6 +1553,38 @@ def test_find_key_checks_every_key_of_a_shared_env_file(tmp_path):
         assert C.find_key(root, tmp_path / "both.env") == ["work/anthropic.txt", "work/openai.txt"]
 
 
+def test_find_key_scans_big_files_in_chunks(tmp_path):
+    """find_key reads chunk bytes at a time with an overlap, so a key across two chunks is found, and a
+    file over 50 MB is scanned too (it was skipped before). Symlinks and FIFOs are still not opened."""
+    key = "sk-TESTKEY0123456789abcdefghij"
+    (tmp_path / "key.env").write_text(f"OPENAI_API_KEY={key}\n")
+    root = tmp_path / "s"
+    root.mkdir()
+    for i, at in enumerate((0, 50, 64 - 10, 300 - len(key))):  # at the start, inside, across 64, at the end
+        data = bytearray(b"x" * 300)
+        data[at:at + len(key)] = key.encode()
+        (root / f"f{i}.bin").write_bytes(bytes(data))
+    (root / "clean.bin").write_bytes(b"x" * 300)
+    (root / "cut.bin").write_bytes(b"x" * 60 + key.encode()[:-1])  # a key without its last character
+    hits = ["f0.bin", "f1.bin", "f2.bin", "f3.bin"]
+    for chunk in (7, 64, 50 << 20):  # 7: shorter than the key
+        assert C.find_key(root, tmp_path / "key.env", chunk=chunk) == hits, chunk
+    (tmp_path / "outside.txt").write_text(key)
+    (root / "link.txt").symlink_to(tmp_path / "outside.txt")
+    os.mkfifo(root / "pipe")
+    for at in ((50 << 20) - 10, (50 << 20) + 5):  # across the default chunk's edge, and after it
+        with open(root / "big.glb", "wb") as f:
+            f.seek(at)
+            f.write(key.encode())
+        assert C.find_key(root, tmp_path / "key.env") == ["big.glb", *hits], at
+    two = root / "two.bin"
+    two.write_bytes(b"y" * 100 + b"sk-ant-" + b"z" * 30 + b"y" * 100)
+    assert C.has_key(two, [b"short-key-0123456", b"sk-ant-" + b"z" * 30], chunk=16)
+    assert not C.has_key(two, [b"short-key-0123456"], chunk=16)
+    with pytest.raises(OSError):
+        C.has_key(root / "link.txt", [key.encode()])
+
+
 def test_tool_server_does_not_import_from_the_work_folder(tmp_path):
     """The model can write any file into /work. The helper runs on the host, outside the agent's
     container, so a json.py or a gator/ package there must never be imported."""

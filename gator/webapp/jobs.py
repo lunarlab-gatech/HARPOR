@@ -41,7 +41,13 @@ it (steps.needs_key: the agent stage, and the propose stage when the VLM lists t
 written to /dev/shm/gator-webapp-<uid>/<job_id>.env (folder 0700, file 0600, OPENAI_API_KEY=<key>
 for astra, ANTHROPIC_API_KEY=<key> for opus) and deleted when the stage ends. A server that restarts
 has no key, and a change of agent drops the key held for the other one, so a job that reaches such a
-stage then waits in "review" until the key is given again.
+stage then waits in "review" until the key is given again. A build may also be queued without the key
+on purpose (submit_build with api_key None, resume with key_later): it then waits there with
+NO_KEY_LATER.
+
+One Runner runs the jobs of a runs folder. It writes RUNS/.runner.json (pid, host, Slurm job), and a
+second Runner on that folder refuses to start while the first one's server is known to run (Runner._claim,
+holder_alive); a file it cannot check counts as stale.
 
     python -m gator.webapp.jobs package --job J
 
@@ -60,6 +66,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import tempfile
@@ -89,6 +96,10 @@ DERIVED = {"frames": ("frames/meta.json", "frames/thumbs", "frames/stamps.json",
            "package": ("results.zip",)}
 NO_KEY = {a: f"The server no longer holds the {p} API key (it restarted); paste the key again and press Build."
           for a, p in steps.PROVIDER.items()}
+NO_KEY_LATER = {a: f"The job needs the {p} API key now; paste it and press Build." for a, p in steps.PROVIDER.items()}
+RUNNER_FILE = ".runner.json"  # in the runs folder: the server whose Runner runs its jobs (Runner._claim)
+# squeue states of a Slurm job whose server may still run (holder_alive)
+SLURM_ALIVE = ("RUNNING", "COMPLETING", "CONFIGURING", "SUSPENDED", "STOPPED", "SIGNALING")
 KEY_VAR = {"astra": "OPENAI_API_KEY", "opus": "ANTHROPIC_API_KEY"}  # the key file's line, per agent
 PARTS = {"mode": "vlm", "list": [], "confirmed": False}  # job.json "parts" of a new job
 OPUS = "claude-opus-5-5"
@@ -386,6 +397,46 @@ def _alive(pgid):
         return False
 
 
+def command_of(pid):
+    """The command line of process pid ("" when it is gone), or None when it cannot be read."""
+    with contextlib.suppress(OSError):
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+    try:  # macOS has no /proc
+        return subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=5).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def holder_alive(info):
+    """True when the server that a .runner.json names ({pid, host, slurm_job}) is known to run: on this host, its pid
+    runs as this user and is a HARPOR server (its command line names gator.webapp); on another host, squeue says its
+    Slurm job runs. What cannot be known (a file without a Slurm job from another host, or no answer from squeue)
+    counts as gone, with a line that says so: a stale file never keeps a server from starting."""
+    if info.get("host") == socket.gethostname():
+        pid = info.get("pid")
+        if type(pid) is not int or pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):  # gone, or the pid is another user's process now
+            return False
+        cmd = command_of(pid)
+        return cmd is None or "gator.webapp" in cmd or "gator/webapp" in cmd  # a pid reused by another program
+    job = info.get("slurm_job")
+    if not isinstance(job, str) or not job.isascii() or not job.isdigit():
+        return False
+    try:
+        out = subprocess.run(["squeue", "-h", "-j", job, "-o", "%T"], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        out = None
+    if out is None or out.returncode and "Invalid job id" not in out.stderr:
+        print(f"Slurm did not say whether job {job} (the server in {RUNNER_FILE} on {info.get('host')}) still runs; "
+              "this server takes the runs folder", flush=True)
+        return False
+    return out.returncode == 0 and out.stdout.strip() in SLURM_ALIVE
+
+
 class Runner:
     """Runs the stages of every job (see the module docstring). One per server."""
 
@@ -395,8 +446,10 @@ class Runner:
         self.cfg, self.runs = cfg, Path(cfg.runs)
         self.key_dir = Path(key_dir) if key_dir else default_key_dir()
         self._keys, self._procs, self._cancelled, self._queue, self._uploads = {}, {}, {}, [], set()
+        self._later = set()  # jobs whose key comes later
         self._cv = threading.Condition(_LOCK)
         self.runs.mkdir(parents=True, exist_ok=True)
+        self._claim()  # before _recover, which would fail the running jobs of another server
         self._key_folder()
         for f in self.key_dir.glob("*.env"):  # left by a server that died
             f.unlink()
@@ -476,6 +529,22 @@ class Runner:
         with self._cv:
             return job_id in self._keys and agent in (None, self._keys[job_id][0])
 
+    def forget_key(self, job_id):
+        """Drop the key held for the job; job.json key_ok turns false. Returns True when one was held. A
+        stage that already has its key file keeps it until it ends; a later stage that needs the key
+        waits in review for it."""
+        with self._cv:
+            held, J = self._keys.pop(job_id, None) is not None, self.runs / str(job_id)
+            if held and ID.fullmatch(str(job_id)) and (J / "job.json").is_file():
+                update(J, key_ok=False)
+            return held
+
+    def queued(self):
+        """The builds that wait, oldest first, as [(job_id, the stage each starts from)]: a copy, taken
+        under the lock. The running build is not in it."""
+        with self._cv:
+            return [(job_id, first) for job_id, first, _ in self._queue]
+
     def delete(self, job_id):
         """Delete the job folder and the key held for it, unless the job is uploading, analyzing, queued
         or running."""
@@ -484,6 +553,7 @@ class Runner:
             self._idle(job_id, load(J))
             self._keys.pop(job_id, None)
             self._cancelled.pop(job_id, None)
+            self._later.discard(job_id)
             shutil.rmtree(J)
 
     def submit_build(self, job_id, api_key, **settings):
@@ -492,8 +562,10 @@ class Runner:
         under the same lock. parts is {"mode": steps.PARTS_MODES, "list": the typed parts}; it is stored with
         the mode the job runs with (parts_settings). lidar is None, {"topic": T} or {"kind": "stray"}, stored
         as lidar_settings gives it (its ValueError passes on); the camera_info check, which opens the bag,
-        is left to the caller (the server's Start makes it). api_key, for the agent (and the VLM of the part list), is
-        needed unless the agent is "none". An earlier build's outputs are deleted first."""
+        is left to the caller (the server's Start makes it). api_key is for the agent (and the VLM of the part
+        list), unless the agent is "none". None queues the build without a key (a key held for the job is
+        dropped, key_ok is false): the job waits in review with NO_KEY_LATER when it reaches a stage that
+        needs the key. An earlier build's outputs are deleted first."""
         from gator.stage_a.sam3_masks import slug
 
         J = self.job_dir(job_id)
@@ -513,10 +585,11 @@ class Runner:
             if "lidar" in settings:  # the bag is not opened under the lock; the server's Start did that check
                 settings["lidar"] = lidar_settings(J, job, settings["lidar"], read_bag=False)
             agent = steps.agent(job)
-            if agent != "none":
+            if agent != "none" and api_key is not None:
                 self._take_key(job_id, api_key, agent)
-            else:
+            else:  # no agent, or the key comes later
                 self._keys.pop(job_id, None)
+            self._key_later(job_id, agent != "none" and api_key is None)
             _clear(J, BUILD)
             self._cancelled.pop(job_id, None)
             update(J, **settings, status="queued", slug=s, stages={**job["stages"], **{b: dict(STAGE) for b in BUILD}},
@@ -524,9 +597,12 @@ class Runner:
             self._queue.append((job_id, "extract", not job.get("auto_continue")))
             self._cv.notify()
 
-    def resume(self, job_id, from_stage, api_key=None, confirm_parts=False, parts_list=None, **fields):
+    def resume(self, job_id, from_stage, api_key=None, confirm_parts=False, parts_list=None, key_later=False,
+               **fields):
         """Queue the stages from from_stage on; api_key replaces the key held for the job, and fields
-        (overrides, view0, agent) are written to job.json first, under the same lock.
+        (overrides, view0, agent) are written to job.json first, under the same lock. key_later, without
+        api_key: the key was left out on purpose, so a job without one that reaches a stage that needs
+        it waits in review with NO_KEY_LATER instead of NO_KEY.
 
         From a stage up to select (the user changed an instance or the picks): the stages from there
         rerun, except da3, which reruns only when prep made a view it has not seen; the outputs of
@@ -609,6 +685,7 @@ class Runner:
                 self._take_key(job_id, api_key, agent)
             elif changed:
                 self._keys.pop(job_id, None)
+            self._key_later(job_id, key_later and not api_key)
             self._cancelled.pop(job_id, None)
             update(J, **fields, status="queued", stages=stages, current=None, error=None, warnings=[],
                    key_ok=self._key_for(job_id, agent) is not None)
@@ -633,7 +710,8 @@ class Runner:
                 _signal_group(proc.pid, signal.SIGTERM)
 
     def shutdown(self, timeout=None):
-        """Cancel every running stage, wait for them to end and delete the key files (server exit)."""
+        """Cancel every running stage, wait for them to end and delete the key files and .runner.json
+        (server exit)."""
         with self._cv:
             self._queue.clear()
             running = list(self._procs)
@@ -644,8 +722,38 @@ class Runner:
             time.sleep(0.1)
         for f in self.key_dir.glob("*.env"):
             f.unlink(missing_ok=True)
+        with contextlib.suppress(OSError, ValueError, AttributeError):  # unless another Runner took the folder since
+            if json.loads((self.runs / RUNNER_FILE).read_text()).get("id") == self._id:
+                (self.runs / RUNNER_FILE).unlink()
 
     # ---- inside the runner ----
+
+    def _claim(self):
+        """Write RUNS/.runner.json ({pid, host, slurm_job, started, id}), or SystemExit while the server
+        it names still runs (holder_alive): two Runners on one runs folder would fail each other's jobs
+        (_recover) and run two GPU stages at once. A Runner of this same process takes over, as a
+        restart in the tests does. This guards against a second server started by mistake; it is not a
+        lock against two that start in the same second."""
+        f, old = self.runs / RUNNER_FILE, None
+        with contextlib.suppress(OSError, ValueError):
+            old = json.loads(f.read_text())
+        this = isinstance(old, dict) and old.get("host") == socket.gethostname() and old.get("pid") == os.getpid()
+        if isinstance(old, dict) and not this and holder_alive(old):
+            where = f"pid {old.get('pid')} on {old.get('host')}" + (
+                f", Slurm job {old['slurm_job']}" if old.get("slurm_job") else "")
+            raise SystemExit(f"another HARPOR server runs the jobs in {self.runs} ({where}); stop it first, "
+                             f"or delete {f} if it is gone")
+        self._id = secrets.token_hex(8)
+        info = {"pid": os.getpid(), "host": socket.gethostname(), "slurm_job": os.environ.get("SLURM_JOB_ID"),
+                "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "id": self._id}
+        fd, tmp = tempfile.mkstemp(dir=self.runs, prefix=".runner.", suffix=".tmp")  # 0600
+        with os.fdopen(fd, "w") as out:
+            json.dump(info, out, indent=1)
+        os.replace(tmp, f)
+
+    def _key_later(self, job_id, later):
+        """Remember whether the newest build or resume of the job left its key for later (NO_KEY_LATER)."""
+        (self._later.add if later else self._later.discard)(job_id)
 
     def _idle(self, job_id, job):
         if job_id in self._uploads:
@@ -791,10 +899,11 @@ class Runner:
         if steps.needs_key(stage, job):
             agent = steps.agent(job)
             with self._cv:
-                key = self._key_for(job_id, agent)
+                key, later = self._key_for(job_id, agent), job_id in self._later
             if key is None:
                 update_stage(J, stage, note=f"waiting for the {steps.PROVIDER[agent]} API key")
-                self._status(job_id, "review", current=None, key_ok=False, warnings=[NO_KEY[agent]])
+                self._status(job_id, "review", current=None, key_ok=False,
+                             warnings=[(NO_KEY_LATER if later else NO_KEY)[agent]])
                 return "review"
             key_file = self._write_key(job_id, agent, key)
         log_path = J / "logs" / f"{stage}.log"

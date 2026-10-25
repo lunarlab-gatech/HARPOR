@@ -1,5 +1,6 @@
 import json
 import re
+import time
 
 import numpy as np
 import pytest
@@ -585,6 +586,37 @@ def test_read_calibration_errors(text, name, match):
         L.read_calibration(text, name)
 
 
+def billion_laughs(levels=30):
+    """A YAML calibration of a few hundred bytes whose T_cam_lidar is 2^levels numbers once aliases expand."""
+    return ("a0: &a0 [0.0, 0.0]\n" + "".join(f"a{i}: &a{i} [*a{i - 1}, *a{i - 1}]\n" for i in range(1, levels + 1))
+            + f"T_cam_lidar: *a{levels}\n")
+
+
+def test_read_calibration_refuses_anchors_aliases_and_deep_nesting():
+    """Nested aliases would ask np.asarray for about 2^31 numbers, and deep brackets keep the pure-Python
+    parser busy for minutes: both are refused at once, before anything is built. & and * in a value stay
+    text."""
+    laughs = billion_laughs()
+    assert len(laughs) < 1000
+    t0 = time.time()
+    with pytest.raises(ValueError, match="^rig.yaml uses YAML anchors or aliases \\(& and \\*\\); write the values out$"):
+        L.read_calibration(laughs, "rig.yaml")
+    for text in (calib().replace("T_cam_lidar: ", "T_cam_lidar: &t "),  # an anchor alone
+                 "base: &b {time_offset_s: 0.0}\n<<: *b\n" + calib()):  # a merge key
+        with pytest.raises(ValueError, match="anchors or aliases"):
+            L.read_calibration(text, "c.yaml")
+    deep = "[" * 30000 + "]" * 30000  # under the server's 64 KB
+    for text, name in ((deep, "c.yaml"), ("- " * 20000 + "1\n", "c.yaml"), ("a: {" * 5000 + "b: 1" + "}" * 5000, "c.yaml"),
+                       (deep, "c.json"), ('{"a": ' * 20000 + "1" + "}" * 20000, "c.json")):
+        with pytest.raises(ValueError, match="^c.(yaml|json) nests lists and maps"):
+            L.read_calibration(text, name)
+    assert time.time() - t0 < 5
+    c = L.read_calibration(calib() + '\nnote: "lab & rig *2"\nplain: a&b*c\n', "c.yaml")
+    assert np.allclose(c["T_cam_lidar"], T_TEST)
+    nested = "/**:\n  ros__parameters:\n    T_cam_lidar: " + json.dumps(T_TEST.tolist()) + "\n"
+    assert np.allclose(L.read_calibration(nested)["T_cam_lidar"], T_TEST)  # 4 levels, as real files nest
+
+
 def test_read_calibration_without_ruamel(monkeypatch):
     import sys
 
@@ -596,5 +628,9 @@ def test_read_calibration_without_ruamel(monkeypatch):
         with pytest.raises(ValueError, match="needs ruamel.yaml or PyYAML"):
             L.read_calibration(calib())
         assert np.allclose(L.read_calibration(json.dumps({"T_cam_lidar": T_TEST.tolist()}), "c.json")["T_cam_lidar"], T_TEST)
-    else:
+    else:  # PyYAML's events: the same refusals
         assert np.allclose(L.read_calibration(calib())["T_cam_lidar"], T_TEST)
+        with pytest.raises(ValueError, match="anchors or aliases"):
+            L.read_calibration(billion_laughs())
+        with pytest.raises(ValueError, match="nests lists and maps"):
+            L.read_calibration("[" * 30000 + "]" * 30000)

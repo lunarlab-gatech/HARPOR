@@ -32,6 +32,10 @@ const JOINTS = ["revolute", "prismatic", "fixed", "unknown"];  // gator.parts.pr
 const VERDICT = { articulated: "articulated: the parts have joints", unchanged: "unchanged: the parts have no joints",
   needs_review: "needs review" };
 const LIST_STATUS = { review: "needs review", ready: "ready to start", choose_topic: "choose topic" };  // badge text in the jobs list
+const NEEDS_YOU = ["review", "ready", "choose_topic", "failed"];  // the list marks these rows
+// "1st", "2nd", "11th": a queued job's place, from the public site's queue_pos (1 is next).
+const ordinal = (n) => n + ([11, 12, 13].includes(n % 100) ? "th" : ["th", "st", "nd", "rd"][n % 10] || "th");
+const queueText = (status, pos) => status === "queued" && Number.isInteger(pos) && pos > 0 ? `queued (${ordinal(pos)})` : null;
 const NEXT = { choose_topic: "Pick the camera topic below.", ready: "Name the object, check the settings, then Start.",
   analyzing: "Reading the input. This takes a few seconds to a minute.",
   queued: "The job waits for the GPU. You can close this page; the job keeps going.",
@@ -49,7 +53,28 @@ const NEXT = { choose_topic: "Pick the camera topic below.", ready: "Name the ob
   // A failed or cancelled job whose scale ran with another calibration (V.scaleStale).
   stale: "The calibration changed since the scale was found. Retry starts again from the lidar stage." };
 const KIND_LABEL = { video: "video", rosbag: "rosbag", stray: "Stray capture" };  // job.json source kind, in the jobs list
-const OFFLINE = "Cannot reach the server. Is the SSH tunnel up?";
+// How the page reaches its data: the server itself (tunnel mode), or Supabase (static/supa.js, on the public site).
+// Factories, not the globals themselves, so the node test harnesses (no XMLHttpRequest) still load. typeof on the bare
+// global, not window.HARPOR_TRANSPORT: two of the test harnesses make window a Proxy that answers every property.
+// url(path, name) gives a URL for src and href (with a download name for a link); keyless(job, agent) is false, or the
+// sentence that says which machine holds that agent's key, so the page asks for none; noJobs is what an empty jobs list
+// says. xhr is the tunnel's only: the public page has no upload area, since its jobs get their input on the user's
+// own machine.
+const PUBLIC = typeof HARPOR_TRANSPORT !== "undefined";
+const T = PUBLIC ? HARPOR_TRANSPORT : {
+  fetch: (url, opts) => fetch(url, opts),
+  url: (path) => path,
+  xhr: () => new XMLHttpRequest(),
+  events: (url) => new EventSource(url),
+  live: ACTIVE,  // the statuses that keep the live view open
+  keyless: () => false,
+  noJobs: "No jobs yet. Upload a video, a rosbag or a Stray Scanner export of one object to start.",
+  ready: Promise.resolve(),
+  liveLog: "live log",
+  offline: "Cannot reach the server. Is the SSH tunnel up?",
+  unauthorized: "not logged in: open the URL with ?token= that the server printed",
+};
+const OFFLINE = T.offline;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 // The job page's tabs by their name in the hash (#/job/<id>/<name>), with the id of each one's panel. The tab buttons
 // are #tab-<name>.
@@ -86,6 +111,8 @@ function h(tag, attrs, ...kids) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (k.startsWith("on")) e[k] = v;
     else if (k === "class") e.className = v;
+    // Through the CSSOM, which a strict CSP allows; it blocks style attributes (the public site has no unsafe-inline).
+    else if (k === "style" && v != null && v !== false && e.style) e.style.cssText = v;
     else if (v === true) e.setAttribute(k, "");
     else if (v !== false && v != null) e.setAttribute(k, v);
   }
@@ -101,7 +128,7 @@ const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter((x) => x 
 const badge = (t, text) => h("span", { class: "badge " + t }, text || t.replace("_", " "));
 const fmt = (sec) => sec < 60 ? sec.toFixed(1) + " s" : sec < 3600 ? Math.floor(sec / 60) + " min " + Math.floor(sec % 60) + " s"
   : Math.floor(sec / 3600) + " h " + Math.floor((sec % 3600) / 60) + " min";
-const file = (p) => `/api/jobs/${V.id}/file/${p}`;
+const file = (p, dl) => T.url(`/api/jobs/${V.id}/file/${p}`, dl);
 const shortTime = (t) => {  // "2026-10-17T21:02:50" -> "Oct 17 21:02", without Date (the server's clock and zone)
   const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)/.exec(t || "");
   return m ? `${MONTHS[+m[2] - 1]} ${+m[3]} ${m[4]}:${m[5]}` : t || "";
@@ -142,10 +169,10 @@ const formatParts = (parts) => (parts || []).map((p) => p.name + (p.count > 1 ? 
 
 async function api(path, opts) {
   let r;
-  try { r = await fetch(path, opts); } catch (e) { online(false); throw new Error(OFFLINE); }
+  try { r = await T.fetch(path, opts); } catch (e) { online(false); throw new Error(OFFLINE); }
   online(true);
   const j = await r.json().catch(() => ({}));
-  if (r.status === 401) throw new Error("not logged in: open the URL with ?token= that the server printed");
+  if (r.status === 401) throw new Error(T.unauthorized);
   if (!r.ok) throw new Error(j.detail || `${r.status} ${r.statusText}`);
   return j;
 }
@@ -193,7 +220,9 @@ function route() {
     .catch((e) => { $("#jstatus").textContent = e.message; });
   else showList();
 }
-window.addEventListener("hashchange", route);
+// The public site routes once supa.js has signed the user in (T.ready, at the end); tunnel mode at once.
+let routing = !PUBLIC;
+window.addEventListener("hashchange", () => { if (routing) route(); });
 
 // ---- 1. jobs list and upload ----
 
@@ -210,20 +239,24 @@ function renderJobs(rows) {
   listKey = rows ? JSON.stringify(rows) : null;
   if (rows && !rows.length) {
     $("#jobs tbody").replaceChildren(h("tr", { class: "empty" },
-      h("td", { colspan: 6 }, "No jobs yet. Upload a video, a rosbag or a Stray Scanner export of one object to start.")));
+      h("td", { colspan: 6 }, T.noJobs)));
     return;
   }
-  $("#jobs tbody").replaceChildren(...(rows || []).map((j) => h("tr", { class: j.status in LIST_STATUS || j.status === "failed" ? "act" : null },
-    h("td", { class: "thumb" }, h("img", { src: `/api/jobs/${j.id}/thumb/0`, alt: "", loading: "lazy",
+  // The hint under the input: its kind, and on the public site where the job runs ("on lab-box").
+  const hint = (j) => [j.kind ? KIND_LABEL[j.kind] || j.kind : null, j.where].filter(Boolean).join(", ");
+  $("#jobs tbody").replaceChildren(...(rows || []).map((j) => h("tr", { class: NEEDS_YOU.includes(j.status) ? "act" : null },
+    h("td", { class: "thumb" }, h("img", { src: T.url(`/api/jobs/${j.id}/thumb/0`), alt: "", loading: "lazy",
       onerror: (e) => e.target.replaceWith(h("span", { class: "noimg" })) })),
-    h("td", { class: "input" }, h("a", { href: "#/job/" + j.id }, j.video),
-      j.kind ? h("div", { class: "hint" }, KIND_LABEL[j.kind] || j.kind) : null),
+    h("td", { class: "input" }, h("a", { href: "#/job/" + j.id }, j.video), hint(j) ? h("div", { class: "hint" }, hint(j)) : null),
     h("td", { class: "obj" }, j.prompt || ""),
     h("td", { class: "when", title: j.created.replace("T", " ") }, shortTime(j.created)),
-    h("td", { class: "stat" }, badge(j.status, LIST_STATUS[j.status])),
-    h("td", { class: "acts" }, ACTIVE.includes(j.status) || j.status === "uploading" ? ""
+    h("td", { class: "stat" }, badge(j.status, queueText(j.status, j.queue_pos) || LIST_STATUS[j.status])),
+    h("td", { class: "acts" }, !deletable(j) ? ""
       : h("button", { class: "small danger", type: "button", "aria-label": "Delete " + j.video, onclick: () => remove(j) }, "Delete")))));
 }
+// A row's Delete button: not while the job runs or uploads, unless the row says it may go (the public site: a job whose
+// machine is offline).
+const deletable = (j) => j.deletable === true || !(ACTIVE.includes(j.status) || j.status === "uploading");
 async function pollList() {  // the 5 s refresh: draws the list again only when it changed
   if ($("#list").hidden || document.hidden === true) return;
   let rows;
@@ -249,7 +282,7 @@ function upload(f) {
       "export folder, zip the folder first.");
     return;
   }
-  const xhr = upXhr = new XMLHttpRequest(), prog = $("#upprog"), t0 = Date.now();
+  const xhr = upXhr = T.xhr(), prog = $("#upprog"), t0 = Date.now();
   const done = () => {
     upXhr = null;
     prog.hidden = $("#upcancel").hidden = true;
@@ -310,8 +343,8 @@ async function openJob(id, tab) {
 async function refresh() {
   const job = V.job = await api(`/api/jobs/${V.id}`);
   $("#jtitle").textContent = `${job.video.name}${job.prompt ? " - " + job.prompt : ""}`;
-  $("#jid").textContent = "job " + job.id;
-  if (ACTIVE.includes(job.status)) openStream();
+  $("#jid").textContent = "job " + job.id + (job.where ? ", " + job.where : "");
+  if (T.live.includes(job.status)) openStream();
   // A scale found with another calibration: Retry then starts from lidar (retryFrom).
   V.scaleStale = ["failed", "cancelled"].includes(job.status) ? await scaleStale(job).catch(() => false) : false;
   renderState({ status: job.status, current: job.current, error: job.error, warnings: job.warnings, key_ok: job.key_ok,
@@ -533,7 +566,8 @@ function renderState(st, follow) {
   const overall = ["queued", "running"].includes(st.status) ? h("div", { class: "overall" },
     h("progress", { max: build.length, value: nDone, "aria-label": "build progress" }),
     h("span", { class: "hint" }, `${nDone} of ${build.length} build stages done`)) : null;
-  fill($("#jstatus"), badge(st.status), " ", sum, overall, st.error ? h("div", { class: "msg errbox" }, st.error) : null);
+  const stText = queueText(st.status, V.job && V.job.queue_pos);
+  fill($("#jstatus"), badge(st.status, stText), " ", sum, overall, st.error ? h("div", { class: "msg errbox" }, st.error) : null);
   const from = retryFrom(st);
   let next = ["failed", "cancelled"].includes(st.status) && from === null ? "Build again from the Settings tab."
     : partList ? NEXT.parts : lidarFailed(st.status, st.stages)
@@ -550,7 +584,7 @@ function renderState(st, follow) {
   if (said !== V.said) { V.said = said; $("#announce").textContent = said; }
   $("#jwarn").replaceChildren(...(st.warnings || []).map((w) => h("li", {}, w)));
   const name = V.job ? V.job.video.name : V.id || "";
-  $("#where").replaceChildren(h("span", { class: "crumb" }, "/ " + name), badge(st.status));
+  $("#where").replaceChildren(h("span", { class: "crumb" }, "/ " + name), badge(st.status, stText));
   document.title = ({ running: `${cur || "running"} ${Math.min(nDone + 1, build.length)}/${build.length}`, queued: "Queued",
     review: partList ? "Part list waiting" : "Review waiting", done: "Done", failed: "Failed", cancelled: "Cancelled", ready: "Ready", analyzing: "Reading",
     choose_topic: "Choose topic" }[st.status] || st.status) + (name ? " · " + name : "") + " · HARPOR";
@@ -585,7 +619,8 @@ function renderState(st, follow) {
     : from === "propose" && (st.stages.find((y) => y.name === "propose") || {}).status === "done" ? "Retry: check the part list"
       : "Retry from " + from;
   const agent = agentOf(st.agent);
-  $("#keyrow").hidden = st.key_ok || agent === "none" || !["review", "failed", "cancelled"].includes(st.status) || from === "frames";
+  $("#keyrow").hidden = st.key_ok || agent === "none" || !["review", "failed", "cancelled"].includes(st.status) || from === "frames" ||
+    !!T.keyless(V.id, agent);  // the machine that runs the job holds the key
   $("#key2name").textContent = (AGENTS[agent] || AGENTS.astra).key || "API key";
   // The key goes next to the button that sends it.
   const home = st.status === "review" ? partList ? $("#partsbar") : $("#revbar") : $("#actions");
@@ -635,12 +670,12 @@ function showRun() {  // the Stages and log tab opens: the log where it was left
 }
 function openStream() {
   if (V.es) return;
-  const id = V.id, es = V.es = new EventSource(`/api/jobs/${id}/events`);
+  const id = V.id, es = V.es = T.events(`/api/jobs/${id}/events`);
   $("#logname").textContent = "live log (connecting)";
   V.logStage = null;
   V.logAtEnd = true;
   $("#rawlog").hidden = true;
-  es.onopen = () => { if (V.id === id) $("#logname").textContent = "live log"; };
+  es.onopen = () => { if (V.id === id) $("#logname").textContent = T.liveLog; };
   es.onerror = () => {
     if (V.id === id) $("#logname").textContent = es.readyState === 2 ? "live log lost: reload the page" : "live log (reconnecting)";
   };
@@ -674,7 +709,7 @@ function closeStream() {
 }
 async function showLog(stage) {
   if (V.es) return;  // the live log is showing
-  const r = await fetch(file(`logs/${stage}.log`));
+  const r = await T.fetch(file(`logs/${stage}.log`));
   $("#log").textContent = r.ok ? quiet(await r.text()).slice(-200000) : `no log of ${stage} yet`;
   $("#logname").textContent = `log of ${stage}`;
   V.logStage = stage;
@@ -723,7 +758,14 @@ async function loadFrames() {
     if (job.prompt) $("#prompt").value = job.prompt;
     $("#nviews").value = $("#nval").textContent = job.n_views || 6;
     $("#pause").checked = !job.auto_continue;
-    for (const r of document.querySelectorAll("input[name=agent]")) r.checked = r.value === agentOf(job.agent);
+    // The public site offers only astra and opus, and only the agents the account may use (supa.js disables the others):
+    // a job of another agent starts from the first agent offered.
+    const radios = [...document.querySelectorAll("input[name=agent]")];
+    for (const r of radios) r.checked = r.value === agentOf(job.agent) && r.disabled !== true;
+    if (!radios.some((r) => r.checked)) {
+      const first = radios.find((r) => r.disabled !== true);
+      if (first) first.checked = true;
+    }
     const parts = job.parts || {};  // older jobs lack it, and "articulated"
     $("#articulated").checked = job.articulated === true;
     partsPick = PARTS_MODES.includes(parts.mode) ? parts.mode : "vlm";
@@ -784,11 +826,14 @@ function chosenAgent() {
   for (const r of document.querySelectorAll("input[name=agent]")) if (r.checked) return r.value;
   return "astra";
 }
-function agentToggle() {  // the key field names the chosen agent's provider; without an agent no key is asked for or sent
-  const a = AGENTS[chosenAgent()];
+// The key field names the chosen agent's provider; without an agent no key is asked for or sent. On the public site,
+// a job on a machine that holds the agent's key (T.keyless) shows that sentence in place of the field.
+function agentToggle() {
+  const a = AGENTS[chosenAgent()], keyless = a.key ? T.keyless(V.id, chosenAgent()) : false;
   $("#keylabel").hidden = !a.key;
-  $("#key").required = !!a.key;
-  $("#keyname").textContent = a.key || "";
+  $("#key").hidden = !!keyless;
+  $("#key").required = !!a.key && !keyless;
+  $("#keyname").textContent = keyless || a.key || "";
   $("#key").placeholder = a.placeholder;
   partsToggle();
 }
@@ -971,7 +1016,7 @@ function renderFrames() {
   const fi = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.i;
   $("#grid").replaceChildren(...(manual ? m.thumbs : m.candidates).map((i) => {
     const picked = manual && shown.has(i), k = shown.get(i), at = m.times[i].toFixed(2) + " s";
-    const kids = [h("img", { src: `/api/jobs/${V.id}/thumb/${i}`, loading: "lazy", alt: manual ? "" : "frame " + i, style: ratio }),
+    const kids = [h("img", { src: T.url(`/api/jobs/${V.id}/thumb/${i}`), loading: "lazy", alt: manual ? "" : "frame " + i, style: ratio }),
       picked ? h("b", {}, String(k + 1) + (V.picks[k] === V.view0 ? " ★" : "")) : null, h("span", {}, at)];
     const cls = "cell" + (cand.has(i) ? " cand" : "") + (picked ? " pick" : "");
     return manual ? h("button", { type: "button", class: cls, "data-i": i, "aria-pressed": String(picked), "aria-label": `frame ${i} at ${at}` }, ...kids)
@@ -1027,13 +1072,13 @@ $("#startform").onsubmit = async (e) => {
   }
   if (V.job && V.job.files && (V.job.files.includes("run/posed.glb") || V.job.files.includes("results.zip")) &&
       !confirm("Build again? This replaces the current results of this job (meshes, physics and results.zip).")) return;
-  const agent = chosenAgent(), keyed = agent !== "none";
+  const agent = chosenAgent(), keyed = agent !== "none", typed = keyed && !T.keyless(V.id, agent);
   $("#start").disabled = true;
   say($("#startmsg"), keyed ? "checking the key" : "", true);
   try {
     await post(`/api/jobs/${V.id}/start`, { mode: mode(), prompt: $("#prompt").value, n_views: +$("#nviews").value,
       picks: manual ? V.picks : [], view0: manual ? V.view0 : null, auto_continue: !$("#pause").checked,
-      agent, api_key: keyed ? $("#key").value : null, articulated, ...(articulated ? { parts_mode: pm, parts } : {}), lidar });
+      agent, api_key: typed ? $("#key").value : null, articulated, ...(articulated ? { parts_mode: pm, parts } : {}), lidar });
     $("#key").value = "";
     say($("#startmsg"), "", true);
     $("#log").textContent = "";
@@ -1497,7 +1542,7 @@ window.addEventListener("resize", tipPlace);
 
 async function renderResults(job) {
   tipClose();  // its button is about to go
-  const has = (p) => job.files.includes(p), json = async (p) => has(p) ? (await fetch(file(p))).json() : null;
+  const has = (p) => job.files.includes(p), json = async (p) => has(p) ? (await T.fetch(file(p))).json() : null;
   const cm = (x) => (100 * x).toFixed(0);
   const viewer = (p, title, key) => {
     const name = h("span", {}, title), cap = h("figcaption", {}, name, info(key, title)), fig = h("figure", {}, cap);
@@ -1508,7 +1553,7 @@ async function renderResults(job) {
         if (d) name.textContent = `${title}: ${cm(d.x)} x ${cm(d.y)} x ${cm(d.z)} cm`;
       },
       onerror: () => fig.replaceChildren(cap, h("p", { class: "msg" }, `Could not show ${p.split("/").pop()}: `,
-        h("a", { href: file(p), download: p.split("/").pop() }, "download it"), ".")) }));
+        h("a", { href: file(p, p.split("/").pop()), download: p.split("/").pop() }, "download it"), ".")) }));
     return fig;
   };
   const off = agentOf(job.agent) === "none", a = job.agent_result, art = job.articulated === true;
@@ -1637,7 +1682,7 @@ function renderDownloads(job) {
   const has = (p) => files.includes(p);
   const groups = DOWNLOADS.map(([title, rows]) => [title, rows.filter(([p]) => has(p))]).filter(([, rows]) => rows.length);
   const row = ([p, name, key]) => h("li", { class: "dlrow" },
-    h("a", { href: file(p), download: `${job.id}_${name}`, class: p === "results.zip" ? "dl primary" : "dl" }, name),
+    h("a", { href: file(p, `${job.id}_${name}`), download: `${job.id}_${name}`, class: p === "results.zip" ? "dl primary" : "dl" }, name),
     typeof sizes[p] === "number" ? h("span", { class: "dlsize" }, fileSize(sizes[p])) : null, info(key, name));
   const note = groups.length && !has("results.zip") ? filesNote(job.status) : null;
   fill($("#downloadsbody"), note ? h("p", { class: "dlnote" }, note) : null, groups.map(([title, rows]) => {
@@ -1771,4 +1816,5 @@ function seekInput(i) {  // the preview at view i's frame, paused: it never star
   v.scrollIntoView({ block: "nearest" });
 }
 
-route();
+if (PUBLIC) T.ready.then(() => { routing = true; route(); });
+else route();

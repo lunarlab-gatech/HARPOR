@@ -77,6 +77,7 @@ CHECK_RANGE = 1.25  # the colours saturate at r / s = 1 / 1.25 (blue) and 1.25 (
 # Calibration files.
 ORTHONORMAL_TOL = 1e-3  # |R R^T - I| below this is re-orthonormalised; above it is an error
 MAX_TRANSLATION = 2.0  # m between LiDAR and camera; more is likely millimeters
+MAX_YAML_DEPTH = 16  # lists and maps in lists and maps; real calibration files use at most 6
 # The camera's optical axes (x right, y down, z forward) from body axes (x forward, y left, z up).
 R_OPT_LINK = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]])
 
@@ -527,16 +528,38 @@ def _transform(data, key):
     return T
 
 
-def _yaml(text):
+def _yaml(text, name="calibration.yaml"):
+    """The YAML text loaded with a safe loader (ruamel.yaml, else PyYAML), after _plain_yaml has walked
+    its parser events."""
     try:
-        from ruamel.yaml import YAML
+        from ruamel.yaml import YAML, events
     except ImportError:
         try:
             import yaml
         except ImportError:
             raise ValueError("reading YAML needs ruamel.yaml or PyYAML; give the calibration as JSON") from None
+        _plain_yaml(yaml.parse(text, Loader=yaml.SafeLoader), yaml.events, name)
         return yaml.safe_load(text)
+    _plain_yaml(YAML(typ="safe", pure=True).parse(text), events, name)
     return YAML(typ="safe", pure=True).load(text)
+
+
+def _plain_yaml(stream, events, name):
+    """ValueError at the first anchor or alias (& and *) in a YAML parser event stream, or at nesting
+    deeper than MAX_YAML_DEPTH; it stops there, before the parser reads on. A safe loader keeps an
+    alias as a second reference to the same list, so a few hundred bytes of nested aliases can stand
+    for billions of numbers once np.asarray walks them. And the pure-Python parser takes minutes over
+    a 64 KB file of nested brackets. Calibration files need neither."""
+    depth = 0
+    for e in stream:
+        if getattr(e, "anchor", None) is not None:
+            raise ValueError(f"{name} uses YAML anchors or aliases (& and *); write the values out")
+        if isinstance(e, events.CollectionStartEvent):
+            depth += 1
+            if depth > MAX_YAML_DEPTH:
+                raise ValueError(f"{name} nests lists and maps deeper than {MAX_YAML_DEPTH} levels")
+        elif isinstance(e, events.CollectionEndEvent):
+            depth -= 1
 
 
 def read_calibration(text, name="calibration.yaml"):
@@ -557,7 +580,8 @@ def read_calibration(text, name="calibration.yaml"):
 
     The rotation must be orthonormal within ORTHONORMAL_TOL (it is then re-orthonormalised by SVD)
     with det > 0, the translation at most MAX_TRANSLATION (2 m) and K positive. The result's T_cam_lidar maps LiDAR points to the
-    camera's optical axes (x right, y down, z forward): body axes get R_OPT_LINK on the left."""
+    camera's optical axes (x right, y down, z forward): body axes get R_OPT_LINK on the left. YAML anchors
+    and aliases, and lists and maps nested deeper than MAX_YAML_DEPTH, are refused (_plain_yaml)."""
     if isinstance(text, bytes):
         try:
             text = text.decode("utf-8-sig")
@@ -570,10 +594,12 @@ def read_calibration(text, name="calibration.yaml"):
             data = json.loads(text)
         except json.JSONDecodeError as e:
             raise ValueError(f"{name} is not valid JSON: {e}") from None
+        except RecursionError:
+            raise ValueError(f"{name} nests lists and maps too deeply") from None
     else:
         text = re.sub(r"(?m)^%YAML.*$", "", text).replace("!!opencv-matrix", "")
         try:
-            data = _yaml(text)
+            data = _yaml(text, name)
         except ValueError:
             raise
         except Exception as e:

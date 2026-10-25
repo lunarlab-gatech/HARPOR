@@ -4,13 +4,17 @@ views, build a simulation-ready object.
 Runs in envs/web (fastapi, uvicorn, av, numpy, pillow, scipy, rosbags) inside the ICE GPU job, from the
 gator_clone root (start_ice.sh starts it there):
 
-    python -m gator.webapp [--runs DIR] [--host 0.0.0.0] [--port 0] [--fake]
+    python -m gator.webapp [--runs DIR] [--host 0.0.0.0] [--port 0] [--fake] [--worker [--local-keys A]]
 
 It makes a login token, writes ~/.config/gator/webapp.json (0600: node, port, token, url_path, and
 slurm_job and slurm_node from SLURM_JOB_ID and SLURMD_NODENAME, so start_ice.sh reuses the server
-only in the same job), prints the port forward for the Mac and the URL, and serves the app with one
-uvicorn worker. When the server stops (Ctrl-C or SIGTERM), it deletes webapp.json if it still
-holds this server's token.
+only in the same job, and worker), prints the port forward for the Mac and the URL, and serves the app
+with one uvicorn worker. When the server stops (Ctrl-C or SIGTERM), it runs the hooks that on_stop
+added, then cancels the running stages, and deletes webapp.json if it still holds this server's token.
+--worker also serves the public site: a personal worker (worker.py) in this process, on the same Runner,
+signed in as the machine's user (python -m gator.webapp.worker login). The server then listens on
+127.0.0.1 unless --host says otherwise. --local-keys names the agents whose key the machine keeps in its
+own key file. webapp.json's "worker" is true while the worker runs, else false.
 --port 0 takes a free port. --fake runs every stage with gator.webapp.fake_steps, so the app works
 on a Mac without GPUs (OpenAI keys that start with sk- and Anthropic keys that start with sk-ant-
 pass). The runs folder defaults to steps.config_from_env(): WEBAPP_RUNS, else $G/webapp_runs.
@@ -106,7 +110,9 @@ to the sharpest frame within 0.25 s (frames/pool.json "picks"). The overrides na
 The API key of the job's agent (OpenAI for astra, Anthropic for opus) arrives in the start,
 overrides, parts and continue bodies. It is checked with jobs.check_key before anything runs and
 then lives only in the runner's memory (jobs.py). The VLM that lists the parts is the agent's model,
-so it takes the same key. A job with "agent": "none" takes no key. Bodies are parsed by hand, and
+so it takes the same key. A job with "agent": "none" takes no key. With "key_later": true and no
+api_key, start, parts and continue go on without the key: the job asks for it when it reaches a stage
+that needs it (jobs.NO_KEY_LATER), and the answer's "key" says KEY_LATER. Bodies are parsed by hand, and
 FastAPI's telemetry is off. Only the reason for a bad part list quotes the body: it names the parts,
 and it is cut to PART_REASON characters.
 """
@@ -154,6 +160,7 @@ CALIBRATION_SUFFIXES = (".yaml", ".yml", ".json")
 LIDAR_COUNTS = ("views", "views_with_points", "views_used", "outliers", "scattered", "few_points", "no_mask",
                 "no_samples")
 PART_REASON = 200  # the longest reason for a bad part list (part_reason)
+KEY_LATER = "no key yet: the job asks for it when it needs it"  # the answer to a body with key_later
 FORWARD = "ssh -S ~/.ssh/cm-ice -O forward -L 8765:{node}:{port} ali497@login-ice.pace.gatech.edu"
 NO_TELEMETRY = {"tracing": False, "metrics": False, "logs": False, "operation_spans": False, "auto_configure": False}
 
@@ -162,11 +169,49 @@ class Bad(Exception):
     """A request the server refuses: (HTTP status, message). Messages never hold the API key."""
 
 
+def agent_of(b, job=None):
+    """The agent a body names ("agent": astra, opus, none, or true or false), else the job's (job: the
+    job.json dict, when given), else astra; 400 for anything else."""
+    if job is not None and b.get("agent") is None:
+        return steps.agent(job)
+    try:
+        return steps.agent({"agent": b.get("agent", "astra")})
+    except ValueError:
+        raise Bad(400, f"agent is {', '.join(steps.AGENTS)}") from None
+
+
+def key_later(b):
+    """True when a start, continue or parts body says "key_later": true and holds no API key: the build
+    goes on without the key, and the job asks for it when a stage needs it (jobs.NO_KEY_LATER). A key in
+    the body wins. 400 when key_later is not true or false."""
+    later = b.get("key_later", False)
+    if type(later) is not bool:
+        raise Bad(400, "key_later is true or false")
+    return later and not b.get("api_key")
+
+
+def on_stop(app, hook):
+    """Run hook() (no arguments, in a thread) when the server stops, before the runner cancels the
+    stages. app is make_app's app or the FastAPI app inside it. Hooks run in the order they were added;
+    one that fails does not keep the others or the shutdown from running."""
+    (app.app if isinstance(app, TokenGate) else app).state.stop_hooks.append(hook)
+
+
 def part_reason(e):
     """The reason gator.parts.propose gives for a bad part list. It quotes the parts, so every long quoted
     value is shortened first (the rule after it stays), then the whole text is cut."""
     text = re.sub(r"""(?:^|(?<=[\s(\[,:]))(['"])([^'"]{37})[^'"]{4,}\1(?=[\s,.;:)\]]|$)""", r"\1\2...\1", str(e))
     return text if len(text) <= PART_REASON else text[:PART_REASON - 3] + "..."
+
+
+def content_length(request):
+    """The request's Content-Length in bytes, else None (missing, or not a whole number). One of more
+    than 15 digits counts as 10**15, which is over every limit here."""
+    size = request.headers.get("content-length", "")
+    if not re.fullmatch(r"[0-9]+", size):
+        return None
+    size = size.lstrip("0") or "0"
+    return 10**15 if len(size) > 15 else int(size)
 
 
 def calibration_summary(cal):
@@ -336,12 +381,14 @@ def tick(J, cursor, last):
 def parse_event_id(J, value):
     """The cursor (see tick) of a Last-Event-ID "<stage>:<offset>", else None."""
     stage, _, pos = (value or "").partition(":")
-    t = jobs.load(J)["stages"].get(stage, {}).get("started") if stage in steps.NAMES and pos.isdigit() else None
+    ok = stage in steps.NAMES and re.fullmatch(r"[0-9]{1,15}", pos)  # not int("²"), nor a seek past what a file holds
+    t = jobs.load(J)["stages"].get(stage, {}).get("started") if ok else None
     return (stage, int(pos), t) if t else None  # a stage that was reset since: start over as a new client
 
 
 def make_app(cfg, token, key_dir=None):
-    """The ASGI app (FastAPI behind the token gate) with its own jobs.Runner for cfg."""
+    """The ASGI app (FastAPI behind the token gate) with its own jobs.Runner for cfg. The FastAPI app is the
+    gate's .app; its state.runner is the Runner, and on_stop adds to its state.stop_hooks."""
     import anyio
     from fastapi import FastAPI, Request
     from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -353,10 +400,16 @@ def make_app(cfg, token, key_dir=None):
     @asynccontextmanager
     async def lifespan(app):
         yield
+        for hook in list(app.state.stop_hooks):  # on_stop: a worker stops before the stages are cancelled
+            try:
+                await run_in_threadpool(hook)
+            except Exception as e:
+                print(f"a stop hook failed: {e!r}", flush=True)
         await run_in_threadpool(runner.shutdown)  # no stage keeps the GPU after the server stops
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan, telemetry=NO_TELEMETRY)
     app.state.runner = runner
+    app.state.stop_hooks = []  # on_stop adds to it
 
     @app.exception_handler(Bad)
     async def bad(request, e):
@@ -371,7 +424,7 @@ def make_app(cfg, token, key_dir=None):
     async def body(request):
         try:
             data = json.loads(await request.body() or b"{}")
-        except ValueError:
+        except (ValueError, RecursionError):  # RecursionError: nested deeper than the parser goes
             raise Bad(400, "the request body is not JSON") from None
         if not isinstance(data, dict):
             raise Bad(400, "the request body is not a JSON object")
@@ -389,15 +442,6 @@ def make_app(cfg, token, key_dir=None):
         if not ok:
             raise Bad(400, msg)
         return msg
-
-    def agent_of(b, job=None):
-        """The agent a body names ("agent": astra, opus, none, or true or false), else the job's."""
-        if job is not None and b.get("agent") is None:
-            return steps.agent(job)
-        try:
-            return steps.agent({"agent": b.get("agent", "astra")})
-        except ValueError:
-            raise Bad(400, f"agent is {', '.join(steps.AGENTS)}") from None
 
     def idle(J):
         job = jobs.load(J)
@@ -429,12 +473,12 @@ def make_app(cfg, token, key_dir=None):
                            f"Scanner export ({' '.join(jobs.STRAY)}); {Path(name).suffix or 'a file without a suffix'} "
                            "is none of these")
         too_big = f"the file is larger than {MAX_UPLOAD >> 30} GB"
-        size = request.headers.get("content-length", "")
-        if not size.isdigit():  # a chunked upload would skip the free-space check; the page always sends one
+        size = content_length(request)
+        if size is None:  # a chunked upload would skip the free-space check; the page always sends one
             raise Bad(411, "send the file with a Content-Length header")
-        if int(size) > MAX_UPLOAD:
+        if size > MAX_UPLOAD:
             raise Bad(413, too_big)
-        free, need = shutil.disk_usage(runner.runs).free, FREE_FACTOR.get(kind, 1.2) * int(size) + (2 << 30)
+        free, need = shutil.disk_usage(runner.runs).free, FREE_FACTOR.get(kind, 1.2) * size + (2 << 30)
         if free < need:
             raise Bad(413, f"the server has {free / 2**30:.1f} GB free and this upload needs {need / 2**30:.1f} GB")
         job_id, path = await run_in_threadpool(runner.new_upload, name)  # no delete until upload_done
@@ -556,7 +600,7 @@ def make_app(cfg, token, key_dir=None):
             raise Bad(400, "view 0 is one of the picked frames")
         if type(auto_continue) is not bool:
             raise Bad(400, "auto_continue is true or false")
-        agent = agent_of(b)  # astra when the body names none
+        agent, later = agent_of(b), key_later(b)  # astra when the body names none
         articulated, parts = b.get("articulated", False), {"mode": b.get("parts_mode"), "list": b.get("parts") or []}
         if not isinstance(parts["list"], list):
             raise Bad(400, "parts is a list of parts")
@@ -571,8 +615,13 @@ def make_app(cfg, token, key_dir=None):
             lidar = jobs.lidar_settings(J, job, value)
         except ValueError as e:
             raise Bad(400, str(e)) from None
-        msg = check_key(b.get("api_key"), agent) if agent != "none" else "no key: the agent is turned off"
-        runner_call(runner.submit_build, job_id, b["api_key"] if agent != "none" else None, mode=mode,
+        if agent == "none":
+            key, msg = None, "no key: the agent is turned off"
+        elif later:  # the job asks for the key when it reaches a stage that needs it
+            key, msg = None, KEY_LATER
+        else:
+            key, msg = b.get("api_key"), check_key(b.get("api_key"), agent)
+        runner_call(runner.submit_build, job_id, key, mode=mode,
                     prompt=prompt.strip(), n_views=n_views, picks=picks if mode == "manual" else [], view0=view0,
                     auto_continue=auto_continue, agent=agent, overrides={"locked": [], "excluded": [], "instance": {}},
                     articulated=articulated, parts=parts, lidar=lidar)
@@ -645,8 +694,8 @@ def make_app(cfg, token, key_dir=None):
         if Path(jobs.safe_name(name)).suffix.lower() not in CALIBRATION_SUFFIXES:
             raise Bad(415, f"upload the calibration as {', '.join(CALIBRATION_SUFFIXES)}")
         too_big = f"a calibration file has at most {MAX_CALIBRATION >> 10} KB"
-        size = request.headers.get("content-length", "")
-        if size.isdigit() and int(size) > MAX_CALIBRATION:
+        size = content_length(request)
+        if size is not None and size > MAX_CALIBRATION:
             raise Bad(413, too_big)
         data = bytearray()
         async for chunk in request.stream():  # never more than the limit in memory
@@ -677,6 +726,8 @@ def make_app(cfg, token, key_dir=None):
         for x in (locked, excluded):
             if not isinstance(x, list) or not all(isinstance(n, str) and n in names for n in x):
                 raise Bad(400, "locked and excluded are lists of pool frames such as f00012")
+            if len(set(x)) < len(x):
+                raise Bad(400, "locked and excluded name each pool frame once")
         if set(locked) & set(excluded):
             raise Bad(400, f"{sorted(set(locked) & set(excluded))} are both locked and excluded")
         if not isinstance(instance, dict):
@@ -714,15 +765,21 @@ def make_app(cfg, token, key_dir=None):
                 "photo": photo if photo and resolve(J, photo) else None,
                 "checks": [rel for rel in (p.relative_to(J).as_posix() for p in checks) if resolve(J, rel)]}
 
-    def held_key(job_id, b, agent):
-        """The body's API key for agent (checked), else None; 400 when the server holds none for the job."""
+    def held_key(job_id, b, agent, later=False):
+        """The body's API key for agent (checked), else None; 400 when the server holds none for the job,
+        unless later (key_later: the job asks for the key when it needs it)."""
         key = (b.get("api_key") or None) if agent != "none" else None  # no key when the agent is off
         if key is not None:
             check_key(key, agent)
-        elif agent != "none" and not runner.has_key(job_id, agent):
+        elif agent != "none" and not later and not runner.has_key(job_id, agent):
             raise Bad(400, f"the server holds no {steps.PROVIDER[agent]} API key for this job (it restarted, or the "
                            "agent changed); paste the key again")
         return key
+
+    def asks(job_id, agent, later):
+        """{"key": KEY_LATER} when a build went on with key_later and the runner holds no key for the
+        job's agent, else {}."""
+        return {"key": KEY_LATER} if later and agent != "none" and not runner.has_key(job_id, agent) else {}
 
     def set_parts(job_id, b):
         from gator.parts import propose
@@ -737,9 +794,10 @@ def make_app(cfg, token, key_dir=None):
             parts = propose.validate(b["parts"], job["prompt"])
         except ValueError as e:
             raise Bad(400, part_reason(e)) from None
-        key = held_key(job_id, b, steps.agent(job))  # the agent stage runs after the parts
-        first = runner_call(runner.resume, job_id, "parts", key, confirm_parts=True, parts_list=parts)
-        return {"status": "queued", "from": first}
+        agent, later = steps.agent(job), key_later(b)
+        key = held_key(job_id, b, agent, later)  # the agent stage runs after the parts
+        first = runner_call(runner.resume, job_id, "parts", key, confirm_parts=True, parts_list=parts, key_later=later)
+        return {"status": "queued", "from": first, **asks(job_id, agent, later)}
 
     @app.post("/api/jobs/{job_id}/parts")
     async def parts(job_id: str, request: Request):
@@ -748,7 +806,7 @@ def make_app(cfg, token, key_dir=None):
     def continue_job(job_id, b):
         J = job_dir(job_id)
         job = idle(J)
-        first, agent = b.get("from") or "sam3d", agent_of(b, job)
+        first, agent, later = b.get("from") or "sam3d", agent_of(b, job), key_later(b)
         key = (b.get("api_key") or None) if agent != "none" else None  # no key when the agent is off
         if first == "frames":  # analyze the input again (it failed, was cancelled or the server stopped); no key
             if job["stages"].get("frames", {}).get("status") == "done":
@@ -761,13 +819,16 @@ def make_app(cfg, token, key_dir=None):
             raise Bad(400, f"from is frames or one of {jobs.BUILD}")
         changed = agent != steps.agent(job)  # the other agent's stage runs anew (Runner.resume)
         if changed or job["stages"]["agent"]["status"] not in ("done", "skipped"):
-            key = held_key(job_id, b, agent)
+            key = held_key(job_id, b, agent, later)
         elif key is not None:
             check_key(key, agent)
+        else:
+            later = False  # the agent stage is done: no stage needs a key
         # Build while the job waits for its part list confirms the VLM's list as it is.
         confirm = steps.waits_for_parts(J, job) and not b.get("from")
-        first = runner_call(runner.resume, job_id, first, key, confirm_parts=confirm, agent=agent)
-        return {"status": "queued", "from": first}  # the agent stage when the agent changed, parts when confirmed
+        first = runner_call(runner.resume, job_id, first, key, confirm_parts=confirm, agent=agent, key_later=later)
+        # from: the agent stage when the agent changed, parts when confirmed
+        return {"status": "queued", "from": first, **asks(job_id, agent, later)}
 
     @app.post("/api/jobs/{job_id}/continue")
     async def continue_(job_id: str, request: Request):
@@ -866,14 +927,47 @@ def _exit_on_sigterm(sig, frame):
     raise SystemExit(128 + sig)
 
 
+def worker_of(local_keys):
+    """What the personal worker starts with: its session (session.Session, which takes the session file's lock). A
+    worker that cannot start leaves the server in tunnel mode: it prints why and returns None."""
+    from gator.webapp import supa, worker
+
+    if local_keys:
+        worker.check_local_keys(local_keys)  # the server refuses to start with --local-keys and a bad key file
+    try:
+        from gator.webapp import session
+    except ImportError as e:  # a broken install: the tunnel still works
+        print(f"the personal worker does not start: {e}", flush=True)
+        return None
+    try:
+        return {"session": session.Session()}
+    except (SystemExit, supa.Error) as e:
+        print(f"the personal worker does not start: {e}\n{worker.SIGNED_OUT}", flush=True)
+        return None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m gator.webapp", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runs", help="folder of the job folders (default: WEBAPP_RUNS, else $G/webapp_runs)")
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", help="the address to listen on (default 0.0.0.0, or 127.0.0.1 with --worker)")
     ap.add_argument("--port", type=int, default=0, help="0 takes a free port")
     ap.add_argument("--fake", action="store_true", help="run every stage with gator.webapp.fake_steps (no GPU)")
+    ap.add_argument("--worker", action="store_true",
+                    help="also serve the public site: a personal worker on this GPU machine (sign in first: "
+                         "python -m gator.webapp.worker login)")
+    ap.add_argument("--local-keys", metavar="AGENTS",
+                    help="with --worker: astra, opus or astra,opus, whose API key this machine keeps in "
+                         "~/.config/gator/openai.env or anthropic.env")
     a = ap.parse_args(argv)
+    local_keys = ()
+    if a.local_keys is not None:
+        if not a.worker:
+            ap.error("--local-keys needs --worker")
+        local_keys = tuple(dict.fromkeys(k.strip() for k in a.local_keys.split(",") if k.strip()))
+        if not local_keys or set(local_keys) - {"astra", "opus"}:
+            ap.error("--local-keys takes astra, opus or astra,opus")
+    host = a.host or ("127.0.0.1" if a.worker else "0.0.0.0")
     import uvicorn
 
     cfg = steps.config_from_env()
@@ -882,19 +976,35 @@ def main(argv=None):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        sock.bind((a.host, a.port))
+        sock.bind((host, a.port))
     except OSError as e:
-        raise SystemExit(f"cannot listen on {a.host}:{a.port}: {e}")
+        raise SystemExit(f"cannot listen on {host}:{a.port}: {e}")
     port, node, token = sock.getsockname()[1], socket.getfqdn(), secrets.token_urlsafe(32)
+    parts = worker_of(local_keys) if a.worker else None  # before the Runner claims the runs folder
     app = make_app(cfg, token)
+    w = None
+    if parts is not None:
+        from gator.webapp import worker
+
+        w = worker.Worker(app, cfg, local_keys, **parts)
+        on_stop(app, w.stop_thread)  # the worker stops before the runner cancels the stages
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
     info = write_info({"node": node, "port": port, "token": token, "url_path": f"/?token={token}",
-                       "slurm_job": os.environ.get("SLURM_JOB_ID"), "slurm_node": os.environ.get("SLURMD_NODENAME")})
+                       "slurm_job": os.environ.get("SLURM_JOB_ID"), "slurm_node": os.environ.get("SLURMD_NODENAME"),
+                       "worker": w is not None})
     print(f"HARPOR web app on {node}:{port}, runs in {cfg.runs}" + (" (fake stages)" if cfg.fake else ""))
     print(f"login details in {info}")
-    print(f"on the Mac: {FORWARD.format(node=node, port=port)}")
-    print(f"then open http://localhost:8765/?token={token}")
-    print(f"(on this machine: http://localhost:{port}/?token={token})", flush=True)
+    if a.worker:  # a user's own machine: the tunnel's ICE forward does not apply
+        print(f"on this machine: http://localhost:{port}/?token={token}")
+        print(f"from another computer: ssh -L {port}:127.0.0.1:{port} <this machine>, then open the same URL there",
+              flush=True)
+    else:
+        print(f"on the Mac: {FORWARD.format(node=node, port=port)}")
+        print(f"then open http://localhost:8765/?token={token}")
+        print(f"(on this machine: http://localhost:{port}/?token={token})", flush=True)
+    if w is not None:
+        print(f"the personal worker of {w.place} runs in this server", flush=True)
+        w.start_thread()
     try:
         with suppress(KeyboardInterrupt):  # uvicorn shuts down on Ctrl-C, then raises it again
             uvicorn.Server(uvicorn.Config(app, log_level="info", access_log=False, timeout_graceful_shutdown=3)).run(

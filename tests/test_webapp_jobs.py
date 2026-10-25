@@ -3,6 +3,7 @@ import os
 import re
 import secrets
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -38,9 +39,9 @@ VOMP = ('eval "$($G/tools/micromamba shell hook -s bash)"; micromamba activate $
 def make_runner(tmp_path):
     made = []
 
-    def make(fake=True):
+    def make(fake=True, **kw):
         cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=fake)
-        r = jobs.Runner(cfg, key_dir=tmp_path / "keys")
+        r = jobs.Runner(cfg, key_dir=tmp_path / "keys", **kw)
         made.append(r)
         return r, cfg
 
@@ -1169,8 +1170,8 @@ def test_runner_rosbag_topics_and_the_agent_off(make_runner, monkeypatch):
     assert not list(runner.key_dir.iterdir())
     with pytest.raises(ValueError, match="is done"):
         runner.submit_analyze(job_id, topic="/a/image_rect")
-    with pytest.raises(ValueError, match="API key"):
-        runner.submit_build(job_id, None, agent=True)
+    with pytest.raises(ValueError, match="API key"):  # None would queue it without a key (the key comes later)
+        runner.submit_build(job_id, "", agent=True)
 
     # Another topic after a failed build: frames runs on it, and the build's outputs, records and picks are gone;
     # so is the calibration, whose T and K were the other camera's.
@@ -1222,6 +1223,183 @@ def test_restart_fails_interrupted_jobs(make_runner):
     assert job["stages"]["da3"]["status"] == "failed" and "server stopped" in job["error"]
     assert job["stages"]["da3"]["ended"] == pytest.approx(t + 30)
     assert {s["name"]: s["seconds"] for s in jobs.progress(J)}["da3"] == 30.0  # not still counting
+
+
+def stub_stages(monkeypatch, hold=()):
+    """Stage commands that touch J/done_<stage> (frames counts as done); a stage in hold first waits until
+    J/go_<stage> exists."""
+    def command(stage, job, cfg, key_file=None):
+        J = cfg.runs / job["id"]
+        gate = f"while [ ! -e {J}/go_{stage} ]; do sleep 0.05; done; " if stage in hold else ""
+        return ["bash", "-c", f"{gate}touch {J}/done_{stage}"], str(J), {}
+
+    monkeypatch.setattr(steps, "command", command)
+    monkeypatch.setattr(steps, "done", lambda stage, J: (Path(J) / f"done_{stage}").exists() or stage == "frames")
+
+
+def until(check, timeout=30):
+    t0 = time.time()
+    while not check():
+        assert time.time() - t0 < timeout, "timed out"
+        time.sleep(0.05)
+
+
+def test_runner_queued_lists_the_builds_that_wait(make_runner, monkeypatch):
+    runner, cfg = make_runner()
+    stub_stages(monkeypatch, hold=("extract",))
+    (a, Ja), (b, Jb), (c, Jc) = (ready_job(cfg, auto_continue=True) for _ in range(3))
+    assert runner.queued() == []
+    for job_id in (a, b, c):
+        runner.submit_build(job_id, None, agent="none")
+    wait(Ja, "running")
+    q = runner.queued()
+    assert q == [(b, "extract"), (c, "extract")]  # the running build is not in it
+    q.clear()  # a copy
+    assert runner.queued() == [(b, "extract"), (c, "extract")]
+    runner.cancel(c)
+    assert runner.queued() == [(b, "extract")] and jobs.load(Jc)["status"] == "cancelled"
+    for J in (Ja, Jb):
+        (J / "go_extract").touch()
+    assert wait(Jb, "done")["status"] == "done" and wait(Ja, "done") and runner.queued() == []
+    runner.resume(b, "package")
+    assert runner.queued() in ([(b, "package")], [])  # [] once the worker took it
+    wait(Jb, "done")
+
+
+def test_runner_json_keeps_a_second_server_off_the_runs_folder(make_runner, monkeypatch):
+    """RUNS/.runner.json names the server whose Runner runs the folder's jobs. A second Runner refuses to
+    start while that server lives, before it fails any of its jobs; one of the same process (a restart in
+    the tests), or of a server that is gone, takes over."""
+    monkeypatch.setenv("SLURM_JOB_ID", "1234567")
+    runner, cfg = make_runner()
+    f = cfg.runs / jobs.RUNNER_FILE
+    info = json.loads(f.read_text())
+    assert (info["pid"], info["host"], info["slurm_job"]) == (os.getpid(), socket.gethostname(), "1234567")
+    assert stat.S_IMODE(f.stat().st_mode) == 0o600 and not list(cfg.runs.glob(".runner.*.tmp"))
+    later, _ = make_runner()
+    assert json.loads(f.read_text())["id"] != info["id"]
+    runner.shutdown(timeout=5)
+    assert f.is_file()  # the file is the later Runner's now
+    later.shutdown(timeout=5)
+    assert not f.exists()
+
+    job_id, J = ready_job(cfg)
+    jobs.update(J, status="running", current="extract")
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-m", "gator.webapp"])
+    try:
+        f.write_text(json.dumps({"pid": other.pid, "host": socket.gethostname(), "slurm_job": "1234568"}))
+        with pytest.raises(SystemExit) as e:
+            make_runner()
+        assert str(e.value) == (f"another HARPOR server runs the jobs in {cfg.runs} (pid {other.pid} on "
+                                f"{socket.gethostname()}, Slurm job 1234568); stop it first, or delete {f} if it is gone")
+        assert jobs.load(J)["status"] == "running" and json.loads(f.read_text())["pid"] == other.pid
+    finally:
+        other.kill()
+        other.wait()
+    make_runner()  # that server is gone: this one takes over and fails the job it left
+    assert jobs.load(J)["status"] == "failed" and json.loads(f.read_text())["pid"] == os.getpid()
+    f.write_text("[not json")
+    make_runner()
+    assert json.loads(f.read_text())["pid"] == os.getpid()
+
+
+def test_holder_alive_asks_slurm_about_another_host(monkeypatch, capsys):
+    """A server counts as running only when that is known: a HARPOR server process of this user on this host, or a
+    running Slurm job on another host. A pid that another program got since, and anything Slurm does not answer,
+    count as gone, so a stale .runner.json never keeps the tunnel from starting."""
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    here = {"host": socket.gethostname()}
+    server_ = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-m", "gator.webapp"])
+    other_program = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert jobs.holder_alive({**here, "pid": server_.pid}) is True
+        assert jobs.holder_alive({**here, "pid": other_program.pid}) is False  # the pid was reused
+    finally:
+        for p in (server_, other_program):
+            p.kill()
+            p.wait()
+    assert not any(jobs.holder_alive({**here, "pid": p}) for p in (gone.pid, None, "1", 0, -1, True))
+    if os.getuid() != 0:
+        assert jobs.holder_alive({**here, "pid": 1}) is False  # another user's process
+
+    calls = []
+
+    def squeue(rc, out="", err=""):
+        def run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, rc, out, err)
+        return run
+
+    other = {"pid": 4242, "host": "gpu-node-2.example", "slurm_job": "1234567"}
+    for rc, out, err, alive in [(0, "RUNNING\n", "", True), (0, "COMPLETING\n", "", True), (0, "TIMEOUT\n", "", False),
+                                (0, "", "", False), (1, "", "slurm_load_jobs error: Invalid job id specified\n", False),
+                                (1, "", "slurm_load_jobs error: Unable to contact slurm controller\n", False)]:
+        monkeypatch.setattr(jobs.subprocess, "run", squeue(rc, out, err))
+        assert jobs.holder_alive(other) is alive, (out, err)
+    assert calls[-1] == ["squeue", "-h", "-j", "1234567", "-o", "%T"]
+    assert capsys.readouterr().out == ("Slurm did not say whether job 1234567 (the server in .runner.json on "
+                                       "gpu-node-2.example) still runs; this server takes the runs folder\n")
+
+    def missing(argv, **kw):
+        raise FileNotFoundError("squeue")
+
+    monkeypatch.setattr(jobs.subprocess, "run", missing)
+    n = len(calls)
+    assert jobs.holder_alive(other) is False and "Slurm did not say" in capsys.readouterr().out
+    assert jobs.holder_alive({**other, "slurm_job": None}) is False
+    assert jobs.holder_alive({**other, "slurm_job": "1234567 -o %all"}) is False and len(calls) == n
+
+
+def test_runner_forget_key(make_runner, monkeypatch):
+    runner, cfg = make_runner()
+    stub_stages(monkeypatch)
+    job_id, J = ready_job(cfg)
+    runner.submit_build(job_id, KEY)  # it stops in review after select
+    job = wait(J, "review")
+    assert job["key_ok"] is True and runner.has_key(job_id, "astra")
+    assert runner.forget_key(job_id) is True
+    assert not runner.has_key(job_id) and jobs.load(J)["key_ok"] is False
+    assert not any(runner.forget_key(x) for x in (job_id, "../" + job_id, None))
+    runner.resume(job_id, "sam3d")
+    job = wait(J, "review")
+    assert job["warnings"] == [jobs.NO_KEY["astra"]] and job["stages"]["agent"]["status"] == "pending"
+
+
+def test_runner_builds_without_a_key_and_asks_for_it_later(make_runner, monkeypatch, tmp_path):
+    """submit_build with api_key None queues the build without a key; the job waits in review at the first
+    stage that needs it, with NO_KEY_LATER. resume with key_later says the same; resume without it says the
+    server lost the key (NO_KEY). A key given wins."""
+    runner, cfg = make_runner()
+    stub_stages(monkeypatch)
+    assert jobs.NO_KEY_LATER == {"astra": "The job needs the OpenAI API key now; paste it and press Build.",
+                                 "opus": "The job needs the Anthropic API key now; paste it and press Build."}
+    job_id, J = ready_job(cfg, auto_continue=True)
+    runner.submit_build(job_id, None, agent="opus")
+    assert jobs.load(J)["key_ok"] is False and not runner.has_key(job_id)
+    job = wait(J, "review")
+    assert job["warnings"] == [jobs.NO_KEY_LATER["opus"]] and job["key_ok"] is False and "key_later" not in job
+    assert job["stages"]["agent"]["note"] == "waiting for the Anthropic API key"
+    assert job["stages"]["place"]["status"] == "done" and not (J / "done_agent").exists()
+    runner.resume(job_id, "sam3d", key_later=True)
+    assert wait(J, "review")["warnings"] == [jobs.NO_KEY_LATER["opus"]]
+    runner.resume(job_id, "sam3d")
+    assert wait(J, "review")["warnings"] == [jobs.NO_KEY["opus"]]
+    runner.resume(job_id, "sam3d", api_key=OPUS_KEY, key_later=True)
+    job = wait(J, "done")
+    assert job["stages"]["agent"]["status"] == "done" and "key_later" not in job
+
+    # A Start without a key drops the key held for the job; an empty key is still refused.
+    job_id, J = ready_job(cfg)
+    runner.submit_build(job_id, KEY)
+    assert wait(J, "review")["key_ok"] is True
+    runner.submit_build(job_id, None, agent="astra")
+    assert not runner.has_key(job_id) and jobs.load(J)["key_ok"] is False
+    wait(J, "review")
+    with pytest.raises(ValueError, match="API key"):
+        runner.submit_build(job_id, "", agent="astra")
+    assert not list(runner.key_dir.iterdir())
+    assert not any(k.encode() in p.read_bytes() for p in all_files(tmp_path) for k in (KEY, OPUS_KEY))
 
 
 def glb_file(path, size=0.2):

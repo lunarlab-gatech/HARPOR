@@ -1145,6 +1145,223 @@ def test_no_delete_while_uploading(tmp_path):
         app.app.state.runner.shutdown(timeout=5)
 
 
+def test_agent_of_and_key_later_at_module_level():
+    """server.agent_of, now at module level so that a worker can ask it, answers as the routes always did;
+    key_later is true only without a key."""
+    for b, job, want in [({}, None, "astra"), ({"agent": "opus"}, None, "opus"), ({"agent": True}, None, "astra"),
+                         ({"agent": False}, None, "none"), ({"agent": "none"}, None, "none"), ({}, {}, "astra"),
+                         ({}, {"agent": "opus"}, "opus"), ({"agent": None}, {"agent": "opus"}, "opus"),
+                         ({"agent": "astra"}, {"agent": "opus"}, "astra"), ({"agent": False}, {"agent": "opus"}, "none"),
+                         ({}, {"agent": False}, "none")]:
+        assert server.agent_of(b, job) == want, (b, job)
+    for b, job in [({"agent": None}, None), ({"agent": 1}, None), ({"agent": 0}, None), ({"agent": []}, None),
+                   ({"agent": {}}, None), ({"agent": "Opus"}, None), ({"agent": "gpt"}, {"agent": "opus"})]:
+        with pytest.raises(server.Bad) as e:
+            server.agent_of(b, job)
+        assert e.value.args == (400, "agent is astra, opus, none"), b
+    assert [server.key_later(b) for b in ({}, {"key_later": False}, {"key_later": True}, {"key_later": True, "api_key": KEY},
+                                          {"key_later": True, "api_key": ""})] == [False, False, True, False, True]
+    for v in (1, 0, "true", None, []):
+        with pytest.raises(server.Bad) as e:
+            server.key_later({"key_later": v})
+        assert e.value.args == (400, "key_later is true or false"), v
+
+
+def test_the_tunnel_page_stays_as_it_was(client):
+    """The tunnel page loads no Supabase script and still offers the agent "none"."""
+    c, _ = client
+    login(c)
+    page = c.get("/").text
+    assert "supabase" not in page.lower() and "supa.js" not in page and "config.js" not in page
+    assert 'name="agent" value="none"' in page
+    assert c.get("/static/supa.js").status_code == 404 and c.get("/static/config.js").status_code == 404
+
+
+def test_stop_hooks_run_before_the_runner_stops(tmp_path, capsys):
+    """on_stop hooks (a worker's stop) run in order when the server stops, before runner.shutdown cancels
+    the stages; one that fails does not stop the others. There are none by default."""
+    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=True)
+    app = server.make_app(cfg, TOKEN, key_dir=tmp_path / "keys")
+    runner, order = app.app.state.runner, []
+    assert app.app.state.stop_hooks == []
+    shutdown = runner.shutdown
+    runner.shutdown = lambda timeout=None: (order.append("shutdown"), shutdown(timeout))
+
+    def broken():
+        order.append("broken")
+        raise RuntimeError("no network")
+
+    server.on_stop(app, lambda: order.append(("first", (cfg.runs / jobs.RUNNER_FILE).is_file())))
+    server.on_stop(app.app, broken)  # the FastAPI app inside the token gate works too
+    server.on_stop(app, lambda: order.append("last"))
+    with TestClient(app) as c:
+        login(c)
+        assert c.get("/api/jobs").json() == [] and order == []
+    assert order == [("first", True), "broken", "last", "shutdown"]
+    assert "a stop hook failed: RuntimeError('no network')" in capsys.readouterr().out
+    assert not (cfg.runs / jobs.RUNNER_FILE).exists()
+
+
+def test_key_later_builds_without_the_key(client, tmp_path):
+    """"key_later": true (a request sent while no worker could take the key) queues Start, Build and an
+    edited part list without the key; the job asks for it at the first stage that needs it. A key in the
+    body wins, and without key_later the old 400 stays."""
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    runner = c.app.app.state.runner
+    opus = "sk-ant-test-" + secrets.token_hex(16)
+    start = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": True, "agent": "opus"}
+    for bad in (1, "yes", None, [True]):
+        r = c.post(f"/api/jobs/{job_id}/start", json={**start, "key_later": bad})
+        assert r.status_code == 400 and r.json()["detail"] == "key_later is true or false", bad
+    for body in (start, {**start, "key_later": False}, {**start, "key_later": True, "api_key": KEY}):  # KEY is OpenAI's
+        assert c.post(f"/api/jobs/{job_id}/start", json=body).status_code == 400, body
+    assert jobs.load(cfg.runs / job_id)["status"] == "ready"
+    r = c.post(f"/api/jobs/{job_id}/start", json={**start, "key_later": True})
+    assert r.status_code == 200 and r.json() == {"status": "queued", "key": server.KEY_LATER}
+    job = wait(c, job_id, "review", "failed")
+    assert job["status"] == "review" and job["warnings"] == [jobs.NO_KEY_LATER["opus"]] and job["key_ok"] is False
+    assert job["stages"]["place"]["status"] == "done" and job["stages"]["agent"]["status"] == "pending"
+    assert "key_later" not in job
+
+    r = c.post(f"/api/jobs/{job_id}/continue", json={})
+    assert r.status_code == 400 and "holds no Anthropic API key" in r.json()["detail"]
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"key_later": True})
+    assert r.json() == {"status": "queued", "from": "sam3d", "key": server.KEY_LATER}
+    assert wait(c, job_id, "review", "failed")["warnings"] == [jobs.NO_KEY_LATER["opus"]]
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"key_later": True, "api_key": opus})  # the key wins
+    assert r.json() == {"status": "queued", "from": "sam3d"}
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done", job["error"]
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "package", "key_later": True})  # no stage needs a key
+    assert r.json() == {"status": "queued", "from": "package"}
+    wait(c, job_id, "done", "failed")
+
+    # An edited part list with key_later, once the server holds no key for the job.
+    art = uploaded(c, tmp_path, name="lid box.mp4")
+    r = c.post(f"/api/jobs/{art}/start", json={**ARTICULATED, "agent": "opus", "api_key": opus, "parts_mode": "vlm_edit"})
+    assert r.status_code == 200, r.text
+    assert wait(c, art, "review", "failed")["parts_review"] is True
+    assert runner.forget_key(art) is True
+    edited = [{"name": "body"}, {"name": "top lid", "parent": "body", "joint": "revolute"}]
+    r = c.post(f"/api/jobs/{art}/parts", json={"parts": edited})
+    assert r.status_code == 400 and "holds no Anthropic API key" in r.json()["detail"]
+    r = c.post(f"/api/jobs/{art}/parts", json={"parts": edited, "key_later": "yes"})
+    assert r.status_code == 400 and r.json()["detail"] == "key_later is true or false"
+    r = c.post(f"/api/jobs/{art}/parts", json={"parts": edited, "key_later": True})
+    assert r.json() == {"status": "queued", "from": "parts", "key": server.KEY_LATER}
+    job = wait(c, art, "review", "failed")
+    assert job["warnings"] == [jobs.NO_KEY_LATER["opus"]] and job["stages"]["parts"]["status"] == "done"
+    assert job["parts"]["confirmed"] is True and job["stages"]["agent"]["status"] == "pending"
+    assert not list((tmp_path / "keys").iterdir())
+    assert not any(opus.encode() in p.read_bytes() for p in all_files(tmp_path))
+
+
+def test_hostile_bodies_get_a_reason_never_a_crash(client, tmp_path):
+    """Requests the page never sends, as a public user could relay them: bodies that are not JSON objects or
+    nest too deeply, wrong types, true for 1, huge lists, names outside the pool, odd headers. Each gets a
+    4xx with a reason (never a 500), and nothing starts."""
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    J = cfg.runs / job_id
+
+    def refused(route, body=None, status=400, **kw):
+        r = c.post(f"/api/jobs/{job_id}/{route}", **({"json": body} if body is not None else {}), **kw)
+        assert r.status_code == status, (route, str(body)[:200], r.status_code, r.text[:300])
+        return r.json()["detail"]
+
+    deep = b"[" * 100000 + b"]" * 100000
+    for raw in (b"[1, 2]", b'"start"', b"null", b"\xff\xfe\x00", b"{", deep, b'{"a": ' * 50000 + b"1" + b"}" * 50000,
+                b"1" * 5000):
+        for route in ("start", "overrides", "parts", "continue", "topic"):
+            assert refused(route, content=raw) in ("the request body is not JSON", "the request body is not a JSON object")
+
+    start = {"mode": "auto", "prompt": "box", "n_views": 4, "agent": "none"}
+    n = len(c.get(f"/api/jobs/{job_id}/frames").json()["times"])
+    user = {"articulated": True, "parts_mode": "user"}
+    for wrong in [{"mode": ["auto"]}, {"mode": None}, {"prompt": 7}, {"prompt": ["box"]}, {"prompt": "x" * 100000},
+                  {"prompt": "!!!"}, {"n_views": True}, {"n_views": "4"}, {"n_views": 4.0}, {"n_views": 10**30},
+                  {"mode": "manual", "picks": [True, False]}, {"mode": "manual", "picks": "1,2"}, {"picks": {"0": 1}},
+                  {"mode": "manual", "picks": list(range(100000))}, {"mode": "manual", "picks": [1] * 100000},
+                  {"mode": "manual", "picks": [0.0, 1.0]}, {"mode": "manual", "picks": [-1, 2]},
+                  {"view0": True}, {"view0": "3"}, {"view0": n}, {"auto_continue": 1}, {"auto_continue": "false"},
+                  {"agent": 1}, {"agent": []}, {"agent": {"name": "opus"}}, {"agent": None}, {"key_later": 1},
+                  {"articulated": 1}, {"articulated": "yes"}, {**user, "parts_mode": ["user"]}, {**user, "parts": "lid"},
+                  {**user, "parts": [7]}, {**user, "parts": [{"name": 7}]}, {**user, "parts": [{"name": "body"}] * 10000},
+                  {**user, "parts": [{"name": "body"}, {"name": "lid", "parent": "body", "count": True}]},
+                  {"lidar": True}, {"lidar": []}, {"lidar": "on"}, {"lidar": {"topic": 3}},
+                  {"agent": "astra", "api_key": 7}, {"agent": "astra", "api_key": ["sk-x"]},
+                  {"agent": "astra", "api_key": {"k": KEY}}, {"agent": "astra", "api_key": True},
+                  {"agent": "astra", "api_key": "sk-" + "a" * 600}, {"agent": "astra", "api_key": "sk-a\nb"}]:
+        refused("start", {**start, **wrong})
+    assert jobs.load(J)["status"] == "ready"
+
+    assert c.post(f"/api/jobs/{job_id}/start", json={**start, "auto_continue": False}).status_code == 200
+    assert wait(c, job_id, "review", "failed")["status"] == "review"
+    name = sorted(c.get(f"/api/jobs/{job_id}/selection").json()["sam3"])[0]
+    for wrong in [{"locked": name}, {"locked": [[name]]}, {"locked": [7]}, {"excluded": ["f99999"]},
+                  {"locked": ["../" + name]}, {"locked": [name] * 100000}, {"excluded": [name, name]},
+                  {"locked": [name], "excluded": [name]}, {"instance": ["1"]}, {"instance": {name: 1}},
+                  {"instance": {name: True}}, {"instance": {name: "1,"}}, {"instance": {name: "9999"}},
+                  {"instance": {name: "999"}}, {"instance": {"f99999": "1"}}, {"view0": 0}, {"view0": True},
+                  {"view0": "f99999"}, {"view0": [name]}, {"agent": "gpt"}, {"agent": 1}, {"agent": "astra", "api_key": 7}]:
+        refused("overrides", wrong)
+    for wrong in [{"from": 1}, {"from": True}, {"from": ["frames"]}, {"from": {"stage": "agent"}}, {"from": "nope"},
+                  {"from": "../agent"}, {"agent": []}, {"key_later": "yes"}, {"agent": "astra", "api_key": 7}]:
+        refused("continue", wrong)
+    refused("topic", {"topic": ["/cam"]}, status=409)  # a video has no topic
+    refused("parts", {"parts": [{"name": "body"}] * 10000}, status=409)  # the job does not wait for a list
+    assert jobs.load(J)["status"] == "review"
+
+    # Headers as raw bytes, through httpx.ASGITransport as a worker sends requests (TestClient re-encodes them):
+    # "²" passes str.isdigit but not int(), and 5000 digits pass neither int() nor a seek.
+    import anyio
+    import httpx
+
+    async def send(method, path, header, content=b""):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=c.app), base_url="http://app",
+                                     headers={"Cookie": f"{server.COOKIE}={TOKEN}"}) as a:
+            r = await a.request(method, path, content=content, headers=[header])
+            return r.status_code, r.text
+
+    for value, status in ((b"\xb2", 411), (b"9" * 5000, 413), (b"-1", 411), (b"1e3", 411)):
+        assert anyio.run(send, "PUT", "/api/upload?name=a.mp4", (b"content-length", value), b"x")[0] == status, value
+    status, _ = anyio.run(send, "PUT", f"/api/jobs/{job_id}/calibration?name=c.yaml", (b"content-length", b"9" * 5000), b"x")
+    assert status == 413
+    for last in (b"frames:\xb2", b"frames:" + b"9" * 30, b"frames:-1", b"nope:1", b"frames"):
+        status, text = anyio.run(send, "GET", f"/api/jobs/{job_id}/events", (b"last-event-id", last))
+        assert status == 200 and "event: end" in text, last  # as a new client
+    assert len(c.get("/api/jobs").json()) == 1
+
+
+def test_hostile_calibration_files_are_refused_fast(client, tmp_path):
+    """A calibration of nested YAML aliases (2^30 numbers once expanded) or of deep brackets is refused
+    within a second, before the server parses it into lists."""
+    pytest.importorskip("rosbags")
+    from test_lidar_scale import billion_laughs
+
+    c, cfg = client
+    login(c)
+    bag = write_bag(tmp_path / "src.bag", ["/cam/image_rect/compressed"], n=20)
+    job_id = c.put("/api/upload", params={"name": "one.bag"}, content=bag.read_bytes()).json()["id"]
+    assert wait(c, job_id, "ready", "failed", "choose_topic")["status"] == "ready"
+    deep = "[" * 30000 + "]" * 30000
+    t0 = time.time()
+    for data, name, why in [(billion_laughs(), "c.yaml", "c.yaml uses YAML anchors or aliases"),
+                            (deep, "c.yaml", "c.yaml nests lists and maps"), (deep, "c.json", "c.json nests lists and maps"),
+                            ("- " * 20000 + "1", "c.yml", "c.yml nests lists and maps"),
+                            (b"\xff\xfe" * 100, "c.yaml", "c.yaml is not a text file"),
+                            ("T_cam_lidar: [" + "0.0, " * 12000 + "0.0]", "c.yaml", "T_cam_lidar has 12001 numbers"),
+                            ("T_cam_lidar: " + "1" * 5000, "c.yaml", ""), ('{"T_cam_lidar": ' + "1" * 5000 + "}", "c.json", "")]:
+        r = c.put(f"/api/jobs/{job_id}/calibration", params={"name": name}, content=data)
+        assert r.status_code == 400 and r.json()["detail"].startswith(why), (name, r.status_code, r.text[:200])
+    assert time.time() - t0 < 5
+    job = c.get(f"/api/jobs/{job_id}").json()
+    assert job["calibration"] is None and not (cfg.runs / job_id / "lidar" / "calibration").exists()
+
+
 # static/app.js in node, with a stand-in DOM in which every element accepts anything and every call
 # records its string arguments (so the text that the page would show is in `texts`).
 NODE_HARNESS = r"""

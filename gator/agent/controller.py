@@ -41,6 +41,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -674,9 +675,10 @@ def read_key(key_file):
     return next(iter(read_keys(key_file)), "")
 
 
-def find_key(root, key_file, max_bytes=50 << 20):
+def find_key(root, key_file, chunk=50 << 20):
     """Files under root that contain any API key from key_file (read_keys). The codex agent's shell can
-    read the keys from /proc, so these files must not be shared. No key is ever printed."""
+    read the keys from /proc, so these files must not be shared. No key is ever printed. Files of any
+    size are scanned, chunk bytes at a time (has_key)."""
     keys = [k.encode() for k in read_keys(key_file) if len(k) >= 16]
     hits = []
     if not keys:
@@ -685,7 +687,26 @@ def find_key(root, key_file, max_bytes=50 << 20):
         for name in files:
             p = Path(d) / name
             with contextlib.suppress(OSError):
-                data = tools.read_file(p, max_bytes)
-                if any(k in data for k in keys):
+                if has_key(p, keys, chunk):
                     hits.append(os.path.relpath(p, root))
     return sorted(hits)
+
+
+def has_key(path, keys, chunk=50 << 20):
+    """True when the regular file at path holds any of keys (bytes). It reads chunk bytes at a time and
+    keeps the last len(longest key) - 1 bytes of each for the next, so a key across two chunks is found.
+    A final symlink, a FIFO or a device raises OSError, as tools.read_file does."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        keep, tail = max(map(len, keys)) - 1, b""
+        with os.fdopen(os.dup(fd), "rb") as f:
+            while block := f.read(chunk):
+                data = tail + block
+                if any(k in data for k in keys):
+                    return True
+                tail = data[-keep:] if keep else b""
+        return False
+    finally:
+        os.close(fd)
