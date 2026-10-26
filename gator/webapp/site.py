@@ -16,10 +16,10 @@ build writes the folder (site/ at the repo root by default, which git ignores):
                 setting up a machine and the machines' status
   privacy.html  what the site keeps, where, for how long, who can see it, and how API keys travel
   demos.html    static/demos.html with relative paths, a CSP <meta>, the site's own model-viewer, demos.js and the
-                demos of --demos DIR (default: WEBAPP_DEMOS), each checked by demos.load; "No demos yet." without a
-                folder.
-                A build without a folder refuses an --out whose earlier build has demos, unless --no-demos: a
-                deploy of it would take the live demos away
+                demos of --demos DIR (default: WEBAPP_DEMOS), each checked by demos.load, with the cards of its
+                placeholders.json (demos.placeholders); "No demos yet." without a folder.
+                A build without a folder refuses an --out whose earlier build has demos or placeholders, unless
+                --no-demos: a deploy of it would take the live gallery away
   demos/        each demo's files (demos/<name>/<file>), copied as they are
   static/       app.js, style.css, supa.js, demos.js, config.js (from site.json), and the vendor files, each checked
                 against its SHA-384 first
@@ -356,7 +356,8 @@ def csp(cfg, meta=False):
     'wasm-unsafe-eval' lets WebAssembly compile, and nothing else: model-viewer compiles its meshopt decoder when it
     loads, and its Draco and KTX2 decoders are WebAssembly too; without it the browser refuses them. The page talks to
     the project's API and its Realtime socket; images and the videos come from signed Storage URLs, and the demos'
-    videos from the site itself. A <meta>
+    videos from the site itself. blob: in connect-src lets model-viewer read a GLB's own textures, which it fetches
+    from blob: URLs that the page made; without it a textured model shows white. A <meta>
     policy cannot set frame-ancestors (browsers ignore it there and say so), so meta=True leaves it out; supa.js stops
     in a frame."""
     api = urlsplit(cfg["url"])
@@ -364,7 +365,7 @@ def csp(cfg, meta=False):
     ws = ("wss" if api.scheme == "https" else "ws") + "://" + api.netloc
     rules = [("default-src", "'none'"), ("script-src", "'self' 'wasm-unsafe-eval'"),
              ("style-src", f"'self' {MODEL_VIEWER_STYLE}"), ("img-src", f"'self' data: blob: {origin}"),
-             ("media-src", f"'self' blob: {origin}"), ("connect-src", f"'self' {origin} {ws}"),
+             ("media-src", f"'self' blob: {origin}"), ("connect-src", f"'self' blob: {origin} {ws}"),
              ("worker-src", "'self' blob:"), ("font-src", "'self'"), ("manifest-src", "'self'"),
              ("frame-ancestors", "'none'"), ("base-uri", "'none'"), ("form-action", "'none'")]
     return "; ".join(f"{k} {v}" for k, v in rules if not (meta and k == "frame-ancestors"))
@@ -427,8 +428,8 @@ def public_help(src, cfg):
     return out
 
 
-def public_demos(src, cfg, shown):
-    """static/demos.html made into the public site's demos.html, with the demos shown."""
+def public_demos(src, cfg, shown, soon=()):
+    """static/demos.html made into the public site's demos.html, with the demos shown and the placeholders' cards."""
     page = "static/demos.html"
     out = once(src, '<meta charset="utf-8">', '<meta charset="utf-8">\n' + head_meta(cfg), page)
     out = once(out, 'href="/static/style.css"', 'href="static/style.css"', page)
@@ -436,7 +437,7 @@ def public_demos(src, cfg, shown):
     out = once(out, MODEL_VIEWER, '<script type="module" src="static/vendor/model-viewer-4.4.0.min.js"></script>', page)
     out = once(out, 'src="/static/demos.js"', 'src="static/demos.js"', page)
     try:
-        out = demos.page(out, shown)
+        out = demos.page(out, shown, soon)
     except demos.DemoError as e:
         raise SiteError(str(e)) from None
     if re.search(r'(?:src|href)="(?:/|https?:)', out):
@@ -484,13 +485,14 @@ def files(cfg, static=STATIC, demo_dir=None):
     """{path in the site folder: bytes} of the whole site, with the demos of demo_dir."""
     try:
         shown = demos.load(demo_dir)
+        soon = demos.placeholders(demo_dir, shown)
     except demos.DemoError as e:
         raise SiteError(f"the demos folder: {e}; nothing was written") from None
     out = {"index.html": public_index((Path(static) / "index.html").read_text(), cfg).encode(),
            "help.html": public_help((Path(static) / "help.html").read_text(), cfg).encode(),
            "privacy.html": PRIVACY.format(meta=head_meta(cfg), contact=": " + html.escape(cfg["contact"], quote=False)
                                           if cfg.get("contact") else "").encode(),
-           "demos.html": public_demos((Path(static) / "demos.html").read_text(), cfg, shown).encode(),
+           "demos.html": public_demos((Path(static) / "demos.html").read_text(), cfg, shown, soon).encode(),
            "static/config.js": config_js(cfg).encode(), "_headers": headers_file(cfg).encode(), ".nojekyll": b""}
     out.update({rel: p.read_bytes() for rel, p in demos.files(demo_dir, shown).items()})
     for name in ("app.js", "style.css", "supa.js", "demos.js"):
@@ -504,15 +506,17 @@ def files(cfg, static=STATIC, demo_dir=None):
 
 def build(out=OUT, config=CONFIG, static=STATIC, demo_dir=None, no_demos=False):
     """Write the site into out, with the demos of demo_dir. An existing out is replaced only when it is an earlier
-    build (or empty), and one with demos only when demo_dir is given or no_demos is true."""
+    build (or empty), and one with demos or placeholders' cards only when demo_dir is given or no_demos is true."""
     out = Path(out)
     site = files(load_config(config), static, demo_dir)
     if out.exists():
         if any(out.iterdir()) and not ((out / ".nojekyll").is_file() and (out / "static" / "config.js").is_file()):
             raise SiteError(f"{out} is not an earlier build of the site; choose another --out")
-        if demo_dir is None and not no_demos and (out / "demos").is_dir():
-            raise SiteError(f"the earlier build in {out} has demos; give --demos DIR, or --no-demos to build without "
-                            "them")
+        page = out / "demos.html"
+        cards = page.is_file() and 'class="democard' in page.read_text(errors="replace")
+        if demo_dir is None and not no_demos and ((out / "demos").is_dir() or cards):
+            raise SiteError(f"the earlier build in {out} has demos or placeholders; give --demos DIR, or --no-demos to "
+                            "build without them")
         shutil.rmtree(out)
     for path, data in site.items():
         p = out / path
@@ -548,7 +552,9 @@ def main(argv=None):
             print(f"wrote {len(written)} files to {args.out}")
             # A build without the folder publishes an empty gallery, so the line says where the demos came from.
             n = len({p.split("/")[1] for p in written if p.startswith("demos/")})
-            print(f"demos: {n} from {folder}" if folder else "demos: none" if args.no_demos
+            soon = (Path(args.out) / "demos.html").read_text().count('class="democard soon"')
+            more = f", {soon} placeholder{'s' if soon != 1 else ''}" if soon else ""
+            print(f"demos: {n} from {folder}{more}" if folder else "demos: none" if args.no_demos
                   else "demos: none (give --demos DIR or set WEBAPP_DEMOS)")
     except SiteError as e:
         print(f"error: {e}", file=sys.stderr)

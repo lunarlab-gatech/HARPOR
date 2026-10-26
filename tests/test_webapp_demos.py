@@ -230,6 +230,7 @@ def test_load_rules(tmp_path, monkeypatch):
     good = hand_demo(tmp_path / "base")
     (good.parent / ".DS_Store").write_bytes(b"\0")
     (good / ".DS_Store").write_bytes(b"\0")
+    (good.parent / demos.PLACEHOLDERS).write_text('{"version": 1, "placeholders": ["Laptop"]}')  # not a demo
     [x] = demos.load(good.parent)
     assert x.files == ("turntable.mp4", "aligned.glb", "poster.jpg", "results.zip")
     n = 0
@@ -280,29 +281,51 @@ def test_load_rules(tmp_path, monkeypatch):
     case("office-chair/aligned.glb: looks private (matches 'cage')",
          put("aligned.glb", glb({**TRIANGLE, "nodes": [{"mesh": 0, "name": "Cage_scan"}]}, POINTS)))
     case("office-chair/demo.json holds a key shape or a machine path", title="/Users/ana/chair.glb")
+    case("office-chair/demo.json: looks private (matches 'cage')",  # as read: a JSON escape hides no word
+         lambda d: (d / "demo.json").write_text((d / "demo.json").read_text().replace('"Office chair"', '"\\u0043age 3"')))
     monkeypatch.setattr(demos, "MAX_FILE", 1000)
     case("office-chair/turntable.mp4 is ", None)
 
 
 def test_page(tmp_path):
-    """The demos in place of the marker, every value escaped: the video plays muted and looping with its controls and
-    poster, the facts beside it, the 3D view folded with a lazy model-viewer, and the files as the Downloads tab lists
+    """The demos in place of the marker, every value escaped: a gallery with one card per demo, each one link to its
+    section with its poster, title and two short facts, then each demo's section: a link back to the gallery, its
+    heading for the focus, the video muted and looping with its controls and poster but no autoplay and nothing
+    preloaded, the facts beside it, the 3D view folded with a lazy model-viewer, and the files as the Downloads tab lists
     them (results.zip first and primary, named <demo>_<file>, with sizes). Without demos the page says so."""
-    hand_demo(tmp_path, name="b-chair", title="<b>Chair</b> & co", order=1)
-    hand_demo(tmp_path, name="a-box", title="Box", order=1, poster=None, downloads=[])
+    hand_demo(tmp_path, name="b-chair", title="<b>Chair</b> & co", order=1,
+              facts=[["Input", "video, 5 views"], ["Mass", "2.00 kg"], ["Size", "69 x 57 x 96 cm"]])
+    hand_demo(tmp_path, name="a-box", title="Box", order=1, poster=None, downloads=[],
+              facts=[["Links", "2: lid, a body with a long name"], ["Agent", "off"], ["Input", "video"], ["Note", "x"]])
     (tmp_path / "a-box" / "poster.jpg").unlink()
     (tmp_path / "a-box" / "results.zip").unlink()
-    hand_demo(tmp_path, name="z-first", title="First", order=0)
+    hand_demo(tmp_path, name="z-first", title="First", order=0, facts=[])
     shown = demos.load(tmp_path)
     assert [x.name for x in shown] == ["z-first", "a-box", "b-chair"]
     out = demos.page(SRC, shown)
     assert "<b>Chair" not in out and "&lt;b&gt;Chair&lt;/b&gt; &amp; co" in out and demos.MARKER not in out
     ids = re.findall(r'id="([^"]+)"', out)
     assert len(ids) == len(set(ids)) and {"demo-z-first", "demo-a-box", "demo-b-chair"} <= set(ids)
+    gallery = re.search(r'<ul class="gallery">\n(.*?)\n</ul>', out, re.S)[1].split("\n")
+    assert out.index('<ul class="gallery">') < out.index("<section")  # the gallery first, then the sections
+    assert gallery == [
+        '<li><a class="democard" href="#demo-z-first"><img class="dcimg" src="demos/z-first/poster.jpg" alt="" '
+        'loading="lazy"><span class="dctitle">First</span></a></li>',
+        '<li><a class="democard" href="#demo-a-box"><span class="dcimg"></span><span class="dctitle">Box</span>'
+        "<dl><dt>Agent</dt><dd>off</dd><dt>Input</dt><dd>video</dd></dl></a></li>",  # no Size or Mass: short ones
+        '<li><a class="democard" href="#demo-b-chair"><img class="dcimg" src="demos/b-chair/poster.jpg" alt="" '
+        'loading="lazy"><span class="dctitle">&lt;b&gt;Chair&lt;/b&gt; &amp; co</span>'
+        "<dl><dt>Size</dt><dd>69 x 57 x 96 cm</dd><dt>Mass</dt><dd>2.00 kg</dd></dl></a></li>"]
+    for href in re.findall(r'<a class="democard" href="#([^"]+)"', out):
+        assert out.count(f'<section class="demo" id="{href}">') == 1, href
     chair = out[out.index('id="demo-b-chair"'):]
-    assert ('<video src="demos/b-chair/turntable.mp4" poster="demos/b-chair/poster.jpg" autoplay muted loop playsinline '
-            'controls preload="auto" aria-label="360 video of &lt;b&gt;Chair&lt;/b&gt; &amp; co"></video>') in chair
-    assert "<dl><dt>Input</dt><dd>video, 5 views</dd><dt>Mass</dt><dd>2.00 kg</dd></dl>" in chair
+    assert chair.startswith('id="demo-b-chair">\n<p class="back"><a href="#">All demos</a></p>\n'
+                            '<h2 tabindex="-1">&lt;b&gt;Chair&lt;/b&gt; &amp; co</h2>\n')
+    assert ('<video src="demos/b-chair/turntable.mp4" poster="demos/b-chair/poster.jpg" muted loop playsinline '
+            'controls preload="none" aria-label="360 video of &lt;b&gt;Chair&lt;/b&gt; &amp; co"></video>') in chair
+    assert "autoplay" not in out
+    assert ("<dl><dt>Input</dt><dd>video, 5 views</dd><dt>Mass</dt><dd>2.00 kg</dd><dt>Size</dt><dd>69 x 57 x 96 cm</dd>"
+            "</dl>") in chair
     assert re.search(r'<details class="sub"><summary>3D view</summary>\s*<model-viewer src="demos/b-chair/aligned.glb" '
                      r'loading="lazy" camera-controls[^>]*></model-viewer>\s*</details>', chair)
     rows = re.findall(r'<a class="([^"]+)" href="([^"]+)" download="([^"]+)">([^<]+)</a><span class="dlsize">([^<]+)</span>',
@@ -314,10 +337,84 @@ def test_page(tmp_path):
     box = out[out.index('id="demo-a-box"'):out.index('id="demo-b-chair"')]
     assert "poster=" not in box and "dlist" not in box
     assert '<p class="emptytab">No demos yet.</p>' in demos.page(SRC, []) and "<section" not in demos.page(SRC, [])
+    assert "gallery" not in demos.page(SRC, [])
     for bad in (SRC.replace(demos.MARKER, ""), SRC.replace(demos.MARKER, demos.MARKER * 2)):
         with pytest.raises(demos.DemoError, match="copies of <!-- demos -->"):
             demos.page(bad, [])
     assert demos.files(tmp_path, shown)["demos/b-chair/poster.jpg"] == tmp_path / "b-chair" / "poster.jpg"
+
+
+def test_page_with_placeholders(tmp_path):
+    """The placeholders' cards follow the demos' cards, in the file's order: the same frame with an empty picture, the
+    title escaped and "Coming soon", and no link, tabindex or section, so nothing opens. With placeholders only, the
+    page is a gallery of them and does not say "No demos yet."."""
+    hand_demo(tmp_path, name="chair", title="Chair")
+    soon = ["Drawer cabinet", "<i>Lamp</i>"]
+    out = demos.page(SRC, demos.load(tmp_path), soon)
+    cards = re.search(r'<ul class="gallery">\n(.*?)\n</ul>', out, re.S)[1].split("\n")
+    assert len(cards) == 3 and cards[0].startswith('<li><a class="democard" href="#demo-chair">')
+    assert cards[1:] == ['<li><div class="democard soon"><span class="dcimg"></span><span class="dctitle">Drawer cabinet'
+                         '</span><span class="dcnote">Coming soon</span></div></li>',
+                         '<li><div class="democard soon"><span class="dcimg"></span><span class="dctitle">&lt;i&gt;Lamp'
+                         '&lt;/i&gt;</span><span class="dcnote">Coming soon</span></div></li>']
+    assert not any(x in "".join(cards[1:]) for x in ("<a", "href", "tabindex", "role=", "<button"))
+    assert out.count("<section") == 1
+    only = demos.page(SRC, [], soon)
+    assert only.count('class="democard soon"') == 2 and "<section" not in only and "No demos yet." not in only
+    assert "<a class=\"democard\"" not in only
+
+
+def test_placeholders_rules(tmp_path):
+    """placeholders.json: none for no folder or no file; its titles in order, but those that a demo has; and each
+    rule, one case each, also through a JSON escape."""
+    assert demos.placeholders(None) == [] and demos.placeholders(tmp_path) == []
+    with pytest.raises(demos.DemoError, match=re.escape(f"no demos folder {tmp_path / 'none'}")):
+        demos.placeholders(tmp_path / "none")
+    p = tmp_path / demos.PLACEHOLDERS
+    p.write_text(json.dumps({"version": 1, "placeholders": ["Drawer cabinet", "Laptop", "x" * 60]}))
+    assert demos.placeholders(tmp_path) == ["Drawer cabinet", "Laptop", "x" * 60]
+
+    def case(why, text):
+        p.write_text(text if isinstance(text, str) else json.dumps(text))
+        with pytest.raises(demos.DemoError, match=re.escape(why)):
+            demos.placeholders(tmp_path)
+
+    case("placeholders.json is not JSON", "{")
+    case("placeholders.json is not a JSON object", ["Laptop"])
+    case("placeholders.json has unknown keys: note", {"version": 1, "placeholders": ["Laptop"], "note": "x"})
+    case("placeholders.json: version is 1", {"placeholders": ["Laptop"]})
+    case("placeholders.json: placeholders is a list of 1 to 12 titles; delete the file for none",
+         {"version": 1, "placeholders": []})
+    case("placeholders.json: placeholders is a list of 1 to 12", {"version": 1, "placeholders": ["a"] * 13})
+    case("placeholders.json: placeholders is a list of 1 to 12", {"version": 1, "placeholders": "Laptop"})
+    case("placeholders.json: placeholder 2 is text of 1 to 60 characters", {"version": 1, "placeholders": ["a", ""]})
+    case("placeholders.json: placeholder 1 is text of 1 to 60", {"version": 1, "placeholders": ["x" * 61]})
+    case("placeholders.json: placeholder 1 is text of 1 to 60", {"version": 1, "placeholders": [3]})
+    case("placeholders.json: placeholder 1 is plain text on one line, with no space at either end",
+         {"version": 1, "placeholders": ["Desk\nlamp"]})
+    for bad in ("Desk\u2028lamp", "Desk\x85lamp", "\u202eDoor", "   "):
+        case("placeholders.json: placeholder 2 is plain text on one line", {"version": 1, "placeholders": ["Door", bad]})
+    case("placeholders.json: placeholder 1 is plain text on one line, with no space", {"version": 1, "placeholders": ["Door "]})
+    case("placeholders.json: version is 1", {"version": True, "placeholders": ["Laptop"]})
+    case("placeholders.json: version is 1", {"version": 1.0, "placeholders": ["Laptop"]})
+    case("placeholders.json: each title once", {"version": 1, "placeholders": ["Door", "Door"]})
+    case("placeholders.json: each title once", {"version": 1, "placeholders": ["Door", "door"]})
+    case("placeholders.json: looks private (matches 'pallet')", {"version": 1, "placeholders": ["Pallet"]})
+    case("placeholders.json holds a key shape or a machine path", {"version": 1, "placeholders": ["/Users/ana/x"]})
+    case("placeholders.json: looks private (matches 'pallet')", '{"version": 1, "placeholders": ["\\u0050allet B"]}')
+    case("placeholders.json holds a key shape or a machine path",
+         '{"version": 1, "placeholders": ["\\/Users\\/ana\\/x"]}')
+    p.write_text(json.dumps({"version": 1, "placeholders": ["Drawer cabinet", "Laptop"]}))
+    hand_demo(tmp_path / "in", name="laptop", title="laptop")  # its demo has come in, so its card goes
+    assert demos.placeholders(tmp_path, demos.load(tmp_path / "in")) == ["Drawer cabinet"]
+    p.unlink()
+    p.symlink_to(tmp_path / "elsewhere.json")
+    with pytest.raises(demos.DemoError, match="placeholders.json is not a regular file"):
+        demos.placeholders(tmp_path)
+    p.unlink()
+    p.mkdir()
+    with pytest.raises(demos.DemoError, match="placeholders.json is not a regular file"):
+        demos.placeholders(tmp_path)
 
 
 def test_demos_template_is_a_plain_page():
@@ -331,25 +428,62 @@ def test_demos_template_is_a_plain_page():
     assert '<a id="helplink" href="help.html#demos">Help</a>' in SRC and "<title>Demos · HARPOR</title>" in SRC
 
 
-def test_demos_js_keeps_the_videos_still_for_reduced_motion():
-    """demos.js turns autoplay off and pauses every video when the system asks for reduced motion, and leaves them
-    alone otherwise."""
+def test_demos_js_plays_the_open_demo():
+    """demos.js, on pageshow and on each hashchange: the targeted demo's video plays muted and looping (not under
+    reduced motion), every other video pauses, the demo's heading takes the focus and the tab's title names the demo.
+    Back in the gallery (no target, or one that is not a demo), every video pauses, the title is the gallery's again
+    and the card of the demo just left takes the focus. Nothing runs before pageshow: until load the browser has not
+    set :target, so the section is hidden and its heading cannot take the focus."""
     if shutil.which("node") is None:
         pytest.skip("no node")
     code = """
-        const out = [];
-        for (const reduce of [false, true]) {
-          const v = { autoplay: true, calls: [], pause() { this.calls.push("pause"); } };
-          globalThis.document = { querySelectorAll: (q) => q === "video[autoplay]" ? [v] : [] };
-          globalThis.matchMedia = (q) => ({ matches: reduce && q === "(prefers-reduced-motion: reduce)" });
-          require("vm").runInThisContext(require("fs").readFileSync(process.argv[1], "utf8"));
-          out.push([v.autoplay, v.calls]);
+        const log = [];
+        let loaded = false;  // the mock's :target: before load nothing shows, so nothing can take the focus
+        const el = (name, extra) => Object.assign({ name, focus() { if (loaded) log.push("focus " + name); } }, extra);
+        const video = (name) => ({ name, muted: false, loop: false,
+          play() { log.push("play " + name + (this.muted && this.loop ? " muted loop" : "")); return Promise.reject(); },
+          pause() { log.push("pause " + name); } });
+        const va = video("a"), vb = video("b");
+        const demo = (id, v) => ({ id, classList: { contains: (c) => c === "demo" }, contains: (x) => x === v,
+                                   querySelector: (q) => q === "h2" ? el("h2 " + id, { textContent: "Title " + id }) : null });
+        const ids = { "demo-a": demo("demo-a", va), "demo-b": demo("demo-b", vb),
+                      other: { id: "other", classList: { contains: () => false } } };
+        const cards = { '.gallery a[href="#demo-a"]': el("card a"), '.gallery a[href="#demo-b"]': el("card b") };
+        let reduce = false;
+        const on = {};
+        globalThis.location = { hash: process.argv[2] };
+        globalThis.document = { title: "Demos · HARPOR", getElementById: (id) => ids[id] || null,
+                                querySelector: (q) => cards[q] || null,
+                                querySelectorAll: (q) => q === ".demo video" ? [va, vb] : [] };
+        globalThis.matchMedia = (q) => ({ matches: reduce && q === "(prefers-reduced-motion: reduce)" });
+        globalThis.addEventListener = (type, fn) => { on[type] = fn; };
+        require("vm").runInThisContext(require("fs").readFileSync(process.argv[1], "utf8"));
+        const steps = [log.splice(0)];
+        loaded = true;
+        on.pageshow();
+        steps.push([...log.splice(0), document.title]);
+        for (const [hash, still] of [["#demo-b", false], ["", false], ["#demo-a", true], ["#other", false]]) {
+          location.hash = hash;
+          reduce = still;
+          on.hashchange();
+          steps.push([...log.splice(0), document.title]);
         }
-        console.log(JSON.stringify(out));
+        console.log(JSON.stringify(steps));
         """
-    p = subprocess.run(["node", "-e", code, str(server.STATIC / "demos.js")], capture_output=True, text=True, timeout=30)
-    assert p.returncode == 0, p.stderr
-    assert json.loads(p.stdout) == [[True, []], [False, ["pause"]]]
+    def run(hash):
+        p = subprocess.run(["node", "-e", code, str(server.STATIC / "demos.js"), hash], capture_output=True, text=True,
+                           timeout=30)
+        assert p.returncode == 0, p.stderr
+        return json.loads(p.stdout)
+
+    gallery, a, b = "Demos · HARPOR", "Title demo-a · Demos · HARPOR", "Title demo-b · Demos · HARPOR"
+    assert run("#demo-a") == [[],  # the script alone: it waits for pageshow
+                              ["play a muted loop", "pause b", "focus h2 demo-a", a],  # opened by its URL
+                              ["pause a", "play b muted loop", "focus h2 demo-b", b],
+                              ["pause a", "pause b", "focus card b", gallery],  # back to the gallery
+                              ["pause a", "pause b", "focus h2 demo-a", a],  # reduced motion: the video stays still
+                              ["pause a", "pause b", "focus card a", gallery]]
+    assert run("")[:2] == [[], ["pause a", "pause b", gallery]]  # the gallery: nothing plays, the focus stays
 
 
 def test_mirrors_of_app_js():
@@ -387,6 +521,14 @@ def test_command_line(job, tmp_path):
     assert r.returncode == 1 and r.stderr.startswith("error: ") and "add --force" in r.stderr
     r = run("check", env={"WEBAPP_DEMOS": str(out)})
     assert r.returncode == 0 and re.fullmatch(r"1 demo, [\d.]+ KB, ok\n", r.stdout), r.stdout
+    (out / demos.PLACEHOLDERS).write_text(json.dumps({"version": 1, "placeholders": ["Laptop", "Door"]}))
+    r = run("check", str(out))
+    assert r.returncode == 0 and re.fullmatch(r"1 demo, 2 placeholders, [\d.]+ KB, ok\n", r.stdout), r.stdout
+    (out / demos.PLACEHOLDERS).write_text(json.dumps({"version": 1, "placeholders": []}))
+    r = run("check", str(out))
+    assert r.returncode == 1 and r.stderr == ("error: placeholders.json: placeholders is a list of 1 to 12 titles; "
+                                              "delete the file for none\n")
+    (out / demos.PLACEHOLDERS).unlink()
     (out / "notes.txt").write_text("x")
     r = run("check", str(out))
     assert r.returncode == 1 and r.stderr == "error: notes.txt is not a demo folder (a demo is a folder, not a link)\n"

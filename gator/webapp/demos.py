@@ -1,5 +1,5 @@
-"""The demos: finished jobs that the site's owner picked, shown at demos.html with their 360 video, a 3D view and
-their files, signed in or out (docs/public_site.md "Demos").
+"""The demos: finished jobs that the site's owner picked, shown at demos.html as a gallery of cards, each a link to
+the demo's 360 video, 3D view and files, signed in or out (docs/public_site.md "Demos").
 
     python -m gator.webapp.demos add SOURCE [--name N] [--title T] [--video MP4] [--glb GLB] [--zip ZIP]
                                              [--fact LABEL=VALUE ...] [--order K] [--out DIR] [--force] [--public-bag]
@@ -17,6 +17,10 @@ add's .<name>.tmp):
   office-chair/poster.jpg     its first frame (optional)
   office-chair/aligned.glb    the mesh turned upright, for the 3D view
   office-chair/results.zip    the job's results.zip, cleaned
+  placeholders.json           {"version": 1, "placeholders": ["Drawer cabinet", ...]} (optional): 1 to 12 titles of 1
+                              to 60 characters, each once, on one line and with no space at either end; each is a
+                              card that says "Coming soon" and opens nothing, after the demos' cards, unless a demo
+                              has that title
 
 load checks every rule and says which one a demo breaks (DemoError): the folder holds demo.json and the files that
 it names, and nothing else; each is a regular file of a type in TYPES, at most MAX_FILE bytes (Cloudflare Pages'
@@ -24,7 +28,9 @@ limit per file), that starts with its type's magic bytes. The files are served f
 that a browser runs as a page (HTML, SVG, XML) is allowed. deep=True (add, check, the server's start and the site
 build) also reads every file: nothing shaped like an API key, no path of a machine (MACHINE_PATH), a GLB with all its
 data inside and without Draco or KTX2 (the demos page loads no decoder, and the CSP blocks gstatic.com), and nothing
-that looks like private data (PRIVATE) in demo.json, the file names or the text inside results.zip.
+that looks like private data (PRIVATE) in demo.json, the file names or the text inside results.zip. placeholders
+reads placeholders.json with the same guard. Both JSON files are checked as written and as read, so a JSON escape
+cannot hide a word.
 
 add makes a demo from a finished job folder, on the machine that holds the job: the 360 video
 (turntable/turntable.mp4, else --video), physics/aligned.glb (else --glb), results.zip packed again with every key
@@ -33,7 +39,7 @@ Results tab (facts_of). It refuses a job that is not done, a rosbag job without 
 are private, and a bag's name can look harmless), and anything that looks private. From a run folder (no job.json),
 --video and --glb are needed, and the facts come from the job-layout records that are there. It writes
 <out>/.<name>.tmp, checks it with load, then renames it to <out>/<name>; an existing demo stays unless --force.
-check runs load(deep=True) on a demos folder.
+check runs load(deep=True) and placeholders on a demos folder.
 """
 
 import argparse
@@ -71,6 +77,10 @@ NO_DECODER = ("KHR_draco_mesh_compression", "KHR_texture_basisu")
 CLEAN_TEXT = (*relay.TEXT, ".mtl", ".obj")  # the members of results.zip that add cleans as text
 VIDEO, MODEL = "turntable/turntable.mp4", "physics/aligned.glb"  # in a job folder (server.OUTPUTS)
 MARKER = "<!-- demos -->"  # where page() puts the demos in static/demos.html
+PLACEHOLDERS, MAX_PLACEHOLDERS = "placeholders.json", 12  # in the demos folder, not a demo
+# a placeholder's title is plain text on one line: no control character, line or paragraph separator, or bidi control
+CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+CARD_FACTS, SHORT = ("Size", "Mass"), 24  # the facts that a card shows first; else others of at most SHORT characters
 # app.js KIND_LABEL (job.json source kind) and RAN (agent_result.agent); a test compares them.
 KIND = {"video": "video", "rosbag": "rosbag", "stray": "Stray capture"}
 RAN = {"codex": "GPT-6-Astra", "claude": "Claude Opus 5.5"}
@@ -146,6 +156,13 @@ def private(text, what):
         raise DemoError(f"{what}: looks private (matches {m[0].lower()!r}); private data is never a demo")
 
 
+def _guard(text, what):
+    """DemoError when text looks private, or holds a key shape or a machine path."""
+    private(text, what)
+    if relay.KEY_SHAPE.search(text) or MACHINE_PATH.search(text):
+        raise DemoError(f"{what} holds a key shape or a machine path")
+
+
 def _glb(data, what):
     """DemoError unless data is a glTF 2 binary with all its data inside and no extension that needs a decoder, whose
     JSON (the node, mesh, material and image names) does not look private."""
@@ -206,13 +223,12 @@ def demo(d, deep=True, name=None):
     if spec.is_symlink() or not spec.is_file() or spec.stat().st_size > MAX_JSON:
         raise DemoError(f"{name}: no demo.json, or one over {MAX_JSON >> 10} KB")
     text = spec.read_text(errors="replace")
-    private(text, f"{name}/demo.json")
-    if relay.KEY_SHAPE.search(text) or MACHINE_PATH.search(text):
-        raise DemoError(f"{name}/demo.json holds a key shape or a machine path")
+    _guard(text, f"{name}/demo.json")
     try:
         j = json.loads(text)
     except ValueError as e:
         raise DemoError(f"{name}/demo.json is not JSON: {e}") from None
+    _guard(json.dumps(j, ensure_ascii=False), f"{name}/demo.json")  # as read: a JSON escape hides nothing
     if not isinstance(j, dict):
         raise DemoError(f"{name}/demo.json is not a JSON object")
     if set(j) - KEYS:
@@ -271,15 +287,55 @@ def demo(d, deep=True, name=None):
 
 
 def load(folder, deep=True):
-    """The demos in folder, sorted by (order, name): [] for None. DemoError names the first demo that breaks a rule, or
-    says that folder is not a folder (a mistyped folder would show no demos, and a site build would take the live ones
-    away)."""
+    """The demos in folder (each entry but placeholders.json and the names that start with "."), sorted by
+    (order, name): [] for None. DemoError names the first demo that breaks a rule, or says that folder is not a folder
+    (a mistyped folder would show no demos, and a site build would take the live ones away)."""
     if folder is None:
         return []
     if not Path(folder).is_dir():
         raise DemoError(f"no demos folder {folder}")
-    shown = [demo(d, deep) for d in sorted(Path(folder).iterdir()) if not d.name.startswith(".")]
+    shown = [demo(d, deep) for d in sorted(Path(folder).iterdir())
+             if not d.name.startswith(".") and d.name != PLACEHOLDERS]
     return sorted(shown, key=lambda x: (x.order, x.name))
+
+
+def placeholders(folder, shown=()):
+    """The titles of folder's placeholders.json, in its order, without the titles of the demos in shown (a demo that
+    has come in takes its placeholder's place): [] for None or no file. DemoError says what is wrong with the file,
+    or that folder is not a folder."""
+    if folder is None:
+        return []
+    if not Path(folder).is_dir():
+        raise DemoError(f"no demos folder {folder}")
+    p = Path(folder) / PLACEHOLDERS
+    if not p.exists() and not p.is_symlink():
+        return []
+    if p.is_symlink() or not p.is_file() or p.stat().st_size > MAX_JSON:
+        raise DemoError(f"{PLACEHOLDERS} is not a regular file of at most {MAX_JSON >> 10} KB")
+    text = p.read_text(errors="replace")
+    _guard(text, PLACEHOLDERS)
+    try:
+        j = json.loads(text)
+    except ValueError as e:
+        raise DemoError(f"{PLACEHOLDERS} is not JSON: {e}") from None
+    _guard(json.dumps(j, ensure_ascii=False), PLACEHOLDERS)
+    if not isinstance(j, dict):
+        raise DemoError(f"{PLACEHOLDERS} is not a JSON object")
+    if set(j) - {"version", "placeholders"}:
+        raise DemoError(f"{PLACEHOLDERS} has unknown keys: {', '.join(sorted(set(j) - {'version', 'placeholders'}))}")
+    if type(j.get("version")) is not int or j["version"] != 1:  # not true or 1.0, which equal 1
+        raise DemoError(f"{PLACEHOLDERS}: version is 1")
+    titles = j.get("placeholders")
+    if not isinstance(titles, list) or not 1 <= len(titles) <= MAX_PLACEHOLDERS:
+        raise DemoError(f"{PLACEHOLDERS}: placeholders is a list of 1 to {MAX_PLACEHOLDERS} titles; delete the file "
+                        "for none")
+    for i, t in enumerate(titles, 1):
+        if CONTROL.search(_text(t, 1, MAX_TITLE, f"{PLACEHOLDERS}: placeholder {i}")) or t != t.strip():
+            raise DemoError(f"{PLACEHOLDERS}: placeholder {i} is plain text on one line, with no space at either end")
+    if len({t.casefold() for t in titles}) != len(titles):
+        raise DemoError(f"{PLACEHOLDERS}: each title once")
+    have = {x.title.strip().casefold() for x in shown}
+    return [t for t in titles if t.casefold() not in have]
 
 
 def files(folder, shown):
@@ -289,14 +345,42 @@ def files(folder, shown):
 
 # ---- the page ----
 
+def card_facts(x):
+    """The two facts of x that its card shows: Size and Mass when it has them, else its other facts of at most SHORT
+    characters, in order."""
+    have = dict(x.facts)
+    first = [(k, have[k]) for k in CARD_FACTS if k in have]
+    return (first + [(k, v) for k, v in x.facts if k not in CARD_FACTS and len(v) <= SHORT])[:2]
+
+
 def card(x):
-    """One demo's section: its title, its 360 video with its facts, the 3D view (folded, so model-viewer fetches the GLB
-    only when it opens) and its files, as the Downloads tab lists them (named <demo>_<file>)."""
+    """A demo's card in the gallery: one link to its section (#demo-<name>) with its poster, its title and two short
+    facts (card_facts)."""
+    e = html.escape
+    img = (f'<img class="dcimg" src="{e(f"demos/{x.name}/{x.poster}")}" alt="" loading="lazy">' if x.poster
+           else '<span class="dcimg"></span>')
+    facts = card_facts(x)
+    dl = "<dl>" + "".join(f"<dt>{e(k)}</dt><dd>{e(v)}</dd>" for k, v in facts) + "</dl>" if facts else ""
+    return f'<li><a class="democard" href="#demo-{x.name}">{img}<span class="dctitle">{e(x.title)}</span>{dl}</a></li>'
+
+
+def soon_card(title):
+    """A placeholder's card: the same frame with an empty picture, its title and "Coming soon", and no link."""
+    return (f'<li><div class="democard soon"><span class="dcimg"></span><span class="dctitle">{html.escape(title)}'
+            '</span><span class="dcnote">Coming soon</span></div></li>')
+
+
+def detail(x):
+    """One demo's section, which style.css shows while the URL targets it: a link back to the gallery, its title, its
+    360 video with its facts (no autoplay and nothing preloaded, so a video loads only when demos.js plays it or its
+    controls do), the 3D view (folded, so model-viewer fetches the GLB only when it opens) and its files, as the
+    Downloads tab lists them (named <demo>_<file>)."""
     e = html.escape
     at = lambda f: e(f"demos/{x.name}/{f}")  # noqa: E731  relative, so it works at / and under /<repo>/
     poster = f' poster="{at(x.poster)}"' if x.poster else ""
-    out = [f'<section class="demo" id="demo-{x.name}">', f"<h2>{e(x.title)}</h2>", '<div class="demobody">',
-           f'  <video src="{at(x.video)}"{poster} autoplay muted loop playsinline controls preload="auto" '
+    out = [f'<section class="demo" id="demo-{x.name}">', '<p class="back"><a href="#">All demos</a></p>',
+           f'<h2 tabindex="-1">{e(x.title)}</h2>', '<div class="demobody">',
+           f'  <video src="{at(x.video)}"{poster} muted loop playsinline controls preload="none" '
            f'aria-label="360 video of {e(x.title)}"></video>']
     if x.facts:
         out.append("  <dl>" + "".join(f"<dt>{e(k)}</dt><dd>{e(v)}</dd>" for k, v in x.facts) + "</dl>")
@@ -313,11 +397,15 @@ def card(x):
     return "\n".join(out + ["</section>"])
 
 
-def page(src, shown):
-    """static/demos.html (src) with the demos in place of its one MARKER; "No demos yet." for none."""
+def page(src, shown, soon=()):
+    """static/demos.html (src) with the gallery in place of its one MARKER: the demos' cards, then a card per
+    placeholder title (soon), then each demo's section; "No demos yet." for neither."""
     if src.count(MARKER) != 1:
         raise DemoError(f"static/demos.html has {src.count(MARKER)} copies of {MARKER}, not 1")
-    return src.replace(MARKER, "\n".join(map(card, shown)) or '<p class="emptytab">No demos yet.</p>')
+    if not shown and not soon:
+        return src.replace(MARKER, '<p class="emptytab">No demos yet.</p>')
+    cards = ['<ul class="gallery">', *map(card, shown), *map(soon_card, soon), "</ul>"]
+    return src.replace(MARKER, "\n".join(cards + list(map(detail, shown))))
 
 
 # ---- add and check ----
@@ -552,8 +640,10 @@ def main(argv=None):
             if not folder:
                 raise DemoError("give DIR or set WEBAPP_DEMOS")
             shown = load(Path(folder).expanduser())
+            soon = placeholders(Path(folder).expanduser(), shown)
             total = sum(n for x in shown for n in x.sizes.values())
-            print(f"{len(shown)} demo{'s' if len(shown) != 1 else ''}, {size_text(total)}, ok")
+            more = f", {len(soon)} placeholder{'s' if len(soon) != 1 else ''}" if soon else ""
+            print(f"{len(shown)} demo{'s' if len(shown) != 1 else ''}{more}, {size_text(total)}, ok")
     except DemoError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

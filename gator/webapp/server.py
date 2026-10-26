@@ -26,7 +26,8 @@ Login: GET /?token=T sets an HttpOnly SameSite=Strict cookie and redirects to /.
 request needs the cookie and gets 401 without it, static files included.
 
 Routes (JSON unless said otherwise; {id} is a job id):
-  GET    /demos.html                  static/demos.html with the demos (demos.page), or "No demos yet."
+  GET    /demos.html                  static/demos.html with the cards of the demos and of the placeholders, and
+                                      the demos' sections (demos.page), or "No demos yet."
   GET    /demos/{name}/{file}         a file that the demo's demo.json lists (demos.TYPES), else 404; Range and
                                       HEAD as for a job's file
   PUT    /api/upload?name=N           the file as the raw body: a video (jobs.VIDEOS), a rosbag (jobs.BAGS)
@@ -435,6 +436,7 @@ def make_app(cfg, token, key_dir=None):
     from gator.webapp import demos
 
     shown = demos.load(cfg.demos)  # before the Runner claims the runs folder; DemoError says what is wrong
+    soon = demos.placeholders(cfg.demos, shown)
     demo_files = {tuple(rel.split("/")[1:]): p for rel, p in demos.files(cfg.demos, shown).items()}
     runner = jobs.Runner(cfg, key_dir=key_dir)
 
@@ -503,7 +505,7 @@ def make_app(cfg, token, key_dir=None):
 
     @app.get("/demos.html")
     def demos_page():  # the header's Demos link opens it in a new tab
-        return HTMLResponse(demos.page((STATIC / "demos.html").read_text(), shown),
+        return HTMLResponse(demos.page((STATIC / "demos.html").read_text(), shown, soon),
                             headers={"Cache-Control": "no-cache"})
 
     @app.api_route("/demos/{name}/{file}", methods=["GET", "HEAD"])

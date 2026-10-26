@@ -110,13 +110,14 @@ def test_build_writes_every_part_of_the_site(built):
 
 def test_csp_is_strict_and_the_same_in_headers_and_meta(built):
     """Scripts and styles from the site only (no CDN host, no unsafe-inline or unsafe-eval; WebAssembly may compile,
-    for model-viewer's decoders, and model-viewer's own style block may apply), the project's API and socket only;
+    for model-viewer's decoders, and model-viewer's own style block may apply), the project's API and socket only,
+    and blob: URLs, from which model-viewer reads a GLB's own textures;
     the header policy equals the <meta> policy of every page plus frame-ancestors, which a <meta> cannot set."""
     head = csp_of_headers(built)
     rules = dict(r.split(" ", 1) for r in head.split("; "))
     assert rules["script-src"] == "'self' 'wasm-unsafe-eval'" and rules["style-src"] == "'self' " + site.MODEL_VIEWER_STYLE
     assert rules["default-src"] == "'none'"
-    assert rules["connect-src"] == "'self' https://abcdefghijklmnop.supabase.co wss://abcdefghijklmnop.supabase.co"
+    assert rules["connect-src"] == "'self' blob: https://abcdefghijklmnop.supabase.co wss://abcdefghijklmnop.supabase.co"
     assert rules["img-src"] == "'self' data: blob: https://abcdefghijklmnop.supabase.co"
     assert rules["media-src"] == "'self' blob: https://abcdefghijklmnop.supabase.co"  # 'self': the demos' videos
     assert rules["frame-ancestors"] == "'none'" and rules["base-uri"] == "'none'" and rules["form-action"] == "'none'"
@@ -139,7 +140,7 @@ def test_model_viewer_style_hash_is_that_of_its_style_block():
 
 def test_local_stack_policy_uses_its_own_origin(tmp_path):
     cfg = {**CFG, "url": "http://127.0.0.1:54321"}
-    assert "connect-src 'self' http://127.0.0.1:54321 ws://127.0.0.1:54321;" in site.csp(cfg)
+    assert "connect-src 'self' blob: http://127.0.0.1:54321 ws://127.0.0.1:54321;" in site.csp(cfg)
     assert "img-src 'self' data: blob: http://127.0.0.1:54321;" in site.csp(cfg)
 
 
@@ -363,10 +364,12 @@ def test_site_with_demos_served_under_a_repo_path(tmp_path, demo_dir):
 
 def test_build_with_demos(tmp_path, demo_dir):
     """demos.html: the CSP and referrer metas first, the site's own model-viewer and demos.js, no other script or inline style,
-    relative links that each go to a file of the site, and the demo's files copied byte for byte. A demos folder that
-    breaks a rule, or that looks private, stops the build, and nothing is written. Without a folder the page says
+    relative links that each go to a file of the site or to a section of the page (a card to its demo, a demo back to
+    the gallery), the placeholders' cards after the demo's, and the demo's files copied byte for byte. A demos folder
+    that breaks a rule, or that looks private, stops the build, and nothing is written. Without a folder the page says
     "No demos yet."."""
     out = tmp_path / "site"
+    (demo_dir / "placeholders.json").write_text(json.dumps({"version": 1, "placeholders": ["Laptop", "Door"]}))
     written = site.build(out, write_cfg(tmp_path), demo_dir=demo_dir)
     assert sorted(p for p in written if p.startswith("demos/")) == sorted(
         f"demos/office-chair/{f}" for f in ("turntable.mp4", "poster.jpg", "aligned.glb", "results.zip"))
@@ -380,10 +383,20 @@ def test_build_with_demos(tmp_path, demo_dir):
     assert [a["src"] for t, a in page.tags if t == "script"] == ["static/vendor/model-viewer-4.4.0.min.js", "static/demos.js"]
     assert page.inline == [] and not any("style" in a or any(k.startswith("on") for k in a) for _, a in page.tags)
     assert ("a", {"href": "index.html", "class": "brand"}) in page.tags
+    ids = {a["id"] for _, a in page.tags if "id" in a}
     for link in page.links:
-        assert not re.match(r"[a-z]+:|/", link) and (out / link.split("#")[0]).is_file(), link
+        if link.startswith("#"):  # the gallery is the page without a target
+            assert link == "#" or link[1:] in ids, link
+        else:
+            assert not re.match(r"[a-z]+:|/", link) and (out / link.split("#")[0]).is_file(), link
+    assert {"#demo-office-chair", "#"} <= set(page.links)
     text = (out / "demos.html").read_text()
     assert not CDN.search(text) and 'id="demo-office-chair"' in text and "No demos yet." not in text
+    assert "<style" not in text and "autoplay" not in text
+    assert re.findall(r'<span class="dctitle">([^<]+)</span><span class="dcnote">Coming soon</span>', text) == ["Laptop", "Door"]
+    assert text.index('href="#demo-office-chair"') < text.index("Laptop")
+    assert "placeholders.json" not in " ".join(written)
+    (demo_dir / "placeholders.json").unlink()
     bad = tmp_path / "bad"
     shutil.copytree(demo_dir, bad)
     (bad / "office-chair" / "notes.zip").write_bytes(b"PK\x03\x04")
@@ -396,11 +409,36 @@ def test_build_with_demos(tmp_path, demo_dir):
         site.build(tmp_path / "other", write_cfg(tmp_path), demo_dir=bad)
     assert not (tmp_path / "other").exists()
     # Over a build with demos, a build without them needs no_demos: a deploy of it would take the live demos away.
-    with pytest.raises(site.SiteError, match="has demos; give --demos DIR, or --no-demos"):
+    with pytest.raises(site.SiteError, match="has demos or placeholders; give --demos DIR, or --no-demos"):
         site.build(out, write_cfg(tmp_path))
     assert (out / "demos" / "office-chair" / "turntable.mp4").is_file()
     site.build(out, write_cfg(tmp_path), no_demos=True)
     assert '<p class="emptytab">No demos yet.</p>' in (out / "demos.html").read_text() and not (out / "demos").exists()
+
+
+def test_build_with_placeholders_only(tmp_path):
+    """A demos folder with only placeholders.json: a gallery of placeholder cards, none a link, no demo files and no
+    "No demos yet.". Over that build, a build without a folder stops, as over one with demos. A bad placeholders.json
+    stops the build with its reason, and nothing is written."""
+    folder = tmp_path / "demos"
+    folder.mkdir()
+    (folder / "placeholders.json").write_text(json.dumps({"version": 1, "placeholders": ["Drawer cabinet", "Toolbox"]}))
+    out = tmp_path / "site"
+    written = site.build(out, write_cfg(tmp_path), demo_dir=folder)
+    assert not any(p.startswith("demos/") for p in written)
+    text = (out / "demos.html").read_text()
+    assert text.count('<div class="democard soon">') == 2 and "No demos yet." not in text and "<section" not in text
+    assert 'class="democard"' not in text and not re.search(r'href="#', text)
+    page = parse(out / "demos.html")
+    assert page.inline == [] and not any("style" in a for _, a in page.tags)
+    with pytest.raises(site.SiteError, match="has demos or placeholders; give --demos DIR, or --no-demos"):
+        site.build(out, write_cfg(tmp_path))
+    assert (out / "demos.html").read_text() == text
+    (folder / "placeholders.json").write_text(json.dumps({"version": 1, "placeholders": ["Pallet B"]}))
+    with pytest.raises(site.SiteError, match=re.escape("the demos folder: placeholders.json: looks private (matches "
+                                                       "'pallet'); private data is never a demo; nothing was written")):
+        site.build(tmp_path / "other", write_cfg(tmp_path), demo_dir=folder)
+    assert not (tmp_path / "other").exists()
 
 
 def test_build_refuses_secrets(tmp_path):
@@ -528,17 +566,20 @@ def test_command_line(tmp_path):
 
 
 def test_command_line_with_demos(tmp_path, demo_dir):
-    """--demos copies the demos in. Over that build, a build without a folder stops unless --no-demos, and a folder
-    that is not there stops the build."""
+    """--demos copies the demos in, and the second line counts them and the placeholders. Over that build, a build
+    without a folder stops unless --no-demos, and a folder that is not there stops the build."""
     cfg, out = tmp_path / "s.json", tmp_path / "out"
     cfg.write_text(json.dumps(CFG))
     build = lambda *a: run_site("build", "--config", str(cfg), "--out", str(out), *a)  # noqa: E731
     r = build("--demos", str(demo_dir))
     assert r.returncode == 0 and r.stdout.splitlines()[1] == f"demos: 1 from {demo_dir}"
+    (demo_dir / "placeholders.json").write_text(json.dumps({"version": 1, "placeholders": ["Laptop", "Door"]}))
+    r = build("--demos", str(demo_dir))
+    assert r.returncode == 0 and r.stdout.splitlines()[1] == f"demos: 1 from {demo_dir}, 2 placeholders"
     assert (out / "demos/office-chair/turntable.mp4").is_file()
     r = build()
-    assert r.returncode == 1 and r.stderr == (f"error: the earlier build in {out} has demos; give --demos DIR, or "
-                                              "--no-demos to build without them\n")
+    assert r.returncode == 1 and r.stderr == (f"error: the earlier build in {out} has demos or placeholders; give "
+                                              "--demos DIR, or --no-demos to build without them\n")
     r = build("--demos", str(tmp_path / "missing"))
     assert r.returncode == 1 and r.stderr == (f"error: the demos folder: no demos folder {tmp_path / 'missing'}; "
                                               "nothing was written\n")

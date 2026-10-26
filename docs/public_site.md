@@ -188,7 +188,7 @@ Run these on the CLI's local stack first where possible, then on the cloud proje
 | The content types of `job-files` | the first log file and URDF (both `text/plain; charset=utf-8`) and GLB of a real job | change `allowed_mime_types` in the storage migration to what Storage takes, and keep it narrow: no XML, HTML or SVG |
 | A 1 MB snapshot through `own_publish` | a long bag on a personal machine | send the frames snapshot in an `own_publish` call of its own, or lower the lean thumbnail count |
 | The site under `/<repo>/` | sign in and open a job on GitHub Pages | a path that starts with `/` slipped in |
-| The demos' videos and GLBs on the host | signed out, open `demos.html` in Safari and see each video play and loop; open 3D view and watch the network list: the GLB loads only then; `curl -s -o /dev/null -D - -H "Range: bytes=0-1023" https://<site>/demos/<name>/turntable.mp4` (want 206 and `video/mp4`) | Range: Safari does not play the video; host the videos elsewhere and add that host to `media-src` |
+| The demos' videos and GLBs on the host | signed out, open `demos.html` in Safari, open each card and see its video play and loop; open 3D view and watch the network list: the GLB loads only then; `curl -s -o /dev/null -D - -H "Range: bytes=0-1023" https://<site>/demos/<name>/turntable.mp4` (want 206 and `video/mp4`) | Range: Safari does not play the video; host the videos elsewhere and add that host to `media-src` |
 | The demos page under the CSP | open `demos.html` with the console open | add only what the console names, to both policies |
 
 ## Run a personal worker on your own GPU machine
@@ -293,9 +293,9 @@ with no network access. The help page's agent section (`help.html#agent`) says w
 
 ## Demos
 
-The Demos link in the header opens `demos.html`: finished jobs that you picked, each with its 360 video, a 3D
-view of `aligned.glb`, its facts and its files. It works signed out. The demos are files of the site, not rows or
-Storage objects, so nothing in Supabase changes.
+The Demos link in the header opens `demos.html`: a gallery of cards for the finished jobs that you picked. A card
+opens its demo, with its 360 video, a 3D view of `aligned.glb`, its facts and its files. It works signed out. The
+demos are files of the site, not rows or Storage objects, so nothing in Supabase changes.
 
 - **The folder.** `WEBAPP_DEMOS` names it, and `--demos DIR` overrides it for the server, the site build and
   `demos add`. There is no default. Keep it outside the repo, for example `~/lunar_lab_research/harpor_demos`.
@@ -307,12 +307,16 @@ Storage objects, so nothing in Supabase changes.
   fact). A run folder without `job.json` needs `--video` and `--glb`. Copy the demo folder to the Mac's demos folder
   with scp, then run `python -m gator.webapp.demos check`.
 - **Show it.** `python -m gator.webapp.site build --demos DIR` copies the demos into `site/`, and its second line
-  says how many. A folder that is not there stops the build, and so does a build without a folder over an earlier
-  build that had demos: its deploy would drop the live demos. Add `--no-demos` when that is what you want; it
+  says how many, with the placeholders. A folder that is not there stops the build, and so does a build without a
+  folder over an earlier build that had demos or placeholders: its deploy would drop the live gallery. Add `--no-demos` when that is what you want; it
   publishes "No demos yet.". A GitHub Actions build cannot see a folder outside the repo, so build on the Mac
   (Cloudflare). The local server shows the same page at `/demos.html` with `--demos DIR`; it reads the folder when
-  it starts, and a folder that is not there stops it. The page's videos start by themselves unless the system asks
-  for reduced motion (`static/demos.js`).
+  it starts, and a folder that is not there stops it. The page loads no video until a demo opens; then its video
+  starts by itself unless the system asks for reduced motion (`static/demos.js`).
+- **Placeholders.** `placeholders.json` in the demos folder adds cards that say "Coming soon" and open nothing, after
+  the demos' cards: `{"version": 1, "placeholders": ["Drawer cabinet", "Laptop"]}`. The module docstring of
+  `demos.py` gives the rules. The server, the build and `check` read it with the guard below. A placeholder with the
+  title of a demo shows no card, so the demo takes its place. Edit the file as demos come in, or delete it.
 - **The guard.** `add`, `check`, the server and the build refuse a demo that looks private (the words of
   `demos.PRIVATE`) in `demo.json`, a file name, the text in `results.zip` or the names in a GLB. `add` also checks
   the job's input name, prompt and camera topic and the text of `selection.json` and `lidar.json`, and refuses a

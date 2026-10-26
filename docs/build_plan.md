@@ -1251,9 +1251,9 @@ Downloads tab 2026-10-23, help page 2026-10-25):
   going. Its section follows the screen (`HELP_AT` in `app.js`): the jobs list, a waiting panel, else
   the tab shown. A failed job's error ends with a Help link to the troubleshooting section.
   `tests/test_help_page.py` checks the page's numbers against the code.
-- Demos (2026-10-25): the header's Demos link opens `demos.html` in a new tab, with finished jobs that the
-  owner picked (`gator/webapp/demos.py`). The server takes the demos folder from `--demos DIR` or `WEBAPP_DEMOS`
-  and serves `/demos.html` and `/demos/<name>/<file>`; `docs/public_site.md` (Demos) has the rest.
+- Demos (2026-10-25): the header's Demos link opens `demos.html` in a new tab, a gallery of the finished jobs
+  that the owner picked (`gator/webapp/demos.py`). The server takes the demos folder from `--demos DIR` or
+  `WEBAPP_DEMOS` and serves `/demos.html` and `/demos/<name>/<file>`; `docs/public_site.md` (Demos) has the rest.
 - The 37 node tests in `tests/test_webapp_server.py` load `app.js`, and so do two in
   `tests/test_webapp_demos.py` (the demos' facts and file sizes). They need `node`, which ICE
   does not have, so run them on the Mac. Three more tests there check the tabs and panels of

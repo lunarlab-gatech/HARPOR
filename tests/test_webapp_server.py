@@ -146,9 +146,12 @@ def test_token_gate(client):
 
 
 def test_demos_pages(tmp_path, capsys):
-    """/demos.html shows the demos of the server's demos folder (or "No demos yet." without one), and /demos/<name>/<file>
-    serves only the files that a demo.json lists, with their type, Range and HEAD. A demos folder that breaks a rule
-    stops the server with the reason."""
+    """/demos.html shows the demos of the server's demos folder as cards, with the cards of its placeholders.json (or
+    "No demos yet." without either), and /demos/<name>/<file> serves only the files that a demo.json lists, with their
+    type, Range and HEAD. A demos folder that breaks a rule, or a bad placeholders.json, stops the server with the
+    reason."""
+    import re
+
     from test_webapp_demos import hand_demo
 
     from gator.webapp import demos
@@ -162,12 +165,20 @@ def test_demos_pages(tmp_path, capsys):
         r = c.get("/demos.html")
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
         assert '<p class="emptytab">No demos yet.</p>' in r.text and "<!-- demos -->" not in r.text
+    (tmp_path / "demos").mkdir()
+    (tmp_path / "demos" / "placeholders.json").write_text('{"version": 1, "placeholders": ["Laptop"]}')
+    with TestClient(app(tmp_path / "demos")) as c:
+        login(c)
+        r = c.get("/demos.html")
+        assert '<span class="dctitle">Laptop</span><span class="dcnote">Coming soon</span>' in r.text
+        assert "No demos yet." not in r.text and "<section" not in r.text
     d = hand_demo(tmp_path / "demos")
     (d / ".DS_Store").write_bytes(b"\0")
     with TestClient(app(tmp_path / "demos")) as c:
         login(c)
         r = c.get("/demos.html")
         assert 'id="demo-office-chair"' in r.text and r.headers["cache-control"] == "no-cache"
+        assert r.text.index('<a class="democard" href="#demo-office-chair">') < r.text.index(">Laptop<")
         assert 'href="/static/style.css"' in r.text and 'href="help.html#demos"' in r.text
         assert c.get("/static/demos.js").content == (server.STATIC / "demos.js").read_bytes()
         mp4 = (d / "turntable.mp4").read_bytes()
@@ -179,9 +190,14 @@ def test_demos_pages(tmp_path, capsys):
         assert r.status_code == 200 and r.headers["content-type"] == "model/gltf-binary" and not r.content
         assert c.get("/demos/office-chair/results.zip").headers["content-type"] == "application/zip"
         for bad in ("/demos/office-chair/demo.json", "/demos/office-chair/.DS_Store", "/demos/other/turntable.mp4",
+                    "/demos/placeholders.json",
                     "/demos/office-chair/../office-chair/demo.json", "/demos/office-chair%2Fturntable.mp4/x",
                     "/demos/office-chair/%2E%2E%2Fdemo.json", "/demos/office-chair"):
             assert c.get(bad).status_code == 404, bad
+    (tmp_path / "demos" / "placeholders.json").write_text('{"version": 1, "placeholders": ["Cage"]}')
+    with pytest.raises(demos.DemoError, match=re.escape("placeholders.json: looks private (matches 'cage')")):
+        app(tmp_path / "demos", runs="runs2")
+    (tmp_path / "demos" / "placeholders.json").unlink()
     (d / "notes.zip").write_bytes(b"PK\x03\x04")
     with pytest.raises(demos.DemoError, match="office-chair/notes.zip is not listed in demo.json"):
         app(tmp_path / "demos", runs="runs2")

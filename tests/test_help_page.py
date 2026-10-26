@@ -161,7 +161,8 @@ def test_help_page_holds_the_method_numbers():
                            "excluded", f"up to {seam_lines} fitted lines", "not split off", "only in results.zip",
                            "urdf/meshes", *zipped, "H.264", f"{turntable.SIDE} x {turntable.SIDE} px",
                            f"{turntable.FPS} fps", f"{turntable.FRAMES / turntable.FPS:g} s"],
-             "demos": ["360 video", "muted and looping", "3D view", "aligned.glb", "<demo>_<name>"],
+             "demos": ["gallery", "All demos", "Back button", "Coming soon", "360 video", "muted and looping", "3D view",
+                       "aligned.glb", "<demo>_<name>"],
              "retry": ["first stage that is not done", "replaces the results"],
              "troubleshooting": ["360 video: …", "Retry from turntable"]}
     assert set(facts) <= set(text), set(facts) - set(text)
