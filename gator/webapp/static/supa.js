@@ -34,7 +34,7 @@
   // steps.STAGES: each stage's name and whether it runs on the GPU, for the view of a job that no worker has seen yet.
   const STAGES = [["topics", false], ["frames", false], ["extract", false], ["masks", true], ["prep", false], ["da3", true],
     ["lidar", false], ["select", false], ["sam3d", true], ["place", false], ["propose", false], ["parts", true], ["agent", true],
-    ["align", false], ["vomp", true], ["mjcf", false], ["usd", false], ["urdf", false], ["package", false]];
+    ["align", false], ["vomp", true], ["mjcf", false], ["usd", false], ["urdf", false], ["turntable", true], ["package", false]];
   const SNAP_NONE = { frames: "the frames are not analyzed yet", selection: "the views are not selected yet",
     parts: "the part list is not on the site yet" };
   const ROUTE_NAME = { topic: "Camera topic", calibration_put: "Calibration", calibration_delete: "Remove calibration",
@@ -254,7 +254,8 @@
     }
     user = session.user;
     sb.auth.onAuthStateChange((event) => { if (event === "SIGNED_OUT") location.reload(); });
-    $("#harpor-email").textContent = user.email || "Account";
+    // The email: the person icon's name for a screen reader, and the menu's first line (site.py ACCOUNT).
+    $("#harpor-email").textContent = $("#harpor-who").textContent = user.email || "signed in";
     $("#harpor-signout").onclick = signOut;
     $("#harpor-account").hidden = false;
     // The account menu closes on a click elsewhere and on Escape, as a menu does.
@@ -330,7 +331,7 @@
       source: { kind: row.input_kind, topic: null }, agent: "astra", status: row.status, mode: "auto", prompt: row.prompt,
       slug: null, n_views: 6, picks: [], view0: null, auto_continue: false, overrides: { locked: [], excluded: [], instance: {} },
       articulated: false, parts: { mode: "vlm", list: [], confirmed: false },
-      lidar: row.input_kind === "stray" ? { kind: "stray" } : null, calibration: null,
+      lidar: row.input_kind === "stray" ? { kind: "stray" } : null, calibration: null, turntable: false,
       stages: Object.fromEntries(STAGES.map(([name]) => [name, { ...stage }])), current: null, error: null,
       warnings: [], key_ok: false, kind: row.input_kind,
       parts_mode: "vlm", parts_review: false, preview: null,

@@ -399,7 +399,9 @@ def test_read_odometry(tmp_path):
 @pytest.mark.parametrize("k", [0, 1, 3])
 def test_a_depth_pixel_lands_on_its_rgb_pixel(tmp_path, k):
     """The marked depth pixel and the dot drawn at its colour pixel come out at the same place in the upright
-    frame; and every depth sample of the scene lands where the upright camera sees that depth."""
+    frame; and every depth sample of the scene lands where the upright camera sees that depth. depth_points
+    gives the same samples and, with odometry.csv's K, their camera points row for row, in the upright frame's
+    axes: the mark's point projects onto the mark through the upright frame's K."""
     mark = (100, 60)
     root = export(tmp_path, n=4, portrait=k, mark=mark)
     info = stray.probe(root)
@@ -418,6 +420,21 @@ def test_a_depth_pixel_lands_on_its_rgb_pixel(tmp_path, k):
     assert abs(xs.mean() + x0 - u) < 0.75 and abs(ys.mean() + y0 - v) < 0.75
     expect = lidar_scale.rot90_points(*rgb_of_depth(*mark), SIZE, k)
     assert (u, v) == pytest.approx(expect, abs=1e-4)
+    K, source = stray.intrinsics(root, 4)
+    assert source == "odometry.csv" and K.shape == (4, 3, 3)
+    Ku = F.intrinsics(W, H)  # the upright frame's: f stays, the centre turns with the frame
+
+    def pixels(xyz):
+        return np.c_[Ku[0, 0] * xyz[:, 0] / xyz[:, 2] + Ku[0, 2], Ku[1, 1] * xyz[:, 1] / xyz[:, 2] + Ku[1, 2]]
+
+    same, xyz, scan = stray.depth_points(root, 0, (W, H), k, K[0])
+    assert np.array_equal(same, uvz) and xyz.dtype == scan.dtype == np.float32 and xyz.shape == (1, 3)
+    assert pixels(xyz)[0] == pytest.approx((u, v), abs=1e-3) and xyz[0, 2] == pytest.approx(MARK_MM / 1000)
+    assert len(scan) == DEPTH[0] * DEPTH[1]  # every pixel with a depth, at any confidence
+    samples, xyz, _ = stray.depth_points(root, 3, (W, H), k, K[3])
+    assert np.array_equal(samples, stray.depth_samples(root, 3, (W, H), k)) and len(xyz) == len(samples)
+    assert np.allclose(pixels(xyz), samples[:, :2], atol=1e-3) and np.allclose(xyz[:, 2], samples[:, 2])
+    assert stray.depth_points(root, 3, (W, H), k, None)[1:] == (None, None)
 
     # Frame 1: every pixel (confidence 2, z within 0.1 to 5 m; the empty view is 4 m) is a sample at the
     # upright pixel where the scene has that depth.
@@ -441,6 +458,28 @@ def test_a_depth_pixel_lands_on_its_rgb_pixel(tmp_path, k):
     Image.fromarray(half).save(root / "depth" / "000002.png")  # 8-bit, not depth
     with pytest.raises(ValueError, match="depth/000002.png is a L image, not 16-bit depth"):
         stray.depth_samples(root, 2, (W, H), k)
+
+
+def test_intrinsics_from_odometry_else_camera_matrix(tmp_path):
+    """odometry.csv's fx, fy, cx, cy per frame first; camera_matrix.csv for every frame without them; a
+    camera_matrix.csv that is not one gives none, without a crash."""
+    root = export(tmp_path, n=3)
+    K, source = stray.intrinsics(root, 3)
+    f = F.FOCAL * SIZE[0]
+    want = [[f, 0, 159.5], [0, f, 119.5], [0, 0, 1]]
+    assert source == "odometry.csv" and np.allclose(K, want)
+    lines = (root / "odometry.csv").read_text().splitlines()
+    (root / "odometry.csv").write_text("\n".join(", ".join(x.split(", ")[:9]) for x in lines) + "\n")
+    K, source = stray.intrinsics(root, 3)
+    assert source == "camera_matrix.csv" and K.shape == (3, 3, 3) and np.allclose(K, want)
+    for bad in ("1,0,0\n0,1,0\n", "1,0,0\n0,1,0\n0,0,2\n", "-1,0,0\n0,1,0\n0,0,1\n", "nan,0,0\n0,1,0\n0,0,1\n",
+                "a,b,c\n0,1,0\n0,0,1\n", "1,0,0,4\n0,1,0\n0,0,1\n", "1,0,0\n0,1,0\n0,0,1\n" + " " * 5000):
+        (root / "camera_matrix.csv").write_text(bad)
+        assert stray.intrinsics(root, 3) == (None, None), bad
+    (root / "camera_matrix.csv").write_bytes(b"\xff\xfe\x00")
+    assert stray.intrinsics(root, 3) == (None, None)
+    (root / "camera_matrix.csv").unlink()
+    assert stray.intrinsics(root, 3) == (None, None)
 
 
 def which(a):

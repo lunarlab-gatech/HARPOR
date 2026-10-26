@@ -617,7 +617,10 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
   fake Blender in the tests fails if it does not.
 - Videos: `gator/agent/blender/turntable.py` renders a 360-degree turntable of one or more GLBs in
   frame W, each asset with its own camera so all panels show the same view, joined with Blender's
-  sequencer (6 s, 30 fps, H.264). `python3 gator/agent/loop_trace.py RUN_DIR --turntable-args
+  sequencer (6 s, 30 fps, H.264). Optional keys (2026-10-25): an asset's `matrix` (4x4, row-major) maps
+  the GLB's Blender world into W first, `label` may be left out, `elevation` lifts the cameras (degrees
+  above the horizontal), and `frames_dir` (one asset) writes PNG frames instead of a video. The web
+  app's 360 video uses them (note 10). `python3 gator/agent/loop_trace.py RUN_DIR --turntable-args
   ARGS.json` prints a session's loop in order and writes turntable arguments for the original and
   every export. Videos so far are in `runs/videos/`.
 - `python3 gator/agent/session_report.py RUN_DIR` prints a session's commands, errors, model time
@@ -1026,6 +1029,8 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    sees how TF links it to the camera, and can upload a calibration file (`.yaml`, `.yml` or `.json`,
    at most 64 KB), which replaces the bag's TF. Start checks the LiDAR topic, the TF link or the
    calibration, and the intrinsics, and shows the reason before any GPU stage runs.
+   The box "Make a 360 video" (off by default; job.json "turntable") adds the `turntable` stage at the
+   end of the build.
 4. SAM 3 masks every candidate, `prep` and Depth Anything 3 run on all candidates together, the
    `lidar` stage finds the metric scale on all of them when LiDAR is on (note 12), and
    `views.select` picks the views. Auto mode drops frames without a mask, with a mask under 1% of
@@ -1052,15 +1057,30 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    body. `align` takes up from a plane fitted under the object in view 0's DA3 points, or
    from the mean camera up when no plane fits, uses `--x footprint`, and adds `--opaque` when the GLB
    has transmission or alpha. For an articulated object, `align` also writes one GLB per link. Then
-   VoMP (once per link for an articulated object), MJCF, USD, URDF and `results.zip`.
+   VoMP (once per link for an articulated object), MJCF, USD, URDF, then the 360 video when the job
+   asked for one (the `turntable` stage; a failure warns), then `results.zip`.
+8. The 360 video (2026-10-25, `gator/webapp/turntable.py`): the GLB that physics used
+   (`physics/up.json` "glb"), turned upright with `aligned.json` "T_s_from_w", so it shows aligned.glb's
+   object and pose with all parts and the GLB's own materials. Blender renders `turntable.FRAMES` frames
+   of `SIDE` x `SIDE` px (Cycles, `SAMPLES` samples, denoised) in the agent's SIF, one turn seen from
+   `ELEVATION_DEG` above, into `turntable/frames/`; the container sees only `turntable/`, the GLB and the
+   scripts. `envs/web` then encodes them with PyAV as the preview is encoded (libx264, yuv420p, crf `CRF`,
+   preset veryfast, a keyframe every 2 s, index first, `FPS` fps: one turn that loops) into
+   `turntable/turntable.mp4`, deletes the frames and writes `turntable/turntable.json` last. The stage runs on the GPU (`steps.GPU`) and is optional
+   (`steps.OPTIONAL`): when it fails, its record says failed, job.json "warnings" gets
+   "360 video: <why>", and the build goes on to `results.zip`, which then has no `turntable.mp4`. Retry
+   from turntable (shown on a done job whose video failed) runs it and `package` again (`Runner.resume`).
+   The render has `RENDER_TIMEOUT_S`. Fake mode runs the real stage with the fake Blender, whose frames are the GLB's
+   outline. `tests/test_webapp_turntable.py` checks the upright turn, the binds, the render with the fake
+   Blender and the encode. Not checked on ICE yet: the upright turn, the render time and the file size.
 
 **UI** (`static/`, plain HTML, CSS and JS with no build step; reworked 2026-10-17, tabs 2026-10-22,
 Downloads tab 2026-10-23, help page 2026-10-25):
 - Tabs (2026-10-22). A job page shows the header, the status line, the next step, the warnings,
   Retry and Cancel, and the panels that wait for the user (the camera topic, the view review, the
   part list and the LiDAR failure). Under them are five tabs: Results, Downloads (the files, by
-  group), Inputs (the input's facts, its preview video and the views used), Settings (the build
-  settings) and Log.
+  group), Inputs (the input's facts, its preview video, the views used and their LiDAR points),
+  Settings (the build settings) and Log.
   - The first tab follows the job's status. A ready job shows Settings. A job in review or
     choose_topic shows Inputs, under its waiting panel. A done job shows Results. Any other job
     (analyzing, queued, running, failed or cancelled) shows Log. After a failure the
@@ -1108,7 +1128,11 @@ Downloads tab 2026-10-23, help page 2026-10-25):
   is the primary button and Build is off. Discard changes undoes the edits, and "Pick frames
   manually" opens the Settings tab in manual mode. Build, Select again and the part list's Build
   scroll the page back to the job's head, since the waiting panel closes.
-- The Results tab shows the viewers and the facts (plain label and value rows). The
+- The Results tab shows the 360 video (when the job asked for one), the viewers and the facts (plain
+  label and value rows). The video plays muted and loops, with controls that pause it; it does not
+  start by itself when the system asks for reduced motion. It is drawn once per file, so a refresh does
+  not start it again, and it plays only while the Results tab shows. When it cannot play, a line offers
+  the file. The
   viewers show the model size in cm; until a mesh shows, its viewer says "Loading the mesh" and its
   caption says "loading" where the size goes. When model-viewer's own script has not loaded after
   10 s (`MV_WAIT_MS`), the viewer offers its file, as when the mesh does not load. With the agent off
@@ -1118,8 +1142,9 @@ Downloads tab 2026-10-23, help page 2026-10-25):
   the tab opens. A result file that does not parse (a cut write after a kill or a full disk) gives
   "Could not read the results: ..." in the facts; the Downloads and Inputs tabs still draw.
 - Downloads tab (2026-10-23): every output file of `server.OUTPUTS` that exists (all of them are in
-  `ALLOW`), in four groups, each under an h3 heading. Everything is `results.zip` (help.html says
-  what it holds). Meshes are `posed.glb`, `parts.glb`, `refined.glb` and `aligned.glb`.
+  `ALLOW`), in five groups, each under an h3 heading. Everything is `results.zip` (help.html says
+  what it holds). Meshes are `posed.glb`, `parts.glb`, `refined.glb` and `aligned.glb`. Video is
+  `turntable.mp4` (2026-10-25).
   Simulation is `model.urdf`, whose line says that it needs the meshes in `results.zip`. Records are
   `placement.json`, `summary.json`, `lidar.json`, `selection.json`, `parts.json` and `mjcf.json`.
   The agent's result is not served alone. Each row is the file name as a download link (each file
@@ -1201,15 +1226,38 @@ Downloads tab 2026-10-23, help page 2026-10-25):
   `GET /api/jobs/{id}` adds "preview" (`server.preview_of`): the record with "seek" (for each view of
   `selection.json`, the frame that the preview shows and its time in the preview), `{"error": ...}`,
   `{"missing": true}`, or null for an older job.
+- LiDAR points (2026-10-25): a job with LiDAR shows "LiDAR points" under the views, once they are
+  selected (`app.js` `renderCloud`). A picker ("view 0", "view 2", ...) lists the views that have a
+  file, view 0 first; Reset goes back to the start. The canvas draws the view's whole scan in gray,
+  the camera as a small pyramid, and the points that the scale used in the accent color on top. It
+  starts at the view's camera, looking at the median of the used points, so it looks like the photo;
+  the field is 50 degrees up and down, wider on a canvas narrower than the frame (`fieldOf`, a phone),
+  so the camera's frame always shows whole. A drag turns, the wheel or a pinch zooms, and on the
+  focused canvas (role application, "3D view", described by its legend) the arrow keys turn and + and -
+  zoom. The legend gives "Whole scan (41,203)" and "Used for the scale: ×1.05 (280 pts)", the view's
+  scale and status from `pool/lidar.json` as the review gives them (`lidarViewText`), or the used
+  points' count without a record. When the scale failed (no views used), the picker lists the pool's
+  views by frame name instead (`lidar/cloud/<view>.glb`, `server.pool_clouds`; note 12). WebGL1,
+  hand-written, with no library; it draws only on a change, and the context is freed when the
+  section draws again or another job opens. A view's file is fetched once (`readCloud` parses it),
+  and only when the canvas first has a size, so a hidden tab loads nothing. A LiDAR job without
+  files says "No LiDAR points to show."; without WebGL, or for a file that does not parse, a line
+  offers the file. `GET /api/jobs/{id}` lists `run/lidar/<i>.glb` in "files" after the outputs, with
+  their sizes, and the file route serves them as `model/gltf-binary`. The worker mirrors them as
+  review files (`relay.GLOBS`, owner `select`). Help explains the colors and the controls.
 - Help (2026-10-25): the UI keeps its words short, and what the items mean and how they are found
   is in one static page, `static/help.html` (served at `/help.html`, also without the login
   cookie, so its troubleshooting reads when the cookie is stale; `site.py` builds the public copy). The header has one Help link, which opens in a new tab, so an upload or an edited list keeps
   going. Its section follows the screen (`HELP_AT` in `app.js`): the jobs list, a waiting panel, else
   the tab shown. A failed job's error ends with a Help link to the troubleshooting section.
   `tests/test_help_page.py` checks the page's numbers against the code.
-- The 31 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
-  does not have, so run them on the Mac. Two more tests there check the tabs and panels of
-  `index.html` and the styles of the Downloads rows in `style.css`.
+- Demos (2026-10-25): the header's Demos link opens `demos.html` in a new tab, with finished jobs that the
+  owner picked (`gator/webapp/demos.py`). The server takes the demos folder from `--demos DIR` or `WEBAPP_DEMOS`
+  and serves `/demos.html` and `/demos/<name>/<file>`; `docs/public_site.md` (Demos) has the rest.
+- The 37 node tests in `tests/test_webapp_server.py` load `app.js`, and so do two in
+  `tests/test_webapp_demos.py` (the demos' facts and file sizes). They need `node`, which ICE
+  does not have, so run them on the Mac. Three more tests there check the tabs and panels of
+  `index.html`, and the styles of the Downloads rows and of the 360 video in `style.css`.
 
 **Public site.** `docs/public_site.md` describes the public site: a static page on Supabase, where users
 sign in with Google or GitHub. Jobs run only on users' own GPU machines: `python -m gator.webapp --worker`
@@ -1236,10 +1284,13 @@ in `sam3/`, `faces.npz`, `vote.json`, `split_report.json` and `split.log`), `run
 Every job gets `physics/urdf/`. A rosbag job's `frames/` adds `stamps.json` (every frame's header
 stamp and log time in ns). A Stray job unpacks its zip into `video/stray/` (`export/` and
 `.unpacked.json`). A job with LiDAR adds `pool/lidar.json` (the scale, note 12) and `lidar/`:
-`samples.npz` and `samples.json` (the samples cache, which a rerun of the stage keeps),
-`check/<view>.jpg` (the check images) and, for a bag with an uploaded calibration,
-`calibration/<name>` (the uploaded file, mode 0600). `results.zip` adds `urdf/` for every job, `parts.glb` and `parts.json` for an articulated job,
-and `lidar.json` for a job with LiDAR.
+`samples.npz`, `clouds.npz` and `samples.json` (the samples cache, which a rerun of the stage keeps),
+`check/<view>.jpg` (the check images), `cloud/<view>.glb` (each view's LiDAR points) and, for a bag
+with an uploaded calibration, `calibration/<name>` (the uploaded file, mode 0600); `run/lidar/<i>.glb`
+holds the points of the views used. A job that asked for the 360 video adds `turntable/`:
+`turntable.mp4`, `turntable.json` (the done marker), `render.json`, `args.json` and `blender.log`.
+`results.zip` adds `urdf/` for every job, `parts.glb` and `parts.json` for an articulated job,
+`lidar.json` for a job with LiDAR, and `turntable.mp4` for a job with the 360 video.
 
 **Check on ICE** (2026-10-16, job 6308026, agent turned off, so no API use):
 - `table.MOV`, prompt "table": 6 picks at least 53 degrees apart. Mean mask IoU 0.66: the legs
@@ -1786,10 +1837,12 @@ Decisions (2026-10-21, user):
      period. The period is the median step between the scans read, else the topic's `rate_hz`, else
      100 ms.
 9. **Samples cache.** The stage samples every frame that `extract` wrote, not only the pool views, and
-   writes `lidar/samples.npz` with `lidar/samples.json`. The cache key holds the version
-   (`CACHE_VERSION` 2), the input file (name, bytes, `mtime_ns`), the camera and LiDAR topics, the
-   calibration's sha256 and the ±50 ms point window (`window_ms`). A rerun with the same key, for
-   example after a mask change, reads no scans.
+   writes `lidar/samples.npz` and `lidar/clouds.npz` (the points for the Inputs tab, below) with
+   `lidar/samples.json`, the key, last. The cache key holds the version (`CACHE_VERSION` 3), the
+   input file (name, bytes, `mtime_ns`), the camera and LiDAR topics, the calibration's sha256 and
+   the ±50 ms point window (`window_ms`). A rerun with the same key, for example after a mask change,
+   reads no scans. A cache without `clouds.npz`, or without a frame that `samples.json` lists in it,
+   is a miss.
 
 **Stray Scanner source** (`gator/webapp/stray.py`):
 1. **The export.** Stray Scanner writes one folder per capture:
@@ -1800,8 +1853,9 @@ Decisions (2026-10-21, user):
    - `odometry.csv`: one row per frame with timestamp, frame, x, y, z, qx, qy, qz and qw (the
      camera-to-world pose in OpenCV camera axes, in ARKit's world with +y up). Newer versions add fx,
      fy, cx and cy.
-   - `camera_matrix.csv`: the intrinsics of the last frame (older versions). `imu.csv`: the IMU log.
-     The stage uses neither file.
+   - `camera_matrix.csv`: the intrinsics of the last frame. `imu.csv`: the IMU log. The scale uses
+     neither file. The points of the Inputs tab take K from `odometry.csv`'s fx, fy, cx and cy,
+     else from `camera_matrix.csv` (below).
 
    The user zips the folder. A `.zip` upload has the input kind `stray`. The zip is unpacked into
    `J/video/stray/export/`.
@@ -1842,7 +1896,7 @@ Decisions (2026-10-21, user):
 6. **Depth samples.** `stray.depth_samples` keeps the depth pixels with confidence 2 (ARKit's high
    confidence) and z from 0.1 m to 5 m. It moves each pixel from the depth image's size to the frame's
    stored size, `(u_d + 0.5) * W / w_d - 0.5`, and then turns it by k. The depth itself is not
-   resampled. A Stray capture needs no extrinsic, no intrinsics and no time matching. Without
+   resampled. The scale of a Stray capture needs no extrinsic, no intrinsics and no time matching. Without
    `confidence/` images, every depth pixel from 0.1 m to 5 m is used, with a warning. A frame without
    a depth image, or with a depth image but no confidence image, gets no samples, with a warning. The
    cache key holds the input file, k, the frames' sizes and the depth filters.
@@ -1954,7 +2008,8 @@ calibration (see the last bullet), it is the stage's done marker.
 - `extrinsic`: `{source, file, calibration_sha256, chain, link, camera_axes, T_cam_lidar}`, with the
   source `calibration` or `tf`. A Stray capture has only `source` and `calibration_sha256` (null).
 - `intrinsics`: `{source, K, D, model, R, size, frame_size}`, and for a Stray capture `{source,
-  depth_size, frame_size, turns, min_confidence, z_range_m}`.
+  depth_size, frame_size, turns, min_confidence, z_range_m, K_from}`. `K_from` is where the points of
+  the Inputs tab took K: `odometry.csv`, `camera_matrix.csv` or null.
 - `time`: `{base, window_ms, offset_ms, log_minus_header_ms {camera, lidar}, scan_period_ms,
   scan_period_from, point_times}`, with the base `header` or `log`. A Stray capture has
   `{base: "frame index"}`.
@@ -1968,6 +2023,45 @@ calibration (see the last bullet), it is the stage's done marker.
 - `steps.done("lidar")` is true only when `ok` is true and `extrinsic.calibration_sha256` equals the
   sha256 of the job's calibration (both are null without one). So an upload or a delete of the
   calibration makes the record stale.
+
+**Points for the Inputs tab** (2026-10-25). The Inputs tab shows each view's LiDAR points in 3D (note
+10): the view's whole scan, and the points that the scale used.
+- `lidar_scale.view_ratio`'s points gain `index`, each point's row in the samples, and
+  `estimate(..., points_out={})` hands every view's points back. The record and the CLI do not change.
+- Rosbag: while the scans are read, each scan also keeps a random subset of all its points, at most
+  `SCAN_KEEP` (20,000), taken before the in-view filter (`read_scans(..., whole=)`, seeded by the log
+  time). A frame's scan is `frame_points` over those subsets, by the same time rule as its samples,
+  so for a spinning LiDAR it is a full turn, also the points behind the camera. It is then thinned at
+  random to at most `SCAN_POINTS` (60,000; seeded by the frame number, kept in order; a stride would
+  draw stripes on an organized cloud). The in-view filter and the samples do not change.
+- Stray: `stray.depth_points` reads each depth image once and gives the samples, their camera points
+  row for row, and every depth pixel with a depth at any confidence as the scan (49,152 on a phone).
+  A pixel at stored (u_s, v_s) is ((u_s - cx) z / fx, (v_s - cy) z / fy, z), then each
+  counterclockwise quarter turn maps (x, y) to (y, -x), as `rot90_points` maps the pixels.
+  `stray.intrinsics` takes K per frame from `odometry.csv`, else `camera_matrix.csv` (at most 4 KB,
+  3 rows of 3 finite numbers, the last row 0 0 1, fx and fy positive); the stage scales it from the
+  video's size to the frame's. Without either, there are no points, with the warning "the export has
+  no intrinsics ..., so the Inputs tab has no LiDAR points", and the same scale.
+- The points are camera points in meters, in the upright frame's OpenCV optical axes. They are cached
+  in `lidar/clouds.npz` (`<frame>_xyz`, the samples' points row for row, and `<frame>_scan`), so a
+  cache hit writes the same files.
+- `lidar.cloud_glb` writes a GLB by hand (struct and json, so `envs/web` needs no trimesh): one node
+  per set that has points, `scan` and `used`, each a mesh with one POINTS primitive (mode 0) whose
+  float VEC3 POSITION accessor has min and max. Points become (x, -y, -z), glTF's axes: y up, the
+  camera at the origin looking down -z, as a glTF camera does. Points that are not finite are left
+  out. A file holds at most about 0.75 MB. Blender opens it too.
+- The stage removes `lidar/cloud/` first and writes `lidar/cloud/<view>.glb` with the check images,
+  also when the record is not ok, before `pool/lidar.json`; a failed source writes none. `used` is
+  `view_ratio`'s used rows of the view's camera points. `select` copies the picks' files to
+  `run/lidar/<i>.glb` (`build_run(..., clouds=)`, before `da3_output.npz`) when the scale is applied,
+  so a build with LiDAR off has none. `run/lidar/` is served and mirrored: about 4.5 MB per job
+  with 6 views (9 MB with 12) on the site, as review files, gone 14 days after the job stops.
+  `lidar/cloud/` is served and mirrored only while `pool/lidar.json` says ok false
+  (`server.pool_clouds`, which `server.resolve` follows): there are no views used then, so the Inputs
+  tab shows each pool view's points by frame name, to check the calibration (up to about 24 MB with 32
+  views). A found scale takes them off the site, since the worker drops what `resolve` no longer
+  serves. A job built before this has no points until its `lidar` stage runs again (the cache version
+  changed).
 
 **Steps** (`envs/web`, from `$G/gator_clone`). On ICE these commands work only after the code is
 synced to `$G/gator_clone` (see "Checks so far"). On the Mac, run them from the `gator_clone` root.
@@ -1994,6 +2088,7 @@ synced to `$G/gator_clone` (see "Checks so far"). On the Mac, run them from the 
   Build again with LiDAR off. For a Stray capture, it says to build again with LiDAR off or with
   other views.
 - Results show the row "Metric scale", and `results.zip` adds `lidar.json`.
+- The Inputs tab shows each view's LiDAR points in 3D (above).
 
 **Fake mode.** `python -m gator.webapp --fake` runs the real `lidar` stage. For a job with LiDAR, the
 fake `da3` multiplies the depth, the pointmaps and the camera translations by 0.8
@@ -2020,6 +2115,10 @@ and in `physics/aligned.json`.
 - On ICE (2026-10-21), `envs/web` passed the LiDAR, Stray and web-app tests: 238 passed and 19 were
   skipped (among them the node tests, because ICE has no `node`). The code is synced to `$G/gator_clone`
   and `$G/gator_dev`.
+- Points for the Inputs tab (2026-10-25, Mac only): 916 passed and 3 were skipped. In fake mode, a bag
+  with 3,000 points behind the camera and a portrait Stray capture showed their points; drag, wheel,
+  arrow keys, Reset and a view change worked, in light and dark mode and at 375 px, with no console
+  errors. Not yet run on ICE or on a real bag.
 
 **Open issues.**
 - No real rosbag with a LiDAR and no real Stray capture has run yet. The next check needs one bag from

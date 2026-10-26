@@ -3,9 +3,12 @@ camera that circles it, with a LiDAR fixed to the camera. All data is made here.
 
 import contextlib
 import hashlib
+import io
 import json
 import os
 import re
+import struct
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -64,8 +67,16 @@ def scene_points(i, n, size, step=1, k=1.0, T=T_CAM_LIDAR):
     return (X @ np.linalg.inv(T).T)[:, :3]
 
 
+def behind(i, T, n):
+    """n points 1 to 3 m behind the camera of frame i (no frame sees them), in the LiDAR's frame (T: T_cam_lidar)."""
+    rng = np.random.default_rng(i)
+    X = np.c_[rng.uniform(-1, 1, (n, 2)), rng.uniform(-3, -1, n), np.ones(n)]
+    return (X @ np.linalg.inv(T).T)[:, :3]
+
+
 def write_scene_bag(path, n=10, size=SIZE, dt=0.5, kind="points", tf="static", info=True, topic=CAMERA,
-                    model="plumb_bob", lidar_clock_s=0.0, lidar_late_s=0.0, between=False, step=1, info_r=None):
+                    model="plumb_bob", lidar_clock_s=0.0, lidar_late_s=0.0, between=False, step=1, info_r=None,
+                    around=0):
     """A ROS1 bag of fake_steps' scene: n rgb8 frames of topic at 1/dt Hz (frame i at the angle
     fake_steps.frame_angle gives it), the camera_info of the topic (K and P of fake_steps.intrinsics;
     D all zero for plumb_bob, else one coefficient of model; R info_r, else the identity) unless info
@@ -76,7 +87,8 @@ def write_scene_bag(path, n=10, size=SIZE, dt=0.5, kind="points", tf="static", i
     a PointCloud2 without per-point times (between: another scan halfway to the next frame, of points
     at half the distance); "livox": a Livox CustomMsg whose timebase is 50 ms before the stamp and
     whose points' times spread over 100 ms, plus points at half the distance 150 to 190 ms after the
-    timebase, which the +-50 ms window must drop."""
+    timebase, which the +-50 ms window must drop. around: every scan also holds that many points behind
+    the camera (behind), which only the clouds of the Inputs tab show."""
     w, h = size
     K = F.intrinsics(w, h)
     turn = TURN_DEG if tf == "dynamic" else 0.0
@@ -104,12 +116,13 @@ def write_scene_bag(path, n=10, size=SIZE, dt=0.5, kind="points", tf="static", i
                 out.append(("/tf", TFM, ns + LAG, m.tf(ns, [("base_link", LIDAR, *lidar_link(i, turn))])))
             head, log = ns + round(lidar_clock_s * 1e9), ns + LAG + round(lidar_late_s * 1e9)
             T = cam_lidar(i, turn)
-            X = scene_points(i, n, size, step, T=T)
+            X = np.vstack([scene_points(i, n, size, step, T=T), behind(i, T, around)])
             if kind == "points":
                 out.append((POINTS, PC2, log, cloud(m, head, X)))
                 if between and i < n - 1:
                     half = round(dt * 5e8)
-                    out.append((POINTS, PC2, log + half, cloud(m, head + half, scene_points(i, n, size, step, 0.5, T))))
+                    X2 = np.vstack([scene_points(i, n, size, step, 0.5, T), behind(i + n, T, around)])
+                    out.append((POINTS, PC2, log + half, cloud(m, head + half, X2)))
             else:
                 bad = scene_points(i, n, size, 2 * step, 0.5, T)
                 pts = [(int(o), *x, 0x10) for o, x in zip(np.linspace(0, 99_000_000, len(X)), X)]
@@ -179,6 +192,37 @@ def scaled(J):
     rec = L.scale(J)
     assert rec == json.loads((J / "pool" / "lidar.json").read_text())
     return rec
+
+
+def read_glb(data):
+    """{node name: (N, 3) points, glTF axes} of a lidar.cloud_glb file (a path or bytes), read with struct and json
+    as a glTF reader does, with its chunk layout, POINTS mode and the accessors' min and max checked."""
+    data = data if isinstance(data, bytes) else Path(data).read_bytes()
+    assert struct.unpack_from("<III", data) == (0x46546C67, 2, len(data))
+    n, kind = struct.unpack_from("<II", data, 12)
+    assert kind == 0x4E4F534A and n % 4 == 0
+    doc = json.loads(data[20:20 + n])
+    m, kind = struct.unpack_from("<II", data, 20 + n)
+    assert kind == 0x004E4942 and m % 4 == 0 and 28 + n + m == len(data) and doc["buffers"][0]["byteLength"] <= m
+    out = {}
+    for node in doc["nodes"]:
+        (prim,) = doc["meshes"][node["mesh"]]["primitives"]
+        acc = doc["accessors"][prim["attributes"]["POSITION"]]
+        view = doc["bufferViews"][acc["bufferView"]]
+        assert prim["mode"] == 0 and (acc["componentType"], acc["type"]) == (5126, "VEC3") and "byteStride" not in view
+        a = np.frombuffer(data, "<f4", 3 * acc["count"], 28 + n + view["byteOffset"]).reshape(-1, 3)
+        assert a.min(0).tolist() == acc["min"] and a.max(0).tolist() == acc["max"]
+        out[node["name"]] = a
+    return out
+
+
+def opencv(a):
+    """glTF axes back to OpenCV camera axes (x right, y down, z forward)."""
+    return np.asarray(a) * [1.0, -1.0, -1.0]
+
+
+def cloud_files(J):
+    return {p.name: p.read_bytes() for p in sorted((J / "lidar" / "cloud").glob("*.glb"))}
 
 
 def failed(J):
@@ -251,6 +295,56 @@ def test_tf_gives_the_scale_and_the_record(points_bag, tmp_path, capsys):
     set_job(J, calibration=None)
     assert not steps.done("lidar", J)
     assert scaled(J)["extrinsic"]["source"] == "tf" and steps.done("lidar", J)
+
+
+def test_clouds_of_a_rosbag(points_bag, tmp_path, monkeypatch):
+    """Every pool view gets lidar/cloud/<view>.glb: its whole scan, also the points behind the camera, and the
+    points that the scale used, which lie in the view's mask. Points outside the picture change nothing of the
+    scale. With smaller limits the scan is cut, and every run writes the same bytes."""
+    J = make_job(tmp_path, write_scene_bag(tmp_path / "around.bag", between=True, around=500))
+    rec = scaled(J)
+    assert rec["s"] == scaled(make_job(tmp_path / "plain", points_bag))["s"]
+    names = mvsam3d.view_names(J / "pool")
+    assert sorted(p.stem for p in (J / "lidar" / "cloud").glob("*.glb")) == names
+    K = F.intrinsics(*SIZE)
+    for v in rec["views"]:
+        c = read_glb(J / "lidar" / "cloud" / f"{v['name']}.glb")
+        scan, used = opencv(c["scan"]), opencv(c["used"])
+        assert sorted(c) == ["scan", "used"] and len(used) == v["points_used"] > 100
+        assert (scan[:, 2] < 0).sum() == 500 and len(scan) <= L.SCAN_POINTS  # behind the camera: glTF z > 0
+        mask = np.array(Image.open(J / "scene" / "sam3_box" / f"{v['name']}.png")) > 0
+        u, w = K[0, 0] * used[:, 0] / used[:, 2] + K[0, 2], K[1, 1] * used[:, 1] / used[:, 2] + K[1, 2]
+        assert mask[lidar_scale.pixel(w), lidar_scale.pixel(u)].all(), v["name"]
+
+    monkeypatch.setattr(L, "SCAN_KEEP", 300)
+    monkeypatch.setattr(L, "SCAN_POINTS", 200)
+    (J / "lidar" / "samples.json").unlink()  # the bag is read again
+    small = scaled(J)
+    first = cloud_files(J)
+    assert small["s"] == rec["s"] and sorted(first) == [f"{n}.glb" for n in names]
+    for v in small["views"]:
+        c = read_glb(first[f"{v['name']}.glb"])
+        assert len(c["scan"]) == 200 and len(c["used"]) == v["points_used"]
+    assert scaled(J)["source"]["cache"] == "hit" and cloud_files(J) == first
+    (J / "lidar" / "samples.json").unlink()
+    assert scaled(J)["source"]["cache"] == "miss" and cloud_files(J) == first
+
+
+def test_cloud_glb():
+    """cloud_glb writes glTF axes (y up, the camera looking down -z), one node per set with points; a set without
+    points, or a point that is not finite, is left out; trimesh reads the file as two point clouds."""
+    trimesh = pytest.importorskip("trimesh")
+    rng = np.random.default_rng(0)
+    scan, used = rng.normal(size=(50, 3)), rng.normal(size=(4, 3))
+    data = L.cloud_glb({"scan": scan, "used": used})
+    got = read_glb(data)
+    assert np.allclose(opencv(got["scan"]), scan, atol=1e-6) and np.allclose(opencv(got["used"]), used, atol=1e-6)
+    scene = trimesh.load(io.BytesIO(data), file_type="glb")
+    assert {k: (type(g).__name__, len(g.vertices)) for k, g in scene.geometry.items()} == {
+        "scan": ("PointCloud", 50), "used": ("PointCloud", 4)}
+    assert list(read_glb(L.cloud_glb({"scan": scan, "used": np.zeros((0, 3))}))) == ["scan"]
+    assert read_glb(L.cloud_glb({"used": [[0.0, 0.0, 1.0], [np.nan, 0.0, 1.0]]}))["used"].tolist() == [[0, 0, -1]]
+    assert L.cloud_glb({"scan": np.zeros((0, 3)), "used": np.zeros((0, 3))}) is None and L.cloud_glb({}) is None
 
 
 def test_a_dynamic_tf_link_and_a_livox_window(tmp_path):
@@ -430,11 +524,20 @@ def test_time_base_and_matching_rules(monkeypatch):
 
     monkeypatch.setattr(rosbag, "scans", fake_scans)
     got = L.read_scans("x.bag", POINTS, [(S0, S0 + 10**9)], keep=lambda xyz, log: xyz[:, 2] > 0)
-    assert [(log, head, xyz.tolist(), t.tolist()) for log, head, xyz, t in got] == [
-        (S0 + LAG, S0, [[0, 0, 2.0]], [S0]), (S0 + LAG + 10**8, S0 + 10**8, [], [])]
+    assert [(log, head, xyz.tolist(), t.tolist(), part) for log, head, xyz, t, part in got] == [
+        (S0 + LAG, S0, [[0, 0, 2.0]], [S0], None), (S0 + LAG + 10**8, S0 + 10**8, [], [], None)]
     assert L.frame_points(got, "header", S0, 1e8).tolist() == [[0, 0, 2.0]]
     assert L.frame_points(got, "log", S0 + LAG + 10**8, 1e8).shape == (0, 3)
     assert L.frame_points([], "header", S0, 1e8).shape == (0, 3)  # a frame whose windows hold no scan
+    # whole: a random subset of each scan, taken before keep, with the points' times.
+    got = L.read_scans("x.bag", POINTS, [(S0, S0 + 10**9)], keep=lambda xyz, log: xyz[:, 2] > 0, whole=1)
+    (xyz, t), (xyz2, t2) = (s[4] for s in got)
+    assert (xyz.tolist(), t.tolist()) in (([[0, 0, 2.0]], [S0]), ([[0, 0, -2.0]], [S0 + 1]))
+    assert (xyz2.tolist(), t2.tolist()) == ([[0, 0, -1.0]], [S0 + 10**8])
+    assert L.frame_points([(s[0], s[1], *s[4]) for s in got], "header", S0 + 10**8, 1e8).tolist() == [[0, 0, -1.0]]
+    pick = L.at_most(np.arange(10), 3, 7).tolist()  # fixed by the seed, in order
+    assert pick == L.at_most(np.arange(10), 3, 7).tolist() == sorted(pick) and len(set(pick)) == 3
+    assert L.at_most(np.arange(3), 5, 0).tolist() == [0, 1, 2]
 
     # in_view: a scan keeps the points in the image of a frame whose read window holds its log time, with
     # that frame's transform (f00001's puts the point behind the camera).
@@ -459,12 +562,19 @@ def test_the_samples_cache(points_bag, tmp_path, monkeypatch):
         (J / "pool" / d / "f00009.png").rename(out / d / "f00009.png")
     first = scaled(J)
     assert first["source"]["cache"] == "miss" and len(first["views"]) == 4
+    clouds = cloud_files(J)
+    assert sorted(clouds) == ["f00001.glb", "f00003.glb", "f00005.glb", "f00007.glb"]
     meta = json.loads((J / "lidar" / "samples.json").read_text())
-    assert meta["key"] == {"version": 2, "kind": "rosbag",
+    frames = ["f00001", "f00003", "f00005", "f00007", "f00009"]
+    assert meta["clouds"] == frames  # every frame sampled, also the one that prep left out
+    with np.load(J / "lidar" / "clouds.npz") as f:
+        assert sorted(f.files) == sorted(f"{n}_{k}" for n in frames for k in ("xyz", "scan"))
+        assert all(len(f[f"{n}_xyz"]) == meta["points"][n] for n in frames)
+    assert meta["key"] == {"version": 3, "kind": "rosbag",
                            "input": {"name": "points.bag", "bytes": points_bag.stat().st_size,
                                      "mtime_ns": points_bag.stat().st_mtime_ns},
                            "topics": {"camera": CAMERA, "lidar": POINTS}, "calibration_sha256": None, "window_ms": 50.0}
-    assert meta["frames"] == ["f00001", "f00003", "f00005", "f00007", "f00009"]
+    assert meta["frames"] == frames
     reads = []
     scans = rosbag.scans
     monkeypatch.setattr(rosbag, "scans", lambda *a: reads.append(a) or scans(*a))
@@ -472,21 +582,27 @@ def test_the_samples_cache(points_bag, tmp_path, monkeypatch):
     assert again["source"]["cache"] == "hit" and reads == [] and again["s"] == first["s"]
     same = ("extrinsic", "intrinsics", "time")
     assert {k: again[k] for k in same} == {k: first[k] for k in same}
+    assert cloud_files(J) == clouds  # the same bytes from the cache
     for d in ("input/images", "input/object", "masks"):  # a mask change: prep now has f00009
         (out / d / "f00009.png").rename(J / "pool" / d / "f00009.png")
     more = scaled(J)
     assert more["source"]["cache"] == "hit" and reads == [] and len(more["views"]) == 5
     assert more["views"][-1]["name"] == "f00009" and more["views"][-1]["status"] == "used"
+    assert cloud_files(J) == {**clouds, "f00009.glb": cloud_files(J)["f00009.glb"]}  # its cloud from the cache
+    assert len(read_glb(J / "lidar" / "cloud" / "f00009.glb")["used"]) == more["views"][-1]["points_used"]
     for d in ("input/images", "input/object", "masks"):  # and another: prep left f00009 out again
         (J / "pool" / d / "f00009.png").unlink()
     fewer = scaled(J)
     assert fewer["source"]["cache"] == "hit" and reads == [] and len(fewer["views"]) == 4
     assert sorted(p.stem for p in (J / "lidar" / "check").glob("*.jpg")) == ["f00001", "f00003", "f00005", "f00007"]
+    assert cloud_files(J) == clouds
+    (J / "lidar" / "clouds.npz").unlink()  # a cache without its clouds is a miss
+    assert scaled(J)["source"]["cache"] == "miss" and len(reads) == 1 and cloud_files(J) == clouds
     os.utime(points_bag, ns=(points_bag.stat().st_atime_ns, points_bag.stat().st_mtime_ns + 10**9))
-    assert scaled(J)["source"]["cache"] == "miss" and len(reads) == 1
-    upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist()})
     assert scaled(J)["source"]["cache"] == "miss" and len(reads) == 2
-    assert scaled(J)["source"]["cache"] == "hit" and len(reads) == 2
+    upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist()})
+    assert scaled(J)["source"]["cache"] == "miss" and len(reads) == 3
+    assert scaled(J)["source"]["cache"] == "hit" and len(reads) == 3
     # The stamps of the frames come from the camera topic again when stamps.json is missing.
     (J / "lidar" / "samples.json").unlink()
     (J / "frames" / "stamps.json").unlink()
@@ -501,7 +617,9 @@ def test_each_failure_says_why(points_bag, tmp_path):
 
     # No TF link and no calibration; the calibration then fixes it.
     set_job(J, video={**job["video"], "path": str(write_scene_bag(root / "no_tf.bag", tf=None))})
+    (J / "lidar" / "cloud").mkdir(parents=True)  # an earlier run's points go too
     assert failed(J) == "the bag's TF does not link camera_optical_frame to lidar; upload the calibration"
+    assert not (J / "lidar" / "cloud").exists()
     assert json.loads((J / "pool" / "lidar.json").read_text())["source"]["topic"] == POINTS
     upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist()})
     assert scaled(J)["ok"]
@@ -553,6 +671,7 @@ def test_each_failure_says_why(points_bag, tmp_path):
     rec = json.loads((J / "pool" / "lidar.json").read_text())
     assert reason.startswith("LiDAR points cover the object in only") and len(rec["views"]) == 5
     assert rec["extrinsic"]["source"] == "calibration" and len(list((J / "lidar" / "check").glob("*.jpg"))) == 5
+    assert len(cloud_files(J)) == 5  # the clouds too, to see where the points went
     with pytest.raises(SystemExit, match="LiDAR points cover the object in only"):
         L.main(["scale", "--job", str(J)])
     upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist()})
@@ -654,7 +773,8 @@ def test_a_stray_capture_gives_the_scale_and_its_cache(tmp_path, capsys, monkeyp
                              "frames": len(extracted), "cache": "miss"}
     assert rec["extrinsic"] == {"source": "stray (depth aligned with the color camera)", "calibration_sha256": None}
     assert rec["intrinsics"] == {"source": "stray: depth scaled to the frame size", "depth_size": [256, 192],
-                                 "frame_size": [240, 320], "turns": 1, "min_confidence": 2, "z_range_m": [0.1, 5.0]}
+                                 "frame_size": [240, 320], "turns": 1, "min_confidence": 2, "z_range_m": [0.1, 5.0],
+                                 "K_from": "odometry.csv"}
     assert rec["time"] == {"base": "frame index"} and rec["warnings"] == []
     out = capsys.readouterr().out
     assert ("LiDAR stray capture.zip, cache miss; extrinsic from stray (depth aligned with the color camera); "
@@ -670,19 +790,56 @@ def test_a_stray_capture_gives_the_scale_and_its_cache(tmp_path, capsys, monkeyp
 
     meta = json.loads((J / "lidar" / "samples.json").read_text())
     zipped = J / "video" / "capture.zip"
-    assert meta["key"] == {"version": 2, "kind": "stray",
+    assert meta["key"] == {"version": 3, "kind": "stray",
                            "input": {"name": "capture.zip", "bytes": zipped.stat().st_size,
                                      "mtime_ns": zipped.stat().st_mtime_ns},
                            "turns": 1, "frame_sizes": [[240, 320]], "min_confidence": 2, "z_range_m": [0.1, 5.0]}
     assert meta["frames"] == extracted
-    reads, depth_samples = [], stray.depth_samples
-    monkeypatch.setattr(stray, "depth_samples", lambda *a, **kw: reads.append(a[1]) or depth_samples(*a, **kw))
+    reads, depth_points = [], stray.depth_points
+    monkeypatch.setattr(stray, "depth_points", lambda *a, **kw: reads.append(a[1]) or depth_points(*a, **kw))
     again = scaled(J)
     assert again["source"]["cache"] == "hit" and reads == [] and again["s"] == rec["s"]
     assert {k: again[k] for k in ("extrinsic", "intrinsics", "time")} == {k: rec[k] for k in ("extrinsic", "intrinsics",
                                                                                               "time")}
     os.utime(zipped, ns=(zipped.stat().st_atime_ns, zipped.stat().st_mtime_ns + 10**9))  # another upload
     assert scaled(J)["source"]["cache"] == "miss" and sorted(reads) == [int(n[1:]) for n in extracted]
+
+
+def test_clouds_of_a_stray_capture(tmp_path):
+    """Each pool view's cloud holds every depth pixel with a depth, also one of confidence 1, which the scale does
+    not use; the used points are samples (their pixels by the upright frame's K, and their depth). Without
+    intrinsics there are no clouds, a warning says why, and the scale is the same."""
+    from scipy.spatial import cKDTree
+
+    J = make_stray_job(tmp_path, portrait=1)
+    names = mvsam3d.view_names(J / "pool")
+    root = J / "video" / "stray" / "export"
+    doubt = root / "confidence" / f"{int(names[1][1:]):06d}.png"
+    conf = np.array(Image.open(doubt))
+    conf[100, 50] = 1
+    Image.fromarray(conf).save(doubt)
+    rec = scaled(J)
+    assert rec["ok"] and rec["intrinsics"]["K_from"] == "odometry.csv" and rec["warnings"] == []
+    assert sorted(p.stem for p in (J / "lidar" / "cloud").glob("*.glb")) == names
+    with np.load(J / "lidar" / "samples.npz") as f:
+        samples = {n: f[n] for n in names}
+    assert len(samples[names[1]]) == 256 * 192 - 1
+    K = F.intrinsics(240, 320)  # the upright frame's
+    for v in rec["views"]:
+        c = read_glb(J / "lidar" / "cloud" / f"{v['name']}.glb")
+        used = opencv(c["used"])
+        assert len(c["scan"]) == 256 * 192 and len(used) == v["points_used"] > 100
+        uvz = np.c_[K[0, 0] * used[:, 0] / used[:, 2] + K[0, 2], K[1, 1] * used[:, 1] / used[:, 2] + K[1, 2], used[:, 2]]
+        assert cKDTree(samples[v["name"]]).query(uvz)[0].max() < 1e-3, v["name"]
+
+    # An export without intrinsics: no odometry columns for them, and a camera_matrix.csv that is not one.
+    lines = (root / "odometry.csv").read_text().splitlines()
+    (root / "odometry.csv").write_text("\n".join(", ".join(x.split(", ")[:9]) for x in lines) + "\n")
+    (root / "camera_matrix.csv").write_text("1,0,0\n0,1,0\n")
+    (J / "lidar" / "samples.json").unlink()
+    bare = scaled(J)
+    assert bare["s"] == rec["s"] and bare["intrinsics"]["K_from"] is None and bare["warnings"] == [L.NO_K]
+    assert cloud_files(J) == {}
 
 
 def test_stray_samples_without_depth_and_each_failure(tmp_path, monkeypatch):
@@ -702,8 +859,8 @@ def test_stray_samples_without_depth_and_each_failure(tmp_path, monkeypatch):
     late = [n for n in frames if int(n[1:]) >= 22]
     unsure = [n for n in frames if int(n[1:]) < 22 and int(n[1:]) % 4 == 1]
     assert late and unsure  # the last frames are candidates of this capture, and some without confidence
-    samples, info = L.stray_samples(J, job, {"kind": "stray"}, names)
-    assert sorted(samples) == frames
+    samples, info, clouds = L.stray_samples(J, job, {"kind": "stray"}, names)
+    assert sorted(samples) == frames and sorted(clouds) == [n for n in frames if n not in late + unsure]
     assert all(len(samples[n]) == (0 if n in late + unsure else 256 * 192) for n in frames)
     assert info["warnings"] == [f"frames {', '.join(late)} have no depth image, so they have no samples",
                                 f"frames {', '.join(unsure)} have a depth image but no confidence image, so they "

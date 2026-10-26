@@ -27,7 +27,9 @@ are always in, "excluded" views never (pool names such as "f00012", or frame num
 end up closer than 15 deg get a warning.
 
 build_run() copies the picks into J/run as views 0..N-1 (view 0 = the anchor) with DA3's arrays
-sliced to them, so the mvsam3d sam3d and place steps run on it as on any run folder.
+sliced to them, so the mvsam3d sam3d and place steps run on it as on any run folder. With a LiDAR
+scale it also copies each pick's LiDAR points, J/lidar/cloud/<name>.glb (lidar.py), to
+J/run/lidar/<i>.glb, for the Inputs tab.
 
 A job with LiDAR (job.json "lidar") has J/pool/lidar.json from the lidar stage (lidar_scale.py).
 select stops first, before it removes anything, unless that record is ok; build_run then multiplies
@@ -212,10 +214,11 @@ def ring(centers, E, c):
     return np.round((c - mu) @ B, 4).tolist(), np.round((centers - mu) @ B, 4).tolist()
 
 
-def build_run(pool_dir, names, run_dir, metric=None):
+def build_run(pool_dir, names, run_dir, metric=None, clouds=None):
     """Copy the pool views names (anchor first) into run_dir as views 0..N-1, with da3_output.npz
     sliced to them, and write run_dir/prep.json. metric: the LiDAR scale s, applied to the sliced
-    arrays (lidar_scale.apply_scale), or None."""
+    arrays (lidar_scale.apply_scale), or None. clouds: a folder of <name>.glb (the lidar stage's
+    points), copied to run_dir/lidar/<i>.glb for each pick that has one, or None."""
     pool_dir, run_dir = Path(pool_dir), Path(run_dir)
     if run_dir.exists():
         shutil.rmtree(run_dir)
@@ -223,6 +226,10 @@ def build_run(pool_dir, names, run_dir, metric=None):
         (run_dir / sub).mkdir(parents=True)
         for i, n in enumerate(names):
             shutil.copyfile(pool_dir / sub / f"{n}.png", run_dir / sub / f"{i}.png")
+    for i, n in enumerate(names if clouds is not None else ()):
+        if (Path(clouds) / f"{n}.glb").is_file():
+            (run_dir / "lidar").mkdir(exist_ok=True)
+            shutil.copyfile(Path(clouds) / f"{n}.glb", run_dir / "lidar" / f"{i}.glb")
     with np.load(pool_dir / "da3_output.npz") as da:
         stem = {Path(str(f)).stem: k for k, f in enumerate(da["image_files"])}
         order, count, arrays = [stem[n] for n in names], len(da["image_files"]), {}
@@ -403,7 +410,8 @@ def select(job_dir):
         picks = [avail[i] for i in S]
     picks = [anchor] + [n for n in picks if n != anchor]
 
-    build_run(job_dir / "pool", picks, job_dir / "run", metric=metric)
+    build_run(job_dir / "pool", picks, job_dir / "run", metric=metric,
+              clouds=None if metric is None else job_dir / "lidar" / "cloud")
     sel = record(out, status, picks, anchor)
     if sel["min_spacing_deg"] is not None and sel["min_spacing_deg"] < MIN_SPACING_DEG:
         sel["warnings"].append(f"two picks are only {sel['min_spacing_deg']:.0f} deg apart")

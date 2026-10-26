@@ -23,7 +23,8 @@ Where the code is:
 | Database | `supabase/migrations/` (six files), `supabase/seed.sql` and `supabase/config.toml` (local stack only) |
 | Worker | `gator/webapp/worker.py`, `relay.py`, `supa.py`, `keybox.py` and `session.py` (the worker's sign-in and commands) |
 | Page | `gator/webapp/static/supa.js`, the transport seam in `static/app.js`, `static/help.html` and `gator/webapp/site.py` |
-| Tests | `tests/test_supabase_sql.py` with `tests/pgcheck/`, `test_webapp_supa.py`, `test_webapp_keybox.py`, `test_webapp_relay.py`, `test_webapp_worker.py`, `test_webapp_session.py`, `test_webapp_contract.py`, `test_webapp_supa_js.py`, `test_site.py`, `test_help_page.py` and `fake_supabase.py` |
+| Demos | `gator/webapp/demos.py` and `static/demos.html` (see Demos below) |
+| Tests | `tests/test_supabase_sql.py` with `tests/pgcheck/`, `test_webapp_supa.py`, `test_webapp_keybox.py`, `test_webapp_relay.py`, `test_webapp_worker.py`, `test_webapp_session.py`, `test_webapp_contract.py`, `test_webapp_supa_js.py`, `test_site.py`, `test_help_page.py`, `test_webapp_demos.py` and `fake_supabase.py` |
 
 Help for users is in one file, `static/help.html`. The server serves it at `/help.html`, and `site.py` builds the
 public site's copy. The build puts the public text of `site.py`'s `HELP_PUBLIC` in place of each block that the file
@@ -67,7 +68,7 @@ No part of HARPOR uses the project's secret key. The cleanup is split this way:
 |---|---|---|
 | requests that waited 7 days (they expire), jobs that waited in "deleting" as long, sealed keys after 1 h, large answers after 1 h, finished requests after 7 days, rate counts after 2 days | pg_cron, every 15 min | `private.sweep()` |
 | the log text of a job (`job_logs`), 14 days after the job stopped | pg_cron | `private.sweep()` |
-| review images and log files 14 days after a job stopped, result files after 90 days | the worker of the job's machine, every hour | it publishes the job again without them. For a job whose folder is gone from the machine, it counts from the row's `stopped_at` and drops them from the file list. Their objects go 10 minutes later |
+| review files (images and LiDAR points) and log files 14 days after a job stopped, result files after 90 days | the worker of the job's machine, every hour | it publishes the job again without them. For a job whose folder is gone from the machine, it counts from the row's `stopped_at` and drops them from the file list. Their objects go 10 minutes later |
 | objects older than 1 h that no file row names, in the folders of the machine's jobs and in folders whose job row is gone | each worker, at its start and every hour, in its user's folder | `own_orphans` |
 | the view, live state, snapshots, file list and log text of a deleted job | `delete_job`, at once | the row alone waits in "deleting" for the machine |
 | the files of a deleted job | the page, at once; the machine's worker, when it takes the delete request | `job_objects`, then the Storage remove call with the user's session |
@@ -117,7 +118,9 @@ Nothing below is done by the code. Do every account step and every git step your
    sb_publishable_...` writes `gator/webapp/site.json`. Add `--contact TEXT` to name a way to reach you on the
    privacy page. The values are public by design, and the build refuses a secret key. Commit `site.json`:
    personal machines get it with the repo, and `python -m gator.webapp.worker login` reads it (or pass
-   `--site-config PATH`). Build the site with `python -m gator.webapp.site build`, which writes `site/`.
+   `--site-config PATH`). Build the site with
+   `python -m gator.webapp.site build --demos ~/lunar_lab_research/harpor_demos`, which writes `site/` with the
+   demos (see Demos below).
 8. **The host.** The same `site/` folder works on Cloudflare Pages (upload `site/` in the dashboard, or
    `npx wrangler pages deploy site`) and on GitHub Pages. `.gitignore` leaves `site/` out of the main branch,
    so on GitHub Pages either push the contents of `site/` to a `gh-pages` branch and publish that branch, or
@@ -172,7 +175,7 @@ Run these on the CLI's local stack first where possible, then on the cloud proje
 |---|---|---|
 | PKCE from Python, and the loopback entry in the redirect list | one real `worker login` | match gotrue's parameter names in the supabase-js 2.118.0 bundle |
 | Refresh token rotation | a personal worker that runs over 2 h, with one restart | keep the lock; the file must hold the new token before the first call with the new access token |
-| CORS and 206 for Range on signed URLs from the site's origin | open a job with a preview video and seek it; open a GLB in Results; or copy a signed URL from the page and run `curl -s -o /dev/null -D - -H "Origin: https://<site>" -H "Range: bytes=0-1023" "<URL>"` (want 206 and Access-Control-Allow-Origin) | Range: the preview cannot seek, and supa.js would need to fetch it as a blob (not built); CORS: model-viewer cannot load GLBs, so ask Supabase support |
+| CORS and 206 for Range on signed URLs from the site's origin | open a job with a preview video and seek it; open a job with a 360 video and see it play and loop in Results (Safari refuses media without 206); open a GLB in Results; or copy a signed URL from the page and run `curl -s -o /dev/null -D - -H "Origin: https://<site>" -H "Range: bytes=0-1023" "<URL>"` (want 206 and Access-Control-Allow-Origin) | Range: the preview cannot seek and the 360 video may not play, and supa.js would need to fetch them as blobs (not built); CORS: model-viewer cannot load GLBs, so ask Supabase support |
 | `storage.objects.metadata->>'size'` | SQL editor: `select metadata from storage.objects limit 1` | change the key name in the functions that read it |
 | The statement timeout of authenticated | SQL editor: `select rolname, rolconfig from pg_roles where rolname in ('authenticated', 'authenticator')` | only a very large `own_publish` could come near it |
 | pg_cron runs the sweep | after the first quarter hour: `select status, return_message from cron.job_run_details order by start_time desc limit 5` | turn on Cron, and push the cron migration again |
@@ -185,6 +188,8 @@ Run these on the CLI's local stack first where possible, then on the cloud proje
 | The content types of `job-files` | the first log file and URDF (both `text/plain; charset=utf-8`) and GLB of a real job | change `allowed_mime_types` in the storage migration to what Storage takes, and keep it narrow: no XML, HTML or SVG |
 | A 1 MB snapshot through `own_publish` | a long bag on a personal machine | send the frames snapshot in an `own_publish` call of its own, or lower the lean thumbnail count |
 | The site under `/<repo>/` | sign in and open a job on GitHub Pages | a path that starts with `/` slipped in |
+| The demos' videos and GLBs on the host | signed out, open `demos.html` in Safari and see each video play and loop; open 3D view and watch the network list: the GLB loads only then; `curl -s -o /dev/null -D - -H "Range: bytes=0-1023" https://<site>/demos/<name>/turntable.mp4` (want 206 and `video/mp4`) | Range: Safari does not play the video; host the videos elsewhere and add that host to `media-src` |
+| The demos page under the CSP | open `demos.html` with the console open | add only what the console names, to both policies |
 
 ## Run a personal worker on your own GPU machine
 
@@ -272,8 +277,8 @@ the machine's own HARPOR page stays on the site as failed, and its files there f
 worker pauses the copy and keeps the local server running. When your session is signed out, the server keeps
 running in tunnel mode and says to run `login` again.
 
-**What the site owner can see.** Your input file stays on your machine. The job's state, logs, review images
-and result files are copied to the site's Supabase project so that you can see them there, and the site's
+**What the site owner can see.** Your input file stays on your machine. The job's state, logs, review images,
+LiDAR points and result files are copied to the site's Supabase project so that you can see them there, and the site's
 owner runs that project and can read these copies. Your API key goes only to your machine, sealed in your
 browser, or it stays in your machine's own key file.
 
@@ -285,6 +290,38 @@ narrow `access.agents` to `{opus}` or `{astra}` for one user.
 
 GPT-6-Astra runs the Codex CLI in a container that can reach the network, and Claude Opus 5.5 runs its shell
 with no network access. The help page's agent section (`help.html#agent`) says what this means for users.
+
+## Demos
+
+The Demos link in the header opens `demos.html`: finished jobs that you picked, each with its 360 video, a 3D
+view of `aligned.glb`, its facts and its files. It works signed out. The demos are files of the site, not rows or
+Storage objects, so nothing in Supabase changes.
+
+- **The folder.** `WEBAPP_DEMOS` names it, and `--demos DIR` overrides it for the server, the site build and
+  `demos add`. There is no default. Keep it outside the repo, for example `~/lunar_lab_research/harpor_demos`.
+  Each demo is a folder `<name>/` (a-z, 0-9 and -) with `demo.json` and the files it lists: `turntable.mp4`,
+  `poster.jpg`, `aligned.glb` and `results.zip`. The module docstring of `demos.py` gives the format.
+- **Make a demo.** On the machine that holds the job (ICE for real jobs; `envs/web` has PyAV and Pillow):
+  `python -m gator.webapp.demos add <job folder> --out <dir>`. It takes the job's 360 video, so start the job with
+  "Make a 360 video" on, or give `--video`. Add `--title`, `--order` or `--fact LABEL=VALUE` (`LABEL=` removes a
+  fact). A run folder without `job.json` needs `--video` and `--glb`. Copy the demo folder to the Mac's demos folder
+  with scp, then run `python -m gator.webapp.demos check`.
+- **Show it.** `python -m gator.webapp.site build --demos DIR` copies the demos into `site/`, and its second line
+  says how many. A folder that is not there stops the build, and so does a build without a folder over an earlier
+  build that had demos: its deploy would drop the live demos. Add `--no-demos` when that is what you want; it
+  publishes "No demos yet.". A GitHub Actions build cannot see a folder outside the repo, so build on the Mac
+  (Cloudflare). The local server shows the same page at `/demos.html` with `--demos DIR`; it reads the folder when
+  it starts, and a folder that is not there stops it. The page's videos start by themselves unless the system asks
+  for reduced motion (`static/demos.js`).
+- **The guard.** `add`, `check`, the server and the build refuse a demo that looks private (the words of
+  `demos.PRIVATE`) in `demo.json`, a file name, the text in `results.zip` or the names in a GLB. `add` also checks
+  the job's input name, prompt and camera topic and the text of `selection.json` and `lidar.json`, and refuses a
+  rosbag job unless you add `--public-bag`, since the rosbags so far are private and a bag's name can look
+  harmless. The guard reads names only, so look at each demo yourself before you publish it.
+- **Clean files.** `add` packs `results.zip` again: in its text files every key shape becomes `[key]` and every
+  path of a machine (`demos.MACHINE_PATH`) becomes its file name. A binary file that holds either stops `add`. The
+  checks also refuse a file over the limit below, a type other than MP4, GLB, ZIP and JPEG, and a GLB that needs
+  Draco or KTX2 (the demos page loads no decoder).
 
 ## Limits
 
@@ -298,7 +335,8 @@ with no network access. The help page's agent section (`help.html#agent`) says w
 | requests | 60 an hour per user | `access.max_requests_per_hour` |
 | waiting | a request 7 days | `settings.pending_days` |
 | a request | a JSON body of 128 KB, nested at most 32 deep; once done, the body keeps 1 KB, an answer over 1 KB goes after an hour and the row after 7 days | `relay()`, `private.sweep()` |
-| kept on the site | log text 14 days after a job stops; review images and log files 14 days, results 90 days, while the machine runs | the sweep, the worker |
+| kept on the site | log text 14 days after a job stops; review images, LiDAR points and log files 14 days, results 90 days, while the machine runs | the sweep, the worker |
+| a demo's file | 25 MiB (Cloudflare Pages' limit per file) | `demos.MAX_FILE` |
 
 Free is a demo: every file is capped at 50 MB, the project has 1 GB of Storage and 5 GB of egress a month, and
 it pauses after about 7 days with little activity, which also stops sign-in. Pro costs $25 a month; turn the

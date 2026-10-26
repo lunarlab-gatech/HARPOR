@@ -330,6 +330,21 @@ def test_view_ratio_takes_the_conf_percentile_over_the_whole_mask():
     assert rec["points_used"] == (inner & (conf >= p)).sum() == 280
 
 
+def test_view_ratio_keeps_each_points_row():
+    """points["index"] is each returned point's row in uvz, past rows that are not finite, not in front, off the
+    grid or hidden behind a nearer point; index[used] are the rows that the scale used."""
+    depth = np.full((H, W), 2.0)
+    depth[25, 40] = np.nan  # no DA3 depth there: visible, not used
+    uvz = np.array([[10, 10, 2.5], [np.nan, 10, 2.5], [11, 10, -1.0], [12, 10, 0.0], [W + 5, 10, 2.5],
+                    [20, 20, 2.5], [20, 20, 5.0], [30, 25, 2.5], [40, 25, 2.5]])
+    rec, pts = L.view_ratio(uvz, (0, 0, W, H), depth, None, np.ones((H, W), bool))
+    assert pts["index"].tolist() == [0, 5, 7, 8] and pts["index"][pts["used"]].tolist() == [0, 5, 7]
+    assert np.array_equal(np.stack([pts["u"], pts["v"]], 1), uvz[pts["index"], :2])
+    assert (rec["points"], rec["points_grid"], rec["points_visible"], rec["points_used"]) == (6, 5, 4, 3)
+    _, none = L.view_ratio(np.zeros((0, 3)), (0, 0, W, H), depth, None, np.ones((H, W), bool))
+    assert none["index"].tolist() == []
+
+
 def test_weighted_median_ties():
     assert L.weighted_median([0, 1, 2], [0.3, 0.1, 0.2]) == 0.5  # half the weight is reached exactly at 0
     assert L.weighted_median([0, 1, 2], [0.1, 0.2, 0.3]) == 1.5
@@ -398,6 +413,15 @@ def test_estimate_recovers_the_scale(tmp_path):
     assert L.estimate(pool, samples, min_points=600)["reason"].startswith("LiDAR points cover the object in only 0 of 8")
     with pytest.raises(TypeError, match="min_point"):
         L.estimate(pool, samples, min_point=10)
+    # points_out gets every view's points, with their rows in the samples; the record stays the same.
+    pts = {}
+    again = L.estimate(pool, samples, points_out=pts)
+    assert {**again, "seconds": None} == {**rec, "seconds": None}
+    assert sorted(pts) == sorted(v["name"] for v in rec["views"])
+    for v in rec["views"]:
+        p = pts[v["name"]]
+        assert p["used"].sum() == v["points_used"] and len(p["index"]) == v["points_visible"]
+        assert np.array_equal(np.stack([p["u"], p["v"]], 1), samples[v["name"]][p["index"], :2])
 
 
 def test_estimate_leaves_out_outliers_and_odd_views(tmp_path):

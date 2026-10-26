@@ -1,14 +1,15 @@
 // HARPOR web app UI: jobs list and upload; a job page with the panels that wait for the user (camera topic, review of
-// the views and of the part list, a LiDAR failure) above five tabs: Results (the viewers and the facts), Downloads (the
-// files, by group), Inputs (the input's facts, its preview video and the views the build used), Settings (the build
-// settings, with LiDAR for the metric scale) and Log. The header's Help link opens help.html at the screen's section.
+// the views and of the part list, a LiDAR failure) above five tabs: Results (the 360 video, the viewers and the facts),
+// Downloads (the files, by group), Inputs (the input's facts, its preview video, the views the build used and their LiDAR points),
+// Settings (the build settings, with LiDAR for the metric scale) and Log. The header's Help link opens help.html at the screen's section.
 // Plain DOM code, no build step. The API key is only read from the password fields and sent once.
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
 const ACTIVE = ["analyzing", "queued", "running"];
 const BUILD = ["extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "place", "propose", "parts", "agent", "align", "vomp",
-  "mjcf", "usd", "urdf", "package"];
+  "mjcf", "usd", "urdf", "turntable", "package"];
+const OPTIONAL = ["turntable"];  // steps.OPTIONAL: when it fails, the job still ends done
 // job.json "agent" (steps.AGENTS): the key it takes and the placeholder of the key field.
 const AGENTS = { astra: { key: "OpenAI API key", placeholder: "sk-..." },
   opus: { key: "Anthropic API key", placeholder: "sk-ant-..." }, none: { key: null, placeholder: "" } };
@@ -19,7 +20,7 @@ const agentOf = (a) => a === false ? "none" : a === true || a == null ? "astra" 
 const STAGE_LABEL = { topics: "camera topics", frames: "frame analysis", extract: "extract frames", masks: "SAM 3 masks",
   prep: "prepare views", da3: "depth (Depth Anything 3)", lidar: "metric scale (LiDAR)", select: "view selection",
   sam3d: "mesh (MV-SAM3D)", place: "pose and scale", propose: "part list", parts: "split into parts", agent: "agent refinement", align: "align upright", vomp: "materials (VoMP)",
-  mjcf: "MuJoCo model", usd: "USD", urdf: "URDF", package: "results.zip" };
+  mjcf: "MuJoCo model", usd: "USD", urdf: "URDF", turntable: "360 video", package: "results.zip" };
 // A stage's label; the agent's names its task.
 const stageLabel = (name, articulated) => name !== "agent" ? STAGE_LABEL[name] || ""
   : articulated ? "agent sets the joints" : STAGE_LABEL.agent;
@@ -96,7 +97,8 @@ const NO_VIEWS = "No views selected yet.";
 // cards (the review cards: renderCards), es, state, scaleStale (the LiDAR scale ran with another calibration); tab (the
 // tab shown), pick (the tab the user picked), tabPhase (the phase of the status that the tab follows) and hashTab (the
 // hash's tab when the page opened); logAtEnd and logTop (where the log was left); and input, inputKey, videoKey, video,
-// selected, inputPlaced, inputAsked, placeAsked and overlay (the Inputs tab: renderInput).
+// selected, inputPlaced, inputAsked, placeAsked and overlay (the Inputs tab: renderInput); spin, spinKey and spinOn (the
+// 360 video: renderSpin).
 let V = {};
 let listKey = null, upXhr = null;  // the jobs list as last drawn; the running upload
 
@@ -344,6 +346,7 @@ async function openJob(id, tab) {
     "downloadsnone", "downloadsbody", "inputnone", "inputbody", "framesnone", "framesbody"]) $("#" + x).hidden = true;
   show("job");
   clearInput();
+  clearSpin();
   $("#log").textContent = "";
   $("#logname").textContent = "";
   $("#rawlog").hidden = true;
@@ -403,6 +406,7 @@ async function drawJob(job) {  // refresh's panels: the waiting panels and what 
     fill($("#facts2"), h("p", { class: "msg" }, RESULTS_UNREAD + e.message));
     fill($("#partchecks"));  // the check images of an earlier draw
   });
+  if (!results) clearSpin();  // a new build replaces the video
   $("#resultsbody").hidden = !results;
   $("#resultsnone").hidden = results;
   $("#resultsnone").textContent = ["failed", "cancelled"].includes(job.status) ? RESULTS_STOPPED : RESULTS_LATER;
@@ -427,11 +431,13 @@ async function settings(job) {  // the build settings (Settings tab) and the inp
 
 // Show the tab `name` and hide the other panels. pick: the user chose it, so the hash keeps it (a reload shows it
 // again) until the job's status changes. When the focus was in the panel that hides, or on a tab that is no longer
-// selected (the status changed), the new tab takes it. The preview video stops when its tab hides.
+// selected (the status changed), the new tab takes it. The preview video stops when its tab hides, and the 360 video
+// plays only while its tab shows (spinTab).
 function selectTab(name, pick) {
   const old = V.tab && V.tab !== name ? $("#" + TABS[V.tab]) : null, had = document.activeElement, tab = $("#tab-" + name);
   const lost = !!had && had !== tab && ((!!old && old.contains(had) === true) || $("#tabs").contains(had) === true);
   if (V.tab === "inputs" && name !== "inputs" && V.video) V.video.pause();
+  spinTab(name);
   V.tab = name;
   V.pick = pick ? name : null;
   for (const n of TAB_NAMES) {
@@ -527,7 +533,9 @@ async function useTopic(topic, btn) {
     $("#log").textContent = "";
   });
 }
-const smooth = () => matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+// True when the system asks for reduced motion: scrolls jump, and the 360 video does not start by itself.
+const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+const smooth = () => reducedMotion() ? "auto" : "smooth";
 $("#chtopic").onclick = async () => {  // the topic table, above the tabs, takes the focus
   V.pickTopic = true;
   await refresh().catch((e) => say($("#topicmsg"), e.message));
@@ -613,7 +621,8 @@ function renderState(st, follow) {
   }
 
   $("#cancel").hidden = !(ACTIVE.includes(st.status) || st.status === "review");
-  $("#retry").hidden = !["failed", "cancelled"].includes(st.status) || from === null;
+  // A done job retries only a failed optional stage (Runner.resume runs package again after it).
+  $("#retry").hidden = from === null || !(["failed", "cancelled"].includes(st.status) || st.status === "done" && OPTIONAL.includes(from));
   if (!$("#retry").hidden) $("#retry").textContent = from === "frames" ? "Read input again"
     : from === "propose" && (st.stages.find((y) => y.name === "propose") || {}).status === "done" ? "Back to part list"
       : "Retry from " + from;
@@ -759,9 +768,10 @@ async function loadFrames() {
     const job = V.job;
     // A bag's LiDAR topics and TF links, for the LiDAR box; an error shows in the box.
     V.topics = job.kind === "rosbag" ? await api(file("frames/topics.json")).catch((e) => ({ error: e.message })) : null;
-    if (job.prompt) $("#prompt").value = job.prompt;
+    $("#prompt").value = job.prompt || "";  // a job without a name shows the placeholder, not the last job's name
     $("#nviews").value = $("#nval").textContent = job.n_views || 6;
     $("#pause").checked = !job.auto_continue;
+    $("#turntable").checked = job.turntable === true;
     // The public site offers only astra and opus, and only the agents the account may use (supa.js disables the others):
     // a job of another agent starts from the first agent offered.
     const radios = [...document.querySelectorAll("input[name=agent]")];
@@ -1071,7 +1081,8 @@ $("#startform").onsubmit = async (e) => {
   try {
     await post(`/api/jobs/${V.id}/start`, { mode: mode(), prompt: $("#prompt").value, n_views: +$("#nviews").value,
       picks: manual ? V.picks : [], view0: manual ? V.view0 : null, auto_continue: !$("#pause").checked,
-      agent, api_key: typed ? $("#key").value : null, articulated, ...(articulated ? { parts_mode: pm, parts } : {}), lidar });
+      agent, api_key: typed ? $("#key").value : null, articulated, ...(articulated ? { parts_mode: pm, parts } : {}), lidar,
+      turntable: $("#turntable").checked === true });
     $("#key").value = "";
     say($("#startmsg"), "", true);
     $("#log").textContent = "";
@@ -1391,6 +1402,7 @@ function mvDefined() {  // true once <model-viewer> is defined; false when it is
     new Promise((r) => setTimeout(() => r(false), MV_WAIT_MS))]);
 }
 async function renderResults(job) {
+  renderSpin(job);
   const has = (p) => job.files.includes(p), json = async (p) => has(p) ? (await T.fetch(file(p))).json() : null;
   const cm = (x) => (100 * x).toFixed(0);
   // A viewer: until its mesh shows, the box says "Loading the mesh" (model-viewer's poster slot, which it hides then)
@@ -1498,6 +1510,7 @@ const DOWNLOADS = [
   ["Everything", [["results.zip", "results.zip"]]],
   ["Meshes", [["run/posed.glb", "posed.glb"], ["run/parts.glb", "parts.glb"], ["refined.glb", "refined.glb"],
     ["physics/aligned.glb", "aligned.glb"]]],
+  ["Video", [["turntable/turntable.mp4", "turntable.mp4"]]],
   ["Simulation", [["physics/urdf/model.urdf", "model.urdf"]]],
   ["Records", [["run/placement.json", "placement.json"], ["physics/summary.json", "summary.json"], ["pool/lidar.json", "lidar.json"],
     ["selection.json", "selection.json"], ["run/parts.json", "parts.json"], ["physics/mjcf/mjcf.json", "mjcf.json"]]]];
@@ -1551,13 +1564,16 @@ function previewSpot(pk, p) {
 }
 const viewText = (pk, i) => `view ${i}, frame ${pk.frame}, ${Number(pk.time_s).toFixed(1)} s`;  // a selection.json pick
 const viewSrc = (i) => file(V.overlay === true && V.input.placed ? `run/overlay_${i}.png` : `run/input/images/${i}.png`);
-function clearInput() {  // the frames are read again, or another job opens: the old video and views go
+function clearInput() {  // the frames are read again, or another job opens: the old video, views and points go
   V.input = V.inputKey = V.videoKey = V.video = null;
   fill($("#inputvideo"));
   fill($("#inputviews"));
+  freeCloud();
+  fill($("#inputlidar"));
   say($("#inputmsg"), "", true);
 }
-// The Inputs tab once the frames are read: the preview video, and the views used once they are selected.
+// The Inputs tab once the frames are read: the preview video, and the views used once they are selected, with their
+// LiDAR points for a job with LiDAR.
 async function renderInput(job) {
   const p = job.preview && job.preview.file ? job.preview : null;
   // The video is drawn once per preview file, so a refresh or a new selection does not stop it. Its "seek" follows the
@@ -1576,16 +1592,25 @@ async function renderInput(job) {
   }
   V.inputPlaced = job.files.includes("run/placement.json");  // place drew run/overlay_<i>.png for every view first
   if ((job.stages.select || {}).status !== "done") {  // no views yet, or a new selection runs: the old views go
-    if (V.inputKey !== "none") {
+    const pool = job.lidar ? poolClouds(job) : [];  // a LiDAR scale that failed: the points of the pool's views
+    const key = pool.length ? "pool " + pool.map((x) => x.path).join() : "none";
+    if (V.inputKey !== key) {
+      const page = V;
       V.input = null;
-      V.inputKey = "none";
+      V.inputKey = key;
       fill($("#inputviews"), h("p", { class: "hint" }, NO_VIEWS));
       say($("#inputmsg"), "", true);
+      if (pool.length) await renderCloud(job, pool, () => V !== page || V.inputKey !== key);
+      else {
+        freeCloud();
+        fill($("#inputlidar"));
+      }
     }
     return;
   }
-  // The views are drawn once per selection. A place run that ends or goes changes only the heading (its mesh fit toggle).
-  const key = JSON.stringify([job.id, (job.stages.select || {}).ended, vkey]);
+  // The views are drawn once per selection, and again when the files of their LiDAR points change (the public site
+  // gets them after the selection). A place run that ends or goes changes only the heading (its mesh fit toggle).
+  const key = JSON.stringify([job.id, (job.stages.select || {}).ended, vkey, usedClouds(job).map((x) => x.path).join()]);
   if (key === V.inputKey) {
     if (V.input && V.input.placed !== V.inputPlaced) {
       V.input.placed = V.inputPlaced;
@@ -1622,6 +1647,11 @@ async function renderInput(job) {
   V.input.figs = figs;
   fill($("#inputviews"), V.input.head, V.input.hint, h("div", { class: "views" }, figs));
   inputHead();
+  if (job.lidar) await renderCloud(job, usedClouds(job, picks), gone);
+  else {
+    freeCloud();
+    fill($("#inputlidar"));
+  }
 }
 function inputHead() {  // the strip's heading and hint, with the mesh fit toggle once place has run
   const I = V.input;
@@ -1648,6 +1678,381 @@ function seekInput(i) {  // the preview at view i's frame, paused: it never star
   // The frame that the video shows: the preview keeps only some frames, so it can be the kept one before the view's.
   say($("#inputmsg"), `View ${i}` + (spot.frame == null ? "" : `, frame ${spot.frame}`) + `, at ${fmt(spot.at)}`, true);
   v.scrollIntoView({ block: "nearest" });
+}
+
+// ---- 5c. the LiDAR points of the views (Inputs tab) ----
+
+// The files of LiDAR points (lidar.cloud_glb's) that the viewer shows, each {id, label, path, name, save}: run/lidar/<i>.glb
+// of view i, which select copies for the views used (picks give their names), else lidar/cloud/<frame>.glb of each view
+// of the pool, which the server offers only while the scale has failed (server.pool_clouds).
+const CLOUD = /^run\/lidar\/(\d{1,3})\.glb$/, POOL_CLOUD = /^lidar\/cloud\/(f\d{5,9})\.glb$/;
+const usedClouds = (job, picks) => (job.files || []).map((f) => CLOUD.exec(f)).filter(Boolean)
+  .sort((a, b) => a[1] - b[1]).map(([path, i]) => ({ id: i, label: "view " + i, path, name: ((picks || [])[i] || {}).name,
+    save: `${job.id}_lidar_view${i}.glb` }));
+const poolClouds = (job) => (job.files || []).map((f) => POOL_CLOUD.exec(f)).filter(Boolean).sort()
+  .map(([path, n]) => ({ id: n, label: n, path, name: n, save: `${job.id}_lidar_${n}.glb` }));
+const NO_CLOUD = "No LiDAR points to show.";
+const NO_GL = "Cannot draw the points here: ";
+// The viewer drawn now (renderCloud). It lives outside V, since openJob makes a new V before clearInput frees it: a
+// page has few WebGL contexts, so each one goes before another job or selection draws.
+let cloudNow = null;
+function freeCloud() {
+  if (cloudNow && cloudNow.gl) cloudNow.gl.free();
+  cloudNow = null;
+}
+// lidar.cloud_glb's file: {scan, used}, each a Float32Array of x, y, z in glTF axes (a set that is not in it is empty).
+// Only the nodes named exactly "scan" and "used" count, each a mesh whose first primitive is POINTS (mode 0) with a
+// float VEC3 POSITION, tightly packed, inside the BIN chunk. Anything else throws.
+function readCloud(buf) {
+  const bad = () => { throw new Error("not a LiDAR points file"); };
+  const at = (list, i) => Array.isArray(list) && Number.isInteger(i) && i >= 0 && i < list.length ? list[i] || {} : bad();
+  const whole = (x) => Number.isInteger(x) && x >= 0;
+  const dv = new DataView(buf), out = { scan: new Float32Array(0), used: new Float32Array(0) };
+  if (buf.byteLength < 28 || dv.getUint32(0, true) !== 0x46546C67 || dv.getUint32(4, true) !== 2) bad();
+  const jlen = dv.getUint32(12, true), bin = 28 + jlen;
+  if (dv.getUint32(16, true) !== 0x4E4F534A || jlen % 4 || bin > buf.byteLength) bad();
+  const blen = dv.getUint32(20 + jlen, true);
+  if (dv.getUint32(24 + jlen, true) !== 0x004E4942 || bin + blen > buf.byteLength) bad();
+  let doc;
+  try { doc = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, jlen))); } catch (e) { bad(); }
+  for (const node of doc && Array.isArray(doc.nodes) ? doc.nodes : []) {
+    const name = node && node.name;
+    if (name !== "scan" && name !== "used") continue;
+    const prim = at(at(doc.meshes, node.mesh).primitives, 0), acc = at(doc.accessors, (prim.attributes || {}).POSITION);
+    const view = at(doc.bufferViews, acc.bufferView), vo = view.byteOffset || 0, ao = acc.byteOffset || 0, n = acc.count;
+    if (prim.mode !== 0 || acc.componentType !== 5126 || acc.type !== "VEC3" || view.byteStride || (view.buffer || 0) !== 0
+      || ![vo, ao, n, view.byteLength].every(whole) || (vo + ao) % 4 || ao + 12 * n > view.byteLength
+      || vo + view.byteLength > blen) bad();
+    out[name] = new Float32Array(buf, bin + vo + ao, 3 * n);
+  }
+  return out;
+}
+// Where a view starts: the eye at the origin, where the view's camera stood (so the first picture looks like the
+// photo), looking at the median of the used points, else of the scan's points in front of the camera (z < 0 in glTF
+// axes), else 1 m ahead. The eye is at target + dist (cos pitch sin yaw, sin pitch, cos pitch cos yaw).
+const PITCH_MAX = 89 * Math.PI / 180;
+function orbitStart(scan, used) {
+  const median = (a, keep) => {
+    const xyz = [[], [], []];
+    for (let i = 0; i + 2 < a.length; i += 3) if (keep(a[i + 2])) for (let k = 0; k < 3; k++) xyz[k].push(a[i + k]);
+    return xyz[0].length ? xyz.map((v) => v.sort((p, q) => p - q)[v.length >> 1]) : null;
+  };
+  const target = median(used, () => true) || median(scan, (z) => z < 0) || [0, 0, -1];
+  const dist = Math.max(Math.hypot(...target), 0.05);
+  const pitch = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, Math.asin(Math.max(-1, Math.min(1, -target[1] / dist)))));
+  return { target, dist, yaw: Math.atan2(-target[0], -target[2]), pitch };
+}
+// 4x4 matrices, column-major as WebGL takes them.
+const perspective = (fovy, aspect, near, far) => {
+  const f = 1 / Math.tan(fovy / 2), r = 1 / (near - far);
+  return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * r, -1, 0, 0, 2 * far * near * r, 0];
+};
+function lookAt(eye, at) {  // world to camera, y up
+  const unit = (v) => { const n = Math.hypot(...v); return v.map((x) => x / n); };
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const z = unit(eye.map((x, k) => x - at[k])), x = unit(cross([0, 1, 0], z)), y = cross(z, x);
+  return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, eye), -dot(y, eye), -dot(z, eye), 1];
+}
+function matmul(a, b) {
+  const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) for (let k = 0; k < 4; k++) o[4 * c + r] += a[4 * k + r] * b[4 * c + k];
+  return o;
+}
+// The camera of the view as line segments: from the origin to the 4 corners of a frame of that aspect ratio at depth d
+// (down -z), and the frame's 4 sides. Up and down, the frame takes 3/4 of the viewer's field (0.35 of tan 25°), and
+// fieldOf widens the field on a canvas narrower than the frame, so the first picture shows it whole at any shape.
+const FRAME_HALF = 0.35, FIELD_HALF = Math.tan(25 * Math.PI / 180);
+function pyramid(d, aspect) {
+  const hh = FRAME_HALF * d, hw = hh * aspect, c = [[-hw, hh, -d], [hw, hh, -d], [hw, -hh, -d], [-hw, -hh, -d]];
+  return new Float32Array(c.flatMap((p, i) => [0, 0, 0, ...p, ...p, ...c[(i + 1) % 4]]));
+}
+// The viewer's vertical field in radians: 50°, or wider when the canvas (canvasAspect) is narrower than the frame
+// (frameAspect), so the frame fills as much of the field across as up and down.
+const fieldOf = (frameAspect, canvasAspect) => 2 * Math.atan(FIELD_HALF * Math.max(1, frameAspect / canvasAspect));
+// The WebGL viewer of a canvas: {show(data, aspect), reset(), draw(), free()}, or null without WebGL. on.sized() runs at
+// the first size of the canvas that is not 0 (a hidden tab has none), and on.lost() when the browser takes the context
+// back. The scan is drawn with the depth test, the camera's pyramid on it, and the used points last without it, so they
+// always show. The colors are style.css's tokens, read at each draw. It draws only on a change, never in a loop.
+function cloudGL(canvas, on) {
+  const gl = canvas.getContext && canvas.getContext("webgl", { antialias: true });
+  if (!gl) return null;
+  const prog = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, "attribute vec3 p; uniform mat4 M; uniform float size; "
+    + "void main() { gl_Position = M * vec4(p, 1.0); gl_PointSize = size; }"],
+  [gl.FRAGMENT_SHADER, "precision mediump float; uniform vec3 color; uniform bool dot; "
+    + "void main() { if (dot && length(gl_PointCoord - 0.5) > 0.5) discard; gl_FragColor = vec4(color, 1.0); }"]]) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    gl.attachShader(prog, sh);
+  }
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return null;
+  const loc = Object.fromEntries(["M", "size", "color", "dot"].map((u) => [u, gl.getUniformLocation(prog, u)]));
+  const attr = gl.getAttribLocation(prog, "p"), range = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE) || [1, 1];
+  const bufs = { scan: gl.createBuffer(), used: gl.createBuffer(), cam: gl.createBuffer() }, n = { scan: 0, used: 0, cam: 0 };
+  let start = null, view = null, frame = 0, dead = false, freed = false, sized = false, frameAspect = 4 / 3;
+  const put = (k, a) => {
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufs[k]);
+    gl.bufferData(gl.ARRAY_BUFFER, a, gl.STATIC_DRAW);
+    n[k] = a.length / 3;
+  };
+  const token = (name) => {  // a color token as [r, g, b] in 0..1
+    const m = /^#([0-9a-f]{6})$/i.exec(getComputedStyle(document.documentElement).getPropertyValue(name).trim());
+    return m ? [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16) / 255) : [0.5, 0.5, 0.5];
+  };
+  const render = () => {
+    frame = 0;
+    if (dead) return;
+    const bg = token("--viewer-bg"), dpr = window.devicePixelRatio || 1;
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(bg[0], bg[1], bg[2], 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    if (!view) return;
+    const { target: t, dist: d, yaw, pitch } = view, cp = Math.cos(pitch);
+    const eye = [t[0] + d * cp * Math.sin(yaw), t[1] + d * Math.sin(pitch), t[2] + d * cp * Math.cos(yaw)];
+    gl.useProgram(prog);
+    const aspect = canvas.width / Math.max(1, canvas.height);
+    gl.uniformMatrix4fv(loc.M, false, matmul(perspective(fieldOf(frameAspect, aspect), aspect, 0.02 * d, 200 * d),
+      lookAt(eye, t)));
+    gl.enableVertexAttribArray(attr);
+    const pass = (k, mode, px, color) => {
+      if (!n[k]) return;
+      gl.bindBuffer(gl.ARRAY_BUFFER, bufs[k]);
+      gl.vertexAttribPointer(attr, 3, gl.FLOAT, false, 0, 0);
+      gl.uniform1f(loc.size, Math.min(Math.max(px * dpr, range[0]), range[1]));
+      gl.uniform3fv(loc.color, token(color));
+      gl.uniform1i(loc.dot, mode === gl.POINTS ? 1 : 0);
+      gl.drawArrays(mode, 0, n[k]);
+    };
+    gl.enable(gl.DEPTH_TEST);
+    pass("scan", gl.POINTS, 2, "--line-strong");
+    pass("cam", gl.LINES, 1, "--fg");
+    gl.disable(gl.DEPTH_TEST);
+    pass("used", gl.POINTS, 4, "--accent");
+  };
+  const draw = () => {
+    if (dead || frame) return;
+    if (typeof requestAnimationFrame === "function") frame = requestAnimationFrame(render);
+    else render();
+  };
+  const resize = () => {
+    const w = canvas.clientWidth, h = canvas.clientHeight, dpr = window.devicePixelRatio || 1;
+    if (dead || !(w > 0 && h > 0)) return;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    draw();
+    if (!sized) {
+      sized = true;
+      on.sized();
+    }
+  };
+  const ro = typeof ResizeObserver === "function" ? new ResizeObserver(resize) : null;
+  if (ro) ro.observe(canvas);
+  else {
+    window.addEventListener("resize", resize);
+    setTimeout(resize);
+  }
+  const dark = typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)") : null;
+  if (dark && dark.addEventListener) dark.addEventListener("change", draw);
+  // Drag turns, two fingers pinch, the wheel zooms; on the focused canvas the arrow keys turn and + and - zoom.
+  const turn = (dyaw, dpitch) => {
+    if (!view) return;
+    view.yaw += dyaw;
+    view.pitch = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, view.pitch + dpitch));
+    draw();
+  };
+  const zoom = (k) => {
+    if (!view) return;
+    view.dist = Math.max(0.02, Math.min(200, view.dist * k));
+    draw();
+  };
+  const down = new Map();  // the pointers down: id -> {x, y}
+  const spread = () => { const [a, b] = down.values(); return Math.hypot(a.x - b.x, a.y - b.y); };
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    down.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    const p = down.get(e.pointerId);
+    if (!p) return;
+    const before = down.size === 2 ? spread() : 0, dx = e.clientX - p.x, dy = e.clientY - p.y;
+    p.x = e.clientX;
+    p.y = e.clientY;
+    if (down.size === 1) turn(-0.01 * dx, 0.01 * dy);
+    else if (down.size === 2 && before > 0 && spread() > 0) zoom(before / spread());
+  });
+  for (const type of ["pointerup", "pointercancel"]) canvas.addEventListener(type, (e) => down.delete(e.pointerId));
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoom(Math.exp(0.001 * e.deltaY * (e.deltaMode === 1 ? 16 : 1)));
+  }, { passive: false });
+  const KEYS = { ArrowLeft: [5, 0], ArrowRight: [-5, 0], ArrowUp: [0, -5], ArrowDown: [0, 5] };  // degrees
+  canvas.addEventListener("keydown", (e) => {
+    if (KEYS[e.key]) turn(KEYS[e.key][0] * Math.PI / 180, KEYS[e.key][1] * Math.PI / 180);
+    else if (e.key === "+" || e.key === "=") zoom(1 / 1.2);
+    else if (e.key === "-" || e.key === "_") zoom(1.2);
+    else return;
+    e.preventDefault();
+  });
+  canvas.addEventListener("webglcontextlost", () => {
+    if (dead) return;
+    dead = true;
+    on.lost();
+  });
+  return {
+    show(data, aspect) {
+      if (dead) return;
+      put("scan", data.scan);
+      put("used", data.used);
+      start = orbitStart(data.scan, data.used);
+      frameAspect = aspect;
+      put("cam", pyramid(0.1 * start.dist, aspect));
+      view = { ...start };
+      draw();
+    },
+    reset() {
+      if (!start) return;
+      view = { ...start };
+      draw();
+    },
+    draw,
+    free() {
+      if (freed) return;
+      freed = dead = true;
+      if (frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame);
+      if (ro) ro.disconnect();
+      else window.removeEventListener("resize", resize);
+      if (dark && dark.removeEventListener) dark.removeEventListener("change", draw);
+      Object.values(bufs).forEach((b) => gl.deleteBuffer(b));
+      gl.deleteProgram(prog);
+      const lose = gl.getExtension("WEBGL_lose_context");
+      if (lose) lose.loseContext();
+    },
+  };
+}
+// The LiDAR points of the views (usedClouds or poolClouds; a job with LiDAR), under the views used: the view picker,
+// Reset, the canvas and a legend with the counts and the view's scale from pool/lidar.json. A view's file is fetched
+// once, and not before the canvas has a size, so a hidden tab loads nothing. gone: renderInput's guard against another
+// page or selection that came meanwhile.
+async function renderCloud(job, shown, gone) {
+  freeCloud();
+  const box = $("#inputlidar");
+  const bar = (...kids) => h("div", { class: "cloudbar" }, h("h4", {}, "LiDAR points"), kids);
+  if (!shown.length) {
+    fill(box, bar(), h("p", { class: "hint" }, NO_CLOUD));
+    return;
+  }
+  let rec = null;
+  if (job.files.includes("pool/lidar.json")) {
+    rec = await api(file("pool/lidar.json")).then(lidarCompact, () => null);  // without it, the legend has no scale
+    if (gone()) return;
+  }
+  const first = shown[0].id;  // view 0 when it has points
+  // The canvas takes the keys (application), and its legend describes it.
+  const C = cloudNow = { job, shown: new Map(shown.map((x) => [x.id, x])), at: first, data: new Map(), sized: false,
+    gl: null, onCanvas: false, scale: new Map(((rec && rec.views) || []).map((v) => [v.name, v])), body: h("div", {}),
+    canvas: h("canvas", { class: "cloud", role: "application", "aria-roledescription": "3D view", tabindex: "0",
+      "aria-describedby": "cloudlegend" }), legend: h("p", { class: "legend", id: "cloudlegend" }) };
+  const pick = h("select", { onchange: (e) => cloudShow(C, e.target.value) },
+    shown.map((x) => h("option", { value: x.id, selected: x.id === first }, x.label)));
+  fill(box, bar(h("label", {}, "View ", pick), h("button", { type: "button", class: "small secondary",
+    onclick: () => { if (C.gl) C.gl.reset(); } }, "Reset")), C.body);
+  fill(C.body, C.canvas, C.legend);
+  C.onCanvas = true;
+  C.gl = cloudGL(C.canvas, {
+    sized: () => { C.sized = true; cloudShow(C, C.at); },
+    lost: () => { const gl = C.gl; C.gl = null; if (gl) gl.free(); cloudShow(C, C.at); },
+  });
+  await cloudShow(C, first);
+}
+// View i in the viewer: its points once read, with "loading" in the legend until then; without WebGL, or for a file
+// that does not parse, a line that offers the file instead.
+async function cloudShow(C, i) {
+  C.at = i;
+  const { path: p, save: name, label } = C.shown.get(i);
+  const offer = () => {
+    C.onCanvas = false;
+    fill(C.body, h("p", { class: "msg" }, NO_GL, h("a", { href: file(p, name), download: name }, "download them"), "."));
+  };
+  if (!C.gl) return offer();
+  C.canvas.setAttribute("aria-label", "LiDAR points of " + label);
+  if (!C.onCanvas) {
+    C.onCanvas = true;
+    fill(C.body, C.canvas, C.legend);
+  }
+  cloudLegend(C, null);
+  if (!C.sized) return;
+  if (!C.data.has(i)) {
+    C.data.set(i, T.fetch(file(p)).then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.arrayBuffer();
+    }).then(readCloud));
+  }
+  let data = null;
+  try { data = await C.data.get(i); } catch (e) { C.data.delete(i); }  // fetched again when the view is picked again
+  if (cloudNow !== C || C.at !== i || !C.gl) return;
+  if (!data) return offer();
+  const pv = C.job.preview;
+  C.gl.show(data, pv && pv.width > 0 && pv.height > 0 ? pv.width / pv.height : 4 / 3);
+  cloudLegend(C, data);
+}
+// The legend: each set's square, name and count. The used points' count comes with the view's scale and status as the
+// review gives them (lidarViewText: "×1.21 (9 pts, outlier)"), when pool/lidar.json has the view. "loading" until the
+// file is read.
+function cloudLegend(C, data) {
+  if (!data) {
+    fill(C.legend, "loading");
+    return;
+  }
+  const v = C.scale.get(C.shown.get(C.at).name);
+  const key = (set, text) => h("span", { class: "key" }, h("span", { class: "sq " + set, "aria-hidden": "true" }), text);
+  fill(C.legend, key("scan", `Whole scan (${count(data.scan.length / 3)})`), " ",
+    key("used", "Used for the scale" + (v ? ": " + lidarViewText(v) : ` (${count(data.used.length / 3)})`)));
+}
+
+// ---- 5d. the 360 video of the object (Results tab) ----
+
+// turntable/turntable.mp4: the turntable stage's video, when the job asked for one and its render worked.
+const SPIN = "turntable/turntable.mp4";
+function clearSpin() {  // another job opens, or a new build hides the results: the old video goes
+  V.spin = V.spinKey = null;
+  fill($("#spin"));
+}
+// The video above the viewers: muted, looping, with controls that pause it; it does not start by itself when the system
+// asks for reduced motion. It is drawn once per file, so a refresh or a new signed URL does not start it again. When
+// it cannot play, the caption stays and a line offers the file, as for a viewer.
+function renderSpin(job) {
+  if (!job.files.includes(SPIN)) return clearSpin();
+  const key = JSON.stringify([job.id, (job.stages.turntable || {}).ended, (job.sizes || {})[SPIN]]);
+  if (key === V.spinKey) return;
+  V.spinKey = key;
+  V.spinOn = !reducedMotion();
+  const name = `${job.id}_turntable.mp4`, cap = h("figcaption", {}, "360 video"), fig = h("figure", { class: "spinfig" }, cap);
+  const video = V.spin = h("video", { src: file(SPIN), autoplay: V.spinOn, muted: true, loop: true, playsinline: true,
+    controls: true, preload: "auto", "aria-label": `360 video of the ${job.prompt || "object"}`,
+    onerror: () => {
+      if (V.spin === video) V.spin = null;
+      fig.replaceChildren(cap, h("p", { class: "msg" }, "Could not play the video: ",
+        h("a", { href: file(SPIN, name), download: name }, "download it"), "."));
+    } });
+  video.muted = true;  // the attribute only sets the default
+  if (V.tab && V.tab !== "results") video.pause();  // drawn while another tab shows: no start there
+  fig.append(video);
+  fill($("#spin"), fig);
+}
+// The 360 video plays only while the Results tab shows. It stops when the tab hides, and plays again when the tab shows
+// if it played when the tab hid (V.spinOn), or at first unless the system asks for reduced motion.
+function spinTab(name) {
+  const v = V.spin;
+  if (!v || name === V.tab) return;
+  if (name === "results") {
+    if (V.spinOn) Promise.resolve(v.play()).catch(() => {});  // a browser may refuse it: the controls still start it
+  } else {
+    if (V.tab === "results") V.spinOn = !v.paused;
+    v.pause();
+  }
 }
 
 if (PUBLIC) T.ready.then(() => { routing = true; route(); });

@@ -129,7 +129,8 @@ def all_files(root):
 
 def test_token_gate(client):
     c, _ = client
-    for path in ("/", "/static/app.js", "/static/index.html", "/api/jobs", "/api/jobs/x/file/selection.json"):
+    for path in ("/", "/static/app.js", "/static/index.html", "/api/jobs", "/api/jobs/x/file/selection.json", "/demos.html",
+                 "/demos/x/y.mp4"):
         assert c.get(path).status_code == 401
     # The help page and its stylesheet hold no job data: they pass, so the page's troubleshooting reads without a login.
     assert c.get("/help.html").status_code == c.get("/static/style.css").status_code == 200
@@ -142,6 +143,54 @@ def test_token_gate(client):
     assert c.get("/api/jobs").json() == [] and c.get("/api/jobs/20260101-000000-abcdef").status_code == 404
     c.cookies.set(server.COOKIE, "wrong")
     assert c.get("/api/jobs").status_code == 401
+
+
+def test_demos_pages(tmp_path, capsys):
+    """/demos.html shows the demos of the server's demos folder (or "No demos yet." without one), and /demos/<name>/<file>
+    serves only the files that a demo.json lists, with their type, Range and HEAD. A demos folder that breaks a rule
+    stops the server with the reason."""
+    from test_webapp_demos import hand_demo
+
+    from gator.webapp import demos
+
+    def app(folder, runs="runs"):
+        cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / runs, fake=True, demos=folder)
+        return server.make_app(cfg, TOKEN, key_dir=tmp_path / "keys")
+
+    with TestClient(app(None)) as c:
+        login(c)
+        r = c.get("/demos.html")
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+        assert '<p class="emptytab">No demos yet.</p>' in r.text and "<!-- demos -->" not in r.text
+    d = hand_demo(tmp_path / "demos")
+    (d / ".DS_Store").write_bytes(b"\0")
+    with TestClient(app(tmp_path / "demos")) as c:
+        login(c)
+        r = c.get("/demos.html")
+        assert 'id="demo-office-chair"' in r.text and r.headers["cache-control"] == "no-cache"
+        assert 'href="/static/style.css"' in r.text and 'href="help.html#demos"' in r.text
+        assert c.get("/static/demos.js").content == (server.STATIC / "demos.js").read_bytes()
+        mp4 = (d / "turntable.mp4").read_bytes()
+        r = c.get("/demos/office-chair/turntable.mp4")
+        assert r.status_code == 200 and r.headers["content-type"] == "video/mp4" and r.content == mp4
+        r = c.get("/demos/office-chair/turntable.mp4", headers={"Range": "bytes=0-99"})
+        assert r.status_code == 206 and r.content == mp4[:100] and r.headers["content-range"] == f"bytes 0-99/{len(mp4)}"
+        r = c.head("/demos/office-chair/aligned.glb")
+        assert r.status_code == 200 and r.headers["content-type"] == "model/gltf-binary" and not r.content
+        assert c.get("/demos/office-chair/results.zip").headers["content-type"] == "application/zip"
+        for bad in ("/demos/office-chair/demo.json", "/demos/office-chair/.DS_Store", "/demos/other/turntable.mp4",
+                    "/demos/office-chair/../office-chair/demo.json", "/demos/office-chair%2Fturntable.mp4/x",
+                    "/demos/office-chair/%2E%2E%2Fdemo.json", "/demos/office-chair"):
+            assert c.get(bad).status_code == 404, bad
+    (d / "notes.zip").write_bytes(b"PK\x03\x04")
+    with pytest.raises(demos.DemoError, match="office-chair/notes.zip is not listed in demo.json"):
+        app(tmp_path / "demos", runs="runs2")
+    assert not (tmp_path / "runs2").exists()  # stopped before the runner claims the runs folder
+    with pytest.raises(SystemExit, match="the demos folder: office-chair/notes.zip is not listed in demo.json"):
+        server.main(["--runs", str(tmp_path / "runs2"), "--host", "127.0.0.1", "--demos", str(tmp_path / "demos")])
+    with pytest.raises(SystemExit, match="the demos folder: no demos folder .*missing"):  # mistyped
+        server.main(["--runs", str(tmp_path / "runs2"), "--host", "127.0.0.1", "--demos", str(tmp_path / "missing")])
+    assert not (tmp_path / "runs2").exists()
 
 
 def test_upload_review_overrides_and_results(client, tmp_path):
@@ -201,8 +250,10 @@ def test_upload_review_overrides_and_results(client, tmp_path):
     assert c.post(f"/api/jobs/{job_id}/continue", json={}).json() == {"status": "queued", "from": "sam3d"}
     job = wait(c, job_id, "done", "failed")
     assert job["status"] == "done", job["error"]
-    # A rigid object without LiDAR has every output but the split parts and the LiDAR record.
-    assert set(job["files"]) == set(server.OUTPUTS) - {"run/parts.glb", "run/parts.json", "pool/lidar.json"}
+    # A rigid object without LiDAR or the 360 video has every output but the split parts, the LiDAR record and the video.
+    assert set(job["files"]) == set(server.OUTPUTS) - {"run/parts.glb", "run/parts.json", "pool/lidar.json",
+                                                      "turntable/turntable.mp4"}
+    assert job["turntable"] is False and job["stages"]["turntable"]["note"] == "turned off"
     # The Downloads tab's sizes: the bytes that the file route sends for each file (refined.glb is the agent's GLB).
     assert set(job["sizes"]) == set(job["files"])
     assert all(job["sizes"][f] == len(c.get(f"/api/jobs/{job_id}/file/{f}").content) > 0 for f in job["files"]), job["sizes"]
@@ -484,6 +535,57 @@ def test_fake_rosbag_job_with_lidar_end_to_end(client, tmp_path):
     with zipfile.ZipFile(io.BytesIO(c.get(f"/api/jobs/{job_id}/file/results.zip").content)) as z:
         assert json.loads(z.read("lidar.json")) == rec
     assert "pool/lidar.json" in job["files"]
+    # The LiDAR points of the views used (select's copies of lidar/cloud/<view>.glb), after the outputs.
+    clouds = lidar_clouds(c, job_id, job)
+    assert job["files"][-len(clouds):] == clouds and all(job["sizes"][f] > 0 for f in clouds)
+    for method in (c.get, c.head):
+        r = method(f"/api/jobs/{job_id}/file/run/lidar/0.glb")
+        assert r.status_code == 200 and r.headers["content-type"] == "model/gltf-binary"
+        assert r.headers["cache-control"] == "no-cache"
+    assert c.get(f"/api/jobs/{job_id}/file/run/lidar/0.glb").content[:4] == b"glTF"
+    # The pool's own points only while the scale has failed (server.pool_clouds).
+    pool = sorted((J / "lidar" / "cloud").glob("f*.glb"))
+    assert pool and not any(f.startswith("lidar/") for f in job["files"])
+    assert c.get(f"/api/jobs/{job_id}/file/lidar/cloud/{pool[0].name}").status_code == 404
+    for p in ("run/lidar/1234.glb", "run/lidar/x.glb", "run/lidar/0.png", "lidar/cloud/f00001.glb", "lidar/clouds.npz"):
+        assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
+
+
+def lidar_clouds(c, job_id, job):
+    """job["files"]'s run/lidar/<i>.glb, which must be one per view used, by i."""
+    picks = c.get(f"/api/jobs/{job_id}/file/selection.json").json()["picks"]
+    clouds = [f for f in job["files"] if f.startswith("run/lidar/")]
+    assert clouds == [f"run/lidar/{i}.glb" for i in range(len(picks))] and len(picks) >= 3
+    return clouds
+
+
+def test_lidar_points_are_listed_by_view(tmp_path):
+    """server.lidar_points lists run/lidar/<i>.glb by the view's number, and only the files that ALLOW serves."""
+    J = tmp_path / "job"
+    (J / "run" / "lidar").mkdir(parents=True)
+    for name in ("10.glb", "2.glb", "0.glb", "1234.glb", "x.glb", "3.png"):
+        (J / "run" / "lidar" / name).write_bytes(b"glTF")
+    (J / "run" / "lidar" / "4.glb").mkdir()  # not a file
+    assert list(server.lidar_points(J)) == ["run/lidar/0.glb", "run/lidar/2.glb", "run/lidar/10.glb"]
+    assert server.lidar_points(tmp_path / "other") == {}
+
+
+def test_pool_points_only_while_the_scale_has_failed(tmp_path):
+    """server.pool_clouds lists lidar/cloud/<view>.glb by name while pool/lidar.json says ok false; resolve and the
+    site's mirror (relay.mirror_plan) follow it, so a scale found later takes them away."""
+    from gator.webapp import relay
+
+    J = tmp_path / "job"
+    (J / "lidar" / "cloud").mkdir(parents=True)
+    (J / "pool").mkdir()
+    for name in ("f00040.glb", "f00012.glb", ".tmp_f00050.glb", "x.glb"):
+        (J / "lidar" / "cloud" / name).write_bytes(b"glTF")
+    mirrored = lambda: [f.rel for f in relay.mirror_plan(J, {"stages": {}}) if f.rel.startswith("lidar/")]  # noqa: E731
+    for rec, listed in ((None, []), ({"ok": True}, []), ({"ok": False}, ["lidar/cloud/f00012.glb", "lidar/cloud/f00040.glb"])):
+        if rec is not None:
+            (J / "pool" / "lidar.json").write_text(json.dumps(rec))
+        assert list(server.pool_clouds(J)) == listed and mirrored() == listed, rec
+        assert (server.resolve(J, "lidar/cloud/f00012.glb") is not None) == bool(listed)
 
 
 def test_fake_stray_job_end_to_end(client, tmp_path):
@@ -542,6 +644,7 @@ def test_fake_stray_job_end_to_end(client, tmp_path):
     with zipfile.ZipFile(io.BytesIO(c.get(f"/api/jobs/{job_id}/file/results.zip").content)) as z:
         assert json.loads(z.read("lidar.json")) == rec
     assert "pool/lidar.json" in job["files"]
+    assert lidar_clouds(c, job_id, job)  # the capture's depth, with the intrinsics of odometry.csv
 
     # Built again with LiDAR off: the lidar stage is skipped and select applies no scale.
     r = c.post(f"/api/jobs/{job_id}/start", json={**start, "lidar": None})
@@ -550,6 +653,7 @@ def test_fake_stray_job_end_to_end(client, tmp_path):
     assert job["status"] == "done", job["error"]
     assert job["lidar"] is None and job["stages"]["lidar"]["note"] == "turned off: no LiDAR"
     assert "pool/lidar.json" not in job["files"] and c.get(f"/api/jobs/{job_id}/selection").json()["lidar"] is None
+    assert not [f for f in job["files"] if f.startswith("run/lidar/")]
     placement = c.get(f"/api/jobs/{job_id}/file/run/placement.json").json()
     assert placement["metric_scale"] is None and placement["units"] == "DA3 units (meters)"
 
@@ -734,7 +838,7 @@ def test_part_list_review_confirms_or_edits_the_list(client, tmp_path):
     assert job["status"] == "done", job["error"]
     proposal = json.loads((J / "run" / "proposal.json").read_text())
     assert (proposal["confirmed"], proposal["edited"], job["parts"]["confirmed"], job["parts_review"]) == (True, False, True, False)
-    assert set(server.OUTPUTS) - {"pool/lidar.json"} <= set(job["files"])  # every output but the LiDAR record
+    assert set(server.OUTPUTS) - {"pool/lidar.json", "turntable/turntable.mp4"} <= set(job["files"])  # but LiDAR, video
     a = job["agent_result"]
     assert (a["mode"], a["verdict"], a["joints_delivered"]) == ("articulation", "articulated", 1)
     assert set(a["counts"]) == {"exports", "reviews", "checkpoints", "joints", "articulation_reviews"}
@@ -772,18 +876,34 @@ def test_part_list_review_confirms_or_edits_the_list(client, tmp_path):
 
 def test_articulated_job_without_an_agent_and_the_new_files(client, tmp_path):
     """The user's list without an agent: the parts are split but get no joints, so refined.glb is not served
-    (physics uses run/parts.glb). The new outputs are served, and nothing else of the parts or the URDF."""
+    (physics uses run/parts.glb). The new outputs are served, and nothing else of the parts or the URDF. The job asks
+    for the 360 video: it is served as video/mp4, with 206 for a Range request, and results.zip holds it; its
+    records are not served."""
     c, cfg = client
     login(c)
     job_id = uploaded(c, tmp_path)
     J = cfg.runs / job_id
-    r = c.post(f"/api/jobs/{job_id}/start", json={**ARTICULATED, "agent": "none", "parts": TYPED[:2]})
+    r = c.post(f"/api/jobs/{job_id}/start", json={**ARTICULATED, "agent": "none", "parts": TYPED[:2], "turntable": True})
     assert r.status_code == 200, r.text
     job = wait(c, job_id, "done", "failed")
     assert job["status"] == "done", job["error"]
     assert (job["articulated"], job["parts_mode"], job["agent_result"]) == (True, "user", None)
     assert job["stages"]["agent"]["note"].startswith("turned off: without the agent the parts get no joints")
     assert set(job["files"]) == set(server.OUTPUTS) - {"refined.glb", "pool/lidar.json"}
+    assert (job["turntable"], job["stages"]["turntable"]["status"], job["warnings"]) == (True, "done", [])
+    mp4 = (J / "turntable" / "turntable.mp4").read_bytes()
+    r = c.get(f"/api/jobs/{job_id}/file/turntable/turntable.mp4")
+    assert r.status_code == 200 and r.headers["content-type"] == "video/mp4" and r.content == mp4
+    assert job["sizes"]["turntable/turntable.mp4"] == len(mp4)
+    r = c.get(f"/api/jobs/{job_id}/file/turntable/turntable.mp4", headers={"Range": "bytes=0-99"})
+    assert r.status_code == 206 and r.content == mp4[:100] and r.headers["content-range"] == f"bytes 0-99/{len(mp4)}"
+    rec = json.loads((J / "turntable" / "turntable.json").read_text())
+    assert rec["glb"] == "run/parts.glb" and rec["frames"] == 240  # the GLB that physics used, every part
+    with zipfile.ZipFile(io.BytesIO(c.get(f"/api/jobs/{job_id}/file/results.zip").content)) as z:
+        assert z.read("turntable.mp4") == mp4
+    for p in ("turntable/turntable.json", "turntable/render.json", "turntable/args.json", "turntable/blender.log",
+              "turntable/../job.json"):
+        assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
     assert steps.next_glb(J) == J / "run" / "parts.glb"
     assert c.get(f"/api/jobs/{job_id}/file/refined.glb").status_code == 404
     assert "links" not in c.get(f"/api/jobs/{job_id}/file/physics/mjcf/mjcf.json").json()  # one body
@@ -1312,7 +1432,8 @@ def test_hostile_bodies_get_a_reason_never_a_crash(client, tmp_path):
                   {"lidar": True}, {"lidar": []}, {"lidar": "on"}, {"lidar": {"topic": 3}},
                   {"agent": "astra", "api_key": 7}, {"agent": "astra", "api_key": ["sk-x"]},
                   {"agent": "astra", "api_key": {"k": KEY}}, {"agent": "astra", "api_key": True},
-                  {"agent": "astra", "api_key": "sk-" + "a" * 600}, {"agent": "astra", "api_key": "sk-a\nb"}]:
+                  {"agent": "astra", "api_key": "sk-" + "a" * 600}, {"agent": "astra", "api_key": "sk-a\nb"},
+                  {"turntable": 1}, {"turntable": "yes"}, {"turntable": None}]:
         refused("start", {**start, **wrong})
     assert jobs.load(J)["status"] == "ready"
 
@@ -1414,7 +1535,7 @@ def run_app_js(replies, code):
 # method in `requests` and the POST bodies in `posts`, and answers with the replies (by URL). A reply
 # with "__status" answers that HTTP error, with the reply as its JSON body. querySelectorAll answers
 # from `lists` (by selector). `history` keeps its state; its replaceState and pushState calls go to
-# `historyCalls` ([kind, url]), and assignments to location.hash go to `hashSets`.
+# `historyCalls` ([kind, url]), and assignments to location.hash go to `hashSets`. TextDecoder is node's (readCloud).
 FORM_HARNESS = r"""
 const fs = require("fs"), vm = require("vm");
 const texts = [], replies = JSON.parse(process.argv[4] || "{}");
@@ -1443,7 +1564,7 @@ const history = { state: null,
   replaceState(state, title, url) { historyCalls.push(["replace", url]); this.state = state; location._hash = url; },
   pushState(state, title, url) { historyCalls.push(["push", url]); this.state = state; location._hash = url; } };
 const ctx = vm.createContext({ console, document, window: el(), location, history, setInterval() {}, EventSource: el(),
-  fetch, agents, partsModes, posts, requests, texts, lists, hashSets, historyCalls });
+  fetch, agents, partsModes, posts, requests, texts, lists, hashSets, historyCalls, TextDecoder });
 Promise.resolve(vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "\n" + process.argv[3], ctx))
   .catch((e) => { console.error(e.stack); process.exitCode = 1; });
 """
@@ -1681,6 +1802,38 @@ def test_app_js_start_form_sends_the_parts():
     assert (none["agent"], none["api_key"], none["parts_mode"]) == ("none", None, "user")
     assert none["parts"] == [{"name": "box body", "parent": None, "joint": None, "count": 1},
                              {"name": "lid", "parent": "box body", "joint": None, "count": 1}]
+
+
+def test_app_js_360_video_setting():
+    """The Settings box "Make a 360 video" shows the job's choice (job.turntable; off for a job made before it), and
+    Start sends it as true or false. The object name is the job's, and empty for a job without one (not the name of the
+    job opened before)."""
+    meta = frames_meta()
+    out = run_form_js("""
+        (async () => {
+          const ticked = [], sent = [], names = [];
+          for (const [t, prompt] of [[true, "Wooden box"], [false, null], [undefined, undefined]]) {
+            V = { id: "j", picks: [], view0: null, job: { id: "j", kind: "video", status: "ready", mode: "auto", picks: [],
+              n_views: 4, agent: "none", lidar: null, calibration: null, turntable: t, prompt } };
+            $("#turntable").checked = "stale";
+            await loadFrames();
+            ticked.push($("#turntable").checked);
+            names.push($("#prompt").value);
+          }
+          agents.forEach((r, j) => { r.checked = j === 2; });
+          for (const on of [true, false]) {
+            V = { id: "j", picks: [], view0: null };
+            Object.assign($("#prompt"), { value: "box" });
+            Object.assign($("#nviews"), { value: "4" });
+            $("#turntable").checked = on;
+            posts.length = 0;
+            await $("#startform").onsubmit({ preventDefault() {} });
+            sent.push(posts[0].body.turntable);
+          }
+          console.log(JSON.stringify({ ticked, sent, names }));
+        })()
+        """, {"/api/jobs/j/frames": meta})
+    assert out == {"ticked": [True, False, False], "sent": [True, False], "names": ["Wooden box", "", ""]}
 
 
 def test_app_js_part_list_panel():
@@ -2742,6 +2895,185 @@ def test_app_js_input_panel_follows_the_selection():
 
 # ---- the job page's tabs: Results, Downloads, Inputs, Settings, Log ----
 
+def glb_bytes(data, rename=None, **accessor):
+    """A lidar.cloud_glb file as a list of bytes (for a JS Uint8Array), with its JSON chunk changed: rename
+    {old node name: new name}, and accessor 0's fields set."""
+    import struct
+
+    n = struct.unpack_from("<I", data, 12)[0]
+    doc = json.loads(data[20:20 + n])
+    for node in doc["nodes"]:
+        node["name"] = (rename or {}).get(node["name"], node["name"])
+    doc["accessors"][0].update(accessor)
+    js = json.dumps(doc).encode()
+    js += b" " * (-len(js) % 4)
+    rest = data[20 + n:]
+    return list(struct.pack("<III", 0x46546C67, 2, 20 + len(js) + len(rest)) + struct.pack("<II", len(js), 0x4E4F534A)
+                + js + rest)
+
+
+def test_app_js_reads_the_lidar_points_file():
+    """readCloud reads lidar.cloud_glb's file into Float32Arrays of x, y, z in glTF axes. A set that the file lacks
+    is empty, a node of another name (also "constructor") is not read, and a file that is not one, or whose
+    accessor runs past its data, throws. orbitStart puts the eye at the origin (the view's camera), looking at the
+    median of the used points, else of the scan's points in front of the camera, else 1 m ahead."""
+    from gator.webapp import lidar
+
+    scan, used = [[0.0, 0.0, 1.0], [1.0, 2.0, 3.0]], [[0.5, 0.25, 2.0]]
+    both = lidar.cloud_glb({"scan": scan, "used": used})
+    files = {"both": list(both), "scan": list(lidar.cloud_glb({"scan": scan})),
+             "odd": glb_bytes(both, rename={"used": "constructor"}), "magic": [0] + list(both)[1:],
+             "short": list(both)[:-12], "past": glb_bytes(both, count=3)}
+    out = run_form_js("""
+        const files = """ + json.dumps(files) + """, out = {};
+        const read = (k) => { try { const r = readCloud(new Uint8Array(files[k]).buffer); return [Array.from(r.scan), Array.from(r.used),
+          r.scan instanceof Float32Array]; } catch (e) { return e.message; } };
+        for (const k of Object.keys(files)) out[k] = read(k);
+        const eye = (o) => { const cp = Math.cos(o.pitch); return [o.target[0] + o.dist * cp * Math.sin(o.yaw),
+          o.target[1] + o.dist * Math.sin(o.pitch), o.target[2] + o.dist * cp * Math.cos(o.yaw)]; };
+        const f = (a) => new Float32Array(a);
+        const used = orbitStart(f([9, 9, -9]), f([1, 2, -4, 3, -1, -6, 2, 0, -5])), scan = orbitStart(f([0, 0, 5, 1, 1, -2]), f([]));
+        out.orbit = [used.target, eye(used), used.dist, scan.target, eye(scan), orbitStart(f([0, 0, 5]), f([])).target];
+        console.log(JSON.stringify(out));
+        """)
+    flip = lambda pts: [c for x, y, z in pts for c in (x, -y, -z)]  # noqa: E731  OpenCV axes to glTF's
+    assert out["both"] == [flip(scan), flip(used), True]
+    assert out["scan"] == [flip(scan), [], True] and out["odd"] == [flip(scan), [], True]
+    assert out["magic"] == out["short"] == out["past"] == "not a LiDAR points file"
+    target, at, dist, target2, at2, ahead = out["orbit"]
+    assert target == [2, 0, -5] and max(map(abs, at)) < 1e-6 and dist == pytest.approx(math.hypot(2, 5))
+    assert target2 == [1, 1, -2] and max(map(abs, at2)) < 1e-6 and ahead == [0, 0, -1]
+
+
+def test_app_js_lidar_start_view_shows_the_whole_frame():
+    """From the view's camera, the pyramid's frame fits the viewer's field on a wide canvas and on a phone's tall one
+    (fieldOf widens the field there), for a 3:2 and a 16:9 frame; on a wide canvas the field stays 50°."""
+    out = run_form_js("""
+        const out = [];
+        for (const [w, h] of [[760, 420], [343, 365], [343, 600]]) for (const fa of [1.5, 16 / 9]) {
+          const M = perspective(fieldOf(fa, w / h), w / h, 0.01, 100), c = pyramid(1, fa);
+          let far = 0;
+          for (let i = 0; i < c.length; i += 3) {
+            if (c[i + 2] === 0) continue;  // the apex, at the eye
+            const x = M[0] * c[i], y = M[5] * c[i + 1], wc = M[11] * c[i + 2];
+            far = Math.max(far, Math.abs(x / wc), Math.abs(y / wc));
+          }
+          out.push([w, fa, far, fieldOf(fa, w / h) * 180 / Math.PI]);
+        }
+        console.log(JSON.stringify(out));
+        """)
+    for w, fa, far, fovy in out:
+        assert 0.5 < far <= 0.76, (w, fa, far)
+        if w == 760:
+            assert fovy == pytest.approx(50)
+
+
+def test_app_js_lidar_points_in_the_inputs_tab():
+    """A LiDAR job whose views are selected shows "LiDAR points" under the views: a picker of the views with points,
+    Reset, the canvas (a 3D view that takes the keys, described by its legend) and a legend that says "loading" until
+    the file is read, then the counts and the view's scale as the review gives it (lidarViewText). Nothing is fetched
+    before the canvas has a size; a view's file is fetched once. A job without LiDAR draws no section; one without
+    points says so; without WebGL a line offers the file. clearInput frees the viewer, and new point files draw it
+    again. A job whose scale failed has no views used: the picker holds the pool's views (server.pool_clouds)."""
+    from gator.webapp import lidar
+
+    rng = np.random.default_rng(0)
+    glbs = {f"/api/jobs/j/file/run/lidar/{i}.glb": list(lidar.cloud_glb({"scan": rng.normal(size=(n, 3)) + [0, 0, 2],
+                                                                        "used": rng.normal(size=(k, 3)) + [0, 0, 2]}))
+            for i, n, k in ((0, 1234, 280), (2, 50, 9))}
+    rec = {"version": 1, "ok": True, "s": 1.07, "reason": None, "combine": {"views": 3, "views_used": 2},
+           "views": [{"name": "f00152", "s": 1.0498, "points_used": 280, "status": "used"},
+                     {"name": "f00040", "s": None, "points_used": 0, "status": "no_samples"},
+                     {"name": "f00301", "s": 1.2101, "points_used": 9, "status": "outlier"}]}
+    files = ["selection.json", "pool/lidar.json", "run/lidar/0.glb", "run/lidar/2.glb"]
+    lid = {"kind": "rosbag", "topic": "/lidar/points"}
+    jobs_ = {"j": input_job("j", lidar=lid, files=files), "more": input_job("j", lidar=lid, files=files + ["run/lidar/1.glb"]),
+             "n": input_job("n", files=files), "e": input_job("e", lidar=lid, files=files[:2]),
+             "g": input_job("g", lidar=lid, files=files),
+             "p": input_job("p", lidar=lid, select="pending", sam3d="pending",
+                            files=["pool/lidar.json", "lidar/cloud/f00152.glb", "lidar/cloud/f00040.glb"])}
+    glbs["/api/jobs/p/file/lidar/cloud/f00040.glb"] = glbs["/api/jobs/j/file/run/lidar/2.glb"]
+    replies = {f"/api/jobs/{i}/file/selection.json": {"ok": True, "picks": PICKS} for i in "jneg"}
+    replies.update({f"/api/jobs/{i}/file/pool/lidar.json": rec for i in "jegp"})
+    out = run_form_js(ELEMENTS + """
+        (async () => {
+          const out = {}, jobs = """ + json.dumps(jobs_) + """, glbs = """ + json.dumps(glbs) + """, gls = [];
+          const fetch0 = fetch;
+          globalThis.fetch = async (url, opt) => url in glbs ? (requests.push({ url, method: "GET" }),
+            { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(glbs[url]).buffer }) : fetch0(url, opt);
+          const gl0 = cloudGL = (canvas, on) => { const g = { on, canvas, shows: [], resets: 0, freed: 0, show(d, a) {
+            this.shows.push([d.scan.length / 3, d.used.length / 3, a]); }, reset() { this.resets++; }, draw() {},
+            free() { this.freed++; } }; gls.push(g); return g; };
+          const settle = async () => { for (let k = 0; k < 30; k++) await null; };
+          const one = (pred) => made.filter(pred).pop();
+          const glbGets = () => requests.filter((r) => r.url.endsWith(".glb")).map((r) => r.url.split("/file/")[1]);
+          V = { id: "j" };
+          await renderInput(jobs.j);
+          const legend = one((e) => e.className === "legend"), canvas = one((e) => e.tag === "canvas");
+          const select = one((e) => e.tag === "select"), bar = one((e) => e.className === "cloudbar");
+          out.bar = [text(bar), select.kids.map((o) => [o.attrs.value, text(o), o.attrs.selected])];
+          out.canvas = [canvas.className, { ...canvas.attrs }];
+          out.before = [text(legend), glbGets()];
+          gls[0].on.sized();
+          await settle();
+          out.view0 = [text(legend), glbGets(), [...gls[0].shows]];
+          select.onchange({ target: { value: "2" } });
+          await settle();
+          out.view2 = [text(legend), canvas.attrs["aria-label"], glbGets(), gls[0].shows.length];
+          select.onchange({ target: { value: "0" } });
+          await settle();
+          select.onchange({ target: { value: "2" } });
+          await settle();
+          out.again = [glbGets(), gls[0].shows.length, text(legend)];
+          one((e) => e.tag === "button" && text(e) === "Reset").onclick();
+          out.reset = gls[0].resets;
+          await renderInput(jobs.more);  // a new point file draws the section again, with a new viewer
+          out.more = [gls.length, gls[0].freed, one((e) => e.tag === "select").kids.map(text)];
+          clearInput();
+          out.cleared = gls[1].freed;
+          for (const id of ["n", "e"]) {
+            made.length = 0;
+            V = { id };
+            await renderInput(jobs[id]);
+            out[id] = [made.some((e) => e.tag === "canvas"), made.filter((e) => e.tag === "p").map(text)];
+          }
+          cloudGL = () => null;
+          made.length = 0;
+          V = { id: "g" };
+          await renderInput(jobs.g);
+          const msg = one((e) => e.className === "msg"), link = msg.kids.find((e) => e.tag === "a");
+          out.g = [text(msg), { ...link.attrs }, made.some((e) => e.tag === "canvas" && e.kids.length)];
+          cloudGL = gl0;
+          made.length = 0;
+          V = { id: "p" };
+          await renderInput(jobs.p);
+          const pool = one((e) => e.tag === "select");
+          gls[gls.length - 1].on.sized();
+          await settle();
+          out.p = [made.filter((e) => e.tag === "p" && e.className === "hint").map(text), pool.kids.map((o) => [o.attrs.value, text(o)]),
+            one((e) => e.tag === "canvas").attrs["aria-label"], text(one((e) => e.className === "legend")), glbGets().pop()];
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    assert out["bar"] == ["LiDAR pointsView view 0view 2Reset", [["0", "view 0", ""], ["2", "view 2", None]]]
+    assert out["canvas"] == ["cloud", {"role": "application", "aria-roledescription": "3D view", "tabindex": "0",
+                                       "aria-describedby": "cloudlegend", "aria-label": "LiDAR points of view 0"}]
+    assert out["before"] == ["loading", []]  # no size yet: nothing fetched
+    assert out["view0"] == ["Whole scan (1,234) Used for the scale: ×1.05 (280 pts)", ["run/lidar/0.glb"],
+                            [[1234, 280, 640 / 360]]]
+    assert out["view2"] == ["Whole scan (50) Used for the scale: ×1.21 (9 pts, outlier)", "LiDAR points of view 2",
+                            ["run/lidar/0.glb", "run/lidar/2.glb"], 2]
+    assert out["again"] == [["run/lidar/0.glb", "run/lidar/2.glb"], 4, out["view2"][0]]  # fetched once per view
+    assert out["reset"] == 1
+    assert out["more"] == [2, 1, ["view 0", "view 1", "view 2"]] and out["cleared"] == 1
+    assert out["n"] == [False, ["★ view 0"]]  # no LiDAR: no section
+    assert out["e"] == [False, ["★ view 0", "No LiDAR points to show."]]
+    assert out["g"][0] == "Cannot draw the points here: download them."
+    assert out["g"][1] == {"href": "/api/jobs/g/file/run/lidar/0.glb", "download": "g_lidar_view0.glb"}
+    assert out["p"] == [["No views selected yet."], [["f00040", "f00040"], ["f00152", "f00152"]], "LiDAR points of f00040",
+                        "Whole scan (50) Used for the scale: no points", "lidar/cloud/f00040.glb"]
+
+
 # For FORM_HARNESS: the tab buttons keep their attributes in tabAttrs and their data-tab, and record focus calls in
 # focusedTabs; tabs() is the tab shown, the picked tab, the panels that show, the tabs with aria-selected="true",
 # each tab's tabindex (in tab order) and the hash.
@@ -2824,8 +3156,9 @@ def test_index_html_tabs_and_their_panels():
         start = html.index(f'id="{parent}"')
         return start < html.index(f'id="{child}"') < html.index(f'id="{panels[panels.index(parent) + 1]}"') \
             if parent != "run" else start < html.index(f'id="{child}"')
-    for child in ("topicrow", "hdr", "strayinfo", "videoinfo", "inputvideo", "inputviews"):
+    for child in ("topicrow", "hdr", "strayinfo", "videoinfo", "inputvideo", "inputviews", "inputlidar"):
         assert inside(child, "input"), child
+    assert order.index("inputviews") + 1 == order.index("inputlidar")  # the LiDAR points under the views
     for child in ("framesum", "inputwarn", "towarn", "startform", "grid", "lidarbox", "start"):
         assert inside(child, "frames"), child
     assert at["hdr"][1]["tabindex"] == at["straywarn"][1]["tabindex"] == "-1"  # "Show" focuses them
@@ -2834,9 +3167,14 @@ def test_index_html_tabs_and_their_panels():
     for child in ("runsum", "stages", "log"):
         assert inside(child, "run"), child
     assert order.index("retry") < order.index("tabs") and order.index("cancel") < order.index("tabs")  # in the job's header
-    # Results: the viewers, then the facts and the part masks, and no download links.
-    assert [order.index(x) for x in ("resultsbody", "viewers", "facts2", "partchecks")] == \
-        sorted(order.index(x) for x in ("resultsbody", "viewers", "facts2", "partchecks"))
+    # Results: the 360 video, the viewers, then the facts and the part masks, and no download links.
+    assert [order.index(x) for x in ("resultsbody", "spin", "viewers", "facts2", "partchecks")] == \
+        sorted(order.index(x) for x in ("resultsbody", "spin", "viewers", "facts2", "partchecks"))
+    assert order.index("spin") == order.index("resultsbody") + 1
+    # The 360 video is asked for in the settings, off at first, before the review box.
+    assert inside("turntable", "frames") and order.index("lidarbox") < order.index("turntable") < order.index("pause")
+    assert at["turntable"][0] == "input" and at["turntable"][1]["type"] == "checkbox" and "checked" not in at["turntable"][1]
+    assert '<label class="check"><input type="checkbox" id="turntable"> Make a 360 video</label>' in html
     assert inside("viewers", "results") and inside("downloadsbody", "downloads") and "todl" not in html
     # The part list's Undo edits is a full-height button, like the review bar's.
     assert at["partsreset"][1]["class"] == "secondary"
@@ -3317,16 +3655,18 @@ def test_app_js_tabs_take_the_focus_after_actions():
 
 
 def test_app_js_help_link_follows_the_screen():
-    """The header has one Help link, after the job's name and before the connection line, to help.html in a new tab
-    (it stays there until app.js routes), and no subtitle. Its section follows the screen: the jobs list goes to
+    """The header has one Help link, after the job's name and the Demos link and before the connection line, to
+    help.html in a new tab (it stays there until app.js routes), and no subtitle. Its section follows the screen: the jobs list goes to
     adding a job, a waiting panel to its own section (the first one shown, in page order), else the tab shown. A
     refresh that shows a waiting panel moves it there; a job that does not load leaves it at the top of the page. The link is quiet and sits at the right of the header."""
     import re
     html = (server.STATIC / "index.html").read_text()
     header = html[html.index("<header>"):html.index("</header>")]
     link = '<a id="helplink" href="help.html" target="_blank" rel="noopener">Help</a>'
+    demos = '<a id="demolink" href="demos.html" target="_blank" rel="noopener">Demos</a>'
     assert '<a href="#/" class="brand">HARPOR</a>' in header and "brandsub" not in html and "title=" not in header
-    assert header.index('id="where"') < header.index(link) < header.index('id="conn"') and header.count("<a ") == 2
+    assert header.index('id="where"') < header.index(demos) < header.index(link) < header.index('id="conn"')
+    assert header.count("<a ") == 3
     review = tab_job("v", "review", lidar="skipped", **{n: "done" for n in ("frames", "extract", "masks", "prep", "da3", "select")})
     out = run_form_js(ELEMENTS + TAB_SETUP + """
         (async () => {
@@ -3373,8 +3713,12 @@ def test_app_js_help_link_follows_the_screen():
                                                  "inputs", "settings", "status"])
     css = (server.STATIC / "style.css").read_text()
     rule = lambda sel: re.search(r"(?:^|\n)" + re.escape(sel) + r" \{([^}]*)\}", css).group(1)  # noqa: E731
-    assert all(x in rule("#helplink") for x in ("margin-left: auto", "var(--muted)", "var(--t-s)"))
+    assert all(x in rule("#demolink, #helplink") for x in ("margin-left: auto", "var(--muted)", "var(--t-s)"))
+    assert "margin-left: 0" in rule("#demolink + #helplink")  # the help and privacy pages have Help alone
     assert "margin-left" not in rule(".conn") and "margin-left" not in rule("header .account")
+    # The account menu's button is a person icon drawn in the text color, with no text to cut.
+    assert all(x in rule(".account .person") for x in ("fill: none", "stroke: currentColor"))
+    assert "text-overflow" not in rule(".account > summary") and "white-space" not in rule(".account > summary")
 
 
 def test_app_js_error_box_links_to_troubleshooting():
@@ -3612,17 +3956,131 @@ def test_app_js_viewer_says_while_its_mesh_loads():
     assert all(x in mvload for x in ("height: 100%", "align-items: center", "var(--muted)"))  # "Loading the mesh"
 
 
+def test_app_js_results_play_the_360_video():
+    """A job with the 360 video shows it first in Results: muted, looping, inline, with controls and a name, starting by
+    itself unless the system asks for reduced motion. A refresh, also with a new signed URL, does not draw it again; a
+    new file (Build again) does. It stops when the Results tab hides and plays again when the tab shows, unless the user
+    paused it. When it cannot play, its caption stays and a line offers the file. Without the file, nothing shows, and
+    another job's page or a new build takes the old video away."""
+    out = run_form_js(ELEMENTS + """
+        (async () => {
+          const out = {}, mp4 = "turntable/turntable.mp4";
+          const job = { id: "j", prompt: "office chair", files: ["run/posed.glb", mp4], sizes: { [mp4]: 2100000 },
+            stages: { turntable: { status: "done", ended: 1000.5 } } };
+          const vids = () => made.filter((e) => e.tag === "video"), figs = () => made.filter((e) => e.className === "spinfig");
+          V = { id: "j" };
+          renderSpin(job);
+          const video = vids()[0], fig = figs()[0];
+          out.video = { ...video.attrs, muted: video.muted, calls: [...video.calls] };
+          out.fig = [fig.tag, fig.kids.map((k) => k.tag), text(fig.kids[0])];
+          renderSpin(job);
+          renderSpin({ ...job, sizes: { ...job.sizes } });
+          out.again = [vids().length, V.spin === video];
+          // The tabs: the video stops when Results hides, and plays again when it shows.
+          V.tab = "results";
+          selectTab("downloads");
+          out.leave = [...video.calls];
+          selectTab("inputs");
+          selectTab("results");
+          out.back = [...video.calls];
+          video.paused = true;  // the user paused it: it stays paused
+          selectTab("downloads");
+          selectTab("results");
+          out.paused = [...video.calls];
+          video.onerror();
+          out.failed = [text(fig), fig.kids[1].kids[1].attrs, V.spin];
+          // A new file: drawn again, and not started while another tab shows.
+          V.tab = "log";
+          renderSpin({ ...job, stages: { turntable: { status: "done", ended: 2000.5 } } });
+          out.newfile = [vids().length, vids()[1].calls];
+          // Reduced motion: no autoplay, and the Results tab does not start it.
+          made.length = 0;
+          globalThis.matchMedia = (q) => ({ matches: q === "(prefers-reduced-motion: reduce)" });
+          V = { id: "k" };
+          renderSpin({ ...job, id: "k", prompt: null });
+          selectTab("results");
+          out.still = [vids()[0].attrs.autoplay, vids()[0].attrs["aria-label"], vids()[0].calls];
+          // No file: nothing, and the old video goes.
+          renderSpin({ ...job, files: ["run/posed.glb"] });
+          out.gone = [V.spin, V.spinKey];
+          console.log(JSON.stringify(out));
+        })()
+        """)
+    assert out["video"] == {"src": "/api/jobs/j/file/turntable/turntable.mp4", "autoplay": "", "muted": True, "loop": "",
+                            "playsinline": "", "controls": "", "preload": "auto", "aria-label": "360 video of the office chair",
+                            "calls": []}
+    assert out["fig"] == ["figure", ["figcaption", "video"], "360 video"]
+    assert out["again"] == [1, True]
+    assert out["leave"] == ["pause"] and out["back"] == ["pause", "pause", "play"]
+    assert out["paused"] == ["pause", "pause", "play", "pause"]
+    assert out["failed"][0] == "360 videoCould not play the video: download it."
+    assert out["failed"][1] == {"href": "/api/jobs/j/file/turntable/turntable.mp4", "download": "j_turntable.mp4"}
+    assert out["failed"][2] is None
+    assert out["newfile"] == [2, ["pause"]]
+    assert out["still"] == [None, "360 video of the object", []]
+    assert out["gone"] == [None, None]
+
+
+def test_app_js_retry_on_a_done_job_is_only_for_the_360_video():
+    """A done job whose 360 video failed (steps.OPTIONAL) offers Retry from turntable, and the click asks the server for
+    that stage; a done job with every stage done offers no Retry."""
+    names = ["topics", "frames", *jobs.BUILD]
+    stages = lambda **o: [{"name": n, "status": o.get(n, "done")} for n in names]  # noqa: E731
+    out = run_form_js("""
+        (async () => {
+          const out = {}, state = (stages) => ({ status: "done", stages, agent: "none", key_ok: false, warnings: [], error: null });
+          const job = { id: "j", video: { name: "chair.mov" } };
+          V = { id: "j", job };
+          renderState(state(""" + json.dumps(stages(turntable="failed")) + """));
+          out.failed = [$("#retry").hidden, $("#retry").textContent];
+          posts.length = 0;
+          await $("#retry").onclick();
+          out.sent = posts.map((p) => [p.url, p.body.from]);
+          V = { id: "j", job };  // the click's refresh took the reply
+          renderState(state(""" + json.dumps(stages()) + """));
+          out.done = $("#retry").hidden;
+          console.log(JSON.stringify(out));
+        })()
+        """)
+    assert out["failed"] == [False, "Retry from turntable"]
+    assert out["sent"] == [["/api/jobs/j/continue", "turntable"]]
+    assert out["done"] is True
+
+
+def test_app_js_new_build_and_another_job_take_the_360_video_away():
+    """drawJob hides the results of a job that builds again, and the old 360 video goes with them; openJob takes away the
+    last job's video before it draws the next one."""
+    out = run_dom_js(WALK + """
+        (async () => {
+          const out = {};
+          V = { id: "j", spin: new Elem("video"), spinKey: "k" };
+          $("#spin").replaceChildren(new Elem("figure"));
+          await drawJob({ id: "j", status: "running", files: [], sizes: {}, video: { name: "x.mp4" }, prompt: "box",
+            source: { kind: "video" }, progress: [], agent: "none", agent_result: null, articulated: false,
+            parts_review: false, stages: { frames: { status: "pending" }, select: { status: "pending" } } });
+          out.build = [V.spin, V.spinKey, $("#spin").kids.length, $("#resultsbody").hidden];
+          $("#spin").replaceChildren(new Elem("figure"));
+          await openJob("m").catch(() => {});
+          out.open = [V.id, V.spin || null, $("#spin").kids.length];
+          console.log(JSON.stringify(out));
+        })()
+        """, {"/api/jobs/m": {"__unused": True}})
+    assert out["build"] == [None, None, 0, True]
+    assert out["open"] == ["m", None, 0]
+
+
 # ---- the Downloads tab (app.js renderDownloads) ----
 
 DL_SIZES = {"results.zip": 12_345_678, "run/posed.glb": 1_234_567, "run/parts.glb": 987_654, "refined.glb": 2_500_000,
-            "physics/aligned.glb": 1_300_000, "physics/urdf/model.urdf": 4_321, "run/placement.json": 5_678,
+            "physics/aligned.glb": 1_300_000, "turntable/turntable.mp4": 2_100_000, "physics/urdf/model.urdf": 4_321, "run/placement.json": 5_678,
             "physics/summary.json": 3_210, "pool/lidar.json": 45_678, "selection.json": 23_456, "run/parts.json": 812,
             "physics/mjcf/mjcf.json": 6_789}
 
 
 def test_app_js_downloads_tab():
-    """The Downloads tab lists the job's files that exist, in four groups, each under an h3: Everything (results.zip),
-    Meshes, Simulation (model.urdf, which says that it needs the meshes in results.zip) and Records. Each row is the
+    """The Downloads tab lists the job's files that exist, in five groups, each under an h3: Everything (results.zip),
+    Meshes, Video (the 360 video), Simulation (model.urdf, which says that it needs the meshes in results.zip) and
+    Records. Each row is the
     file name as a download link that saves as <job id>_<file>, and its size from job.sizes (none when the server
     gave none), and nothing else. Groups without files are left out, a file that the tab does not know is ignored,
     and a running build lists none. Without results.zip, a line above the groups says why: the build has not made it
@@ -3633,14 +4091,16 @@ def test_app_js_downloads_tab():
     cases = {
         "a": {**job, "status": "done", "files": every, "sizes": DL_SIZES},
         "r": {"id": "r", "status": "done", "agent": "none", "agent_result": None, "articulated": False,
-              "files": [f for f in every if f not in ("run/parts.glb", "run/parts.json", "refined.glb", "pool/lidar.json")]
+              "files": [f for f in every if f not in ("run/parts.glb", "run/parts.json", "refined.glb", "pool/lidar.json",
+                                                      "turntable/turntable.mp4")]
               + ["frames/preview.mp4"], "sizes": {k: v for k, v in DL_SIZES.items() if k != "physics/aligned.glb"}},
         "v": {"id": "v", "status": "review", "files": ["selection.json", "pool/lidar.json"], "sizes": DL_SIZES},
         "f": {"id": "f", "status": "failed", "files": ["selection.json", "run/posed.glb", "run/placement.json"]},
         "c": {"id": "c", "status": "cancelled", "files": ["selection.json"], "sizes": {}},
         # A job from before the URDF stage: results.zip has no urdf/ (jobs.package zips what exists).
         "u": {"id": "u", "status": "done", "agent": "none", "agent_result": None,
-              "files": [f for f in every if f not in ("physics/urdf/model.urdf", "run/parts.glb", "run/parts.json")]},
+              "files": [f for f in every if f not in ("physics/urdf/model.urdf", "run/parts.glb", "run/parts.json",
+                                                      "turntable/turntable.mp4")]},
         "y": {"id": "y", "status": "ready", "files": [], "sizes": {}},
         "z": {"id": "z", "status": "analyzing", "files": [], "sizes": {}},
         "n": {"id": "n", "status": "cancelled", "files": [], "sizes": {}},
@@ -3686,12 +4146,12 @@ def test_app_js_downloads_tab():
                             "100 MB", "999 MB", "1.00 GB", "1.00 GB", "2.50 GB"]
     a = out["a"]
     assert a["none"][0] is True and a["body"] is False and a["note"] is None
-    assert [g["title"] for g in a["groups"]] == ["Everything", "Meshes", "Simulation", "Records"]
+    assert [g["title"] for g in a["groups"]] == ["Everything", "Meshes", "Video", "Simulation", "Records"]
     assert all(g["labelled"] and g["tag"] == "h3" and g["cls"] == ["dlgroup", "ul", "dlist"] for g in a["groups"])
     rows = [r for g in a["groups"] for r in g["rows"]]
     assert [(r["name"], r["size"]) for r in rows] == [
         ("results.zip", "12.3 MB"), ("posed.glb", "1.2 MB"), ("parts.glb", "988 KB"), ("refined.glb", "2.5 MB"),
-        ("aligned.glb", "1.3 MB"), ("model.urdf", "4.3 KB"), ("placement.json", "5.7 KB"), ("summary.json", "3.2 KB"),
+        ("aligned.glb", "1.3 MB"), ("turntable.mp4", "2.1 MB"), ("model.urdf", "4.3 KB"), ("placement.json", "5.7 KB"), ("summary.json", "3.2 KB"),
         ("lidar.json", "46 KB"), ("selection.json", "23 KB"), ("parts.json", "812 B"), ("mjcf.json", "6.8 KB")]
     by_name = {r["name"]: r for r in rows}
     assert sorted(r["href"] for r in rows) == sorted(f"/api/jobs/a/file/{p}" for p in every)
@@ -3701,7 +4161,7 @@ def test_app_js_downloads_tab():
     assert by_name["results.zip"]["cls"] == "dl primary" and all(r["cls"] == "dl" for r in rows if r["name"] != "results.zip")
     assert all(r["kids"] == 2 and r["li"] == "dlrow" for r in rows)  # the link and its size, nothing else
     texts = {g["title"]: g["text"] for g in a["groups"]}
-    assert texts == {"Everything": None, "Meshes": None, "Simulation": out["sim"], "Records": None}
+    assert texts == {"Everything": None, "Meshes": None, "Video": None, "Simulation": out["sim"], "Records": None}
     assert out["sim"] == "Needs the meshes in results.zip."
     # A rigid job without the agent or LiDAR: only its files, a file with no size shows none, an unknown file is left out.
     r = out["r"]
@@ -3762,6 +4222,24 @@ def test_app_js_downloads_survive_a_results_file_that_does_not_parse():
     assert out["facts"] == out["unread"] + "Unexpected end of JSON input" and out["checks"] == 0
     assert out["results"] == [False, True]  # the viewer still shows
     assert out["inputs"] == [True, False]  # drawJob went on past the results
+
+
+def test_style_css_360_video():
+    """The 360 video is square and as tall as a viewer at most, never wider than the panel, on the viewers' background
+    with their hairline; its caption is a viewer's; on a wide screen with one viewer it sits beside the viewer, 260 px
+    at most, above the facts, so the facts show on the first screen."""
+    import re
+    css = (server.STATIC / "style.css").read_text()
+    video = re.search(r"\n\.spinfig video \{([^}]*)\}", css).group(1)
+    assert all(x in video for x in ("width: min(100%, clamp(260px, 45vh, 420px))", "aspect-ratio: 1", "height: auto",
+                                    "var(--viewer-bg)", "1px solid var(--line)"))
+    assert ".viewers figcaption, .spinfig figcaption {" in css
+    wide = css[css.index("@media (min-width: 1100px)"):]
+    wide = wide[:wide.index("\n}")]
+    assert "#resultsbody.onefig > #spin { grid-column: 2; grid-row: 1; }" in wide
+    assert "#resultsbody.onefig > #facts2 { grid-column: 2; grid-row: 2; margin-top: 0; }" in wide
+    assert "grid-row: 1 / span 2" in wide and "grid-template-rows: auto 1fr" in wide
+    assert "#resultsbody.onefig .spinfig video { width: min(100%, 260px); }" in wide
 
 
 def test_style_css_downloads():

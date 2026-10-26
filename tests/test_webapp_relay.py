@@ -369,16 +369,20 @@ def test_globs_cover_every_allow_path():
     assert relay.owner("logs/masks.log") == "masks" and relay.owner("agent/s/x") is None
     assert {relay.role_of(p) for p in server.OUTPUTS} == {"result"}
     assert relay.role_of("logs/frames.log") == "log" and relay.role_of("frames/thumbs/0.jpg") == "review"
+    # The LiDAR points of the run's views: select copies them, and they leave the site with the review images.
+    assert relay.owner("run/lidar/0.glb") == "select" and relay.role_of("run/lidar/11.glb") == "review"
 
 
 def job_folder(tmp_path, running=()):
-    """A job folder with one file per ALLOW path, a few that ALLOW does not serve, and job.json."""
+    """A job folder with one file per ALLOW path, a few that ALLOW does not serve, and job.json. Its LiDAR scale
+    failed, so the pool's points are served too (server.pool_clouds)."""
     J = tmp_path / LOCAL
     for alt in relay.GLOBS:
         p = J / alternative_sample(alt)
         p.parent.mkdir(parents=True, exist_ok=True)
         if alt != r"refined\.glb":  # not a file of the folder: resolve maps it to the agent's GLB
             p.write_bytes(b"data of " + p.name.encode())
+    (J / "pool" / "lidar.json").write_text(json.dumps({"ok": False}))
     (J / "agent" / "s").mkdir(parents=True)
     (J / "agent" / "s" / "final.glb").write_bytes(b"glb")
     (J / "agent" / "result.json").write_text(json.dumps({"source": "s", "verdict": "improved", "glb": "final.glb"}))
@@ -402,13 +406,17 @@ def test_mirror_plan_takes_every_allow_path_that_resolve_accepts(tmp_path):
     assert got["refined.glb"].path == (J / "agent" / "s" / "final.glb").resolve()  # steps.agent_glb
     assert got["results.zip"].role == "result" and got["logs/masks.log"].role == "log"
     assert got["frames/thumbs/12.jpg"].role == "review"
+    assert [(f.rel, f.role) for f in plan if f.rel.startswith("run/lidar/")] == [(alternative_sample(r"run/lidar/\d{1,3}\.glb"),
+                                                                                  "review")]
+    assert got["turntable/turntable.mp4"].role == "result"  # the 360 video: a result, kept 90 days
 
 
 def test_mirror_plan_holds_back_the_files_of_a_running_stage(tmp_path):
-    J, job = job_folder(tmp_path, running=("frames", "place", "masks"))
+    J, job = job_folder(tmp_path, running=("frames", "place", "masks", "turntable"))
     rels = {f.rel for f in relay.mirror_plan(J, job)}
     assert not {"frames/thumbs/12.jpg", "frames/preview.mp4", "run/posed.glb", "run/overlay_12.png",
-                "run/placement.json", "logs/masks.log", "scene/sam3_masks/check/f00012.jpg"} & rels
+                "run/placement.json", "logs/masks.log", "scene/sam3_masks/check/f00012.jpg",
+                "turntable/turntable.mp4"} & rels
     assert {"frames/topics.json", "run/input/images/3.png", "selection.json", "results.zip"} <= rels
 
 

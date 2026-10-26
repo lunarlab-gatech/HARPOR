@@ -36,6 +36,10 @@ confirm_parts (mode "vlm_edit"; whatever auto_continue says), or the user typed 
 (mode "user", which is also the mode of a job without an agent). "confirmed" turns true when the user
 confirms the list, and false again whenever propose runs. A rigid job skips propose and parts.
 
+job.json "turntable" (false at first; older jobs lack it) asks for the 360 video: the turntable stage
+(steps.py) renders it after urdf. It is optional (steps.OPTIONAL): when it fails, the job gets a warning
+and the build goes on to package.
+
 The API key stays in the runner's memory, with the agent it was checked for. For the stages that take
 it (steps.needs_key: the agent stage, and the propose stage when the VLM lists the parts) it is
 written to /dev/shm/gator-webapp-<uid>/<job_id>.env (folder 0700, file 0600, OPENAI_API_KEY=<key>
@@ -52,10 +56,10 @@ holder_alive); a file it cannot check counts as stale.
     python -m gator.webapp.jobs package --job J
 
 writes J/results.zip: posed.glb, refined.glb (the agent's GLB, if physics used it), parts.glb and
-parts.json (an articulated job's split parts), aligned.glb, summary.json, mjcf/, usd/, urdf/,
-placement.json, selection.json, lidar.json (the metric scale from LiDAR) and agent_result.json,
-without any file that the agent result lists in key_found_in (agent_result.json too, when the
-session's result.json is listed).
+parts.json (an articulated job's split parts), aligned.glb, turntable.mp4 (the 360 video, when the job
+asked for it), summary.json, mjcf/, usd/, urdf/, placement.json, selection.json, lidar.json (the metric
+scale from LiDAR) and agent_result.json, without any file that the agent result lists in key_found_in
+(agent_result.json too, when the session's result.json is listed).
 """
 
 import argparse
@@ -86,14 +90,14 @@ BAGS = (".bag", ".mcap", ".db3")
 STRAY = (".zip",)  # a Stray Scanner export folder, zipped
 INPUTS = {"video": "a video", "rosbag": "a rosbag", "stray": "a Stray Scanner capture"}  # for messages
 # What a stage's rerun must not find from an earlier run; the other stages replace their own files.
-# The LiDAR samples cache (lidar/samples.*) stays: the lidar stage checks its key. A killed frames stage
-# leaves its half-written preview video (.tmp_preview.mp4).
+# The LiDAR samples cache (lidar/samples.* and lidar/clouds.npz) stays: the lidar stage checks its key. A killed
+# frames stage leaves its half-written preview video (.tmp_preview.mp4).
 DERIVED = {"frames": ("frames/meta.json", "frames/thumbs", "frames/stamps.json", "frames/preview.mp4",
                       "frames/.tmp_preview.mp4"),
-           "extract": ("frames/pool.json", "scene", "pool"), "lidar": ("pool/lidar.json", "lidar/check"),
+           "extract": ("frames/pool.json", "scene", "pool"), "lidar": ("pool/lidar.json", "lidar/check", "lidar/cloud"),
            "select": ("selection.json", "run"), "propose": ("run/proposal.json",),
            "parts": ("run/parts", "run/parts.glb", "run/parts.json"), "agent": ("agent",), "align": ("physics",),
-           "package": ("results.zip",)}
+           "turntable": ("turntable",), "package": ("results.zip",)}
 NO_KEY = {a: f"The server no longer holds the {p} API key (it restarted); paste the key again and press Build."
           for a, p in steps.PROVIDER.items()}
 NO_KEY_LATER = {a: f"The job needs the {p} API key now; paste it and press Build." for a, p in steps.PROVIDER.items()}
@@ -138,7 +142,7 @@ def create_job(runs_dir, filename):
              "mode": "auto", "prompt": None, "slug": None, "n_views": 6, "picks": [], "view0": None,
              "auto_continue": False, "overrides": {"locked": [], "excluded": [], "instance": {}},
              "articulated": False, "parts": dict(PARTS), "lidar": {"kind": "stray"} if k == "stray" else None,
-             "calibration": None,
+             "calibration": None, "turntable": False,
              "stages": {s: dict(STAGE) for s in steps.NAMES}, "current": None, "error": None, "warnings": [],
              "key_ok": False})
     return job_id, path
@@ -299,16 +303,16 @@ def last_progress(log):
 def progress(job_dir):
     """Every stage's state (name, gpu, status, started, ended, returncode, note, seconds), with progress
     from the last PROGRESS line of the running stage's log. A rigid job made before the part stages has no
-    record of propose and parts, and a job made before LiDAR none of lidar; they show as skipped, as the
-    build would skip them."""
+    record of propose and parts, a job made before LiDAR none of lidar, and one made before the 360 video
+    none of turntable; they show as skipped, as the build would skip them."""
     J = Path(job_dir)
     job, now, out = load(J), time.time(), []
     for s in steps.STAGES:
         rec = job["stages"].get(s["name"])
         if rec is None and s["name"] in ("propose", "parts") and not steps.articulated(job):
             rec = {"status": "skipped", "note": steps.skip(s["name"], J)}
-        if rec is None and s["name"] == "lidar":
-            why = steps.skip("lidar", J)
+        if rec is None and s["name"] in ("lidar", "turntable"):
+            why = steps.skip(s["name"], J)
             rec = {"status": "skipped", "note": why} if why else None
         st = {**STAGE, **(rec or {}), "name": s["name"], "gpu": s["gpu"], "seconds": None, "progress": None}
         if st["started"]:
@@ -558,12 +562,13 @@ class Runner:
 
     def submit_build(self, job_id, api_key, **settings):
         """Queue the build from extract with the settings in job.json (mode, prompt, n_views, picks, view0,
-        auto_continue, overrides, agent, articulated, parts, lidar); settings are written to job.json first,
-        under the same lock. parts is {"mode": steps.PARTS_MODES, "list": the typed parts}; it is stored with
-        the mode the job runs with (parts_settings). lidar is None, {"topic": T} or {"kind": "stray"}, stored
-        as lidar_settings gives it (its ValueError passes on); the camera_info check, which opens the bag,
-        is left to the caller (the server's Start makes it). api_key is for the agent (and the VLM of the part
-        list), unless the agent is "none". None queues the build without a key (a key held for the job is
+        auto_continue, overrides, agent, articulated, parts, lidar, turntable); settings are written to
+        job.json first, under the same lock. parts is {"mode": steps.PARTS_MODES, "list": the typed parts}; it
+        is stored with the mode the job runs with (parts_settings). lidar is None, {"topic": T} or
+        {"kind": "stray"}, stored as lidar_settings gives it (its ValueError passes on); the camera_info check,
+        which opens the bag, is left to the caller (the server's Start makes it). turntable is true or false;
+        the server checks its type, as it does for mode and n_views. api_key is for the agent (and the VLM of
+        the part list), unless the agent is "none". None queues the build without a key (a key held for the job is
         dropped, key_ok is false): the job waits in review with NO_KEY_LATER when it reaches a stage that
         needs the key. An earlier build's outputs are deleted first."""
         from gator.stage_a.sam3_masks import slug
@@ -610,8 +615,9 @@ class Runner:
         review, else unless auto_continue). From sam3d on (Build, or a retry after a failure): the
         stages that finished are skipped, except that another agent than the job's reruns the agent
         stage and every stage after it (the part list stays). Another agent drops the key held for the
-        old one. Returns the stage the run starts from: from_stage, or the agent stage when another
-        agent moves it earlier.
+        old one. From an optional stage (steps.OPTIONAL; a done job's Retry after its 360 video failed):
+        it and every stage after it run again, since package zipped its old output. Returns the stage
+        the run starts from: from_stage, or the agent stage when another agent moves it earlier.
 
         confirm_parts, while the job waits for its part list (steps.waits_for_parts): parts_list, or the
         VLM's own list when it is None, becomes the confirmed list in run/proposal.json
@@ -671,6 +677,9 @@ class Runner:
                 raise ValueError("the views are not selected yet")
             else:
                 pause = False
+                if from_stage in steps.OPTIONAL:  # results.zip holds its old output, or none
+                    _clear(J, steps.NAMES[i:])
+                    stages.update({s: dict(STAGE) for s in steps.NAMES[i:]})
             if confirm_parts:
                 proposal = propose.confirm(J, parts_list)
                 _clear(J, steps.NAMES[i:])
@@ -878,7 +887,7 @@ class Runner:
         for stage in steps.NAMES[steps.NAMES.index(first):]:
             # Jobs from before the parts stages lack their records.
             ran = not (load(J)["stages"].get(stage, {}).get("status") == "done" and steps.done(stage, J))
-            if ran and self._run_stage(job_id, stage) not in ("done", "skipped"):
+            if ran and self._run_stage(job_id, stage) not in ("done", "skipped", "warned"):
                 return
             if (ran and stage == steps.REVIEW_AFTER and pause) or steps.pause_after(stage, J):
                 self._status(job_id, "review", current=None)  # after propose: the part list waits for the user
@@ -886,7 +895,8 @@ class Runner:
         self._status(job_id, "done", current=None)
 
     def _run_stage(self, job_id, stage):
-        """Run one stage and record it. Returns done, skipped, failed, review or cancelled."""
+        """Run one stage and record it. Returns done, skipped, warned (an optional stage failed: steps.OPTIONAL;
+        the job gets a warning and the build goes on), failed, review or cancelled."""
         J = self.runs / job_id
         reason = steps.skip(stage, J)
         if reason:
@@ -945,6 +955,10 @@ class Runner:
             return "review"
         why = why or (f"exit {rc}: {_last_line(log_path)}" if rc else "it finished without writing its output")
         update_stage(J, stage, status="failed", note=why, **ended)
+        if stage in steps.OPTIONAL:
+            with self._cv:
+                update(J, warnings=[*(load(J).get("warnings") or []), f"{steps.OPTIONAL[stage]}: {why}"])
+            return "warned"
         self._status(job_id, "failed", current=None, error=f"{stage}: {why}")
         return "failed"
 
@@ -999,15 +1013,18 @@ def package(job_dir):
             keyed.add(result.resolve())
     files = [("posed.glb", J / "run" / "posed.glb"), ("refined.glb", steps.agent_glb(J)),
              ("parts.glb", J / "run" / "parts.glb"), ("parts.json", J / "run" / "parts.json"),
-             ("aligned.glb", J / "physics" / "aligned.glb"), ("summary.json", J / "physics" / "summary.json"),
+             ("aligned.glb", J / "physics" / "aligned.glb"), ("turntable.mp4", J / "turntable" / "turntable.mp4"),
+             ("summary.json", J / "physics" / "summary.json"),
              ("placement.json", J / "run" / "placement.json"), ("selection.json", J / "selection.json"),
              ("lidar.json", J / "pool" / "lidar.json"), ("agent_result.json", result)]
     for d in ("mjcf", "usd", "urdf"):
         files += [(f"{d}/{p.relative_to(J / 'physics' / d)}", p) for p in sorted((J / "physics" / d).rglob("*"))]
-    # align copies the GLB byte for byte, and MJCF, USD and URDF copy its meshes and textures.
+    # align copies the GLB byte for byte, MJCF, USD and URDF copy its meshes and textures, and the 360 video
+    # shows it.
     used = (json.loads((J / "physics" / "up.json").read_text()).get("glb") if (J / "physics" / "up.json").is_file() else None)
     if used and Path(used).resolve() in keyed:
-        keyed |= {p.resolve() for a, p in files if a == "aligned.glb" or a.startswith(("mjcf/", "usd/", "urdf/"))}
+        keyed |= {p.resolve() for a, p in files
+                  if a in ("aligned.glb", "turntable.mp4") or a.startswith(("mjcf/", "usd/", "urdf/"))}
     tmp = J / ".results.zip.tmp"
     names = []
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:

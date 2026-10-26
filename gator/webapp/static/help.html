@@ -32,6 +32,7 @@
     <li><a href="#joints">Joints and links</a></li>
     <li><a href="#physics">Mass and materials</a></li>
     <li><a href="#downloads">Downloads</a></li>
+    <li><a href="#demos">Demos</a></li>
     <li><a href="#retry">Retry, cancel and build again</a></li>
     <li><a href="#troubleshooting">Troubleshooting</a></li>
   </ol>
@@ -139,6 +140,7 @@
     <tr><td><code>mjcf</code></td><td>Builds the MuJoCo model.</td><td></td></tr>
     <tr><td><code>usd</code></td><td>Builds the USD model.</td><td></td></tr>
     <tr><td><code>urdf</code></td><td>Builds the URDF model.</td><td></td></tr>
+    <tr><td><code>turntable</code></td><td>Makes the 360 video, when you ask for one.</td><td>GPU</td></tr>
     <tr><td><code>package</code></td><td>Writes results.zip.</td><td></td></tr>
   </tbody>
 </table>
@@ -188,6 +190,10 @@
   <dd>For an object with moving parts. See <a href="#parts">Parts of an articulated object</a>.</dd>
   <dt>Use LiDAR for metric scale</dt>
   <dd>See <a href="#lidar">Metric scale and LiDAR</a>.</dd>
+  <dt>Make a 360 video</dt>
+  <dd>Off at first. At the end of the build, the app makes an 8 s video of the object as it turns once. The object
+    stands upright, and the camera looks from 20° above. This adds a few minutes on the GPU. When the video fails, the
+    job still finishes, with a warning.</dd>
   <dt>Review views before building</dt>
   <dd>On at first. The build stops after the view selection, so you can check the views before the mesh is made.</dd>
 </dl>
@@ -466,8 +472,8 @@ time_offset_s: 0.0</pre>
 
 <section id="inputs">
 <h2>Inputs tab</h2>
-<p>The Inputs tab shows the input once it is read: its name and kind, a preview video, facts about the frames, and the
-  views that the build used.</p>
+<p>The Inputs tab shows the input once it is read: its name and kind, a preview video, facts about the frames, the
+  views that the build used and, for a job with LiDAR, their LiDAR points.</p>
 
 <h3>Preview and views</h3>
 <p>The app makes the preview video when it reads the input. A job read before the app made previews has none. The
@@ -476,6 +482,22 @@ time_offset_s: 0.0</pre>
   and its time. ★ marks view 0.</p>
 <p>After the place stage, Mesh fit draws the posed mesh in red and the outline of the SAM 3 mask in green on each view.
   A mesh that strays from the green outline shows a poor fit.</p>
+
+<h3>LiDAR points</h3>
+<p>A job with LiDAR shows the LiDAR points of each view in 3D, under Views used. View picks the view. When the scale
+  fails, there are no views used yet. The tab then shows the points of every candidate view, named by its frame, so you
+  can check the calibration.</p>
+<p>Gray points are the view's whole scan. For a rosbag, these are the LiDAR's points at the frame's time (within 50 ms,
+  or the nearest scan when the bag has no point times), also those outside the picture, thinned at random to at most
+  60,000. For a Stray capture, they are every depth pixel, also the doubtful ones.</p>
+<p>Blue points are the ones the scale used: inside the object's mask, not hidden behind nearer points, and with a
+  confident DA3 depth. A view marked outlier, scattered or few points was left out of the scale (see
+  <a href="#lidar">How the scale is found</a>).</p>
+<p>The view starts where the camera stood, so it looks like the photo. The small pyramid marks the camera. Drag to turn,
+  and use the wheel or pinch to zoom. On a focused view, the arrow keys turn and + and - zoom. Reset goes back to the
+  start.</p>
+<p>A Stray capture needs the camera's intrinsics (in odometry.csv, or camera_matrix.csv) for its points. A job built
+  before this view has no LiDAR points until its lidar stage runs again.</p>
 
 <h3>Frame facts</h3>
 <p>The Video line (Stray capture for a Stray Scanner capture) opens the facts: frames, length, frame rate, size, codec
@@ -493,8 +515,13 @@ time_offset_s: 0.0</pre>
 
 <section id="results">
 <h2>Results</h2>
-<p>The Results tab shows the meshes in 3D viewers, then a list of facts. Drag to turn a mesh, and scroll to zoom.</p>
+<p>The Results tab shows the 360 video, the meshes in 3D viewers, then a list of facts. Drag to turn a mesh, and
+  scroll to zoom.</p>
 <dl>
+  <dt>360 video</dt>
+  <dd>Shows when you asked for one. It is the mesh that physics used, turned upright, with its own materials. It plays
+    muted and loops, and its controls pause it. It stops when you leave the tab. When your system asks for reduced
+    motion, it does not start by itself.</dd>
   <dt>Posed mesh</dt>
   <dd>MV-SAM3D's mesh from all the views used, with its size, position and a small turn fitted to the SAM 3
     masks. The log and the Agent row call it the Stage A mesh.</dd>
@@ -604,6 +631,7 @@ time_offset_s: 0.0</pre>
     <tr><td><code>urdf/</code></td><td>model.urdf with its meshes in urdf/meshes.</td><td>Jobs built since the app
       made URDF models.</td></tr>
     <tr><td><code>posed.glb</code>, <code>aligned.glb</code></td><td>The meshes below.</td><td>Always.</td></tr>
+    <tr><td><code>turntable.mp4</code></td><td>The 360 video below.</td><td>When you asked for one.</td></tr>
     <tr><td><code>refined.glb</code></td><td>The agent's GLB.</td><td>When the agent ran.</td></tr>
     <tr><td><code>parts.glb</code>, <code>parts.json</code></td><td>The split parts and their record.</td><td>An
       articulated object.</td></tr>
@@ -631,6 +659,12 @@ time_offset_s: 0.0</pre>
     long side on x (z up in MuJoCo, y up in glTF). Up is the object's own axis closest to the up of the table or floor
     under it in view 0, or to the cameras' mean up when no plane fits there. Materials that let light through are made
     opaque, because VoMP rejects them.</dd>
+</dl>
+
+<h3>Video</h3>
+<dl>
+  <dt><code>turntable.mp4</code></dt>
+  <dd>The 360 video: H.264 in MP4, 720 x 720 px, 30 fps, 8 s. The object turns once, so the video loops.</dd>
 </dl>
 
 <h3>Simulation</h3>
@@ -672,6 +706,17 @@ time_offset_s: 0.0</pre>
 </dl>
 </section>
 
+<section id="demos">
+<h2>Demos</h2>
+<p>The Demos link at the top of the page opens finished jobs that the site's owner picked. Each demo plays its 360
+  video, muted and looping; its controls pause it. When your system asks for reduced motion, the videos do not start
+  by themselves. Open 3D view to turn the model with the mouse or a finger.</p>
+<p>The facts are those of the Results tab: see <a href="#results">Results</a>, <a href="#joints">Joints and links</a>
+  and <a href="#physics">Mass and materials</a>. The files are those of the Downloads tab, and each one downloads as
+  <code>&lt;demo&gt;_&lt;name&gt;</code>: see <a href="#downloads">Downloads</a>. The 3D view shows aligned.glb, the
+  mesh turned upright.</p>
+</section>
+
 <section id="retry">
 <h2>Retry, cancel and build again</h2>
 <dl>
@@ -679,7 +724,8 @@ time_offset_s: 0.0</pre>
   <dd>On a failed or cancelled job. It continues from the first stage that is not done, and its label names that
     stage, such as Retry from sam3d. Read input again means that the input was not read yet. Back to part list means
     that the job stopped before you confirmed its part list. After a change of the calibration, Retry starts from
-    lidar.</dd>
+    lidar. A done job whose 360 video failed shows Retry from turntable. It makes the video again and then
+    results.zip.</dd>
   <dt>Cancel job</dt>
   <dd>Stops the running stage. For the API key, see <a href="#agent">The agent and API keys</a>.</dd>
   <dt>Build again</dt>
@@ -701,6 +747,9 @@ time_offset_s: 0.0</pre>
 <dl>
   <dt>lidar: …</dt>
   <dd>The LiDAR scale failed. See <a href="#lidar">Metric scale and LiDAR</a>.</dd>
+  <dt>360 video: …</dt>
+  <dd>The 360 video failed, and the rest of the job is done. The Log tab has the turntable stage's log. To try again,
+    press Retry from turntable.</dd>
   <dt>the server stopped while this job ran; resume it</dt>
   <dd>The server restarted during the build. Press Retry.</dd>
   <dt>The server no longer holds the … API key</dt>

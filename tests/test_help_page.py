@@ -10,14 +10,15 @@ from pathlib import Path
 from gator.agent import controller, tools
 from gator.parts import geometry, vote
 from gator.stage_a import lidar_scale, part_masks
-from gator.webapp import agent_step, jobs, site, steps, video, views
+from gator.webapp import agent_step, jobs, site, steps, turntable, video, views
+from gator.webapp import lidar as lidar_stage
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "gator" / "webapp" / "static"
 HELP = STATIC / "help.html"
 # The sections in order. The ids are stable: the app's Help links point to them, and the public page keeps them.
 SECTIONS = ("about", "capture", "add-job", "status", "topics", "settings", "review", "parts", "agent", "lidar",
-            "inputs", "results", "joints", "physics", "downloads", "retry", "troubleshooting")
+            "inputs", "results", "joints", "physics", "downloads", "demos", "retry", "troubleshooting")
 # The local-only blocks, <!-- local:NAME --> ... <!-- /local:NAME -->; toc and account are empty here, and the public
 # page fills them (the account, machine and machine-status sections).
 LOCAL = ("toc", "account", "add-job", "keys", "agent-none", "troubleshooting")
@@ -117,7 +118,7 @@ def test_help_page_holds_the_method_numbers():
     size_err = 0.05  # mass goes with the size cubed
     mass_err = f"{size_err:.0%} size error gives about a {(1 + size_err) ** 3 - 1:.0%} mass error"
     src = inspect.getsource(jobs.package)
-    zipped = re.findall(r'\("([\w.]+\.(?:glb|json))", ', src)
+    zipped = re.findall(r'\("([\w.]+\.(?:glb|json|mp4))", ', src)
     zipped += [d + "/" for d in re.findall(r'"(\w+)"', re.search(r"for d in \(([^)]*)\)", src)[1])]
     assert len(zipped) >= 13, zipped  # the package source still reads as it did; update the pattern when it changes
     L = lidar_scale
@@ -125,7 +126,8 @@ def test_help_page_holds_the_method_numbers():
     facts = {"capture": [*jobs.VIDEOS, *jobs.BAGS, *jobs.STRAY, "HDR off"],
              "add-job": [f"up to {upload[1]} GB"],
              "status": [*steps.NAMES, "one at a time"],
-             "settings": [f"within {snap_s} s", f"{nviews[1]} to {nviews[2]}", "view 0"],
+             "settings": [f"within {snap_s} s", f"{nviews[1]} to {nviews[2]}", "view 0", "Make a 360 video",
+                          f"{turntable.FRAMES / turntable.FPS:g} s", f"{turntable.ELEVATION_DEG}°"],
              "review": [f"under {views.MIN_AREA:.0%} of the image", f"below {num(views.MIN_CONSISTENCY)}",
                         f"closer than {num(views.MIN_SPACING_DEG)}°", "over a third"],
              "parts": [f"at least {score}", f"less than {small}", "not found", "still have a part",
@@ -142,8 +144,11 @@ def test_help_page_holds_the_method_numbers():
                        f"fewer than {L.MIN_VIEWS} views", f"over {L.MAX_SPREAD_REL:.0%}",
                        f"outside {num(L.S_MIN)} to {num(L.S_MAX)}", f"at most {num(L.MAX_TRANSLATION)} m",
                        "T_cam_lidar", "camera_axes", "time_offset_s", "replaces the bag's TF"],
-             "inputs": ["0.6 of that median", "16 to 32", "★"],
-             "results": [f"Below {iou}", "view 0's camera frame", "aligned.glb", "larger than", "mean over the views"],
+             "inputs": ["0.6 of that median", "16 to 32", "★", f"at most {lidar_stage.SCAN_POINTS:,}",
+                        f"within {lidar_stage.WINDOW_S * 1000:g} ms", "pinch", "Reset", "outlier, scattered or few points",
+                        "every candidate view"],
+             "results": [f"Below {iou}", "view 0's camera frame", "aligned.glb", "larger than", "mean over the views",
+                         "360 video", "reduced motion"],
              "joints": ["A ? means", "With 0", "nearest part above it", "fixed to the world", "one rigid body"],
              "physics": ["64³", mass_err, "collision hulls", "left out", "median density", "Pa", "kg/m³",
                          "by its volume", "bottom of the object", "MuJoCo, USD and URDF", "VoMP v1.1"],
@@ -154,8 +159,11 @@ def test_help_page_holds_the_method_numbers():
                            "uploaded calibration", "Stray capture", "aligned with the color camera", "view 0 first",
                            "null without LiDAR",
                            "excluded", f"up to {seam_lines} fitted lines", "not split off", "only in results.zip",
-                           "urdf/meshes", *zipped],
-             "retry": ["first stage that is not done", "replaces the results"]}
+                           "urdf/meshes", *zipped, "H.264", f"{turntable.SIDE} x {turntable.SIDE} px",
+                           f"{turntable.FPS} fps", f"{turntable.FRAMES / turntable.FPS:g} s"],
+             "demos": ["360 video", "muted and looping", "3D view", "aligned.glb", "<demo>_<name>"],
+             "retry": ["first stage that is not done", "replaces the results"],
+             "troubleshooting": ["360 video: …", "Retry from turntable"]}
     assert set(facts) <= set(text), set(facts) - set(text)
     for sid, want in facts.items():
         assert all(f in text[sid] for f in want), (sid, [f for f in want if f not in text[sid]])
@@ -223,12 +231,14 @@ def test_help_page_local_blocks_are_well_formed():
 
 
 def test_every_help_link_has_its_section():
-    """The header's Help link (app.js HELP_AT) and the error box's link go to a section of the help page, on the
-    tunnel and on the public site. The links that site.py adds to the public pages (the machines panel, the privacy
-    page) go to a section of the public help page."""
+    """The header's Help link (app.js HELP_AT), the error box's link and the demos page's Help link go to a section of
+    the help page, on the tunnel and on the public site. The links that site.py adds to the public pages (the machines
+    panel, the privacy page) go to a section of the public help page."""
     app = (STATIC / "app.js").read_text()
     at = re.search(r"const HELP_AT = \{(.*?)\};", app, re.S)[1]
     anchors = set(re.findall(r':\s*"([\w-]+)"', at)) | set(re.findall(r'"help\.html#([\w-]+)"', app))
+    anchors |= set(re.findall(r'"help\.html#([\w-]+)"', (STATIC / "demos.html").read_text()))
+    assert "demos" in anchors
     assert {"add-job", "status", "troubleshooting"} <= anchors and len(anchors) >= 11, anchors
     public = set(re.findall(r"help\.html#([\w-]+)", Path(site.__file__).read_text()))
     assert {"machine", "agent"} <= public, public

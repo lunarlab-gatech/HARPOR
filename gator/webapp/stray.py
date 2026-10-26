@@ -11,7 +11,7 @@ The export (https://github.com/strayrobots/scanner/blob/main/docs/format.md) is 
   odometry.csv        one row per frame: timestamp, frame, x, y, z, qx, qy, qz, qw (the camera-to-world
                       pose, OpenCV camera axes, in ARKit's gravity-aligned world with +y up), and on
                       newer versions fx, fy, cx, cy (at the video's size)
-  camera_matrix.csv   the intrinsics of the last frame (older versions); imu.csv
+  camera_matrix.csv   the intrinsics of the last frame; imu.csv
 Video frame i, depth/i and the odometry row with frame == i are one moment. The user zips the
 folder, so the zip holds one top folder, and Finder adds __MACOSX junk.
 
@@ -51,6 +51,14 @@ container's rotation.
 depth_samples() gives the LiDAR samples of frame i as the lidar stage takes them: [u, v, z] in pixels of
 the upright frame. Depth pixel (u_d, v_d) is at (u_d + 0.5) W / w_d - 0.5 (and the same for v) in the
 stored frame of size W x H, then turned by k (lidar_scale.rot90_points). The depth is not resampled.
+
+The intrinsics are read only for the LiDAR points of the Inputs tab, never for the scale.
+intrinsics() takes each frame's fx, fy, cx, cy from odometry.csv, else camera_matrix.csv (the last
+frame's, strictly parsed). depth_points() gives the samples and, with K, the same pixels as camera
+points ((u_s - cx) z / fx, (v_s - cy) z / fy, z at the stored pixel u_s, v_s), and every depth pixel
+with a depth as the frame's whole scan. Each counterclockwise quarter turn maps the stored camera
+axes (x, y) to (y, -x), as rot90_points maps the pixels, so the points are in the upright frame's
+optical axes.
 """
 
 import csv
@@ -84,6 +92,7 @@ DEPTH_UNITS = 1000.0  # depth PNGs hold millimetres
 MAX_DEPTH_PIXELS = 1 << 20  # a phone's depth images are 256x192; larger ones are refused before they are decoded
 MIN_CONF = 2  # ARKit's high confidence
 Z_RANGE = (0.1, 5.0)  # m; the LiDAR's useful range
+MAX_CAMERA_MATRIX = 4096  # bytes of camera_matrix.csv; more is not one
 
 
 def _size(n):
@@ -412,30 +421,104 @@ def _pixels(path, rel):
         raise ValueError(f"{rel}: {e}") from None
 
 
-def depth_samples(root, i, rgb_wh, k, min_conf=MIN_CONF, z_range=Z_RANGE):
-    """(N, 3) float32 [u, v, z] of frame i's depth image: u, v in pixels of the upright frame of size
-    rgb_wh (pixel centres at integers), z in meters; only the pixels with confidence >= min_conf (0:
-    every pixel, without reading confidence/) and z within z_range. k: the frame's counterclockwise
-    quarter turns. ValueError when the images are not what the format says."""
-    from gator.stage_a import lidar_scale
+def _camera_matrix(root):
+    """camera_matrix.csv as a 3x3 matrix, or None when it is missing or not 3 rows of 3 finite numbers with
+    the last row 0 0 1 and fx, fy > 0. It comes from the user's zip, so nothing else is trusted."""
+    f = Path(root) / "camera_matrix.csv"
+    try:
+        if not f.is_file() or f.stat().st_size > MAX_CAMERA_MATRIX:
+            return None
+        rows = [r.split(",") for r in f.read_text(encoding="utf-8-sig").splitlines() if r.strip()]
+        K = np.array([[float(x) for x in r] for r in rows], float)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if K.shape != (3, 3) or not np.isfinite(K).all() or not np.allclose(K[2], [0, 0, 1]):
+        return None
+    return K if K[0, 0] > 0 and K[1, 1] > 0 else None
 
+
+def intrinsics(root, n_frames):
+    """(K of each frame (n_frames, 3, 3), at the video's stored size, and its source: "odometry.csv" or
+    "camera_matrix.csv"), or (None, None). odometry.csv's fx, fy, cx, cy are per frame; camera_matrix.csv
+    (the last frame's) is the fallback for every frame."""
+    if n_frames < 1:
+        return None, None
+    try:
+        odo = read_odometry(root)
+    except SystemExit:
+        odo = None
+    c = None if odo is None else odo["intrinsics"]
+    if c is not None and len(c) == n_frames and np.array_equal(odo["frame"], np.arange(n_frames)) \
+            and np.isfinite(c).all() and (c[:, :2] > 0).all():
+        K = np.zeros((n_frames, 3, 3))
+        K[:, 0, 0], K[:, 1, 1], K[:, 0, 2], K[:, 1, 2], K[:, 2, 2] = c[:, 0], c[:, 1], c[:, 2], c[:, 3], 1.0
+        return K, "odometry.csv"
+    K = _camera_matrix(root)
+    return (np.repeat(K[None], n_frames, 0), "camera_matrix.csv") if K is not None else (None, None)
+
+
+def _depth(root, i, min_conf):
+    """(z in meters, confidence or None) of frame i's depth image: confidence only with min_conf (0: not read).
+    ValueError when the images are not what the format says."""
     root = Path(root)
     mode, z = _pixels(root / "depth" / f"{i:06d}.png", f"depth/{i:06d}.png")
     if mode not in ("I;16", "I;16B", "I"):
         raise ValueError(f"depth/{i:06d}.png is a {mode} image, not 16-bit depth")
     z = z.astype(np.float64) / DEPTH_UNITS
+    if not min_conf:
+        return z, None
+    c = root / "confidence" / f"{i:06d}.png"
+    if not c.is_file():
+        raise ValueError(f"depth/{i:06d}.png has no confidence/{i:06d}.png")
+    _, conf = _pixels(c, f"confidence/{i:06d}.png")
+    if conf.shape != z.shape:
+        raise ValueError(f"confidence/{i:06d}.png is {conf.shape[1]}x{conf.shape[0]} but depth/{i:06d}.png is "
+                         f"{z.shape[1]}x{z.shape[0]}")
+    return z, conf
+
+
+def _stored(u_d, v_d, depth_hw, rgb_wh, k):
+    """Depth pixels to pixels of the frame as stored (size W x H, the upright frame of size rgb_wh turned back by
+    k), and that size."""
+    h_d, w_d = depth_hw
+    W, H = (rgb_wh[0], rgb_wh[1]) if k % 2 == 0 else (rgb_wh[1], rgb_wh[0])
+    return (u_d + 0.5) * (W / w_d) - 0.5, (v_d + 0.5) * (H / h_d) - 0.5, (W, H)
+
+
+def _camera(u, v, z, K, k):
+    """Stored pixels with depth z to camera points (N, 3) of the upright frame (see the module docstring)."""
+    x, y = (u - K[0, 2]) * z / K[0, 0], (v - K[1, 2]) * z / K[1, 1]
+    for _ in range(k % 4):
+        x, y = y, -x
+    return np.stack([x, y, z], 1).astype(np.float32)
+
+
+def depth_samples(root, i, rgb_wh, k, min_conf=MIN_CONF, z_range=Z_RANGE):
+    """(N, 3) float32 [u, v, z] of frame i's depth image: u, v in pixels of the upright frame of size
+    rgb_wh (pixel centres at integers), z in meters; only the pixels with confidence >= min_conf (0:
+    every pixel, without reading confidence/) and z within z_range. k: the frame's counterclockwise
+    quarter turns. ValueError when the images are not what the format says."""
+    return depth_points(root, i, rgb_wh, k, None, min_conf, z_range)[0]
+
+
+def depth_points(root, i, rgb_wh, k, K, min_conf=MIN_CONF, z_range=Z_RANGE):
+    """(samples, xyz, scan) of frame i's depth image, read once: samples as depth_samples gives them; xyz (N, 3),
+    the samples' pixels as camera points, row for row; scan (M, 3), every depth pixel with a depth (z > 0) at
+    any confidence as camera points. K: the frame's intrinsics at the stored frame's size; without it (None),
+    xyz and scan are None. Camera points are float32, in meters, in the upright frame's optical axes."""
+    from gator.stage_a import lidar_scale
+
+    z, conf = _depth(root, i, min_conf)
     keep = (z >= z_range[0]) & (z <= z_range[1])
-    if min_conf:
-        c = root / "confidence" / f"{i:06d}.png"
-        if not c.is_file():
-            raise ValueError(f"depth/{i:06d}.png has no confidence/{i:06d}.png")
-        _, conf = _pixels(c, f"confidence/{i:06d}.png")
-        if conf.shape != z.shape:
-            raise ValueError(f"confidence/{i:06d}.png is {conf.shape[1]}x{conf.shape[0]} but depth/{i:06d}.png is "
-                             f"{z.shape[1]}x{z.shape[0]}")
+    if conf is not None:
         keep &= conf >= min_conf
     v_d, u_d = np.nonzero(keep)
-    h_d, w_d = z.shape
-    W, H = (rgb_wh[0], rgb_wh[1]) if k % 2 == 0 else (rgb_wh[1], rgb_wh[0])  # the frame as stored
-    u, v = lidar_scale.rot90_points((u_d + 0.5) * (W / w_d) - 0.5, (v_d + 0.5) * (H / h_d) - 0.5, (W, H), k)
-    return np.stack([u, v, z[keep]], 1).astype(np.float32)
+    us, vs, size = _stored(u_d, v_d, z.shape, rgb_wh, k)
+    u, v = lidar_scale.rot90_points(us, vs, size, k)
+    samples = np.stack([u, v, z[keep]], 1).astype(np.float32)
+    if K is None:
+        return samples, None, None
+    K = np.asarray(K, float)
+    vw, uw = np.nonzero(z > 0)
+    uw, vw, _ = _stored(uw, vw, z.shape, rgb_wh, k)
+    return samples, _camera(us, vs, z[keep], K, k), _camera(uw, vw, z[z > 0], K, k)

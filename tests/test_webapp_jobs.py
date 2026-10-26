@@ -100,7 +100,7 @@ def test_commands_have_the_ice_environment():
         assert argv[2].startswith("set -eo pipefail\nG=/storage/ice1/5/0/ali497/gator\n"
                                   "J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n")
         assert ("export " + STAGE_A in argv[2]) == (s in ("prep", "da3", "sam3d", "place", "propose", "parts", "agent",
-                                                          "align")), s
+                                                          "align", "turntable")), s
         assert env == {"PYTHONUNBUFFERED": "1"} and KEY not in argv[2]
     sc = {s: v[0][2] for s, v in scripts.items()}
     assert sc["masks"].endswith("\nexport HF_HOME=$G/.cache/huggingface\nrm -f \"$J/scene/sam3_coffee_cup/sam3.json\"\n"
@@ -120,6 +120,11 @@ def test_commands_have_the_ice_environment():
     assert sc["topics"].endswith('$G/envs/web/bin/python -m gator.webapp.video topics --job "$J"')
     assert sc["frames"].endswith('$G/envs/web/bin/python -m gator.webapp.video analyze --job "$J"')
     assert sc["package"].endswith('$G/envs/web/bin/python -m gator.webapp.jobs package --job "$J"')
+    # The 360 video: Blender renders the frames in the SIF (envs/sam3d), and envs/web encodes them.
+    assert sc["turntable"].endswith(
+        f'\nrm -rf "$J/turntable"\nexport {STAGE_A}\n'
+        'cd $G/gator_clone && $G/envs/sam3d/bin/python -m gator.webapp.turntable render --job "$J" '
+        '--sif $G/sif/gator-agent.sif\ncd $G/gator_clone && $G/envs/web/bin/python -m gator.webapp.turntable encode --job "$J"')
     assert sc["lidar"] == ('set -eo pipefail\nG=/storage/ice1/5/0/ali497/gator\n'
                            'J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n'
                            'cd $G/gator_clone && $G/envs/web/bin/python -m gator.webapp.lidar scale --job "$J"')
@@ -255,7 +260,7 @@ def test_config_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("WEBAPP_RUNS", str(tmp_path / "r"))
     monkeypatch.delenv("WEBAPP_FAKE")
     assert steps.config_from_env().runs == tmp_path / "r" and not steps.config_from_env().fake
-    assert [s["name"] for s in steps.STAGES if s["gpu"]] == ["masks", "da3", "sam3d", "parts", "agent", "vomp"]
+    assert [s["name"] for s in steps.STAGES if s["gpu"]] == ["masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable"]
     assert [s["name"] for s in steps.STAGES if s["review_after"]] == ["select"]
 
 
@@ -290,6 +295,18 @@ def test_done_markers_guard_and_skip(tmp_path):
     assert not steps.done("select", J)
     (J / "selection.json").write_text(json.dumps({"ok": True}))
     assert steps.done("select", J)
+    # The 360 video: skipped unless the job asks for it (older jobs do not); done when turntable.json is there.
+    assert steps.skip("turntable", J) == "turned off" and not steps.turntable({"turntable": "yes"})
+    (J / "job.json").write_text(json.dumps({"prompt": "coffee cup", "slug": "coffee_cup", "turntable": False}))
+    assert steps.skip("turntable", J) == "turned off"
+    (J / "job.json").write_text(json.dumps({"prompt": "coffee cup", "slug": "coffee_cup", "turntable": True}))
+    assert steps.skip("turntable", J) is None and steps.turntable(jobs.load(J))
+    (J / "turntable").mkdir()
+    (J / "turntable" / "turntable.mp4").write_bytes(b"")
+    assert not steps.done("turntable", J)
+    (J / "turntable" / "turntable.json").write_text("{}")
+    assert steps.done("turntable", J) and steps.guard("turntable", J) is None
+    assert steps.OPTIONAL == {"turntable": "360 video"} and jobs.DERIVED["turntable"] == ("turntable",)
     (J / "physics" / "mjcf").mkdir(parents=True)
     (J / "physics" / "mjcf" / "mjcf.json").write_text(json.dumps({"name": "x"}))
     assert not steps.done("mjcf", J)
@@ -387,18 +404,20 @@ def test_lidar_stage_done_skip_guard_and_derived(tmp_path):
     assert steps.NAMES.index("lidar") == steps.NAMES.index("da3") + 1 == steps.NAMES.index("select") - 1
     assert "lidar" not in steps.GPU and "lidar" in jobs.BUILD
 
-    # A rerun of lidar starts without its record and check images; the samples cache and the calibration
-    # stay. A new analysis drops the frames' stamps.
-    for f in ("pool/lidar.json", "lidar/check/f00001.jpg", "lidar/samples.npz", "lidar/samples.json",
-              "lidar/calibration/c.yaml", "frames/stamps.json", "frames/meta.json"):
+    # A rerun of lidar starts without its record, check images and points; the samples cache and the
+    # calibration stay. A new analysis drops the frames' stamps.
+    for f in ("pool/lidar.json", "lidar/check/f00001.jpg", "lidar/cloud/f00001.glb", "lidar/samples.npz",
+              "lidar/samples.json", "lidar/clouds.npz", "lidar/calibration/c.yaml", "frames/stamps.json",
+              "frames/meta.json"):
         (J / f).parent.mkdir(parents=True, exist_ok=True)
         (J / f).write_text("x")
     jobs._clear(J, ["lidar"])
     assert not (J / "pool" / "lidar.json").exists() and not (J / "lidar" / "check").exists()
-    assert all((J / "lidar" / f).is_file() for f in ("samples.npz", "samples.json", "calibration/c.yaml"))
+    assert not (J / "lidar" / "cloud").exists()
+    assert all((J / "lidar" / f).is_file() for f in ("samples.npz", "samples.json", "clouds.npz", "calibration/c.yaml"))
     jobs._clear(J, ["frames"])
     assert not (J / "frames" / "stamps.json").exists() and not (J / "frames" / "meta.json").exists()
-    assert jobs.DERIVED["lidar"] == ("pool/lidar.json", "lidar/check")
+    assert jobs.DERIVED["lidar"] == ("pool/lidar.json", "lidar/check", "lidar/cloud")
 
 
 def test_lidar_settings_and_the_build_that_stores_them(make_runner, tmp_path, monkeypatch):
@@ -598,15 +617,19 @@ def test_progress_reads_the_newest_run_of_the_log(tmp_path):
 
     # A rigid job made before the part stages lacks their records: they show as skipped, urdf as pending.
     # A job made before LiDAR lacks the lidar stage's record and its job.json fields: skipped too.
+    # A job made before the 360 video lacks the turntable stage's record and job.json "turntable": skipped too.
     old = jobs.load(J)
-    for s in ("propose", "parts", "urdf", "lidar"):
+    for s in ("propose", "parts", "urdf", "lidar", "turntable"):
         del old["stages"][s]
-    del old["articulated"], old["parts"], old["lidar"], old["calibration"]
+    del old["articulated"], old["parts"], old["lidar"], old["calibration"], old["turntable"]
     jobs.save(J, old)
     st = {s["name"]: s for s in jobs.progress(J)}
     assert st["propose"]["status"] == st["parts"]["status"] == "skipped"
     assert st["parts"]["note"] == "turned off: rigid object" and st["urdf"]["status"] == "pending"
     assert (st["lidar"]["status"], st["lidar"]["note"], st["lidar"]["gpu"]) == ("skipped", "turned off: no LiDAR", False)
+    assert (st["turntable"]["status"], st["turntable"]["note"], st["turntable"]["gpu"]) == ("skipped", "turned off", True)
+    jobs.save(J, {**old, "turntable": True})
+    assert {s["name"]: s["status"] for s in jobs.progress(J)}["turntable"] == "pending"
     jobs.save(J, {**old, "articulated": True})
     assert {s["name"]: s["status"] for s in jobs.progress(J)}["propose"] == "pending"
     jobs.save(J, {**old, "lidar": {"kind": "rosbag", "topic": "/points"}})  # with LiDAR on it is not skipped
@@ -759,6 +782,51 @@ def test_runner_opus_key_and_a_change_of_agent(make_runner, tmp_path, monkeypatc
     assert not any(k.encode() in p.read_bytes() for p in all_files(tmp_path) for k in (KEY, OPUS_KEY))
 
 
+def test_runner_warns_when_the_360_video_fails(make_runner, monkeypatch):
+    """The turntable stage is optional (steps.OPTIONAL): when it fails, its record says why, job.json "warnings" gets
+    "360 video: <why>", and the build goes on to package, so the job ends done. A Cancel while it runs still cancels
+    the job, before package. A retry from turntable runs package again (Runner.resume), so results.zip gets the
+    video."""
+    runner, cfg = make_runner()
+
+    def command(stage, job, cfg, key_file=None):
+        J = cfg.runs / job["id"]
+        script = f"echo PROGRESS 1; touch {J}/done_{stage}"
+        if stage == "turntable" and not (J / "works").exists():
+            script = "sleep 30" if (J / "slow").exists() else "echo PROGRESS 0.5; echo the GPU is gone; exit 3"
+        return ["bash", "-c", script], str(J), {}
+
+    monkeypatch.setattr(steps, "command", command)
+    monkeypatch.setattr(steps, "done", lambda stage, J: (Path(J) / f"done_{stage}").exists() or stage == "frames")
+    job_id, J = ready_job(cfg, auto_continue=True)
+    runner.submit_build(job_id, None, agent="none", turntable=True)
+    job = wait(J, "done", "failed")
+    tt = job["stages"]["turntable"]
+    assert (job["status"], job["error"], job["turntable"]) == ("done", None, True)
+    assert (tt["status"], tt["returncode"], tt["note"]) == ("failed", 3, "exit 3: the GPU is gone")
+    assert job["warnings"] == ["360 video: exit 3: the GPU is gone"] and job["stages"]["package"]["status"] == "done"
+
+    package_started = job["stages"]["package"]["started"]
+
+    # Retry from the video, cancelled while it runs: the job is cancelled, and package waits for the next run.
+    (J / "slow").touch()
+    assert runner.resume(job_id, "turntable") == "turntable"
+    t0 = time.time()
+    while jobs.load(J)["current"] != "turntable" and time.time() - t0 < 30:
+        time.sleep(0.05)
+    runner.cancel(job_id)
+    job = wait(J, "cancelled", timeout=30)
+    assert job["stages"]["turntable"]["note"] == "cancelled" and job["warnings"] == []
+    assert job["stages"]["package"]["status"] == "pending"
+
+    # Retry again, and the video works: package runs again.
+    (J / "works").touch()
+    runner.resume(job_id, "turntable")
+    job = wait(J, "done", "failed")
+    assert job["status"] == "done" and job["warnings"] == [] and job["stages"]["turntable"]["status"] == "done"
+    assert job["stages"]["package"]["status"] == "done" and job["stages"]["package"]["started"] > package_started
+
+
 def test_runner_key_file_lives_only_during_the_agent_stage(make_runner, tmp_path, monkeypatch):
     runner, cfg = make_runner()
     (runner.key_dir / "stale.env").write_text("OPENAI_API_KEY=old\n")
@@ -779,7 +847,7 @@ def test_runner_key_file_lives_only_during_the_agent_stage(make_runner, tmp_path
     job_id, J = ready_job(cfg, auto_continue=True)
     runner.submit_build(job_id, KEY)
     job = wait(J, "done")
-    skipped = ("lidar", "propose", "parts")  # a video has no LiDAR, and a rigid object no parts
+    skipped = ("lidar", "propose", "parts", "turntable")  # a video has no LiDAR, a rigid object no parts, no 360 video
     assert all(job["stages"][s]["status"] == ("skipped" if s in skipped else "done") for s in ["frames", *jobs.BUILD])
     assert job["key_ok"] is False
     assert job["slug"] == "box" and job_id not in runner._keys
@@ -864,7 +932,8 @@ def test_runner_pauses_for_the_part_list_and_confirms_it(make_runner, tmp_path, 
     proposal = json.loads((J / "run" / "proposal.json").read_text())
     assert proposal["confirmed"] and proposal["edited"] and [p["name"] for p in proposal["parts"]] == ["body", "top lid", "latch"]
     assert job["parts"] == {"mode": "vlm_edit", "list": proposal["parts"], "confirmed": True}
-    assert all(job["stages"][s]["status"] == "done" for s in steps.NAMES[steps.NAMES.index("parts"):])
+    assert all(job["stages"][s]["status"] == ("skipped" if s == "turntable" else "done")
+               for s in steps.NAMES[steps.NAMES.index("parts"):])
     assert (J / "logs" / "propose.log").read_text().count("== propose ") == 1
     with pytest.raises(ValueError, match="does not wait for its part list"):
         runner.resume(job_id, "sam3d", confirm_parts=True)
@@ -1421,16 +1490,20 @@ def test_package_leaves_out_key_files(tmp_path, capsys):
               "physics/usd/usd.json", "pool/lidar.json"):
         (J / f).write_text("{}")
     (J / "physics" / "mjcf" / "assets" / "visual_0.obj").write_text("v 0 0 0\n")
+    (J / "turntable").mkdir()
+    (J / "turntable" / "turntable.mp4").write_bytes(b"\0\0\0\x18ftypmp42")
     (J / "physics" / "up.json").write_text(json.dumps({"glb": str(J / "agent/s/work/exports/001.glb")}))
     r = {"source": "finish", "verdict": "complete", "glb": "work/exports/001.glb", "key_found_in": []}
     (J / "agent" / "result.json").write_text(json.dumps(r))
     jobs.package(J)
     names = set(zipfile.ZipFile(J / "results.zip").namelist())
-    assert names == {"posed.glb", "refined.glb", "aligned.glb", "summary.json", "placement.json", "selection.json",
-                     "lidar.json", "agent_result.json", "mjcf/mjcf.json", "mjcf/assets/visual_0.obj", "usd/usd.json"}
+    assert names == {"posed.glb", "refined.glb", "aligned.glb", "turntable.mp4", "summary.json", "placement.json",
+                     "selection.json", "lidar.json", "agent_result.json", "mjcf/mjcf.json", "mjcf/assets/visual_0.obj",
+                     "usd/usd.json"}
     with zipfile.ZipFile(J / "results.zip") as z:
         assert z.read("refined.glb") == (J / "agent/s/work/exports/001.glb").read_bytes()
-    # The agent wrote the key into its GLB: neither it nor what physics made from it is packaged.
+        assert z.read("turntable.mp4") == (J / "turntable" / "turntable.mp4").read_bytes()
+    # The agent wrote the key into its GLB: neither it nor what physics made from it (the 360 video too) is packaged.
     (J / "agent" / "result.json").write_text(json.dumps({**r, "key_found_in": ["work/exports/001.glb", "session/x.log"]}))
     jobs.main(["package", "--job", str(J)])
     assert set(zipfile.ZipFile(J / "results.zip").namelist()) == {"posed.glb", "summary.json", "placement.json",
@@ -1721,7 +1794,9 @@ def test_fake_build_end_to_end(make_runner, tmp_path):
     runner.resume(job_id, "sam3d")
     job = wait(J, "done")
     rigid = ("propose", "parts")  # a rigid object skips the parts stages, and a video the LiDAR
-    assert [s for s in steps.NAMES if job["stages"][s]["status"] != "done"] == ["topics", "lidar", "propose", "parts"]
+    assert [s for s in steps.NAMES if job["stages"][s]["status"] != "done"] == ["topics", "lidar", "propose", "parts",
+                                                                                "turntable"]
+    assert job["stages"]["turntable"]["note"] == "turned off" and not (J / "turntable").exists()
     assert all(job["stages"][s]["note"] == "turned off: rigid object" for s in rigid)
     placement = json.loads((J / "run" / "placement.json").read_text())
     assert placement["metric_scale"] is None and placement["units"] == "DA3 units (meters)"
@@ -1736,7 +1811,7 @@ def test_fake_build_end_to_end(make_runner, tmp_path):
             "urdf/model.urdf", "urdf/urdf.json"} <= names and not {"parts.glb", "parts.json"} & names
     urdf = json.loads((J / "physics" / "urdf" / "urdf.json").read_text())
     assert urdf["checked"]["links"] == 1 and urdf["checked"]["joints"] == 0 and urdf["checked"]["missing"] == []
-    skipped = ("topics", "lidar", *rigid)  # topics and lidar: video input
+    skipped = ("topics", "lidar", *rigid, "turntable")  # topics and lidar: video input; no 360 video asked for
     assert all(s["seconds"] is not None for s in jobs.progress(J) if s["name"] not in skipped)
     assert not list(runner.key_dir.iterdir())
     assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))
@@ -1762,7 +1837,8 @@ def test_fake_articulated_build_end_to_end(make_runner, tmp_path, mode, agent):
     jobs.update(J, mode="auto", prompt="Wooden box", n_views=4, auto_continue=True)
     typed = [{"name": "box body"}, {"name": "lid", "parent": "box body", "joint": "revolute"},
              {"name": "drawer", "parent": "box body", "joint": "prismatic"}]
-    runner.submit_build(job_id, key, agent=agent, articulated=True, parts={"mode": mode, "list": typed if mode == "user" else []})
+    runner.submit_build(job_id, key, agent=agent, articulated=True, parts={"mode": mode, "list": typed if mode == "user" else []},
+                        turntable=mode == "vlm")  # one case asks for the 360 video
     base, lid = ("box_body", "lid") if mode == "user" else ("body", "lid")
     if mode == "vlm_edit":  # auto_continue does not skip this pause
         job = wait(J, "review")
@@ -1776,7 +1852,7 @@ def test_fake_articulated_build_end_to_end(make_runner, tmp_path, mode, agent):
     job = wait(J, "done", "failed")
     assert job["status"] == "done", (job["error"], (J / "logs" / f"{job['error'].split(':')[0]}.log").read_text()[-3000:]
                                      if job["error"] else "")
-    skipped = {"topics", "lidar"} | ({"agent"} if agent == "none" else set())
+    skipped = {"topics", "lidar"} | ({"agent"} if agent == "none" else set()) | ({"turntable"} if mode != "vlm" else set())
     assert all(job["stages"][s]["status"] == ("skipped" if s in skipped else "done") for s in steps.NAMES), job["stages"]
     assert job["parts"]["mode"] == mode and job["parts"]["confirmed"] is (mode == "vlm_edit")
 
@@ -1801,6 +1877,10 @@ def test_fake_articulated_build_end_to_end(make_runner, tmp_path, mode, agent):
     urdf = json.loads((J / "physics" / "urdf" / "urdf.json").read_text())["checked"]
     zipped = set(zipfile.ZipFile(J / "results.zip").namelist())
     assert {"parts.glb", "parts.json", "urdf/model.urdf", "mjcf/scene.xml", "usd/usd.json"} <= zipped
+    assert ("turntable.mp4" in zipped) is (mode == "vlm")
+    if mode == "vlm":  # the 360 video of the agent's parts with joints, all parts in it
+        rec = json.loads((J / "turntable" / "turntable.json").read_text())
+        assert (rec["glb"], rec["codec"], rec["frames"]) == ("agent/s/work/exports/001.glb", "h264", 240)
     if agent == "none":  # no joints: physics uses the split parts as one body
         assert job["stages"]["agent"]["note"].startswith("turned off: without the agent the parts get no joints")
         assert steps.next_glb(J) == J / "run" / "parts.glb" and steps.agent_glb(J) is None

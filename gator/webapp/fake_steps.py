@@ -11,8 +11,10 @@ alignment work on them.
 
 Real code runs wherever it needs no GPU and no ICE env: topics, frames and extract (video.py, also
 for a rosbag, since rosbags is pure Python, and for a Stray Scanner zip), prep (mvsam3d.prep), lidar
-(lidar.py), select (views.py), align (physics_auto.py), cameras.json (mvsam3d.cameras) and package
-(jobs.package). For a job with LiDAR (steps.lidar: a bag's LiDAR topic or a Stray Scanner capture's
+(lidar.py, with the LiDAR points of the views), select (views.py), align (physics_auto.py), cameras.json
+(mvsam3d.cameras), turntable (gator.webapp.turntable with the fake Blender of gator.agent.fake_agent,
+whose frames are the GLB's outline; the MP4 is a real H.264 file) and package (jobs.package).
+For a job with LiDAR (steps.lidar: a bag's LiDAR topic or a Stray Scanner capture's
 depth), the fake DA3 is off by FAKE_DA3_SCALE: its depth, pointmaps and camera translations are 0.8 x
 the scene's, so the real lidar stage must find 1.25 from the bag's true points or the capture's true
 depth images, and place records metric_scale as the real place does. place sizes the posed box in the
@@ -38,6 +40,7 @@ import json
 import re
 import runpy
 import shutil
+import signal
 import stat
 import sys
 import time
@@ -774,6 +777,17 @@ def urdf(J):
     report.update(fake=True, checked=U.check(out))
     (out / "urdf.json").write_text(json.dumps(report, indent=1))
     print(f"URDF (fake): {report['checked']['links']} links, {report['checked']['joints']} joints, {out / 'model.urdf'}")
+
+
+def turntable(J):
+    """The real stage with the fake Blender: the frames, then the MP4 (gator.webapp.turntable). A Cancel kills the
+    fake Blender's process group too, as turntable.main makes it do."""
+    from gator.agent import tools
+    from gator.webapp import turntable as T
+
+    signal.signal(signal.SIGTERM, tools._on_sigterm)
+    T.render(J, blender=[sys.executable, "-m", "gator.agent.fake_agent", "--blender"])
+    T.encode(J)
 
 
 def main(argv=None):

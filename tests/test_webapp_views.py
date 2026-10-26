@@ -178,6 +178,19 @@ def test_build_run_slices_the_pool(tmp_path):
     assert prep["views"][0] == {"name": "0", "pool_name": "f00030", "frame": 30}
     V.build_run(tmp_path / "pool", ["f00040", "f00000", "f00020"], run)
     assert M.view_names(run) == ["0", "1", "2"] and len(M.cameras(run)) == 3
+    assert not (run / "lidar").exists()  # clouds=None: no LiDAR points
+
+    # The lidar stage's points of the picks (lidar/cloud/<name>.glb) go to run/lidar/<i>.glb in pick order; a
+    # pick without a file gets none.
+    clouds = tmp_path / "cloud"
+    clouds.mkdir()
+    for n in ("f00000", "f00020", "f00030"):
+        (clouds / f"{n}.glb").write_bytes(b"glTF of " + n.encode())
+    V.build_run(tmp_path / "pool", ["f00040", "f00000", "f00020"], run, clouds=clouds)
+    assert sorted(p.name for p in (run / "lidar").iterdir()) == ["1.glb", "2.glb"]
+    assert [(run / "lidar" / f"{i}.glb").read_bytes() for i in (1, 2)] == [b"glTF of f00000", b"glTF of f00020"]
+    V.build_run(tmp_path / "pool", ["f00040"], run, clouds=clouds)
+    assert not (run / "lidar").exists()
 
 
 def test_select_auto(tmp_path):
@@ -325,11 +338,16 @@ def test_metric_scale_reads_the_lidar_record(tmp_path):
 def test_select_applies_the_lidar_scale(tmp_path):
     j, *_ = make_job(tmp_path, lidar={"kind": "rosbag", "topic": "/livox/lidar"})
     write_lidar(j)
+    (j / "lidar" / "cloud").mkdir(parents=True)  # the lidar stage's points of every pool view
+    for p in (j / "pool" / "masks").glob("*.png"):
+        (j / "lidar" / "cloud" / f"{p.stem}.glb").write_bytes(p.stem.encode())
     sel = V.select(j)
     assert sel["ok"] and sel["metric_scale"] == {"s": 1.25, "views_used": 20, "spread_rel": 0.012}
     assert json.loads((j / "selection.json").read_text())["metric_scale"] == sel["metric_scale"]
     assert json.loads((j / "run" / "prep.json").read_text())["metric_scale"] == 1.25
     picks = [p["name"] for p in sel["picks"]]
+    assert [(j / "run" / "lidar" / f"{i}.glb").read_bytes().decode() for i in range(len(picks))] == picks
+    assert len(list((j / "run" / "lidar").iterdir())) == len(picks)
     with np.load(j / "pool" / "da3_output.npz") as pool, np.load(j / "run" / "da3_output.npz") as run:
         stem = [Path(str(f)).stem for f in pool["image_files"]]
         assert np.allclose(run["depth"], 1.25 * pool["depth"][[stem.index(n) for n in picks]])
@@ -342,6 +360,9 @@ def test_select_applies_the_lidar_scale(tmp_path):
     assert json.loads((j / "selection.json").read_text())["metric_scale"]["s"] == 1.25
 
     j2, *_ = make_job(tmp_path / "b")
+    (j2 / "lidar").mkdir()  # an earlier build with LiDAR left its points; LiDAR is off now
+    (j / "lidar" / "cloud").rename(j2 / "lidar" / "cloud")
     assert V.select(j2)["metric_scale"] is None
     with np.load(j2 / "run" / "da3_output.npz") as run:
         assert "metric_scale" not in run.files
+    assert not (j2 / "run" / "lidar").exists()

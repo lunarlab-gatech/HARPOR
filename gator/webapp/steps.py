@@ -34,6 +34,10 @@ lines, with G=$(readlink -f ~/scratch)/gator and the job folder J under G/webapp
   mjcf     envs/mujoco  physics.mjcf            physics/mjcf/mjcf.json with "compiled"
   usd      envs/mujoco  physics.usd             physics/usd/usd.json with "checked"
   urdf     envs/mujoco  physics.urdf            physics/urdf/urdf.json with "checked"
+  turntable                                     turntable/turntable.json, written last (skipped unless
+           envs/sam3d   turntable render        job.json "turntable"): a 360 video of the GLB that
+                        (Blender in the SIF),   physics used, turned upright. Its failure warns and
+           envs/web     turntable encode        does not fail the job (OPTIONAL)
   package  envs/web     jobs package            results.zip
 
 job.json "articulated" (true or false; older jobs lack it: false) turns on the parts of an
@@ -47,6 +51,9 @@ job.json "lidar" (lidar(); null for a video and for older jobs) names the LiDAR 
 metric scale (build_plan.md note 12): {"kind": "rosbag", "topic": T}, a LiDAR topic of the job's bag,
 or {"kind": "stray"}, the depth images of a Stray Scanner capture.
 
+job.json "turntable" (true or false; older jobs lack it: false) asks for the 360 video of the finished
+object (build_plan.md note 10), which the turntable stage makes before package.
+
 With WEBAPP_FAKE=1 every stage runs `python -m gator.webapp.fake_steps STAGE --job J` instead,
 with the same outputs, so the app works on a Mac without GPUs.
 """
@@ -59,8 +66,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 NAMES = ["topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "place", "propose", "parts",
-         "agent", "align", "vomp", "mjcf", "usd", "urdf", "package"]
-GPU = ("masks", "da3", "sam3d", "parts", "agent", "vomp")
+         "agent", "align", "vomp", "mjcf", "usd", "urdf", "turntable", "package"]
+GPU = ("masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable")
+# The stages whose failure leaves the job usable, each with the words that start its warning: the build goes on.
+OPTIONAL = {"turntable": "360 video"}
 REVIEW_AFTER = "select"
 PARTS_AFTER = "propose"  # an unconfirmed "vlm_edit" part list pauses the job here (pause_after)
 STAGES = [{"name": n, "gpu": n in GPU, "review_after": n == REVIEW_AFTER} for n in NAMES]
@@ -79,7 +88,7 @@ VOMP_ENV = ('CUDA_HOME=$CONDA_PREFIX HF_HOME=$G/.cache/huggingface TORCH_HOME=$G
 MARKERS = {"topics": "frames/topics.json", "frames": "frames/meta.json", "prep": "pool/prep.json",
            "sam3d": "run/pose.json", "place": "run/placement.json", "propose": "run/proposal.json",
            "parts": "run/parts.json", "agent": "agent/result.json", "align": "physics/aligned.json",
-           "vomp": "physics/summary.json", "package": "results.zip"}
+           "vomp": "physics/summary.json", "turntable": "turntable/turntable.json", "package": "results.zip"}
 MIN_IOU = 0.5
 # job.json "agent": GPT-6-Astra (Codex CLI), Claude Opus 5.5 (claude_agent) or no agent stage
 AGENTS = ("astra", "opus", "none")
@@ -93,6 +102,7 @@ class Config:
     G: Path            # $(readlink -f ~/scratch)/gator: envs/, sif/, gator_clone/, the model clones
     runs: Path         # the job folders
     fake: bool = False
+    demos: Path | None = None  # the demos folder (WEBAPP_DEMOS), shown at /demos.html (demos.py)
 
     @property
     def sif(self):
@@ -104,8 +114,9 @@ class Config:
 
 def config_from_env():
     G = Path(os.environ.get("GATOR_ROOT") or Path("~/scratch").expanduser().resolve() / "gator")
+    demos = os.environ.get("WEBAPP_DEMOS")
     return Config(G=G, runs=Path(os.environ.get("WEBAPP_RUNS") or G / "webapp_runs"),
-                  fake=os.environ.get("WEBAPP_FAKE") == "1")
+                  fake=os.environ.get("WEBAPP_FAKE") == "1", demos=Path(demos).expanduser() if demos else None)
 
 
 def _job(job_dir):
@@ -139,6 +150,11 @@ def parts_mode(job):
     if mode not in PARTS_MODES:
         raise ValueError(f"the parts mode is one of {', '.join(PARTS_MODES)}")
     return "user" if agent(job) == "none" else mode
+
+
+def turntable(job):
+    """True when the job asks for the 360 video (job.json "turntable"); older jobs do not."""
+    return job.get("turntable") is True
 
 
 def needs_key(stage, job):
@@ -197,6 +213,11 @@ def command(stage, job, cfg, key_file=None):
             lines += ['rm -rf "$J/physics/mjcf"', run + common + ' --out "$J/physics/mjcf"']
         else:
             lines.append(run + common + f' --mjcf "$J/physics/mjcf" --out "$J/physics/{stage}"')
+    elif stage == "turntable":
+        # Blender renders the frames in the agent's SIF (envs/sam3d), and PyAV encodes them in envs/web.
+        step = run + '$G/envs/{}/bin/python -m gator.webapp.turntable {} --job "$J"'
+        lines += ['rm -rf "$J/turntable"', f"export {STAGE_A_ENV}",
+                  step.format("sam3d", "render") + " --sif $G/sif/gator-agent.sif", step.format("web", "encode")]
     elif stage == "parts":
         # One script in two envs: SAM 3 part masks in envs/sam3seg, then the vote, the split (Blender in the
         # agent's SIF) and parts.json, the done marker, in envs/sam3d. The old marker is removed first.
@@ -304,8 +325,9 @@ def guard(stage, job_dir):
 
 def skip(stage, job_dir):
     """The reason to skip a stage, else None: topics for a video and a Stray Scanner capture, lidar without
-    LiDAR, propose and parts for a rigid object, and the agent when the job has none or on a poor Stage A
-    placement. A malformed "lidar" is not skipped: the stage fails with the reason."""
+    LiDAR, propose and parts for a rigid object, the agent when the job has none or on a poor Stage A
+    placement, and turntable unless the job asks for the 360 video. A malformed "lidar" is not skipped: the
+    stage fails with the reason."""
     job = _json(Path(job_dir) / "job.json")
     if stage == "topics":
         return {"rosbag": None, "stray": "Stray Scanner capture"}.get(source(job)["kind"], "video input")
@@ -316,6 +338,8 @@ def skip(stage, job_dir):
             return None
     if stage in ("propose", "parts"):
         return None if articulated(job) else "turned off: rigid object"
+    if stage == "turntable":
+        return None if turntable(job) else "turned off"
     if stage != "agent":
         return None
     if agent(job) == "none":

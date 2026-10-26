@@ -13,6 +13,7 @@
 <header>
   <a href="#/" class="brand">HARPOR</a>
   <span id="where"></span>
+  <a id="demolink" href="demos.html" target="_blank" rel="noopener">Demos</a>
   <a id="helplink" href="help.html" target="_blank" rel="noopener">Help</a>
   <span id="conn" class="conn" role="status" hidden></span>
 </header>
@@ -129,6 +130,7 @@
   <div id="results" class="panel tabpanel" role="tabpanel" aria-labelledby="tab-results" tabindex="0" hidden>
     <p id="resultsnone" class="emptytab">No results yet.</p>
     <div id="resultsbody" hidden>
+      <div id="spin"></div>
       <div id="viewers" class="viewers"></div>
       <div id="facts2"></div>
       <div id="partchecks"></div>
@@ -160,6 +162,7 @@
         </details>
       </div>
       <div id="inputviews"></div>
+      <div id="inputlidar"></div>
     </div>
   </div>
 
@@ -224,6 +227,7 @@
             <p id="calmsg" class="msg" role="status"></p>
           </div>
         </div>
+        <label class="check"><input type="checkbox" id="turntable"> Make a 360 video</label>
         <label class="check"><input type="checkbox" id="pause" checked> Review views before building</label>
         <div class="stickybar"><button id="start">Start</button> <span id="startmsg" class="msg" role="status"></span></div>
       </form>

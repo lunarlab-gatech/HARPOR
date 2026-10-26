@@ -56,9 +56,11 @@ header { position: sticky; top: 0; z-index: 10; display: flex; gap: var(--s3); a
 header .brand { font-weight: 700; color: var(--fg); text-decoration: none; letter-spacing: 0.02em; }
 #where { display: flex; gap: var(--s3); align-items: center; min-width: 0; color: var(--muted); }
 #where .crumb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--t-s) var(--mono); }
-/* the Help link (app.js helpAt sets its section): a quiet link that puts it, and what follows it, at the right */
-#helplink { flex: none; margin-left: auto; color: var(--muted); font-size: var(--t-s); text-decoration: none; }
-#helplink:hover { color: var(--fg); text-decoration: underline; }
+/* the Demos and Help links (app.js helpAt sets Help's section): quiet links; the first one puts itself, and what follows
+   it, at the right. The help and privacy pages have no Demos link. */
+#demolink, #helplink { flex: none; margin-left: auto; color: var(--muted); font-size: var(--t-s); text-decoration: none; }
+#demolink + #helplink { margin-left: 0; }
+#demolink:hover, #helplink:hover { color: var(--fg); text-decoration: underline; }
 .conn { display: inline-flex; gap: 6px; align-items: center; font-size: var(--t-s); color: var(--bad); }
 .conn::before { content: ""; flex: none; width: 7px; height: 7px; background: currentColor; }
 
@@ -178,6 +180,8 @@ label.check:has(input:disabled) { color: var(--muted); }
 #strayfacts { margin-top: 0; }
 #startform > label { font-size: var(--t-ui); font-weight: 600; }
 #startform > label.check { font-size: var(--t-m); font-weight: 400; }
+/* "Make a 360 video" has its own line: the box that follows it is inline too. */
+#startform > label.check:has(#turntable) { display: flex; width: fit-content; }
 #startform > label > input { display: block; margin-top: var(--s1); font-size: var(--t-m); font-weight: 400; }
 #autobox { display: flex; gap: var(--s3); align-items: center; }
 #autobox label { margin: 0; }
@@ -352,16 +356,27 @@ th { padding-block: 6px; font-size: var(--t-s); font-weight: 500; color: var(--m
 /* results */
 .viewers { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s5); margin: var(--s4) 0; }
 .viewers.single { grid-template-columns: minmax(0, 760px); }
-/* One viewer (app.js renderResults sets .onefig): on a wide screen the facts sit beside it, not below the fold. */
+/* One viewer (app.js renderResults sets .onefig): on a wide screen the 360 video, smaller, and the facts sit beside it,
+   not below the fold. The viewer spans both rows, and the second row takes the rest of its height (1fr), so the facts
+   follow the video at once, or start at the top without one. */
 @media (min-width: 1100px) {
-  #resultsbody.onefig { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0 var(--s6); align-items: start; }
+  #resultsbody.onefig { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); grid-template-rows: auto 1fr;
+    gap: 0 var(--s6); align-items: start; }
   #resultsbody.onefig > #partchecks { grid-column: 1 / -1; }
-  #resultsbody.onefig > .viewers.single { grid-template-columns: minmax(0, 1fr); margin-top: 0; }
-  #resultsbody.onefig > #facts2 { margin-top: 0; }
+  #resultsbody.onefig > .viewers.single { grid-template-columns: minmax(0, 1fr); grid-column: 1; grid-row: 1 / span 2;
+    margin-top: 0; }
+  #resultsbody.onefig > #spin { grid-column: 2; grid-row: 1; }
+  #resultsbody.onefig > #facts2 { grid-column: 2; grid-row: 2; margin-top: 0; }
+  #resultsbody.onefig .spinfig { margin-top: 0; }
+  #resultsbody.onefig .spinfig video { width: min(100%, 260px); }
 }
 .viewers figure { margin: 0; min-width: 0; }
-.viewers figcaption { padding: 0 0 6px; font-size: var(--t-ui); font-weight: 600; }
-.viewers figure .msg { padding: var(--s3) 0; }
+.viewers figcaption, .spinfig figcaption { padding: 0 0 6px; font-size: var(--t-ui); font-weight: 600; }
+/* The 360 video (app.js renderSpin): square, as tall as a viewer, with the viewers' hairline. */
+.spinfig { margin: var(--s4) 0; }
+.spinfig video { display: block; width: min(100%, clamp(260px, 45vh, 420px)); height: auto; aspect-ratio: 1;
+  background: var(--viewer-bg); border: 1px solid var(--line); border-radius: var(--r); }
+.viewers figure .msg, .spinfig .msg { padding: var(--s3) 0; }
 model-viewer { display: block; width: 100%; height: clamp(260px, 45vh, 420px); background: var(--viewer-bg); border: 1px solid var(--line);
   border-radius: var(--r); }
 /* "Loading the mesh" (app.js renderResults): in model-viewer's poster slot, which fills the box until the mesh shows. */
@@ -422,21 +437,38 @@ a.dl.primary:hover { background: var(--primary-hover); }
 .views figcaption { margin-top: var(--s1); font: var(--t-xs) var(--mono); color: var(--muted); font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere; }
 .views figure.at figcaption { color: var(--fg); font-weight: 700; }
+/* the LiDAR points of the views (app.js renderCloud): the heading with the view picker and Reset, the canvas (it takes
+   drags and pinches itself, so no page scroll starts there), and the legend with the sets' squares, like .conn's */
+.cloudbar { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s3); align-items: center; margin: var(--s5) 0 var(--s1); }
+.cloudbar h4 { margin: 0; }
+.cloudbar label { display: inline-flex; gap: var(--s2); align-items: center; font-size: var(--t-ui); }
+canvas.cloud { display: block; width: 100%; max-width: 760px; height: clamp(260px, 45vh, 420px); background: var(--viewer-bg);
+  border: 1px solid var(--line); touch-action: none; cursor: grab; }
+canvas.cloud:active { cursor: grabbing; }
+.legend { display: flex; flex-wrap: wrap; gap: 0 var(--s3); margin: var(--s1) 0 0; font: var(--t-xs) var(--mono); color: var(--muted);
+  font-variant-numeric: tabular-nums; }
+.legend .key { white-space: nowrap; }
+.sq { display: inline-block; width: 7px; height: 7px; margin-right: 6px; }
+.sq.scan { background: var(--line-strong); }
+.sq.used { background: var(--accent); }
 
 /* the public site (static/supa.js draws into the markup that site.py adds): the account menu in the header, the banner
    of the user's machines under it, the sign-in and waiting panels, the panel about the machines, the line of requests
    that wait on the job page, and the privacy page */
 header .account { position: relative; }  /* after the Help link, at the right */
-/* a block, not a flex box, so a long email ends in an ellipsis; the arrow sits in the right padding */
-.account > summary { position: relative; display: block; min-height: 32px; max-width: 260px; padding: 2px 26px 2px 10px;
-  border: 1px solid var(--line-strong); border-radius: var(--r); color: var(--fg); font-size: var(--t-s); line-height: 26px;
-  cursor: pointer; list-style: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the menu's button: a person icon (site.py ACCOUNT, drawn in the text color) and the arrow; the email is its name for a
+   screen reader and the menu's first line */
+.account > summary { display: flex; align-items: center; gap: var(--s1); min-height: 32px; padding: 0 8px;
+  border: 1px solid var(--line-strong); border-radius: var(--r); color: var(--muted); cursor: pointer; list-style: none; }
 .account > summary::-webkit-details-marker { display: none; }
-.account > summary::after { content: "\25BE"; content: "\25BE" / ""; position: absolute; top: 2px; right: 10px; color: var(--muted); }
-.account > summary:hover, .account[open] > summary { border-color: var(--fg); }
+.account > summary::after { content: "\25BE"; content: "\25BE" / ""; font-size: var(--t-s); }
+.account > summary:hover, .account[open] > summary { border-color: var(--fg); color: var(--fg); }
+.account .person { flex: none; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5;
+  stroke-linecap: round; }
 .accountmenu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 200px; padding: 4px 14px;
   border: 1px solid var(--line-strong); border-radius: var(--r); background: var(--surface); box-shadow: var(--shadow); }
 .accountmenu p { margin: var(--s2) 0; white-space: nowrap; }
+.accountmenu .who { max-width: 260px; white-space: normal; overflow-wrap: anywhere; font: var(--t-s) var(--mono); }  /* a long email wraps */
 .accountmenu #harpor-storage:empty { display: none; }
 .banner { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s5); padding: 6px var(--s5); border-bottom: 1px solid var(--line);
   background: var(--bg); font-size: var(--t-s); }
@@ -465,7 +497,6 @@ div.pending p.hint { padding: 0; border: 0; }
 .privacy h3 { margin: var(--s6) 0 var(--s1); }
 .privacy p { max-width: 70ch; }
 @media (max-width: 600px) {
-  .account > summary { max-width: 120px; }  /* the job's name in the header keeps some room */
   .banner { padding: 6px var(--s4); }
   .gate { margin: var(--s5) 0; }
 }
@@ -474,7 +505,7 @@ div.pending p.hint { padding: 0; border: 0; }
    of the app under a hairline. Its tables and term lists wrap their text, and a term column is only as wide as its
    terms, up to 16em, since some terms are whole messages. */
 main.help { max-width: 860px; }
-.help h1 { font-size: var(--t-2xl); font-weight: 600; line-height: 1.2; letter-spacing: -0.015em; margin: 0 0 var(--s3); }
+.help h1, .demos h1 { font-size: var(--t-2xl); font-weight: 600; line-height: 1.2; letter-spacing: -0.015em; margin: 0 0 var(--s3); }
 .help section { margin-top: var(--s6); padding-top: var(--s5); border-top: 1px solid var(--line); }
 .help h2 { font-size: var(--t-xl); margin-bottom: var(--s3); }
 .help h3 { margin: var(--s5) 0 var(--s1); }
@@ -496,6 +527,16 @@ nav.toc { margin: var(--s3) 0 var(--s5); }
   .help dl { grid-template-columns: minmax(0, 1fr); }  /* the phones' rule for dl below does not outrank .help dl */
   .help th, .help td { padding-right: var(--s2); font-size: var(--t-s); }
 }
+
+/* the demos page (demos.py page): one section per demo under a hairline: its 360 video with its facts beside it on a
+   wide screen, the 3D view folded, then its files in the Downloads tab's rows */
+.demo { margin-top: var(--s6); padding-top: var(--s5); border-top: 1px solid var(--line); }
+.demo h2 { font-size: var(--t-xl); margin-bottom: var(--s3); }
+.demobody { display: grid; gap: var(--s5); }
+@media (min-width: 900px) { .demobody { grid-template-columns: minmax(0, 640px) minmax(0, 1fr); align-items: start; } }
+.demo video { display: block; width: 100%; max-width: 70vh; height: auto; background: var(--viewer-bg);
+  border: 1px solid var(--line); border-radius: var(--r); }  /* a square video stays in the window's height */
+.demo .dlist { margin-top: var(--s3); }
 
 /* phones */
 @media (max-width: 600px) {
@@ -548,5 +589,7 @@ nav.toc { margin: var(--s3) 0 var(--s5); }
   input, select, textarea { font-size: 16px; }
   .card select { min-height: 40px; }
   a.dl { min-height: 44px; }
-  #helplink { margin-block: -6px; padding: 12px 0; }  /* a 44 px target for a finger, in the header's height */
+  /* 44 px targets for a finger, in the header's height */
+  #demolink, #helplink { margin-block: -6px; padding: 12px 0; }
+  .account > summary { min-width: 44px; min-height: 44px; margin-block: -6px; justify-content: center; }
 }

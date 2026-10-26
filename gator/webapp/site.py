@@ -1,7 +1,7 @@
 """The public HARPOR site: a static folder whose page talks only to Supabase.
 
     python -m gator.webapp.site init --url https://<ref>.supabase.co --key sb_publishable_...
-    python -m gator.webapp.site build [--out DIR]
+    python -m gator.webapp.site build [--out DIR] [--demos DIR | --no-demos]
 
 init writes gator/webapp/site.json. Its values are public by design: the project's URL and its publishable key.
 build writes the folder (site/ at the repo root by default, which git ignores):
@@ -15,25 +15,34 @@ build writes the folder (site/ at the repo root by default, which git ignores):
                 its local-only blocks: no upload, SSH tunnel or "None" agent, and the sections on the account,
                 setting up a machine and the machines' status
   privacy.html  what the site keeps, where, for how long, who can see it, and how API keys travel
-  static/       app.js, style.css, supa.js, config.js (from site.json), and the vendor files, each checked
+  demos.html    static/demos.html with relative paths, a CSP <meta>, the site's own model-viewer, demos.js and the
+                demos of --demos DIR (default: WEBAPP_DEMOS), each checked by demos.load; "No demos yet." without a
+                folder.
+                A build without a folder refuses an --out whose earlier build has demos, unless --no-demos: a
+                deploy of it would take the live demos away
+  demos/        each demo's files (demos/<name>/<file>), copied as they are
+  static/       app.js, style.css, supa.js, demos.js, config.js (from site.json), and the vendor files, each checked
                 against its SHA-384 first
   _headers      the same CSP and the other security headers, for Cloudflare Pages
   .nojekyll     so that GitHub Pages serves the folder as it is
 
 Every path in the pages is relative, so the same folder works at a domain root and under /<repo>/. The build
 refuses an output that holds a secret key or a JWT. The tunnel mode never uses any of this: the server serves
-static/index.html and static/help.html as they are.
+static/index.html and static/help.html as they are, and static/demos.html with the server's own demos folder.
 """
 import argparse
 import base64
 import hashlib
 import html
 import json
+import os
 import re
 import shutil
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from gator.webapp import demos
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -71,10 +80,13 @@ SCRIPTS = ("static/vendor/supabase-2.118.0.js", "static/config.js", "static/supa
 
 # ---- the markup that supa.js draws into, added to static/index.html ----
 
+# The account menu opens from a person icon. A screen reader names it "Account: <email>"; the menu's first line shows
+# the email. The SVG takes its stroke and fill from style.css (the CSP blocks style attributes).
 ACCOUNT = """
   <details id="harpor-account" class="account" hidden>
-    <summary id="harpor-email">Account</summary>
+    <summary title="Account"><svg class="person" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false"><circle cx="10" cy="7" r="3.25"/><path d="M3.75 17c.6-3.3 3.1-5.25 6.25-5.25s5.65 1.95 6.25 5.25"/></svg><span class="sr-only">Account: <span id="harpor-email"></span></span></summary>
     <div class="accountmenu">
+      <p id="harpor-who" class="who"></p>
       <p id="harpor-storage" class="hint"></p>
       <p><a href="privacy.html">Privacy</a></p>
       <p><button id="harpor-signout" class="small secondary" type="button">Sign out</button></p>
@@ -87,6 +99,7 @@ GATE = """
 <section id="harpor-signin" class="panel gate" hidden>
   <h2>Sign in to HARPOR</h2>
   <p>Turn a capture of one object into a simulation-ready model, on your own GPU machine.</p>
+  <p><a href="demos.html" target="_blank" rel="noopener">See the demos</a></p>
   <p class="gatebtns"><button id="harpor-google" type="button">Sign in with Google</button>
     <button id="harpor-github" type="button">Sign in with GitHub</button></p>
   <p id="harpor-signinmsg" class="msg" role="status"></p>
@@ -127,7 +140,8 @@ HELP_PUBLIC = {
     <li><a href="#machine-status">Machine status</a></li>""",
     "account": """<section id="account">
 <h2>Account and access</h2>
-<p>This site shows the HARPOR jobs that run on your own GPU machine. Sign in with Google or GitHub.</p>
+<p>This site shows the HARPOR jobs that run on your own GPU machine. Sign in with Google or GitHub. The person icon at
+  the top right opens your account menu: your email, the Storage line, Privacy and Sign out.</p>
 <p>The site's owner approves each account by hand. Until then, the page says Waiting for approval, and your machines
   cannot show jobs here. To ask for access, write who you are and what you will build, in 1 to 500 characters, and
   press Send request. You can send one request a day.</p>
@@ -248,14 +262,14 @@ PRIVACY = """<!doctype html>
 <h3>Where your data lives</h3>
 <p>Your jobs run on your own GPU machine. Your input file stays on that machine and never comes to this site.</p>
 <p>So that you can see your jobs here, HARPOR on your machine copies each job's state, the logs of its stages, its
-  review images and its result files to this site's Supabase project. The project also keeps your account and the
-  requests that you send to your machine. Supabase stores all of this for the site's owner, who runs that project and
-  can read it.</p>
+  review images, the LiDAR points of its views and its result files to this site's Supabase project. A LiDAR scan can
+  show more of the place than the photos do. The project also keeps your account and the requests that you send to
+  your machine. Supabase stores all of this for the site's owner, who runs that project and can read it.</p>
 
 <h3>How long it is kept</h3>
 <p>A request that your machine does not take within 7 days goes. The log text of a job goes 14 days after the job
-  stops. HARPOR on your machine deletes a job's review images and log files from the site 14 days after the job stops,
-  and its result files after 90 days. It does this while it runs, so files can stay longer while your machine is off.
+  stops. HARPOR on your machine deletes a job's review images, LiDAR points and log files from the site 14 days after
+  the job stops, and its result files after 90 days. It does this while it runs, so files can stay longer while your machine is off.
   Delete a job on the jobs page to remove its files from the site at once. The job's folder on your machine stays yours
   to delete. If the site's owner takes back your approval, this page no longer lists your jobs; then ask the owner to
   delete them.</p>
@@ -341,7 +355,8 @@ def csp(cfg, meta=False):
     styles through the CSSOM, which the policy allows), plus model-viewer's own shadow-DOM styles by their hash.
     'wasm-unsafe-eval' lets WebAssembly compile, and nothing else: model-viewer compiles its meshopt decoder when it
     loads, and its Draco and KTX2 decoders are WebAssembly too; without it the browser refuses them. The page talks to
-    the project's API and its Realtime socket; images and the preview video come from signed Storage URLs. A <meta>
+    the project's API and its Realtime socket; images and the videos come from signed Storage URLs, and the demos'
+    videos from the site itself. A <meta>
     policy cannot set frame-ancestors (browsers ignore it there and say so), so meta=True leaves it out; supa.js stops
     in a frame."""
     api = urlsplit(cfg["url"])
@@ -349,7 +364,7 @@ def csp(cfg, meta=False):
     ws = ("wss" if api.scheme == "https" else "ws") + "://" + api.netloc
     rules = [("default-src", "'none'"), ("script-src", "'self' 'wasm-unsafe-eval'"),
              ("style-src", f"'self' {MODEL_VIEWER_STYLE}"), ("img-src", f"'self' data: blob: {origin}"),
-             ("media-src", f"blob: {origin}"), ("connect-src", f"'self' {origin} {ws}"),
+             ("media-src", f"'self' blob: {origin}"), ("connect-src", f"'self' {origin} {ws}"),
              ("worker-src", "'self' blob:"), ("font-src", "'self'"), ("manifest-src", "'self'"),
              ("frame-ancestors", "'none'"), ("base-uri", "'none'"), ("form-action", "'none'")]
     return "; ".join(f"{k} {v}" for k, v in rules if not (meta and k == "frame-ancestors"))
@@ -412,6 +427,23 @@ def public_help(src, cfg):
     return out
 
 
+def public_demos(src, cfg, shown):
+    """static/demos.html made into the public site's demos.html, with the demos shown."""
+    page = "static/demos.html"
+    out = once(src, '<meta charset="utf-8">', '<meta charset="utf-8">\n' + head_meta(cfg), page)
+    out = once(out, 'href="/static/style.css"', 'href="static/style.css"', page)
+    out = once(out, 'href="/"', 'href="index.html"', page)  # the brand link
+    out = once(out, MODEL_VIEWER, '<script type="module" src="static/vendor/model-viewer-4.4.0.min.js"></script>', page)
+    out = once(out, 'src="/static/demos.js"', 'src="static/demos.js"', page)
+    try:
+        out = demos.page(out, shown)
+    except demos.DemoError as e:
+        raise SiteError(str(e)) from None
+    if re.search(r'(?:src|href)="(?:/|https?:)', out):
+        raise SiteError("the public demos.html still has an absolute path or another host; update site.py")
+    return out
+
+
 def config_js(cfg):
     public = {k: cfg[k] for k in ("url", "publishableKey")}
     return ("// Written by gator/webapp/site.py from gator/webapp/site.json. Public values only.\n"
@@ -448,14 +480,20 @@ def vendor_files(static=STATIC):
     return out
 
 
-def files(cfg, static=STATIC):
-    """{path in the site folder: bytes} of the whole site."""
+def files(cfg, static=STATIC, demo_dir=None):
+    """{path in the site folder: bytes} of the whole site, with the demos of demo_dir."""
+    try:
+        shown = demos.load(demo_dir)
+    except demos.DemoError as e:
+        raise SiteError(f"the demos folder: {e}; nothing was written") from None
     out = {"index.html": public_index((Path(static) / "index.html").read_text(), cfg).encode(),
            "help.html": public_help((Path(static) / "help.html").read_text(), cfg).encode(),
            "privacy.html": PRIVACY.format(meta=head_meta(cfg), contact=": " + html.escape(cfg["contact"], quote=False)
                                           if cfg.get("contact") else "").encode(),
+           "demos.html": public_demos((Path(static) / "demos.html").read_text(), cfg, shown).encode(),
            "static/config.js": config_js(cfg).encode(), "_headers": headers_file(cfg).encode(), ".nojekyll": b""}
-    for name in ("app.js", "style.css", "supa.js"):
+    out.update({rel: p.read_bytes() for rel, p in demos.files(demo_dir, shown).items()})
+    for name in ("app.js", "style.css", "supa.js", "demos.js"):
         out[f"static/{name}"] = (Path(static) / name).read_bytes()
     out.update({f"static/vendor/{rel}": data for rel, data in vendor_files(static).items()})
     for path, data in out.items():
@@ -464,13 +502,17 @@ def files(cfg, static=STATIC):
     return out
 
 
-def build(out=OUT, config=CONFIG, static=STATIC):
-    """Write the site into out. An existing out is replaced only when it is an earlier build (or empty)."""
+def build(out=OUT, config=CONFIG, static=STATIC, demo_dir=None, no_demos=False):
+    """Write the site into out, with the demos of demo_dir. An existing out is replaced only when it is an earlier
+    build (or empty), and one with demos only when demo_dir is given or no_demos is true."""
     out = Path(out)
-    site = files(load_config(config), static)
+    site = files(load_config(config), static, demo_dir)
     if out.exists():
         if any(out.iterdir()) and not ((out / ".nojekyll").is_file() and (out / "static" / "config.js").is_file()):
             raise SiteError(f"{out} is not an earlier build of the site; choose another --out")
+        if demo_dir is None and not no_demos and (out / "demos").is_dir():
+            raise SiteError(f"the earlier build in {out} has demos; give --demos DIR, or --no-demos to build without "
+                            "them")
         shutil.rmtree(out)
     for path, data in site.items():
         p = out / path
@@ -491,14 +533,23 @@ def main(argv=None):
     b = sub.add_parser("build", help="write the site folder")
     b.add_argument("--out", default=str(OUT), help=f"the folder to write (default {OUT})")
     b.add_argument("--config", default=str(CONFIG), help="site.json")
+    d = b.add_mutually_exclusive_group()
+    d.add_argument("--demos", metavar="DIR", default=os.environ.get("WEBAPP_DEMOS"),
+                   help="the demos folder (default: WEBAPP_DEMOS)")
+    d.add_argument("--no-demos", action="store_true", help="build without demos, also over a build that had them")
     args = ap.parse_args(argv)
     try:
         if args.cmd == "init":
             cfg = init(args.url, args.key, args.contact, args.config, args.force)
             print(f"wrote {args.config} for {cfg['url']}; build the site with python -m gator.webapp.site build")
         else:
-            written = build(args.out, args.config)
+            folder = Path(args.demos).expanduser() if args.demos and not args.no_demos else None
+            written = build(args.out, args.config, demo_dir=folder, no_demos=args.no_demos)
             print(f"wrote {len(written)} files to {args.out}")
+            # A build without the folder publishes an empty gallery, so the line says where the demos came from.
+            n = len({p.split("/")[1] for p in written if p.startswith("demos/")})
+            print(f"demos: {n} from {folder}" if folder else "demos: none" if args.no_demos
+                  else "demos: none (give --demos DIR or set WEBAPP_DEMOS)")
     except SiteError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

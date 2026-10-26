@@ -20,12 +20,14 @@ GLB kinds: good (a box of edge `size` with a PBR material), nan, no_material, ga
 same cube as two named nodes in W: body, the lower three quarters, and lid on top; with joints in the
 lid's extras when the scene has them). The fake .blend of parts also lists its objects and joints.
 `python -m gator.agent.fake_agent --blender ...` stands in for Blender, following the file contracts
-of blender/export_glb.py, review.py, set_joint.py and review_articulation.py without bpy, and those of
-blender/split_parts.py for gator.parts.stage split.
+of blender/export_glb.py, review.py, set_joint.py and review_articulation.py without bpy, those of
+blender/split_parts.py for gator.parts.stage split, and the frames_dir contract of blender/turntable.py
+for gator.webapp.turntable render.
 """
 
 import contextlib
 import json
+import math
 import os
 import signal
 import sys
@@ -121,6 +123,35 @@ def set_joint(blend, out, child, spec):
         json.dump(rec, f)
 
 
+def turntable_frames(args, side=96):
+    """blender/turntable.py with frames_dir, without bpy: args["frames"] PNGs of side px (0001.png, ...) on the
+    0.82-gray background, each the convex hull of the GLB's vertices in dark gray, seen orthographically as the
+    real camera sees it (along +z of W after the asset's matrix, args["elevation"] degrees from above), as the
+    asset turns once about W's y."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+    from scipy.spatial import ConvexHull
+
+    from gator.physics.align import load_w
+
+    assert len(args["assets"]) == 1 and args.get("frames_dir"), "frames_dir takes exactly one asset"
+    a, out, n = args["assets"][0], Path(args["frames_dir"]), args["frames"]
+    M = np.eye(4) if a.get("matrix") is None else np.asarray(a["matrix"], float)
+    v = load_w(a["path"])[0] @ M[:3, :3].T + M[:3, 3]  # glTF -> W is Blender's import
+    c, r = (v.min(0) + v.max(0)) / 2, np.linalg.norm(v.max(0) - v.min(0)) / 2
+    e = math.radians(args.get("elevation", 0))
+    right, down = np.array([1.0, 0.0, 0.0]), np.array([0.0, math.cos(e), -math.sin(e)])  # the camera's x and y in W
+    out.mkdir(parents=True, exist_ok=True)
+    for k in range(n):
+        t = -2 * math.pi * k / n  # as turntable.py keys the pivot's turn
+        R = np.array([[math.cos(t), 0.0, math.sin(t)], [0.0, 1.0, 0.0], [-math.sin(t), 0.0, math.cos(t)]])
+        p = (v - c) @ R.T
+        uv = side / 2 + np.stack([p @ right, p @ down], 1) * side / (2.6 * r)  # the panel is 2.6 r wide
+        img = Image.new("RGB", (side, side), (209, 209, 209))
+        ImageDraw.Draw(img).polygon([tuple(q) for q in uv[ConvexHull(uv).vertices]], fill=(64, 64, 64))
+        img.save(out / f"{k + 1:04d}.png")
+
+
 def fake_blender(argv):
     i = argv.index("--python")
     # Blender applies --python-exit-code only to scripts after it; a later flag lets failures exit 0.
@@ -153,6 +184,8 @@ def fake_blender(argv):
         split_parts(*rest[:4])
     elif script == "set_joint.py":
         set_joint(blend, *rest[:3])
+    elif script == "turntable.py":
+        turntable_frames(json.loads(Path(rest[0]).read_text()))
     elif script == "review_articulation.py":
         args = json.loads(Path(rest[0]).read_text())
         assert all(sorted(s["motions"]) == sorted(args["links"]) for s in args["states"])

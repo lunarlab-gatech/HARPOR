@@ -20,8 +20,9 @@ The estimate (estimate()) runs on the pool after da3:
               median of the used views. It fails when fewer than 3 views have points, fewer than 3
               or under half of them agree, the spread is over 8%, or s is outside 0.5 to 2.
 The record is pool/lidar.json (version 1); check images show the points coloured by r / s on the
-prep image, to spot calibration and timing errors. read_calibration() reads the LiDAR-camera
-calibration file (YAML or JSON).
+prep image, to spot calibration and timing errors. estimate(points_out=...) also gives each view's
+points with their rows in the samples ("index"), so the lidar stage can show which points the scale
+used. read_calibration() reads the LiDAR-camera calibration file (YAML or JSON).
 
     python -m gator.stage_a.lidar_scale estimate --pool P --samples S.npz --out F [--check DIR]
     python -m gator.stage_a.lidar_scale scale-run --run R --s 2 --out O
@@ -261,7 +262,8 @@ def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, erode_frac
     mask, points_used: with valid DA3 depth and conf) and gives erode_px, conf_min, s (the median of
     r = z / depth), iqr_rel (the IQR of r over s) and status: no_mask, no_samples, few_points,
     scattered or candidate (combine makes it used or outlier). points holds the visible points for
-    the check image: u, v (source pixels), r (NaN without valid depth) and used."""
+    the check image: u, v (source pixels), r (NaN without valid depth), used, and index: each
+    point's row in uvz."""
     from scipy.ndimage import distance_transform_edt
 
     from gator.webapp.views import at_size
@@ -271,13 +273,14 @@ def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, erode_frac
     conf = np.ones_like(depth) if conf is None else np.asarray(conf, float)
     m = at_size(np.asarray(mask) > 0, (h, w))
     uvz = np.asarray(uvz, float).reshape(-1, 3)
-    uvz = uvz[np.isfinite(uvz).all(1) & (uvz[:, 2] > 0)]
+    rows = np.flatnonzero(np.isfinite(uvz).all(1) & (uvz[:, 2] > 0))
+    uvz = uvz[rows]
     gu, gv = source_to_grid(uvz[:, 0], uvz[:, 1], crop, (w, h))
     iu, iv = pixel(gu), pixel(gv)
     g = (iu >= 0) & (iu < w) & (iv >= 0) & (iv < h)
-    iu, iv, z, src = iu[g], iv[g], uvz[g, 2], uvz[g, :2]
+    iu, iv, z, src, rows = iu[g], iv[g], uvz[g, 2], uvz[g, :2], rows[g]
     vis = zbuffer(iu, iv, z, (h, w), zbuffer_tol)
-    iu, iv, z, src = iu[vis], iv[vis], z[vis], src[vis]
+    iu, iv, z, src, rows = iu[vis], iv[vis], z[vis], src[vis], rows[vis]
 
     dist = distance_transform_edt(m)
     e = max(1, round(erode_frac * np.hypot(h, w)))
@@ -299,7 +302,7 @@ def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, erode_frac
            "points_mask": int(inner[iv, iu].sum()), "points_used": int(used.sum()), "erode_px": int(e),
            "conf_min": None if conf_min is None else round(conf_min, 4),
            "s": None if s is None else round(s, 6), "iqr_rel": None if iqr is None else round(iqr, 4), "status": status}
-    return rec, {"u": src[:, 0], "v": src[:, 1], "r": r, "used": used}
+    return rec, {"u": src[:, 0], "v": src[:, 1], "r": r, "used": used, "index": rows}
 
 
 def weighted_median(x, w):
@@ -376,10 +379,11 @@ def load_samples(samples):
     return out
 
 
-def estimate(pool_dir, samples, check_dir=None, **overrides):
+def estimate(pool_dir, samples, check_dir=None, points_out=None, **overrides):
     """The lidar.json record of a pool (mvsam3d prep and da3 ran on it) and the LiDAR samples
     ({pool name: (N, 3) [u, v, z]} or an .npz). overrides change thresholds by name (thresholds()).
-    With check_dir, writes check_dir/<name>.jpg for every view."""
+    With check_dir, writes check_dir/<name>.jpg for every view. A dict points_out gets {view name:
+    view_ratio's points}."""
     from PIL import Image
 
     from gator.stage_a.mvsam3d import view_names
@@ -407,6 +411,8 @@ def estimate(pool_dir, samples, check_dir=None, **overrides):
         views.append({"name": n, "frame": int(n[1:]) if re.fullmatch(r"f\d+", n) else None, **rec})
     comb = combine(views, **{k: t[k] for k in COMBINE_KEYS})
     ok, s, reason = comb.pop("ok"), comb.pop("s"), comb.pop("reason")
+    if points_out is not None:
+        points_out.update(points)
     warnings = []
     unknown = [k for k in samples if k not in points]
     if unknown:

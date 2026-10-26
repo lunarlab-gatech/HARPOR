@@ -5,6 +5,7 @@ import hashlib
 import html
 import http.server
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -35,6 +36,17 @@ def built(tmp_path):
     out = tmp_path / "site"
     site.build(out, write_cfg(tmp_path, contact="the lab's front desk"))
     return out
+
+
+@pytest.fixture
+def demo_dir(tmp_path):
+    """A demos folder with one demo written by hand (tests/test_webapp_demos.py)."""
+    pytest.importorskip("av")
+    pytest.importorskip("PIL")
+    from test_webapp_demos import hand_demo
+
+    hand_demo(tmp_path / "demos")
+    return tmp_path / "demos"
 
 
 class Links(HTMLParser):
@@ -83,10 +95,10 @@ def csp_of_headers(out):
 
 def test_build_writes_every_part_of_the_site(built):
     files = sorted(p.relative_to(built).as_posix() for p in built.rglob("*") if p.is_file())
-    assert files == sorted([".nojekyll", "_headers", "help.html", "index.html", "privacy.html", "static/app.js",
-                            "static/config.js", "static/style.css", "static/supa.js"] +
+    assert files == sorted([".nojekyll", "_headers", "demos.html", "help.html", "index.html", "privacy.html", "static/app.js",
+                            "static/config.js", "static/demos.js", "static/style.css", "static/supa.js"] +
                            [f"static/vendor/{v}" for v in site.VENDOR])
-    for name in ("app.js", "style.css", "supa.js"):
+    for name in ("app.js", "style.css", "supa.js", "demos.js"):
         assert (built / "static" / name).read_bytes() == (site.STATIC / name).read_bytes()
     for rel in site.VENDOR:
         assert (built / "static/vendor" / rel).read_bytes() == (site.STATIC / "vendor" / rel).read_bytes()
@@ -106,10 +118,10 @@ def test_csp_is_strict_and_the_same_in_headers_and_meta(built):
     assert rules["default-src"] == "'none'"
     assert rules["connect-src"] == "'self' https://abcdefghijklmnop.supabase.co wss://abcdefghijklmnop.supabase.co"
     assert rules["img-src"] == "'self' data: blob: https://abcdefghijklmnop.supabase.co"
-    assert rules["media-src"] == "blob: https://abcdefghijklmnop.supabase.co"
+    assert rules["media-src"] == "'self' blob: https://abcdefghijklmnop.supabase.co"  # 'self': the demos' videos
     assert rules["frame-ancestors"] == "'none'" and rules["base-uri"] == "'none'" and rules["form-action"] == "'none'"
     assert "'unsafe-inline'" not in head and "'unsafe-eval'" not in head and not CDN.search(head)
-    for page in ("index.html", "help.html", "privacy.html"):
+    for page in ("index.html", "help.html", "privacy.html", "demos.html"):
         assert csp_of_meta(built / page) == head.replace("frame-ancestors 'none'; ", "")
     text = (built / "_headers").read_text()
     for h in ("Referrer-Policy: no-referrer", "Strict-Transport-Security: max-age=31536000",
@@ -133,8 +145,9 @@ def test_local_stack_policy_uses_its_own_origin(tmp_path):
 
 def test_public_index_is_the_tunnel_page_made_public(built):
     """Relative paths only, each to a file of the site; the CSP and referrer metas before anything that loads; the
-    site's own model-viewer; the Supabase scripts before app.js; the markup that supa.js draws into; the header's Help
-    link before the account menu; the upload area hidden, with its message line moved out of it, after the machines
+    site's own model-viewer; the Supabase scripts before app.js; the markup that supa.js draws into; the header's Demos
+    and Help links before the account menu, which opens from a person icon whose name holds the email; the sign-in
+    panel's link to the demos; the upload area hidden, with its message line moved out of it, after the machines
     panel, which links to the help page's machine setup; no "None" agent; no inline script, style attribute or event
     attribute, which the CSP would block."""
     page = parse(built / "index.html")
@@ -149,10 +162,10 @@ def test_public_index_is_the_tunnel_page_made_public(built):
     assert scripts == ["static/vendor/model-viewer-4.4.0.min.js", "static/vendor/supabase-2.118.0.js", "static/config.js",
                        "static/supa.js", "static/app.js"]
     ids = {a.get("id") for _, a in page.tags}
-    for i in ("harpor-account", "harpor-email", "harpor-storage", "harpor-signout", "harpor-banner", "harpor-signin",
+    for i in ("harpor-account", "harpor-email", "harpor-who", "harpor-storage", "harpor-signout", "harpor-banner", "harpor-signin",
               "harpor-google", "harpor-github", "harpor-signinmsg", "harpor-waiting", "harpor-request", "harpor-note",
               "harpor-send", "harpor-requestmsg", "harpor-own", "harpor-machines", "harpor-pending", "drop", "file",
-              "upmsg", "jobs", "startform", "keylabel", "helplink"):
+              "upmsg", "jobs", "startform", "keylabel", "demolink", "helplink"):
         assert i in ids, i
     for gone in ("harpor-resume", "harpor-ownnote", "harpor-howto"):
         assert gone not in ids, gone
@@ -164,7 +177,19 @@ def test_public_index_is_the_tunnel_page_made_public(built):
     html = (built / "index.html").read_text()
     assert not CDN.search(html) and 'value="none"' not in html and "tus" not in html.lower().replace("status", "")
     header = html[html.index("<header>"):html.index("</header>")]
-    assert header.index('id="helplink"') < header.index('id="conn"') < header.index('id="harpor-account"')
+    assert (header.index('id="demolink"') < header.index('id="helplink"') < header.index('id="conn"')
+            < header.index('id="harpor-account"'))
+    # The account menu's button: a person icon (an SVG that a screen reader skips) and a name in .sr-only that starts
+    # with "Account: " and holds the email; the menu's first line holds the email too.
+    summary = re.search(r"<summary[^>]*>(.*?)</summary>", header, re.S)[1]
+    svg = re.findall(r"<svg[^>]*>", summary)
+    assert len(svg) == 1 and 'aria-hidden="true"' in svg[0] and 'focusable="false"' in svg[0]
+    name = re.sub(r"<svg.*?</svg>", "", summary, flags=re.S)
+    assert re.fullmatch(r'<span class="sr-only">Account: <span id="harpor-email"></span></span>', name)
+    menu = header[header.index('class="accountmenu"'):]
+    assert re.search(r'class="accountmenu">\s*<p id="harpor-who" class="who"></p>', menu)
+    gate = html[html.index('id="harpor-signin"'):html.index("</section>", html.index('id="harpor-signin"'))]
+    assert '<p><a href="demos.html" target="_blank" rel="noopener">See the demos</a></p>' in gate  # as the header's link
     drop = html[html.index('<div id="drop"'):html.index("</div>", html.index('<div id="drop"'))]
     assert 'id="file"' in drop and 'id="upmsg"' not in drop and html.count('id="upmsg"') == 1
     assert html.index('id="harpor-own"') < html.index('id="upmsg"') < html.index("<h2>Jobs</h2>")
@@ -194,12 +219,13 @@ def test_privacy_page_says_where_data_lives_and_who_can_see_keys(built):
     assert ("a", {"href": "help.html#agent"}) in page.tags
     text = html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", (built / "privacy.html").read_text())))
     for want in ("Your input file stays on that machine and never comes to this site.",
-                 "copies each job's state, the logs of its stages, its review images and its result files to this "
-                 "site's Supabase project",
+                 "copies each job's state, the logs of its stages, its review images, the LiDAR points of its views "
+                 "and its result files to this site's Supabase project",
+                 "A LiDAR scan can show more of the place than the photos do.",
                  "the site's owner, who runs that project and can read it.",
                  "The log text of a job goes 14 days after the job stops.",
-                 "review images and log files from the site 14 days after the job stops, and its result files after "
-                 "90 days",
+                 "review images, LiDAR points and log files from the site 14 days after the job stops, and its result "
+                 "files after 90 days",
                  "Delete a job on the jobs page to remove its files from the site at once.",
                  "If the site's owner takes back your approval, this page no longer lists your jobs; then ask the "
                  "owner to delete them.",
@@ -246,7 +272,9 @@ def test_public_help_page(built):
                  "python -m gator.webapp.worker add PATH", "offline or stopping",
                  "GPT-6-Astra runs the Codex CLI in a container that can reach the network.",
                  "These commands run on the GPU machine that runs the job.",
-                 "Claude Opus 5.5 runs its shell with no network access.", "Signed out. Reload to sign in."):
+                 "Claude Opus 5.5 runs its shell with no network access.", "Signed out. Reload to sign in.",
+                 "The person icon at the top right opens your account menu: your email, the Storage line, Privacy and "
+                 "Sign out."):
         assert want in text, want
     for gone in ("SSH tunnel", "?token=", "Choose a file", "Cancel upload", "20 GB", "None"):
         assert gone not in text, gone
@@ -293,9 +321,10 @@ def test_public_help_numbers_are_the_databases(built):
     assert "`Storage: ${mib(r.data)} of ${mib(access.max_result_bytes)} MB`" in (site.STATIC / "supa.js").read_text()
 
 
-def test_site_served_under_a_repo_path_loads_every_asset(built, tmp_path):
-    """Served as GitHub Pages serves a project site (under /HARPOR/), every src and href of the three pages, and the
-    decoder files that supa.js names, load by their relative URL."""
+def served(built, tmp_path):
+    """Serve the site built as GitHub Pages serves a project site (under /HARPOR/), and load every src and href of its
+    four pages and the decoder files that supa.js names by their relative URL. Returns those URLs, relative to the
+    site."""
     www = tmp_path / "www"
     shutil.copytree(built, www / "HARPOR")
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(www))
@@ -305,19 +334,73 @@ def test_site_served_under_a_repo_path_loads_every_asset(built, tmp_path):
     try:
         base = f"http://127.0.0.1:{httpd.server_address[1]}/HARPOR/"
         urls = {base, base + "privacy.html"}
-        for page in ("index.html", "help.html", "privacy.html"):
+        for page in ("index.html", "help.html", "privacy.html", "demos.html"):
             urls |= {urllib.parse.urljoin(base + page, link.split("#")[0]) for link in parse(built / page).links}
         supa = (site.STATIC / "supa.js").read_text()
         for folder in re.findall(r'new URL\("(static/vendor/[^"]+/)", location\.href\)', supa):
             for f in (site.STATIC / folder.replace("static/", "", 1)).iterdir():
                 urls.add(base + folder + f.name)
-        assert len(urls) > 12
         for url in sorted(urls):
             with urllib.request.urlopen(url) as r:
                 assert r.status == 200, url
+        return {u.removeprefix(base) for u in urls}
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_site_served_under_a_repo_path_loads_every_asset(built, tmp_path):
+    """Every asset of the four pages loads under /HARPOR/ (served), without demos."""
+    assert len(served(built, tmp_path)) > 12
+
+
+def test_site_with_demos_served_under_a_repo_path(tmp_path, demo_dir):
+    """The same with a demo: its files load too."""
+    built = tmp_path / "site"
+    site.build(built, write_cfg(tmp_path), demo_dir=demo_dir)
+    assert "demos/office-chair/turntable.mp4" in served(built, tmp_path)
+
+
+def test_build_with_demos(tmp_path, demo_dir):
+    """demos.html: the CSP and referrer metas first, the site's own model-viewer and demos.js, no other script or inline style,
+    relative links that each go to a file of the site, and the demo's files copied byte for byte. A demos folder that
+    breaks a rule, or that looks private, stops the build, and nothing is written. Without a folder the page says
+    "No demos yet."."""
+    out = tmp_path / "site"
+    written = site.build(out, write_cfg(tmp_path), demo_dir=demo_dir)
+    assert sorted(p for p in written if p.startswith("demos/")) == sorted(
+        f"demos/office-chair/{f}" for f in ("turntable.mp4", "poster.jpg", "aligned.glb", "results.zip"))
+    for rel in written:
+        if rel.startswith("demos/"):
+            assert (out / rel).read_bytes() == (demo_dir / rel.removeprefix("demos/")).read_bytes(), rel
+    page = parse(out / "demos.html")
+    assert page.head[:3] == [("meta", {"charset": "utf-8"}),
+                             ("meta", {"http-equiv": "Content-Security-Policy", "content": csp_of_meta(out / "demos.html")}),
+                             ("meta", {"name": "referrer", "content": "no-referrer"})]
+    assert [a["src"] for t, a in page.tags if t == "script"] == ["static/vendor/model-viewer-4.4.0.min.js", "static/demos.js"]
+    assert page.inline == [] and not any("style" in a or any(k.startswith("on") for k in a) for _, a in page.tags)
+    assert ("a", {"href": "index.html", "class": "brand"}) in page.tags
+    for link in page.links:
+        assert not re.match(r"[a-z]+:|/", link) and (out / link.split("#")[0]).is_file(), link
+    text = (out / "demos.html").read_text()
+    assert not CDN.search(text) and 'id="demo-office-chair"' in text and "No demos yet." not in text
+    bad = tmp_path / "bad"
+    shutil.copytree(demo_dir, bad)
+    (bad / "office-chair" / "notes.zip").write_bytes(b"PK\x03\x04")
+    with pytest.raises(site.SiteError, match="the demos folder: office-chair/notes.zip is not listed in demo.json"):
+        site.build(tmp_path / "other", write_cfg(tmp_path), demo_dir=bad)
+    (bad / "office-chair" / "notes.zip").unlink()
+    spec = json.loads((bad / "office-chair" / "demo.json").read_text())
+    (bad / "office-chair" / "demo.json").write_text(json.dumps({**spec, "title": "Pallet A"}))
+    with pytest.raises(site.SiteError, match="looks private"):
+        site.build(tmp_path / "other", write_cfg(tmp_path), demo_dir=bad)
+    assert not (tmp_path / "other").exists()
+    # Over a build with demos, a build without them needs no_demos: a deploy of it would take the live demos away.
+    with pytest.raises(site.SiteError, match="has demos; give --demos DIR, or --no-demos"):
+        site.build(out, write_cfg(tmp_path))
+    assert (out / "demos" / "office-chair" / "turntable.mp4").is_file()
+    site.build(out, write_cfg(tmp_path), no_demos=True)
+    assert '<p class="emptytab">No demos yet.</p>' in (out / "demos.html").read_text() and not (out / "demos").exists()
 
 
 def test_build_refuses_secrets(tmp_path):
@@ -420,15 +503,21 @@ def test_build_replaces_only_an_earlier_build(tmp_path, built):
     assert (other / "notes.md").read_text() == "mine"
 
 
+def run_site(*args):
+    """python -m gator.webapp.site with args, without WEBAPP_DEMOS."""
+    env = {k: v for k, v in os.environ.items() if k != "WEBAPP_DEMOS"}
+    return subprocess.run([sys.executable, "-m", "gator.webapp.site", *args], cwd=ROOT, capture_output=True, text=True,
+                          timeout=60, env=env)
+
+
 def test_command_line(tmp_path):
-    def run(*args):
-        return subprocess.run([sys.executable, "-m", "gator.webapp.site", *args], cwd=ROOT, capture_output=True, text=True,
-                              timeout=60)
+    run = run_site
     cfg = tmp_path / "s.json"
     r = run("init", "--url", CFG["url"], "--key", CFG["publishableKey"], "--config", str(cfg))
     assert r.returncode == 0 and CFG["publishableKey"] not in r.stdout + r.stderr
     r = run("build", "--config", str(cfg), "--out", str(tmp_path / "out"))
     assert r.returncode == 0 and r.stdout.startswith("wrote ") and (tmp_path / "out/index.html").is_file()
+    assert r.stdout.splitlines()[1] == "demos: none (give --demos DIR or set WEBAPP_DEMOS)"
     r = run("init", "--url", CFG["url"], "--key", "sb_secret_0123456789abcdef", "--config", str(tmp_path / "x.json"))
     assert r.returncode == 1 and r.stderr.startswith("error: ") and "sb_secret_0123456789abcdef" not in r.stderr
     assert run("build", "--config", str(tmp_path / "missing.json")).returncode == 1
@@ -436,6 +525,27 @@ def test_command_line(tmp_path):
     for gone in ("--storage-url", "--plan-file-limit"):  # the site takes no uploads
         assert run("init", "--url", CFG["url"], "--key", CFG["publishableKey"], gone, "1", "--config",
                    str(tmp_path / "y.json")).returncode == 2
+
+
+def test_command_line_with_demos(tmp_path, demo_dir):
+    """--demos copies the demos in. Over that build, a build without a folder stops unless --no-demos, and a folder
+    that is not there stops the build."""
+    cfg, out = tmp_path / "s.json", tmp_path / "out"
+    cfg.write_text(json.dumps(CFG))
+    build = lambda *a: run_site("build", "--config", str(cfg), "--out", str(out), *a)  # noqa: E731
+    r = build("--demos", str(demo_dir))
+    assert r.returncode == 0 and r.stdout.splitlines()[1] == f"demos: 1 from {demo_dir}"
+    assert (out / "demos/office-chair/turntable.mp4").is_file()
+    r = build()
+    assert r.returncode == 1 and r.stderr == (f"error: the earlier build in {out} has demos; give --demos DIR, or "
+                                              "--no-demos to build without them\n")
+    r = build("--demos", str(tmp_path / "missing"))
+    assert r.returncode == 1 and r.stderr == (f"error: the demos folder: no demos folder {tmp_path / 'missing'}; "
+                                              "nothing was written\n")
+    assert (out / "demos/office-chair/turntable.mp4").is_file()
+    assert build("--demos", str(demo_dir), "--no-demos").returncode == 2
+    r = build("--no-demos")
+    assert r.returncode == 0 and r.stdout.splitlines()[1] == "demos: none" and not (out / "demos").exists()
 
 
 def test_gitignore_keeps_secrets_and_the_built_site_out():

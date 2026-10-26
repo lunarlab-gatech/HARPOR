@@ -523,18 +523,20 @@ def test_signed_out_page_signs_in_with_pkce_back_to_the_site_folder():
 
 
 def test_account_waiting_for_approval_can_request_access():
-    """Signed in without approval: the waiting panel and its request box (rpc request_access); the account menu shows
-    the email; app.js never routes, and no machine or job is read."""
+    """Signed in without approval: the waiting panel and its request box (rpc request_access); the account icon's
+    name and the menu's first line hold the email; app.js never routes, and no machine or job is read."""
     out = run_js("""
         await advance(0);
         $("#harpor-note").value = "  I build robot props for the lab.  ";
         await $("#harpor-request").onsubmit({ preventDefault() {} });
         out({ waiting: $("#harpor-waiting").hidden, signin: $("#harpor-signin").hidden, email: $("#harpor-email").textContent,
+          who: $("#harpor-who").textContent,
           account: $("#harpor-account").hidden, rpc: calls.filter((c) => c.rpc).map((c) => [c.rpc, c.args]),
           msg: $("#harpor-requestmsg").textContent, own: $("#harpor-own").hidden,
           read: calls.filter((c) => c.table).map((c) => [c.table, c.cols]) });
         """, setup=account(approved=False) + "db.rpc.request_access = () => ({ data: 'sent' });")
-    assert out["waiting"] is False and out["signin"] is True and out["email"] == "ana@example.org" and out["account"] is False
+    assert out["waiting"] is False and out["signin"] is True and out["account"] is False
+    assert out["email"] == out["who"] == "ana@example.org"
     assert out["rpc"] == [["request_access", {"p_note": "I build robot props for the lab."}]]
     assert out["msg"] == "Request sent." and out["own"] is True
     assert out["read"] == [["access", "approved,agents,max_result_bytes,request_at"], ["settings", "worker_online_s,max_machines"]]

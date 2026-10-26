@@ -38,7 +38,8 @@ HOSTILE_START = [
     {**USER, "parts": [{"name": "body"}, {"name": "lid", "parent": "body", "count": True}]}, {"lidar": True},
     {"lidar": []}, {"lidar": "on"}, {"lidar": {"topic": 3}}, {"agent": "astra", "api_key": 7},
     {"agent": "astra", "api_key": ["sk-x"]}, {"agent": "astra", "api_key": True},
-    {"agent": "astra", "api_key": "sk-" + "a" * 600}, {"agent": "astra", "api_key": "sk-a\nb"}]
+    {"agent": "astra", "api_key": "sk-" + "a" * 600}, {"agent": "astra", "api_key": "sk-a\nb"}, {"turntable": 1},
+    {"turntable": "yes"}]
 HOSTILE_CONTINUE = [{"from": 1}, {"from": True}, {"from": ["frames"]}, {"from": {"stage": "agent"}}, {"from": "nope"},
                     {"from": "../agent"}, {"agent": []}, {"agent": "gpt"}, {"key_later": "yes"},
                     {"agent": "astra", "api_key": 7}]

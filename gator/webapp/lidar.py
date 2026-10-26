@@ -47,17 +47,30 @@ A rosbag's samples:
               keeps only the points that land in the image of a frame whose read window holds it, so a
               360 degree LiDAR does not fill the memory.
 
-A Stray Scanner capture's samples (stray.depth_samples): the depth image depth/NNNNNN.png of each
-frame, in millimetres, aligned with the color camera, so there is no extrinsic, no intrinsics and no
-time matching. Each depth pixel with confidence 2 and z within 0.1 to 5 m is scaled from the depth
-image's size to the frame's as stored, then turned upright by the turn that the frames got
-(frames/meta.json "video" "rotation", from gravity). The zip is unpacked in J/video/stray (stray.unpack,
-which the frames stage did already). A frame without a depth image, or with one but without its
-confidence image, gets no samples, with a warning.
+A Stray Scanner capture's samples (stray.depth_points): the depth image depth/NNNNNN.png of each
+frame, in millimetres, aligned with the color camera, so there is no extrinsic and no time matching.
+The scale needs no intrinsics; they are read only for the clouds (stray.intrinsics: odometry.csv,
+else camera_matrix.csv, scaled from the video's size to the frame's), and without them the record
+has a warning and the Inputs tab no points. Each depth pixel with confidence 2 and z within 0.1 to
+5 m is scaled from the depth image's size to the frame's as stored, then turned upright by the turn
+that the frames got (frames/meta.json "video" "rotation", from gravity). The zip is unpacked in
+J/video/stray (stray.unpack, which the frames stage did already). A frame without a depth image, or
+with one but without its confidence image, gets no samples, with a warning.
 The record's source is {kind "stray", file, depth_size, frames (the frames sampled)}, its extrinsic
 {source "stray (depth aligned with the color camera)"}, its intrinsics {source "stray: depth scaled to
-the frame size", depth_size, frame_size, turns, min_confidence, z_range_m} and its time {base "frame
-index"}.
+the frame size", depth_size, frame_size, turns, min_confidence, z_range_m, K_from (odometry.csv,
+camera_matrix.csv or null)} and its time {base "frame index"}.
+
+Clouds. For the Inputs tab, each sampled frame also gets its LiDAR points as camera points (meters,
+OpenCV optical axes of the upright frame): xyz, the samples' points row for row, and scan, the frame's
+whole scan. A rosbag's scan is frame_points over a random subset of each scan read (at most SCAN_KEEP
+points, kept before the in-view filter), so the points behind and beside the camera are in it too, then
+at most SCAN_POINTS of them; a Stray capture's is every depth pixel with a depth, at any confidence.
+They are cached in J/lidar/clouds.npz ("<frame>_xyz", "<frame>_scan") next to the samples. The stage
+writes J/lidar/cloud/<view>.glb (cloud_glb: node "scan", the whole scan, and node "used", the points
+that the scale used, view_ratio's used rows of xyz) with the check images, also when the record is not
+ok, before pool/lidar.json. select copies the picks' files to J/run/lidar/<i>.glb; while the record is not
+ok, the server offers the pool's own files instead (server.pool_clouds).
 
 The estimate is lidar_scale.estimate, with the check images in J/lidar/check. The record,
 pool/lidar.json, gains source, extrinsic {source, file, calibration_sha256, chain, link, camera_axes,
@@ -76,6 +89,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import time
 from pathlib import Path
 
@@ -90,7 +104,11 @@ ASPECT_TOL = 0.01  # intrinsics for another size are scaled to the frames when t
 # A bag whose topics.json is older than the LiDAR listing (Runner.submit_analyze lists it again on a topic choice).
 OLD_TOPICS = ("the bag was listed before LiDAR topics were; choose its camera topic again to list them (for a job in "
               "review or done: upload the bag again)")
-CACHE_VERSION = 2  # of lidar/samples.json; another version is a cache miss (2: time_offset_s only in the header base)
+CACHE_VERSION = 3  # of lidar/samples.json; another version is a miss (3: the clouds in lidar/clouds.npz)
+SCAN_POINTS = 60_000  # the most points of a view's whole scan in its cloud (lidar/cloud/<view>.glb)
+SCAN_KEEP = 20_000  # while reading, each scan also keeps a random subset of its points, at most this many, for the clouds
+NO_K = ("the export has no intrinsics (fx, fy, cx, cy in odometry.csv, or camera_matrix.csv), so the Inputs tab has "
+        "no LiDAR points")
 
 
 class Failed(Exception):
@@ -131,7 +149,8 @@ def progress(x):
 # ---- the samples cache ----
 
 def cache_read(J, key, names):
-    """{name: samples} and the info of lidar/samples.*, when its key is key and it has every name; else None."""
+    """({name: samples}, the info, {name: (xyz, scan)}) of lidar/samples.* and lidar/clouds.npz, when the key is
+    key and the files have every name (the clouds: every frame that samples.json lists with one); else None."""
     d = Path(J) / "lidar"
     meta = read_json(d / "samples.json")
     if not isinstance(meta, dict) or meta.get("key") != key or not set(names) <= set(meta.get("frames") or []):
@@ -139,21 +158,29 @@ def cache_read(J, key, names):
     try:
         with np.load(d / "samples.npz") as f:
             samples = {n: np.asarray(f[n], float) for n in meta["frames"]}
-    except (OSError, ValueError, KeyError):
+        with np.load(d / "clouds.npz") as f:
+            clouds = {n: (f[f"{n}_xyz"], f[f"{n}_scan"]) for n in meta.get("clouds") or []}
+    except (OSError, ValueError, KeyError, TypeError):
         return None
-    return samples, meta.get("info") or {}
+    return samples, meta.get("info") or {}, clouds
 
 
-def cache_write(J, key, samples, info):
-    """lidar/samples.npz, then lidar/samples.json (the key) last; the old key goes first."""
+def _savez(path, arrays):
+    tmp = path.with_name(".tmp_" + path.name)
+    with open(tmp, "wb") as f:
+        np.savez(f, **arrays)
+    os.replace(tmp, path)
+
+
+def cache_write(J, key, samples, info, clouds):
+    """lidar/samples.npz, lidar/clouds.npz, then lidar/samples.json (the key) last; the old key goes first."""
     d = Path(J) / "lidar"
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     (d / "samples.json").unlink(missing_ok=True)
-    tmp = d / ".tmp_samples.npz"
-    with open(tmp, "wb") as f:
-        np.savez(f, **{n: np.asarray(a, np.float32).reshape(-1, 3) for n, a in samples.items()})
-    os.replace(tmp, d / "samples.npz")
-    write_json(d / "samples.json", {"key": key, "frames": sorted(samples), "info": info,
+    _savez(d / "samples.npz", {n: np.asarray(a, np.float32).reshape(-1, 3) for n, a in samples.items()})
+    _savez(d / "clouds.npz", {f"{n}_{k}": np.asarray(a, np.float32).reshape(-1, 3) for n, c in clouds.items()
+                              for k, a in zip(("xyz", "scan"), c)})
+    write_json(d / "samples.json", {"key": key, "frames": sorted(samples), "clouds": sorted(clouds), "info": info,
                                     "points": {n: int(len(a)) for n, a in sorted(samples.items())}})
 
 
@@ -312,11 +339,20 @@ def link_gaps(edges, chain, times):
     return out
 
 
-def read_scans(path, topic, windows, keep=None, lo=0.1, hi=0.85):
-    """[(log_ns, header_ns, xyz, t_ns or None)] of the LiDAR topic within the log-time windows
+def at_most(a, k, seed):
+    """At most k rows of a: a random choice fixed by seed, kept in their order (a stride would draw stripes on
+    an organized cloud)."""
+    if len(a) <= k:
+        return a
+    return a[np.sort(np.random.default_rng(seed).choice(len(a), k, replace=False))]
+
+
+def read_scans(path, topic, windows, keep=None, lo=0.1, hi=0.85, whole=0):
+    """[(log_ns, header_ns, xyz, t_ns or None, whole)] of the LiDAR topic within the log-time windows
     (rosbag.scans), with PROGRESS lines from lo to hi as the windows are read. keep: a function of
     (xyz, log_ns) that gives the points to hold (None: all), so that a 360 degree scan keeps only what
-    the camera can see (in_view)."""
+    the camera can see (in_view). whole: (xyz, t_ns or None) of at most that many of the scan's points,
+    taken before keep (at_most, seeded by the log time), for the clouds; None when whole is 0."""
     from gator.webapp import rosbag
 
     spans = rosbag.merge_windows(windows)
@@ -324,10 +360,14 @@ def read_scans(path, topic, windows, keep=None, lo=0.1, hi=0.85):
     out, shown = [], lo
     for log, head, xyz, t in rosbag.scans(path, topic, windows):
         t = None if t is None else np.asarray(t, np.int64)
+        part = None
+        if whole:
+            rows = at_most(np.arange(len(xyz)), whole, int(log))
+            part = (np.array(xyz[rows], np.float32), None if t is None else t[rows])
         if keep is not None:
             m = keep(xyz, int(log))
             xyz, t = xyz[m], None if t is None else t[m]
-        out.append((int(log), int(head), xyz, t))
+        out.append((int(log), int(head), xyz, t, part))
         passed = sum(min(b, log) - a for a, b in spans if a <= log)
         x = lo + (hi - lo) * passed / total
         if x >= shown + 0.02:
@@ -418,7 +458,7 @@ def frame_points(scans, base, t_cam, period):
     w = WINDOW_S * 1e9
     if all(s[3] is not None for s in scans):
         got = []
-        for log, head, xyz, t in scans:
+        for log, head, xyz, t, *_ in scans:
             if not len(t):
                 continue
             tb = t if base == "header" else log + (t - (head or int(t.min())))
@@ -431,25 +471,33 @@ def frame_points(scans, base, t_cam, period):
     return scans[i][2] if abs(stamps[i] - t_cam) <= period else np.zeros((0, 3), np.float32)
 
 
-def project(xyz, T, intr, frame_size):
-    """(u, v, z, ok) of LiDAR points in the frame's pixels (lidar_scale.project): T_cam_lidar, then the
-    camera_info's R, then the intrinsics fitted to the frame (fit_matrix)."""
+def to_camera(xyz, T, intr):
+    """LiDAR points in the frame where a sample's z lives: T_cam_lidar, then the camera_info's R."""
     X = np.asarray(xyz, float).reshape(-1, 3) @ T[:3, :3].T + T[:3, 3]
     if intr.get("R") is not None:
         X = X @ np.asarray(intr["R"], float).T
+    return X
+
+
+def project(xyz, T, intr, frame_size):
+    """(u, v, z, ok, X) of LiDAR points in the frame's pixels (lidar_scale.project): to_camera, then the
+    intrinsics fitted to the frame (fit_matrix). X: the camera points."""
+    X = to_camera(xyz, T, intr)
     K = fit_matrix(intr["K"], intr["size"], frame_size, intr["source"])
-    return lidar_scale.project(X, K, intr["D"], intr["model"], frame_size)
+    return (*lidar_scale.project(X, K, intr["D"], intr["model"], frame_size), X)
 
 
 def to_samples(xyz, T, intr, frame_size):
-    """[u, v, z] (float32) of the LiDAR points that land in the frame (project)."""
-    u, v, z, ok = project(xyz, T, intr, frame_size)
-    return np.stack([u[ok], v[ok], z[ok]], 1).astype(np.float32)
+    """([u, v, z], their camera points), float32 and row for row, of the LiDAR points that land in the frame
+    (project)."""
+    u, v, z, ok, X = project(xyz, T, intr, frame_size)
+    return np.stack([u[ok], v[ok], z[ok]], 1).astype(np.float32), X[ok].astype(np.float32)
 
 
 def rosbag_samples(J, job, spec, names):
-    """({frame name: (N, 3) [u, v, z]}, info) of a rosbag job's LiDAR topic (see the module docstring).
-    info: source, extrinsic, intrinsics, time and warnings. Failed with the reason."""
+    """({frame name: (N, 3) [u, v, z]}, info, clouds) of a rosbag job's LiDAR topic (see the module docstring).
+    info: source, extrinsic, intrinsics, time and warnings; clouds: {frame name: (xyz, scan)}. Failed with
+    the reason."""
     from gator.webapp import steps
     from gator.webapp.jobs import INPUTS
 
@@ -495,9 +543,9 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
            "topics": {"camera": cam, "lidar": topic}, "calibration_sha256": cal_sha, "window_ms": WINDOW_S * 1000}
     hit = cache_read(J, key, names)
     if hit is not None:
-        samples, info = hit
+        samples, info, clouds = hit
         print(f"LiDAR samples of {len(samples)} frames from the cache (lidar/samples.npz)", flush=True)
-        return samples, {**info, "source": {**info.get("source", source), "cache": "hit"}}
+        return samples, {**info, "source": {**info.get("source", source), "cache": "hit"}}, clouds
 
     warnings = []
     sizes = {}
@@ -530,7 +578,7 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
                         "images, give K in the calibration too")
     progress(0.1)
     print(f"reading {topic} within {READ_S} s of {len(frames)} frames", flush=True)
-    scans = read_scans(path, topic, windows, in_view(frames, wins, T, intr, sizes))
+    scans = read_scans(path, topic, windows, in_view(frames, wins, T, intr, sizes), whole=SCAN_KEEP)
     info = {"source": {**source, "scans": len(scans)}, "extrinsic": ext, "intrinsics": intr}
     if not scans:
         raise Failed(f"{topic} has no scans within {READ_S} s of the frames' times; was the LiDAR recording "
@@ -542,22 +590,25 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
     info["time"] = {**trec, "scan_period_ms": round(period / 1e6, 3), "scan_period_from": period_from,
                     "point_times": point_times}
     add = offset if base == "header" else 0  # the offset relates the header clocks, not the log times
-    samples = {}
+    samples, clouds = {}, {}
     for n in frames:  # only the scans read for this frame
         near = [s for s in scans if any(a <= s[0] < b for a, b in wins[n])]
         t_cam = int(stamps["header_ns" if base == "header" else "log_ns"][int(n[1:])]) + add
-        samples[n] = to_samples(frame_points(near, base, t_cam, period), T[n], intr, sizes[n])
+        samples[n], xyz = to_samples(frame_points(near, base, t_cam, period), T[n], intr, sizes[n])
+        scan = to_camera(frame_points([(s[0], s[1], *s[4]) for s in near], base, t_cam, period), T[n], intr)
+        scan = scan[np.isfinite(scan).all(1)]
+        clouds[n] = (xyz, at_most(scan, SCAN_POINTS, int(n[1:])).astype(np.float32))
     info["warnings"] = warnings
-    cache_write(J, key, samples, info)
-    return samples, {**info, "source": {**info["source"], "cache": "miss"}}
+    cache_write(J, key, samples, info, clouds)
+    return samples, {**info, "source": {**info["source"], "cache": "miss"}}, clouds
 
 
 def stray_samples(J, job, spec, names):
-    """({frame name: (N, 3) [u, v, z]}, info) of a Stray Scanner capture's depth images (see the module
-    docstring). Failed with the reason."""
+    """({frame name: (N, 3) [u, v, z]}, info, clouds) of a Stray Scanner capture's depth images (see the module
+    docstring); clouds: {frame name: (xyz, scan)}, none without intrinsics. Failed with the reason."""
     from PIL import Image
 
-    from gator.webapp import steps, stray
+    from gator.webapp import rosbag, steps, stray
     from gator.webapp.jobs import INPUTS
 
     path = Path(job["video"]["path"])
@@ -592,9 +643,9 @@ def stray_samples(J, job, spec, names):
            "min_confidence": stray.MIN_CONF, "z_range_m": list(stray.Z_RANGE)}
     hit = cache_read(J, key, names)
     if hit is not None:
-        samples, info = hit
+        samples, info, clouds = hit
         print(f"LiDAR samples of {len(samples)} frames from the cache (lidar/samples.npz)", flush=True)
-        return samples, {**info, "source": {**info.get("source", source), "cache": "hit"}}
+        return samples, {**info, "source": {**info.get("source", source), "cache": "hit"}}, clouds
 
     try:
         root = stray.unpack(path, path.parent / "stray")
@@ -607,9 +658,14 @@ def stray_samples(J, job, spec, names):
     if not any(stray.FRAME_FILE.fullmatch(f"confidence/{p.name}") for p in (root / "confidence").glob("*.png")):
         min_conf = 0
         warnings.append("the export has no confidence/ images, so every depth pixel is used, also the doubtful ones")
+    K, K_from = stray.intrinsics(root, int(video.get("n_frames") or 0))
+    if K is None:
+        warnings.append(NO_K)
+    stored = upright if k % 2 == 0 else upright[::-1]  # the video as stored, the size K is for
     progress(0.1)
     print(f"reading the depth images of {len(frames)} frames, turned {90 * k} degrees", flush=True)
-    samples, missing, unsure = {}, [], []  # frames without a depth image; with one but without its confidence
+    samples, clouds = {}, {}
+    missing, unsure = [], []  # frames without a depth image; with one but without its confidence
     for j, n in enumerate(frames):
         i = int(n[1:])
         if not (root / "depth" / f"{i:06d}.png").is_file():
@@ -617,10 +673,14 @@ def stray_samples(J, job, spec, names):
         elif min_conf and not (root / "confidence" / f"{i:06d}.png").is_file():
             unsure.append(n)
         else:
+            w, h = sizes[n] if k % 2 == 0 else sizes[n][::-1]
+            Ki = None if K is None or i >= len(K) else rosbag.rescale(K[i], w / stored[0], h / stored[1])
             try:
-                samples[n] = stray.depth_samples(root, i, sizes[n], k, min_conf=min_conf)
+                samples[n], xyz, scan = stray.depth_points(root, i, sizes[n], k, Ki, min_conf=min_conf)
             except (ValueError, OSError) as e:
                 raise Failed(f"{n}: {e}", {"source": source}) from None
+            if Ki is not None:
+                clouds[n] = (xyz, at_most(scan, SCAN_POINTS, i))
         samples.setdefault(n, np.zeros((0, 3), np.float32))
         progress(0.1 + 0.75 * (j + 1) / len(frames))
     for left, what in ((missing, "no depth image"), (unsure, "a depth image but no confidence image")):
@@ -631,13 +691,68 @@ def stray_samples(J, job, spec, names):
             "extrinsic": {"source": "stray (depth aligned with the color camera)", "calibration_sha256": None},
             "intrinsics": {"source": "stray: depth scaled to the frame size", "depth_size": video.get("depth_size"),
                            "frame_size": list(sizes[frames[0]]), "turns": k, "min_confidence": min_conf,
-                           "z_range_m": list(stray.Z_RANGE)},
+                           "z_range_m": list(stray.Z_RANGE), "K_from": K_from},
             "time": {"base": "frame index"}, "warnings": warnings}
-    cache_write(J, key, samples, info)
-    return samples, {**info, "source": {**info["source"], "cache": "miss"}}
+    cache_write(J, key, samples, info, clouds)
+    return samples, {**info, "source": {**info["source"], "cache": "miss"}}, clouds
 
 
 SOURCES = {"rosbag": rosbag_samples, "stray": stray_samples}  # job.json "lidar" "kind": its samples
+
+
+# ---- the clouds of the Inputs tab ----
+
+def cloud_glb(parts):
+    """A GLB (bytes) of point sets, or None when every set is empty. parts: {"scan": (N, 3), "used": (M, 3)}
+    camera points in OpenCV axes. Each set becomes (x, -y, -z), glTF's axes: x right, y up, z back toward
+    the viewer, with the camera at the origin looking down -z as a glTF camera does. One node per set that has
+    points, named as the set, with one POINTS primitive (mode 0) whose POSITION accessor has min and max, as
+    glTF requires. Points that are not finite are left out. Hand-written, so envs/web needs no trimesh."""
+    nodes, meshes, accessors, views, chunks, offset = [], [], [], [], [], 0
+    for name in ("scan", "used"):
+        a = np.asarray(parts.get(name, np.zeros((0, 3))), float).reshape(-1, 3)
+        a = (a[np.isfinite(a).all(1)] * [1.0, -1.0, -1.0]).astype("<f4")
+        if not len(a):
+            continue  # glTF has no accessor of count 0
+        data = a.tobytes()  # 12 bytes a point, so every view starts 4-byte aligned
+        views.append({"buffer": 0, "byteOffset": offset, "byteLength": len(data), "target": 34962})
+        accessors.append({"bufferView": len(views) - 1, "componentType": 5126, "type": "VEC3", "count": len(a),
+                          "min": a.min(0).tolist(), "max": a.max(0).tolist()})
+        meshes.append({"name": name, "primitives": [{"attributes": {"POSITION": len(accessors) - 1}, "mode": 0}]})
+        nodes.append({"name": name, "mesh": len(meshes) - 1})
+        chunks.append(data)
+        offset += len(data)
+    if not nodes:
+        return None
+    doc = {"asset": {"version": "2.0", "generator": "HARPOR lidar"}, "scene": 0,
+           "scenes": [{"nodes": list(range(len(nodes)))}], "nodes": nodes, "meshes": meshes, "accessors": accessors,
+           "bufferViews": views, "buffers": [{"byteLength": offset}]}
+    js = json.dumps(doc, separators=(",", ":")).encode()
+    js += b" " * (-len(js) % 4)
+    binary = b"".join(chunks)
+    binary += b"\0" * (-len(binary) % 4)
+    return (struct.pack("<III", 0x46546C67, 2, 28 + len(js) + len(binary)) + struct.pack("<II", len(js), 0x4E4F534A)
+            + js + struct.pack("<II", len(binary), 0x004E4942) + binary)
+
+
+def write_clouds(folder, clouds, points):
+    """folder/<view>.glb for each view of clouds ({view: (xyz, scan)}) that has points: its whole scan and the
+    points that the scale used (points: lidar_scale.estimate's points_out; the used rows of xyz). Returns the
+    views written."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    out = []
+    for n, (xyz, scan) in sorted(clouds.items()):
+        p = points.get(n)
+        used = np.asarray(xyz)[np.asarray(p["index"])[np.asarray(p["used"], bool)]] if p else np.zeros((0, 3))
+        data = cloud_glb({"scan": scan, "used": used})
+        if data is None:
+            continue
+        tmp = folder / f".tmp_{n}.glb"
+        tmp.write_bytes(data)
+        os.replace(tmp, folder / f"{n}.glb")
+        out.append(n)
+    return out
 
 
 # ---- the stage ----
@@ -673,12 +788,13 @@ def scale(job_dir):
     if not names or not (J / "pool" / "da3_output.npz").is_file():
         raise SystemExit("the pool has no views with DA3 depth; run prep and da3 first")
     progress(0)
-    check = J / "lidar" / "check"
-    shutil.rmtree(check, ignore_errors=True)  # the check images of views that left the pool
+    check, cloud = J / "lidar" / "check", J / "lidar" / "cloud"
+    for old in (check, cloud):  # the check images and clouds of views that left the pool
+        shutil.rmtree(old, ignore_errors=True)
     out = J / "pool" / "lidar.json"
     out.unlink(missing_ok=True)
     try:
-        samples, info = SOURCES[spec["kind"]](J, job, spec, names)
+        samples, info, clouds = SOURCES[spec["kind"]](J, job, spec, names)
     except Failed as e:
         rec = record({"ok": False, "s": None, "reason": str(e), "views": [], "combine": None}, e.info, t0)
         write_json(out, rec)
@@ -696,11 +812,14 @@ def scale(job_dir):
               f"per-point times {tm.get('point_times')}", flush=True)
     elif tm:
         print(f"time base {tm['base']}", flush=True)
+    pts = {}
     try:
-        est = lidar_scale.estimate(J / "pool", {n: samples[n] for n in names if n in samples}, check_dir=check)
+        est = lidar_scale.estimate(J / "pool", {n: samples[n] for n in names if n in samples}, check_dir=check,
+                                   points_out=pts)
     except ValueError as e:  # a pool that prep and da3 left inconsistent
         write_json(out, record({"ok": False, "s": None, "reason": str(e), "views": [], "combine": None}, info, t0))
         raise SystemExit(f"no metric scale: {e}") from None
+    write_clouds(cloud, {n: clouds[n] for n in names if n in clouds}, pts)  # with the check images, also when not ok
     rec = record(est, info, t0)
     write_json(out, rec)  # last: with ok, the stage's done marker
     lines = lidar_scale.summary(rec)

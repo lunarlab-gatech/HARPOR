@@ -5,6 +5,7 @@ Runs in envs/web (fastapi, uvicorn, av, numpy, pillow, scipy, rosbags) inside th
 gator_clone root (start_ice.sh starts it there):
 
     python -m gator.webapp [--runs DIR] [--host 0.0.0.0] [--port 0] [--fake] [--worker [--local-keys A]]
+                           [--demos DIR]
 
 It makes a login token, writes ~/.config/gator/webapp.json (0600: node, port, token, url_path, and
 slurm_job and slurm_node from SLURM_JOB_ID and SLURMD_NODENAME, so start_ice.sh reuses the server
@@ -17,12 +18,17 @@ signed in as the machine's user (python -m gator.webapp.worker login). The serve
 own key file. webapp.json's "worker" is true while the worker runs, else false.
 --port 0 takes a free port. --fake runs every stage with gator.webapp.fake_steps, so the app works
 on a Mac without GPUs (OpenAI keys that start with sk- and Anthropic keys that start with sk-ant-
-pass). The runs folder defaults to steps.config_from_env(): WEBAPP_RUNS, else $G/webapp_runs.
+pass). The runs folder defaults to steps.config_from_env(): WEBAPP_RUNS, else $G/webapp_runs. --demos DIR (default:
+WEBAPP_DEMOS, else none) names a demos folder (demos.py), which the server reads and checks once when it starts: add
+or change a demo, then start it again.
 
 Login: GET /?token=T sets an HttpOnly SameSite=Strict cookie and redirects to /. Every other
 request needs the cookie and gets 401 without it, static files included.
 
 Routes (JSON unless said otherwise; {id} is a job id):
+  GET    /demos.html                  static/demos.html with the demos (demos.page), or "No demos yet."
+  GET    /demos/{name}/{file}         a file that the demo's demo.json lists (demos.TYPES), else 404; Range and
+                                      HEAD as for a job's file
   PUT    /api/upload?name=N           the file as the raw body: a video (jobs.VIDEOS), a rosbag (jobs.BAGS)
                                       or a zipped Stray Scanner export (jobs.STRAY, .zip) by the suffix it
                                       is saved under, else 415; 411 without a Content-Length; at most 20
@@ -36,8 +42,10 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       the agent's verdict, model and, for opus, tokens and cost estimate
                                       ("agent_result"; "agent" is the job's choice: astra, opus or none;
                                       an articulation result adds mode, counts and joints_delivered), the
-                                      output files that exist ("files") and their sizes in bytes ("sizes",
-                                      sizes_of),
+                                      output files that exist and then the LiDAR points of the run's views
+                                      (run/lidar/<i>.glb, by i) and, while the scale has failed, of the
+                                      pool's views (lidar/cloud/<view>.glb, pool_clouds) as "files", their
+                                      sizes in bytes ("sizes", sizes_of),
                                       "articulated", "parts_mode" and "parts_review" (the job waits for its
                                       part list), "lidar" (steps.lidar), "calibration" (the uploaded
                                       calibration's summary, calibration_summary, or null) and "preview"
@@ -63,8 +71,8 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       job is analyzing, queued or running); a lidar stage that ran with it
                                       is stale, as after a PUT
   POST   /api/jobs/{id}/start         {mode, prompt, n_views, picks, view0, auto_continue, agent, api_key,
-                                      articulated?, parts_mode?, parts?, lidar?} (agent astra: an OpenAI
-                                      key; opus: an Anthropic key; none: no key, physics uses the Stage A
+                                      articulated?, parts_mode?, parts?, lidar?, turntable?} (agent astra: an
+                                      OpenAI key; opus: an Anthropic key; none: no key, physics uses the Stage A
                                       mesh; true and false mean astra and none). articulated (default
                                       false) builds an object with moving parts; parts_mode
                                       (steps.PARTS_MODES, default vlm) says who lists them, and parts is the
@@ -74,7 +82,8 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       depth of a Stray Scanner capture, for the metric scale;
                                       jobs.lidar_settings checks it (400 with the reason). Without it a
                                       Stray job keeps its own (LiDAR on, unless a Start turned it off) and
-                                      the other jobs get null
+                                      the other jobs get null. turntable (default false) renders a 360
+                                      video of the object at the end (the turntable stage)
   GET    /api/jobs/{id}/selection     selection.json with "sam3": the SAM 3 instances of every pool frame,
                                       and "lidar": the metric scale's record in short (lidar_compact) for a
                                       job with LiDAR, else null; its calibration_changed is true when the
@@ -99,7 +108,7 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       reconnect resumes with Last-Event-ID), "end" when the job stops
   GET    /api/jobs/{id}/file/{path}   only the paths that ALLOW matches; refined.glb is the agent's GLB
                                       (steps.agent_glb), never the Stage A or split parts' GLB. A Range
-                                      request (the preview video's seek) gets 206 with Content-Range, and 416
+                                      request (a video's seek) gets 206 with Content-Range, and 416
                                       when it starts past the end (Starlette's FileResponse). HEAD gets the
                                       headers alone
 
@@ -141,19 +150,22 @@ FREE_FACTOR = {"stray": 2.2}  # free space an upload needs, times its size (+ 2 
 ACTIVE = ("analyzing", "queued", "running")
 # Path segments are words, so no "..", absolute path or backslash ever matches.
 ALLOW = re.compile(r"frames/thumbs/\d+\.jpg|frames/topic_previews/\d+\.jpg|frames/topics\.json|frames/preview\.mp4"
-                   r"|pool/lidar\.json|lidar/check/f\d{5,9}\.jpg|scene/sam3_\w+/check/[\w-]+\.jpg"
-                   r"|run/input/images/\d{1,3}\.png|run/overlay_\d+\.png|run/posed\.glb"
+                   r"|pool/lidar\.json|lidar/check/f\d{5,9}\.jpg|lidar/cloud/f\d{5,9}\.glb"
+                   r"|scene/sam3_\w+/check/[\w-]+\.jpg"
+                   r"|run/input/images/\d{1,3}\.png|run/lidar/\d{1,3}\.glb|run/overlay_\d+\.png|run/posed\.glb"
                    r"|run/parts\.glb|run/parts\.json|run/parts/sam3/check/\d+\.jpg"
-                   r"|refined\.glb|physics/aligned\.glb|physics/summary\.json|physics/mjcf/mjcf\.json"
-                   r"|physics/urdf/model\.urdf|run/placement\.json|selection\.json|results\.zip|logs/\w+\.log")
+                   r"|refined\.glb|physics/aligned\.glb|turntable/turntable\.mp4|physics/summary\.json"
+                   r"|physics/mjcf/mjcf\.json|physics/urdf/model\.urdf|run/placement\.json|selection\.json|results\.zip"
+                   r"|logs/\w+\.log")
 TYPES = {".glb": "model/gltf-binary", ".jpg": "image/jpeg", ".png": "image/png", ".json": "application/json",
          ".zip": "application/zip", ".log": "text/plain; charset=utf-8", ".urdf": "application/xml",
          ".mp4": "video/mp4"}
 # run/parts.* exist only for an articulated job; mjcf.json and model.urdf for every job that got that far.
-# pool/lidar.json only for a job with LiDAR.
+# pool/lidar.json only for a job with LiDAR. turntable/turntable.mp4 only when the job asked for the 360 video and
+# its render worked.
 OUTPUTS = ("run/posed.glb", "run/parts.glb", "run/parts.json", "refined.glb", "physics/aligned.glb",
-           "physics/summary.json", "physics/mjcf/mjcf.json", "physics/urdf/model.urdf", "run/placement.json",
-           "selection.json", "pool/lidar.json", "results.zip")
+           "turntable/turntable.mp4", "physics/summary.json", "physics/mjcf/mjcf.json", "physics/urdf/model.urdf",
+           "run/placement.json", "selection.json", "pool/lidar.json", "results.zip")
 INSTANCE = re.compile(r"none|\d{1,3}(,\d{1,3})*")
 MAX_CALIBRATION = 64 << 10  # bytes of a calibration file
 CALIBRATION_SUFFIXES = (".yaml", ".yml", ".json")
@@ -284,8 +296,9 @@ def read_json(path):
 
 
 def resolve(J, rel):
-    """The file that rel names in job folder J, if ALLOW has it and it stays inside J, else None."""
-    if not ALLOW.fullmatch(rel):
+    """The file that rel names in job folder J, if ALLOW has it and it stays inside J, else None. The pool's LiDAR
+    points (lidar/cloud/) only while the scale has failed (pool_clouds)."""
+    if not ALLOW.fullmatch(rel) or rel.startswith("lidar/cloud/") and not scale_failed(J):
         return None
     p = J / rel
     if rel == "refined.glb":
@@ -297,6 +310,30 @@ def resolve(J, rel):
     except OSError:
         return None
     return real if real.is_file() and real.is_relative_to(J.resolve()) else None
+
+
+def lidar_points(J):
+    """{run/lidar/<i>.glb: the file} of the run's views that have LiDAR points (views.build_run), by i."""
+    d = J / "run" / "lidar"
+    rels = [f"run/lidar/{p.name}" for p in d.glob("*.glb")] if d.is_dir() else []
+    rels = sorted((r for r in rels if ALLOW.fullmatch(r)), key=lambda r: int(Path(r).stem))
+    return {r: p for r in rels if (p := resolve(J, r))}
+
+
+def scale_failed(J):
+    """True when pool/lidar.json says that the LiDAR scale failed (ok false)."""
+    rec = read_json(J / "pool" / "lidar.json")
+    return isinstance(rec, dict) and rec.get("ok") is False
+
+
+def pool_clouds(J):
+    """{lidar/cloud/<view>.glb: the file} of the pool's views that have LiDAR points (lidar.write_clouds), by name,
+    while the scale has failed: the Inputs tab shows them, since there are no views used. With a scale, the views
+    used have theirs in run/lidar (lidar_points)."""
+    if not scale_failed(J):
+        return {}
+    rels = sorted(f"lidar/cloud/{p.name}" for p in (J / "lidar" / "cloud").glob("*.glb"))
+    return {r: p for r in rels if (p := resolve(J, r))}
 
 
 def sizes_of(found):
@@ -391,10 +428,14 @@ def make_app(cfg, token, key_dir=None):
     gate's .app; its state.runner is the Runner, and on_stop adds to its state.stop_hooks."""
     import anyio
     from fastapi import FastAPI, Request
-    from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
     from starlette.concurrency import run_in_threadpool
     from starlette.requests import ClientDisconnect
 
+    from gator.webapp import demos
+
+    shown = demos.load(cfg.demos)  # before the Runner claims the runs folder; DemoError says what is wrong
+    demo_files = {tuple(rel.split("/")[1:]): p for rel, p in demos.files(cfg.demos, shown).items()}
     runner = jobs.Runner(cfg, key_dir=key_dir)
 
     @asynccontextmanager
@@ -410,6 +451,7 @@ def make_app(cfg, token, key_dir=None):
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan, telemetry=NO_TELEMETRY)
     app.state.runner = runner
     app.state.stop_hooks = []  # on_stop adds to it
+    app.state.demos = shown
 
     @app.exception_handler(Bad)
     async def bad(request, e):
@@ -459,9 +501,21 @@ def make_app(cfg, token, key_dir=None):
     def help_page():  # the Help link opens it in a new tab
         return FileResponse(STATIC / "help.html", headers={"Cache-Control": "no-cache"})
 
+    @app.get("/demos.html")
+    def demos_page():  # the header's Demos link opens it in a new tab
+        return HTMLResponse(demos.page((STATIC / "demos.html").read_text(), shown),
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.api_route("/demos/{name}/{file}", methods=["GET", "HEAD"])
+    def demo_file(name: str, file: str):
+        p = demo_files.get((name, file))
+        if p is None:
+            raise Bad(404, "no such demo file")
+        return FileResponse(p, media_type=demos.TYPES[p.suffix], headers={"Cache-Control": "no-cache"})
+
     @app.get("/static/{name}")
     def static(name: str):  # no-cache, so the browser takes a new app.js after an update
-        if name not in ("app.js", "style.css"):
+        if name not in ("app.js", "style.css", "demos.js"):
             raise Bad(404, "no such file")
         return FileResponse(STATIC / name, headers={"Cache-Control": "no-cache"})
 
@@ -528,6 +582,8 @@ def make_app(cfg, token, key_dir=None):
                    calibration=calibration_summary(job.get("calibration")), preview=preview_of(J))
         job["progress"] = jobs.progress(J)
         found = {f: resolve(J, f) for f in OUTPUTS}
+        found.update(lidar_points(J))
+        found.update(pool_clouds(J))
         job["files"] = [f for f, p in found.items() if p]
         job["sizes"] = sizes_of(found)
         r = read_json(J / "agent" / "result.json")
@@ -604,6 +660,9 @@ def make_app(cfg, token, key_dir=None):
             raise Bad(400, "view 0 is one of the picked frames")
         if type(auto_continue) is not bool:
             raise Bad(400, "auto_continue is true or false")
+        turntable = b.get("turntable", False)
+        if type(turntable) is not bool:
+            raise Bad(400, "turntable is true or false")
         agent, later = agent_of(b), key_later(b)  # astra when the body names none
         articulated, parts = b.get("articulated", False), {"mode": b.get("parts_mode"), "list": b.get("parts") or []}
         if not isinstance(parts["list"], list):
@@ -628,7 +687,7 @@ def make_app(cfg, token, key_dir=None):
         runner_call(runner.submit_build, job_id, key, mode=mode,
                     prompt=prompt.strip(), n_views=n_views, picks=picks if mode == "manual" else [], view0=view0,
                     auto_continue=auto_continue, agent=agent, overrides={"locked": [], "excluded": [], "instance": {}},
-                    articulated=articulated, parts=parts, lidar=lidar)
+                    articulated=articulated, parts=parts, lidar=lidar, turntable=turntable)
         return {"status": "queued", "key": msg}
 
     @app.post("/api/jobs/{job_id}/start")
@@ -966,6 +1025,7 @@ def main(argv=None):
     ap.add_argument("--local-keys", metavar="AGENTS",
                     help="with --worker: astra, opus or astra,opus, whose API key this machine keeps in "
                          "~/.config/gator/openai.env or anthropic.env")
+    ap.add_argument("--demos", metavar="DIR", help="a demos folder to show at /demos.html (default: WEBAPP_DEMOS)")
     a = ap.parse_args(argv)
     local_keys = ()
     if a.local_keys is not None:
@@ -978,7 +1038,8 @@ def main(argv=None):
     import uvicorn
 
     cfg = steps.config_from_env()
-    cfg = replace(cfg, runs=Path(a.runs).resolve() if a.runs else cfg.runs, fake=cfg.fake or a.fake)
+    cfg = replace(cfg, runs=Path(a.runs).resolve() if a.runs else cfg.runs, fake=cfg.fake or a.fake,
+                  demos=Path(a.demos).expanduser().resolve() if a.demos else cfg.demos)
     # The socket is bound here, so the port is known (also for --port 0) before webapp.json is written.
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -988,7 +1049,12 @@ def main(argv=None):
         raise SystemExit(f"cannot listen on {host}:{a.port}: {e}")
     port, node, token = sock.getsockname()[1], socket.getfqdn(), secrets.token_urlsafe(32)
     parts = worker_of(local_keys) if a.worker else None  # before the Runner claims the runs folder
-    app = make_app(cfg, token)
+    from gator.webapp import demos
+
+    try:
+        app = make_app(cfg, token)
+    except demos.DemoError as e:
+        raise SystemExit(f"the demos folder: {e}")
     w = None
     if parts is not None:
         from gator.webapp import worker
@@ -1001,6 +1067,8 @@ def main(argv=None):
                        "worker": w is not None})
     print(f"HARPOR web app on {node}:{port}, runs in {cfg.runs}" + (" (fake stages)" if cfg.fake else ""))
     print(f"login details in {info}")
+    if cfg.demos:
+        print(f"demos: {len(app.app.state.demos)} from {cfg.demos}")
     if a.worker:  # a user's own machine: the tunnel's ICE forward does not apply
         print(f"on this machine: http://localhost:{port}/?token={token}")
         print(f"from another computer: ssh -L {port}:127.0.0.1:{port} <this machine>, then open the same URL there",
