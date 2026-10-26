@@ -115,6 +115,7 @@ Known gaps in existing code:
 
 | File | Content |
 |---|---|
+| `LICENSE` | MIT, for HARPOR's own code. Third-party models and the vendored web libraries keep their own licenses (the Licenses bullet above, and `gator/webapp/static/vendor/licenses/`) |
 | `docs/build_plan.md` | This file: overview, design and build notes |
 | `docs/public_site.md` | The public HARPOR site on Supabase: personal workers on users' own GPU machines, the owner's setup and the live checks |
 | `docs/research.md` | Research findings with sources: the paper and every results table, MV-SAM3D and SAM 3D, the agent harness, datasets, baselines and metrics, and the deferred generator design |
