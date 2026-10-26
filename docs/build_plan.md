@@ -1015,8 +1015,8 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    the sharpest frame within 0.25 s). Type the object noun for SAM 3, and pick the agent:
    GPT-6-Astra (asks for an OpenAI key), Claude Opus 5.5 (asks for an Anthropic key, checked with
    the `anthropic` SDK), or none (no key; the agent stage is skipped and physics uses the Stage A
-   mesh). For an object with moving parts, tick "Articulated object" and choose who lists the parts:
-   "The VLM lists the parts", "The VLM proposes, I edit the list" or "I type the parts". The VLM is
+   mesh). For an object with moving parts, tick "Articulated (has moving parts)" and choose who lists
+   the parts under "Part list": "VLM", "VLM, then I check" or "I type them". The VLM is
    the agent's model, so in the two VLM modes the `propose` stage takes the agent's key too. With no
    agent there is no VLM, so the user types the parts. The typed list has one line per part as
    `name > parent : joint`. The base comes first and alone on its line, with no parent and no joint.
@@ -1038,13 +1038,13 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    table about 1.07 times.
 5. The review page shows the picks with their SAM 3 overlays, every candidate's status and a
    top-down ring of the cameras. The user can lock or exclude frames, choose another SAM 3
-   instance or "not in this frame", and set view 0. Then Build.
+   instance or "not in frame", and set view 0. Then Build.
 6. MV-SAM3D and `place`. For an articulated object, `propose` then writes the part list
    (`run/proposal.json`), and `parts` runs the part masks, the face vote, the split in Blender and
-   `parts.json` (note 11). A rigid object skips both stages. In the mode "The VLM proposes, I edit the
-   list", the job stops after `propose` with the status `review`, whatever the pause setting says, and
-   shows the list. "Build with these parts" confirms the list as it is or as edited, and the build
-   goes on from `parts`. A retry after a cancel stops at the list again.
+   `parts.json` (note 11). A rigid object skips both stages. In the mode "VLM, then I check", the job
+   stops after `propose` with the status `review`, whatever the pause setting says, and shows the list.
+   Its "Build" confirms the list as it is or as edited, and the build goes on from `parts`. A retry
+   after a cancel stops at the list again.
 7. The agent runs if it is on and the mean mask IoU is at least 0.5. For a rigid object it refines
    `posed.glb`, and when the agent is off or skipped, physics uses `posed.glb`. For an articulated
    object it sets the joints of `parts.glb` within a 900 s budget (note 11). When the agent is off or
@@ -1055,15 +1055,15 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    VoMP (once per link for an articulated object), MJCF, USD, URDF and `results.zip`.
 
 **UI** (`static/`, plain HTML, CSS and JS with no build step; reworked 2026-10-17, tabs 2026-10-22,
-Downloads tab 2026-10-23):
+Downloads tab 2026-10-23, help page 2026-10-25):
 - Tabs (2026-10-22). A job page shows the header, the status line, the next step, the warnings,
   Retry and Cancel, and the panels that wait for the user (the camera topic, the view review, the
   part list and the LiDAR failure). Under them are five tabs: Results, Downloads (the files, by
   group), Inputs (the input's facts, its preview video and the views used), Settings (the build
-  settings) and Stages and log.
+  settings) and Log.
   - The first tab follows the job's status. A ready job shows Settings. A job in review or
     choose_topic shows Inputs, under its waiting panel. A done job shows Results. Any other job
-    (analyzing, queued, running, failed or cancelled) shows Stages and log. After a failure the
+    (analyzing, queued, running, failed or cancelled) shows Log. After a failure the
     failed stage's log loads by itself.
   - A tab that the user picks stays until the status changes. The statuses of a run (analyzing,
     queued and running) count as one, so a tab picked while the job waits for the GPU stays when
@@ -1072,110 +1072,125 @@ Downloads tab 2026-10-23):
     tab. The page writes the hash with `history.replaceState`, so the tabs add no steps to the back
     button. `history.state` keeps the status that the tab was picked in. A reload after a change of
     status shows the new status's tab.
-  - When a run stops, the event stream's state event changes only the header. The Stages and log
-    tab stays while the stream sends the last lines of the log. The refresh after the stream's end
+  - When a run stops, the event stream's state event changes only the header. The Log tab stays
+    while the stream sends the last lines of the log. The refresh after the stream's end
     draws the new tab's panel first, then shows the tab.
-  - A tab with nothing to show says so in one sentence, for example "The results appear here when
-    the build has made them." While a job runs, Settings says "You can change the settings when the
-    job stops." and Downloads says "The files appear here when the build stops."
+  - A tab with nothing to show says so in a few words, for example "No results yet." While a job
+    runs, Settings says "Locked while the job runs." and Downloads says "Files show when the build
+    stops." After a failed or cancelled job, Results says "Job stopped before any results." and an
+    empty Downloads tab "Job stopped before any files."
   - The tabs follow the WAI-ARIA tabs pattern: a roving tabindex, and Left, Right, Home and End. On
     a narrow phone the tab bar scrolls sideways, and the page does not. The bar has no scrollbar,
     and its edge fades where more tabs are off the bar. On a phone the panel joins the tab bar.
-  - A hidden Stages and log tab still takes the live log and runs the stage clocks. It reads no
+  - A hidden Log tab still takes the live log and runs the stage clocks. It reads no
     layout while hidden. When the tab opens, the log is at its end, or where the user left it.
   - When an action hides or disables the focused button (Start, Build, Retry or Cancel), the tab
     shown takes the focus. A refused Start keeps it. When the status changes the tab and the focus
     is on a tab or in the panel that hides, the new tab takes the focus.
 - A status line names the next step. While a job runs, a progress bar counts the build stages. The
-  header and the tab title show the job's status. Retry names the stage it continues from, and
+  tab title shows the job's status; the header shows only the job's name. Retry names the stage it continues from, and
   Cancel asks first.
 - The Settings tab keeps Start in a bar fixed to the bottom of the screen. The frame grid folds
-  away. Manual mode shows a pick count and the picks as chips. In review the tab holds the
-  "Start over with other settings" form. When the input has warnings (HDR, or a Stray export's
-  warnings), the tab says how many, for example "The input has 3 warnings.", and "Show the
-  warnings" opens the Inputs tab at the first one.
+  away. Manual mode shows a pick count and the picks as chips. In review the tab holds the form
+  again, with "Start over". Its heading, "Settings", is for screen readers and the focus only. When
+  the input has warnings (HDR, or a Stray export's warnings), the tab says how many, for example
+  "3 input warnings", and "Show" opens the Inputs tab at the first one.
 - The review page shows the ring and the summary side by side and the picked views apart from the
-  other candidates, with Build in a fixed bottom bar. Edited cards are marked, there is Discard
-  changes, and "Start over in manual mode" opens the Settings tab in manual mode.
-- The Results tab shows the viewers and the facts, under the line "Download the files from the
-  Downloads tab.", whose tab name is a button that opens that tab and scrolls it into view. The
-  viewers show the model size in cm. With the agent off and no split parts (a rigid object), there is
-  one viewer, and from 1100 px up the facts sit beside it. With the agent off, the facts' Agent row
+  other candidates, with Build in a fixed bottom bar. On the ring, view 0 is a star, a pick is a
+  filled dot (a locked pick a square) with its view number on the side away from the object, an
+  available view is a hollow dot, and a small or inconsistent view is a cross. The legend under
+  the ring names only the dot, the star and the object ("Top view: ● picked, ★ view 0, + object");
+  a hidden sentence says the same to a screen reader. A locked pick's card says "locked", and its
+  badge mark is a hollow square. Only a pick, or a view set to "always use", offers view 0. An added
+  view that holds view 0 and is set back to "auto" gives view 0 back to the saved choice. An edited
+  card says what Select again does to it: "Added when you select again.", "Left out when you select
+  again." (its image greys) or "Changed. Select again to apply it." While edits wait, "Select again"
+  is the primary button and Build is off. Discard changes undoes the edits, and "Pick frames
+  manually" opens the Settings tab in manual mode. Build, Select again and the part list's Build
+  scroll the page back to the job's head, since the waiting panel closes.
+- The Results tab shows the viewers and the facts (plain label and value rows). The
+  viewers show the model size in cm; until a mesh shows, its viewer says "Loading the mesh" and its
+  caption says "loading" where the size goes. When model-viewer's own script has not loaded after
+  10 s (`MV_WAIT_MS`), the viewer offers its file, as when the mesh does not load. With the agent off
+  and no split parts (a rigid object), there is one viewer, and from 1100 px up the facts sit beside
+  it. With the agent off, the facts' Agent row
   says so, and no line under the viewers repeats it. A viewer drawn while its tab is hidden loads when
   the tab opens. A result file that does not parse (a cut write after a kill or a full disk) gives
   "Could not read the results: ..." in the facts; the Downloads and Inputs tabs still draw.
 - Downloads tab (2026-10-23): every output file of `server.OUTPUTS` that exists (all of them are in
-  `ALLOW`), in four groups, each under an h3 heading. Everything is `results.zip`, with a sentence on
-  what it holds (the URDF, the LiDAR record, the agent's result and the split parts only when the job
-  has them, and the agent's result not when it held the API key) and that the MJCF and USD models
-  come only in it. Meshes are `posed.glb`, `parts.glb`, `refined.glb` and `aligned.glb`.
-  Simulation is `model.urdf`, under the sentence that its meshes come only in `results.zip`, so it
-  does not load alone. Records are
+  `ALLOW`), in four groups, each under an h3 heading. Everything is `results.zip` (help.html says
+  what it holds). Meshes are `posed.glb`, `parts.glb`, `refined.glb` and `aligned.glb`.
+  Simulation is `model.urdf`, whose line says that it needs the meshes in `results.zip`. Records are
   `placement.json`, `summary.json`, `lidar.json`, `selection.json`, `parts.json` and `mjcf.json`.
   The agent's result is not served alone. Each row is the file name as a download link (each file
-  downloads as `<job id>_<file>`, for example `<job id>_results.zip`), its size and its info button.
+  downloads as `<job id>_<file>`, for example `<job id>_results.zip`) and its size.
   The download arrow is decoration with empty alternative text. A group without files is left
-  out. When the tab lists files but not `results.zip`, a sentence above the groups says why: in
-  review (or before a build) "results.zip and the other files appear here when the build has made
-  them.", and after a failed or cancelled build "The build stopped before it made results.zip, so the
-  tab lists only the files that it made." While a build runs the tab lists no files, because the
-  build replaces them as it goes. A done job's next step is "Look at the meshes in the Results tab.",
-  since the Results tab's first line names the Downloads tab.
+  out. When the tab lists files but not `results.zip`, a line above the groups says why: in
+  review (or before a build) "More files after the build.", and after a failed or cancelled build
+  "Build stopped before results.zip." While a build runs the tab lists no files, because the
+  build replaces them as it goes. A done job has no next step.
   `GET /api/jobs/{id}` adds "sizes" (`server.sizes_of`): the bytes of each file in "files", from one
   stat each.
-- The jobs list shows a thumbnail, the input kind and a short time, and marks jobs that wait for the
-  user. It is redrawn only when it changed.
-- Uploads show their speed and time left, and can be cancelled.
-- The page follows the system dark mode and works at phone width. Tables become cards on a phone.
+- The jobs list shows a thumbnail, the input kind, the status, a short time and a trash can button (named
+  "Delete <file>" for screen readers), and marks jobs that wait for the user. It is redrawn only when it changed.
+- Uploads show the bytes sent and the time left, and can be cancelled.
+- The page follows the system dark mode and works at phone width. On a phone, each job of the jobs table is one
+  compact block with a rule under it.
+- The look (2026-10-25) is a plain lab tool: hairline rules instead of cards, near-black text on near-white
+  (graphite in dark mode), one ink accent for links and focus, a near-black primary button, status as a small
+  square mark and a word, and mono for file names, ids, sizes and times. The stylesheet uses system fonts only.
+  The job's status line says its state once ("Done"), and the object noun follows the input's name in the title
+  in a muted color.
 - Messages are live regions. All controls, frame cells and stage names included, work with the
   keyboard.
-- Articulated objects (2026-10-20): the settings form has the "Articulated object" box, which shows
-  the three parts modes and, for "I type the parts", the part list (`#partlist`, read by the
-  top-level `parseParts()`). A job that waits after `propose` shows the "Check the part list" panel:
-  view 0's photo, the VLM's list as editable text, its warnings, "Build with these parts" and "Undo
-  my edits". Results add a "Parts (split, before rigging)" viewer, the parts that were not split off,
+- Articulated objects (2026-10-20): the settings form has the "Articulated (has moving parts)" box,
+  which shows the three parts modes and, for "I type them", the part list (`#partlist`, read by the
+  top-level `parseParts()`). A job that waits after `propose` shows the "Part list" panel:
+  view 0's photo, the VLM's list as editable text, its warnings, "Build" and "Undo edits". Results
+  add a "Split parts" viewer, the parts that were not split off,
   the part-mask check images, the links, base and joints from `mjcf.json`, the number of joints
   delivered and the link masses. The Downloads tab adds `parts.glb` and `parts.json`. The agent stage's label
-  names its task and budget ("agent sets the joints, 15 min budget").
+  names its task ("agent sets the joints").
 - Metric scale from LiDAR (2026-10-21, note 12):
   - The upload box takes a Stray Scanner export as a `.zip`, and the jobs list names its kind "Stray
     capture". A Stray job's Inputs tab shows the turn from gravity, the number of depth and
     confidence images, and the export's warnings.
   - The settings form has the box "Use LiDAR for metric scale", which is hidden for a video and on by
     default for a Stray capture. For a bag it shows the LiDAR topic select, the TF link (the TF topic
-    and the chain of frames, or "no TF link: upload the calibration") and the calibration upload. An
+    and the chain of frames, or "No TF link: upload a calibration") and the calibration upload. An
     uploaded calibration shows its summary (the LiDAR's distance from the camera in cm and its turn in
     degrees), with Replace and Remove.
   - The stage label is "metric scale (LiDAR)".
-  - The review page shows the scale, the views used and the spread ("Metric scale from LiDAR: x1.250
-    (8 of 8 views, spread 0.0%)"), the warnings, and the check images folded. Each candidate's card
+  - The review page shows the scale, the views used and the spread ("LiDAR scale ×1.250 (8/8 views,
+    spread 0.0%)"), the warnings, and the check images folded. Each candidate's card
     also shows its own LiDAR scale, its used point count and its status, such as outlier or few
     points. For a bag the page has "Change the calibration", which opens the Settings tab at the
     calibration upload.
     After a calibration change, the page says that Build finds the scale again first and then stops
     in review.
-  - When the `lidar` stage fails, the panel "Metric scale from LiDAR" shows the reason, the check
-    images and "Go to the LiDAR settings" (in the Settings tab). The status line names the next
-    step, for example "Upload a calibration in the Settings tab, then Retry. Or turn LiDAR off there
-    and build again." For a Stray capture it says to build again with LiDAR off or with other views.
+  - When the `lidar` stage fails, the status line gives the reason, and the stage list and the panel
+    "LiDAR scale failed" do not repeat it. The panel shows the warnings, the check images and
+    "LiDAR settings" (in the Settings tab). The status line names the next step, for example "In
+    Settings, upload a calibration and Retry, or turn LiDAR off and build again." For a Stray
+    capture it says to build again with LiDAR off or with other views.
   - Results add the row "Metric scale": the scale with the LiDAR topic (or "iPhone LiDAR depth"), the
     views used and the spread, or "Depth Anything 3's estimate (no LiDAR)".
 - Inputs tab (2026-10-22): once the frames are read, the tab shows the preview video (muted, with
   controls, loading only its metadata first) with the input's name and kind, such as "table.MOV
-  (video)" or "scan.bag (rosbag, camera topic /cam/image_rect)", and its size and rate. Under it are
-  "Change the camera topic" (a bag that can change it), the HDR warning, a Stray capture's facts,
+  (video)" or "scan.bag (rosbag, camera topic /cam/image_rect)". Under it are
+  "Change topic" (a bag that can change it), the HDR warning, a Stray capture's facts,
   and the video facts with the sharpness plot (folded). Once the views are selected (in review,
   during the build and after), "Views used" shows one figure per view in run order: the view's image
   (`run/input/images/<i>.png`, loaded lazily) and a caption such as "view 0, frame 152, 15.2 s" from
   `selection.json`; a star marks view 0. Each view is a button that puts the video at the frame that
   the preview shows for it, paused (it never plays by itself), marks it as current, and says in a
   live region which frame the video shows and at what time in the video (the kept frame before the
-  view's frame when the preview skipped it). After `place`, the button "Show the mesh fit" swaps
+  view's frame when the preview skipped it). After `place`, the button "Mesh fit" swaps
   every image for place's overlay (`run/overlay_<i>.png`: the posed mesh in red, the mask outline in
-  green); it looks pressed while it is on. A job analyzed before previews says "This job has no
-  preview video, because its input was read before the app made previews." A job whose preview file
-  is gone says so. Before the views are selected, and while a new selection runs, the strip says
-  "The views used appear here after the app selects them." The video is drawn once per preview file,
+  green); it looks pressed while it is on, and the hint names the two colors. A job analyzed before
+  previews says "No preview video.", and a job whose preview file is gone "Preview video missing."
+  Before the views are selected, and while a new selection runs, the strip says
+  "No views selected yet." The video is drawn once per preview file,
   so a refresh or a new selection does not stop it. The views are drawn once per selection. On a
   running job's page, the event that says `select` is done draws the views, and the event that says
   `place` is done adds the toggle without drawing them again. A portrait preview gets a narrow box,
@@ -1186,25 +1201,15 @@ Downloads tab 2026-10-23):
   `GET /api/jobs/{id}` adds "preview" (`server.preview_of`): the record with "seek" (for each view of
   `selection.json`, the frame that the preview shows and its time in the preview), `{"error": ...}`,
   `{"missing": true}`, or null for an older job.
-- Info buttons (2026-10-22): every item of the Results and Downloads tabs has a small "i" button after
-  its label: each row of the facts list, each viewer's caption, the part-mask check images and each
-  file of the Downloads tab. The button is a real `<button>` with the label
-  "About <item>" and `aria-describedby` on its note. The note shows on hover and on keyboard focus.
-  A click, a tap, Enter or Space toggles it: a note that showed before the press hides, and one that
-  did not shows and stays open. Escape, a click elsewhere, focus that moves on, another tab and the
-  jobs list close it, and so does a scroll that moves its button under the sticky header. One note
-  shows at a time. The note is fixed to the window, so it moves no layout, and it stays 12 px inside
-  the window's edges. A facts row's note sits under the row's value, from the value's left edge, or
-  above the label when only that fits, so it covers neither the value nor the column of info buttons.
-  Other notes sit under their button, or above it. The note uses the color tokens, so it follows
-  dark mode. The notes are one table in `app.js`, `INFO`, keyed by item, with one to three plain
-  sentences each. They say what the value is and how it was found, with the rules and numbers of the
-  code (for example the 0.5 mask IoU guard, VoMP's 64^3 grid and the agent's 600 s and 900 s
-  budgets), and what a missing or skipped value means. The node test reads those numbers from the
-  code, so a changed constant fails it until the note is fixed.
-- The 30 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
-  does not have, so run them on the Mac. Three more tests there check the tabs and panels of
-  `index.html`, and the styles of the info buttons and of the Downloads rows in `style.css`.
+- Help (2026-10-25): the UI keeps its words short, and what the items mean and how they are found
+  is in one static page, `static/help.html` (served at `/help.html`, also without the login
+  cookie, so its troubleshooting reads when the cookie is stale; `site.py` builds the public copy). The header has one Help link, which opens in a new tab, so an upload or an edited list keeps
+  going. Its section follows the screen (`HELP_AT` in `app.js`): the jobs list, a waiting panel, else
+  the tab shown. A failed job's error ends with a Help link to the troubleshooting section.
+  `tests/test_help_page.py` checks the page's numbers against the code.
+- The 31 node tests in `tests/test_webapp_server.py` load `app.js`. They need `node`, which ICE
+  does not have, so run them on the Mac. Two more tests there check the tabs and panels of
+  `index.html` and the styles of the Downloads rows in `style.css`.
 
 **Public site.** `docs/public_site.md` describes the public site: a static page on Supabase, where users
 sign in with Google or GitHub. Jobs run only on users' own GPU machines: `python -m gator.webapp --worker`
@@ -1213,7 +1218,8 @@ and the tunnel work as before, except that a second server on the same runs fold
 first one is known to run (`.runner.json` in the runs folder; delete it when that server is gone).
 
 **Security.** The server port on the compute node is open to other ICE users, so every request
-needs the login cookie (a random token). The API key lives only in the server's memory. For the
+needs the login cookie (a random token), except the help page and its stylesheet, which hold no
+job data. The API key lives only in the server's memory. For the
 agent stage, and for the `propose` stage when the VLM lists the parts, it is written to a 0600 file
 in a 0700 folder under `/dev/shm` and deleted afterwards.
 It is never written to `job.json`, logs or argv. Files the controller lists in `key_found_in` are

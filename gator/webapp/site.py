@@ -8,9 +8,12 @@ build writes the folder (site/ at the repo root by default, which git ignores):
 
   index.html    static/index.html with relative paths, the site's own copy of model-viewer, the Supabase scripts,
                 a CSP <meta>, the markup that supa.js draws into (sign-in, account menu, the banner of the user's
-                machines, the waiting-for-approval panel, the panel about the machines, the pending line), the
-                upload area hidden (jobs get their input on the user's own GPU machine), and no "No agent"
-                choice, since the public site runs astra and opus only
+                machines that are offline or stopping, the waiting-for-approval panel, the panel about the
+                machines, the pending line), the upload area hidden (jobs get their input on the user's own GPU
+                machine), and no "None" agent, since the public site runs astra and opus only
+  help.html     static/help.html with relative paths, a CSP <meta>, and the public text (HELP_PUBLIC) in place of
+                its local-only blocks: no upload, SSH tunnel or "None" agent, and the sections on the account,
+                setting up a machine and the machines' status
   privacy.html  what the site keeps, where, for how long, who can see it, and how API keys travel
   static/       app.js, style.css, supa.js, config.js (from site.json), and the vendor files, each checked
                 against its SHA-384 first
@@ -19,7 +22,7 @@ build writes the folder (site/ at the repo root by default, which git ignores):
 
 Every path in the pages is relative, so the same folder works at a domain root and under /<repo>/. The build
 refuses an output that holds a secret key or a JWT. The tunnel mode never uses any of this: the server serves
-static/index.html as it is.
+static/index.html and static/help.html as they are.
 """
 import argparse
 import base64
@@ -83,47 +86,27 @@ GATE = """
 
 <section id="harpor-signin" class="panel gate" hidden>
   <h2>Sign in to HARPOR</h2>
-  <p>HARPOR turns a phone video, a rosbag or a Stray Scanner capture of one object into simulation-ready models: its
-    meshes, its parts and joints, and its mass and materials.</p>
+  <p>Turn a capture of one object into a simulation-ready model, on your own GPU machine.</p>
   <p class="gatebtns"><button id="harpor-google" type="button">Sign in with Google</button>
     <button id="harpor-github" type="button">Sign in with GitHub</button></p>
   <p id="harpor-signinmsg" class="msg" role="status"></p>
-  <p class="hint">The site's owner approves each new account by hand. Jobs run on your own GPU machine, and this site
-    shows them. Their state, files and logs are kept in this site's Supabase project.
-    <a href="privacy.html">Privacy and where your data lives</a>.</p>
+  <p class="hint"><a href="privacy.html">Privacy</a></p>
 </section>
 
 <section id="harpor-waiting" class="panel gate" hidden>
-  <h2>Your account is waiting for approval</h2>
-  <p>The site's owner approves each account by hand. Until then your machines cannot show jobs here.</p>
+  <h2>Waiting for approval</h2>
   <form id="harpor-request" class="request">
-    <label for="harpor-note">Request access: say who you are and what you want to build.</label>
+    <label for="harpor-note">Request access: who you are and what you will build</label>
     <textarea id="harpor-note" rows="3" maxlength="500" required></textarea>
-    <p><button id="harpor-send" type="submit">Send the request</button>
+    <p><button id="harpor-send" type="submit">Send request</button>
       <span id="harpor-requestmsg" class="msg" role="status"></span></p>
   </form>
 </section>"""
+# How to set up a machine is in help.html (HELP_PUBLIC's account block), in a new tab like the header's Help link.
 OWN = """<section id="harpor-own" class="panel own" hidden>
     <h3>Your GPU machines</h3>
-    <p id="harpor-ownnote"></p>
     <ul id="harpor-machines" class="machines"></ul>
-    <details id="harpor-howto" class="sub">
-      <summary>How to run jobs on your own GPU machine</summary>
-      <ol class="steps">
-        <li>Set up HARPOR on the machine, with its environments, containers and model checkouts. Then add the package
-          that opens sealed keys to its web environment: <code>pip install cryptography==50.0.2</code>.</li>
-        <li>Sign in there: <code>python -m gator.webapp.worker login</code>. On a machine without a browser, forward
-          the port first with <code>ssh -L 8767:127.0.0.1:8767 &lt;machine&gt;</code>, add
-          <code>--no-browser</code>, and open the address that it prints on your own computer.</li>
-        <li>Start HARPOR there: <code>python -m gator.webapp --worker</code>. Add
-          <code>--local-keys opus</code> to use the Anthropic key in <code>~/.config/gator/anthropic.env</code> on
-          the machine, or <code>--local-keys astra</code> for the OpenAI key in <code>openai.env</code>. This page
-          then asks for no key for the machine's jobs.</li>
-        <li>Add a file in the machine's own HARPOR page, or with
-          <code>python -m gator.webapp.worker add PATH</code>. Its job shows here within a few seconds, and the file
-          stays on the machine.</li>
-      </ol>
-    </details>
+    <p><a href="help.html#machine" target="_blank" rel="noopener">Set up a machine</a></p>
   </section>
   """
 # The upload area's message line, out of the hidden upload area: app.js says there why a delete or the list failed.
@@ -131,6 +114,109 @@ UPMSG = """
     <p id="upmsg" class="msg" role="status"></p>"""
 PENDING = """
     <div id="harpor-pending" class="pending" role="status" hidden></div>"""
+
+# ---- help.html: the public text of each local-only block of static/help.html ----
+
+# static/help.html marks what only the tunnel page has as <!-- local:NAME -->...<!-- /local:NAME -->: the upload, the
+# SSH tunnel, the ?token= link and the agent "None". The build puts HELP_PUBLIC[NAME] in each block's place, and stops
+# when a name is on one side only. The section ids stay, so the app's Help links work on both sites. toc and account
+# are empty on the tunnel page: here they add the sections that only the public site has.
+HELP_PUBLIC = {
+    "toc": """<li><a href="#account">Account and access</a></li>
+    <li><a href="#machine">Set up a machine</a></li>
+    <li><a href="#machine-status">Machine status</a></li>""",
+    "account": """<section id="account">
+<h2>Account and access</h2>
+<p>This site shows the HARPOR jobs that run on your own GPU machine. Sign in with Google or GitHub.</p>
+<p>The site's owner approves each account by hand. Until then, the page says Waiting for approval, and your machines
+  cannot show jobs here. To ask for access, write who you are and what you will build, in 1 to 500 characters, and
+  press Send request. You can send one request a day.</p>
+<p>The owner also sets which agents your account may use. The Settings tab offers only those.</p>
+<p><a href="privacy.html">Privacy</a> says what the site keeps, where it keeps it, and who can see it.</p>
+</section>
+
+<section id="machine">
+<h2>Set up a machine</h2>
+<p>Jobs run on your own GPU machine. To set one up:</p>
+<ol>
+  <li>Set up HARPOR on the machine, with its environments, containers and model checkouts. Then add the package that
+    opens sealed keys to its web environment: <code>pip install cryptography==50.0.2</code>.</li>
+  <li>Sign in there: <code>python -m gator.webapp.worker login</code>. On a machine without a browser, forward the
+    port first with <code>ssh -L 8767:127.0.0.1:8767 &lt;machine&gt;</code>, add <code>--no-browser</code>, and open
+    the address that it prints on your own computer.</li>
+  <li>Start HARPOR there: <code>python -m gator.webapp --worker</code>. Add <code>--local-keys opus</code> to use the
+    Anthropic key in <code>~/.config/gator/anthropic.env</code> on the machine, or <code>--local-keys astra</code> for
+    the OpenAI key in <code>openai.env</code>. This site then asks for no key for the machine's jobs.</li>
+  <li>Add jobs on the machine: see <a href="#add-job">Add a job</a>.</li>
+</ol>
+</section>
+
+<section id="machine-status">
+<h2>Machine status</h2>
+<p>The machines panel on the jobs list gives the state of each machine. The banner under the header shows only the
+  machines that are offline or stopping.</p>
+<dl>
+  <dt>online</dt>
+  <dd>The machine runs HARPOR and takes jobs.</dd>
+  <dt>online until 05:35</dt>
+  <dd>The machine runs HARPOR until that time.</dd>
+  <dt>stopping at 05:35, stopping soon</dt>
+  <dd>The machine stops soon and takes no new builds. New builds wait until it runs again.</dd>
+  <dt>offline since Oct 24 05:35</dt>
+  <dd>The machine stopped then. Its jobs wait until it runs again.</dd>
+  <dt>offline</dt>
+  <dd>The machine has not run in the last 30 days. Its jobs wait until it runs again.</dd>
+</dl>
+<p>Has its own Anthropic key, or OpenAI key, means that the machine was started with <code>--local-keys</code>. Its
+  jobs need no key from this site.</p>
+<p>A request that the machine does not take within 7 days expires.</p>
+<p>The Storage line in the account menu, such as Storage: 120 of 2,048 MB, counts the files that your machines copied
+  to this site, against the limit of your account. When it is full, new files stay on the machine: delete old jobs to
+  make room. <a href="privacy.html">Privacy</a> says how long the files stay.</p>
+</section>""",
+    "add-job": """<p>Jobs run on your own GPU machine, so you add the file there: in the machine's own HARPOR page, or with
+  <code>python -m gator.webapp.worker add PATH</code>. The job shows on this site within a few seconds, and the file
+  stays on the machine. To set up a machine, see <a href="#machine">Set up a machine</a>.</p>""",
+    "keys": """<p>The page seals the key so that only the HARPOR worker on the job's machine can open it.
+  <a href="privacy.html">Privacy</a> says how keys travel and how long the worker keeps them.</p>
+<p>A machine started with <code>--local-keys</code> uses its own key file (see <a href="#machine">Set up a
+  machine</a>), and the page asks for no key for its jobs.</p>
+<p>When the job's machine is offline or stopping, the page does not send the key, and the line under the status says
+  Key not sent.</p>""",
+    "agent-none": "",  # the public site runs astra and opus only
+    "troubleshooting": """<h3>The site</h3>
+<dl>
+  <dt>Cannot reach Supabase. Check your connection.</dt>
+  <dd>The page cannot reach the site's database. Check your network, then reload the page.</dd>
+  <dt>Signed out. Reload to sign in.</dt>
+  <dd>Your sign-in ended. Reload the page and sign in again.</dd>
+  <dt>The machine went offline. Try again.</dt>
+  <dd>The job's machine stopped while the page sent the key. Send the request again: the page then leaves the key out
+    (see <a href="#agent">The agent and API keys</a>).</dd>
+  <dt>The machine is stopping. Try again.</dt>
+  <dd>The machine began to stop while the page sent the key. Send the request again: the page then leaves the key
+    out.</dd>
+  <dt>The machine restarted. Paste the key again.</dt>
+  <dd>The worker on the machine restarted while the page sent the key, so it cannot open a key sealed for the old one.
+    Paste the key again and send.</dd>
+  <dt>you can send one request a day</dt>
+  <dd>You can ask for access once a day. Send the request again tomorrow.</dd>
+  <dt>too many requests: at most N an hour</dt>
+  <dd>Your account sent too many requests to its machines in the last hour. Wait, then try again.</dd>
+  <dt>an earlier request for this job still waits for its machine</dt>
+  <dd>The machine has not taken your last request for this job. Wait for it, or withdraw it.</dd>
+  <dt>Withdraw</dt>
+  <dd>Each request that waits for its machine shows in a line under the status of the job, such as Start, sent 10:42:
+    waits for lab-box. Withdraw takes it back while the machine has not taken it.</dd>
+  <dt>File not on the site yet.</dt>
+  <dd>The machine has not copied the file to the site yet, or the file expired. <a href="privacy.html">Privacy</a>
+    says how long files stay.</dd>
+</dl>""",
+}
+# A local block, with the indent before it and the line break after it, which an empty public text leaves out too.
+LOCAL_BLOCK = re.compile(r"([ \t]*)<!-- local:([\w-]+) -->.*?<!-- /local:\2 -->(\n?)", re.S)
+# Any local-block marker, also one with other spacing that LOCAL_BLOCK does not take.
+LOCAL_MARK = re.compile(r"<!--\s*/?\s*local\b")
 
 # ---- privacy.html ----
 
@@ -147,13 +233,12 @@ PRIVACY = """<!doctype html>
 </head>
 <body>
 <header>
-  <a href="index.html" class="brand">HARPOR
-    <span class="brandsub">High-fidelity Articulated sim-Ready Object Reconstruction</span></a>
+  <a href="index.html" class="brand">HARPOR</a>
+  <a id="helplink" href="help.html">Help</a>
 </header>
 <main class="privacy">
 <div class="panel">
 <h2>Privacy and where your data lives</h2>
-<p>This page says what the HARPOR site keeps, where it keeps it, for how long, and who can see it.</p>
 
 <h3>Your account</h3>
 <p>You sign in with Google or GitHub. The site gets your email address and the name on that account. It keeps no
@@ -176,22 +261,13 @@ PRIVACY = """<!doctype html>
   delete them.</p>
 
 <h3>Your API keys</h3>
-<p>Each job uses your own key: an OpenAI key for GPT-6-Astra, or an Anthropic key for Claude Opus 5.5. Your provider
-  bills you for it.</p>
 <p>Your browser seals the key to the public key of the HARPOR worker on your machine. Only that worker can open the
   sealed key, so Supabase never holds it in a form that can be read. The worker checks the key with your provider and
-  keeps it in memory while the job needs it, at most 24 hours while the job waits for your review. You can also keep
-  the key in a file on your machine; then this page asks for none.</p>
+  keeps it in memory while the job needs it, at most 24 hours while the job waits for your review.</p>
 <p>Your browser trusts the public key that this site's database lists for your machine. Someone who can change that
   database, such as the site's owner, could list another key and read the keys that you send after that. If this
-  matters to you, keep the key in a file on your machine. Use a key with a spending limit, and delete it at your
-  provider when you no longer need it.</p>
-
-<h3>GPT-6-Astra and the network</h3>
-<p>GPT-6-Astra runs the Codex CLI in a container that can reach the network. Text in your video or images, such as a
-  sign or a label, could steer it to run commands that reach the network. These commands run on your machine. Claude
-  Opus 5.5 runs its shell with no network access. If this matters to you, choose Opus. Each job uses your own API key,
-  and your provider bills you for it.</p>
+  matters to you, keep the key in a file on your machine.</p>
+<p>Choosing an agent: see <a href="help.html#agent">Help</a>.</p>
 
 <h3>What your browser keeps</h3>
 <p>Your browser keeps your sign-in session and a short list of your requests whose answers you have not read yet. The
@@ -284,12 +360,12 @@ def head_meta(cfg):
             '<meta name="referrer" content="no-referrer">')
 
 
-def once(text, old, new):
+def once(text, old, new, page="static/index.html"):
     """text with old (which must occur exactly once) replaced by new; SiteError names the anchor otherwise, so a
-    change in static/index.html stops the build instead of leaving a part out."""
+    change in the page stops the build instead of leaving a part out."""
     n = text.count(old)
     if n != 1:
-        raise SiteError(f"static/index.html has {n} copies of {old.strip()[:80]!r}, not 1; update site.py")
+        raise SiteError(f"{page} has {n} copies of {old.strip()[:80]!r}, not 1; update site.py")
     return text.replace(old, new)
 
 
@@ -302,7 +378,7 @@ def public_index(src, cfg):
                "\n".join(f'<script src="{s}"></script>' for s in SCRIPTS))
     none = re.findall(r'\n *<label><input type="radio" name="agent" value="none">[^<]*</label>', out)
     if len(none) != 1:
-        raise SiteError("static/index.html has no single \"No agent\" choice to leave out; update site.py")
+        raise SiteError("static/index.html has no single \"None\" agent to leave out; update site.py")
     out = out.replace(none[0], "")  # the public site runs astra and opus only
     out = once(out, '<span id="conn" class="conn" role="status" hidden></span>',
                '<span id="conn" class="conn" role="status" hidden></span>' + ACCOUNT)
@@ -314,6 +390,25 @@ def public_index(src, cfg):
     out = once(out, '<p id="jnext" class="next"></p>', '<p id="jnext" class="next"></p>' + PENDING)
     if re.search(r'(?:src|href)="(?:/|https?:)', out):
         raise SiteError("the public index.html still has an absolute path or another host; update site.py")
+    return out
+
+
+def public_help(src, cfg):
+    """static/help.html made into the public site's help.html: the public text of each local-only block."""
+    page = "static/help.html"
+    out = once(src, '<meta charset="utf-8">', '<meta charset="utf-8">\n' + head_meta(cfg), page)
+    out = once(out, 'href="/static/style.css"', 'href="static/style.css"', page)
+    out = once(out, 'href="/"', 'href="index.html"', page)  # the brand link
+    names = [m[2] for m in LOCAL_BLOCK.finditer(out)]
+    if sorted(names) != sorted(HELP_PUBLIC):
+        raise SiteError(f"{page} has the local blocks {', '.join(names) or 'none'}, not one of each name in "
+                        "HELP_PUBLIC; update site.py")
+    # Two markers per block and no other: a stray marker (or one that LOCAL_BLOCK cannot read) would ship local text.
+    if len(LOCAL_MARK.findall(out)) != 2 * len(names):
+        raise SiteError(f"{page} has a local-block marker without its partner; update site.py")
+    out = LOCAL_BLOCK.sub(lambda m: HELP_PUBLIC[m[2]] and m[1] + HELP_PUBLIC[m[2]] + m[3], out)
+    if re.search(r'(?:src|href)="(?:/|https?:)', out):
+        raise SiteError("the public help.html still has an absolute path or another host; update site.py")
     return out
 
 
@@ -356,6 +451,7 @@ def vendor_files(static=STATIC):
 def files(cfg, static=STATIC):
     """{path in the site folder: bytes} of the whole site."""
     out = {"index.html": public_index((Path(static) / "index.html").read_text(), cfg).encode(),
+           "help.html": public_help((Path(static) / "help.html").read_text(), cfg).encode(),
            "privacy.html": PRIVACY.format(meta=head_meta(cfg), contact=": " + html.escape(cfg["contact"], quote=False)
                                           if cfg.get("contact") else "").encode(),
            "static/config.js": config_js(cfg).encode(), "_headers": headers_file(cfg).encode(), ".nojekyll": b""}

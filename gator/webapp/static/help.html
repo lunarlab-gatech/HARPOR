@@ -1,0 +1,734 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Help · HARPOR</title>
+<meta name="description" content="How to use HARPOR, from the capture to the simulation models">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <a href="/" class="brand">HARPOR</a>
+</header>
+<main class="help">
+<h1>Help</h1>
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li><a href="#about">About HARPOR</a></li>
+    <!-- local:toc --><!-- /local:toc -->
+    <li><a href="#capture">Record a capture</a></li>
+    <li><a href="#add-job">Add a job</a></li>
+    <li><a href="#status">Job status and the log</a></li>
+    <li><a href="#topics">Camera topics of a rosbag</a></li>
+    <li><a href="#settings">Build settings</a></li>
+    <li><a href="#review">Review the views</a></li>
+    <li><a href="#parts">Parts of an articulated object</a></li>
+    <li><a href="#agent">The agent and API keys</a></li>
+    <li><a href="#lidar">Metric scale and LiDAR</a></li>
+    <li><a href="#inputs">Inputs tab</a></li>
+    <li><a href="#results">Results</a></li>
+    <li><a href="#joints">Joints and links</a></li>
+    <li><a href="#physics">Mass and materials</a></li>
+    <li><a href="#downloads">Downloads</a></li>
+    <li><a href="#retry">Retry, cancel and build again</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+  </ol>
+</nav>
+
+<section id="about">
+<h2>About HARPOR</h2>
+<p>HARPOR stands for High-fidelity Articulated sim-Ready Object Reconstruction. It turns a phone video, a rosbag or a
+  Stray Scanner capture of one object into models for simulation:</p>
+<ul>
+  <li>meshes of the object, as it stood in the capture and turned upright;</li>
+  <li>its parts and joints, when it has moving parts;</li>
+  <li>its mass and materials;</li>
+  <li>MuJoCo, USD and URDF models.</li>
+</ul>
+<p>Each job builds one object from one capture. The build picks sharp frames, masks the object with SAM 3, estimates
+  depth with Depth Anything 3 (DA3), chooses the views, makes a mesh with MV-SAM3D and fits it to the masks. An agent
+  then refines the mesh or sets the joints, and VoMP predicts the materials. <a href="#status">Job status and the
+  log</a> lists every stage.</p>
+</section>
+<!-- local:account --><!-- /local:account -->
+
+<section id="capture">
+<h2>Record a capture</h2>
+<p>Capture one object. Walk around it and keep it in frame the whole time. Record with HDR off: HDR video gives flat
+  colors, so the textures look washed out.</p>
+<table>
+  <thead><tr><th>Input</th><th>Files</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Video</td><td><code>.mp4 .mov .m4v .avi .mkv .webm</code></td><td>From a phone or any other
+      camera.</td></tr>
+    <tr><td>Rosbag</td><td><code>.bag .mcap .db3</code></td><td>A ROS 1 bag is one .bag file. A ROS 2 bag is a
+      folder: use the .mcap or .db3 file inside it. The bag needs a camera topic (Image or CompressedImage). A LiDAR
+      topic gives the metric scale.</td></tr>
+    <tr><td>Stray Scanner</td><td><code>.zip</code></td><td>Zip the export folder of the Stray Scanner app first. The
+      iPhone's LiDAR depth in it gives the metric scale.</td></tr>
+  </tbody>
+</table>
+</section>
+
+<section id="add-job">
+<h2>Add a job</h2>
+<!-- local:add-job -->
+<p>On the jobs list, drop the file on the Add a capture box, or press Choose a file. A file can be up to 20 GB.</p>
+<p>The upload shows how much is sent and the time left. Keep the page open until it ends, because leaving the page
+  stops it. Cancel upload stops it too.</p>
+<p>When the upload ends, the job page opens and the app reads the input.</p>
+<!-- /local:add-job -->
+</section>
+
+<section id="status">
+<h2>Job status and the log</h2>
+<p>The badge under the job's name gives its status, and the line under it says what to do next. On the jobs list, a
+  line at the left marks the jobs that wait for you.</p>
+<table>
+  <thead><tr><th>Status</th><th>What it means</th><th>Tab</th></tr></thead>
+  <tbody>
+    <tr><td><span class="badge analyzing">analyzing</span></td><td>The app reads the input. For a rosbag it first
+      lists the camera topics. This takes a few seconds to a minute.</td><td>Log</td></tr>
+    <tr><td><span class="badge choose_topic">choose topic</span></td><td>The rosbag has more than one camera topic.
+      Choose one: see <a href="#topics">Camera topics</a>.</td><td>Inputs</td></tr>
+    <tr><td><span class="badge ready">ready</span></td><td>The input is read. Name the object, check the settings,
+      then press Start: see <a href="#settings">Build settings</a>.</td><td>Settings</td></tr>
+    <tr><td><span class="badge queued">queued</span></td><td>The job waits for the GPU, since jobs run one at a time.
+      The badge can give its place, such as queued (2nd). You can close the page.</td><td>Log</td></tr>
+    <tr><td><span class="badge running">running</span></td><td>The build runs, and the badge names the stage. You can
+      close the page.</td><td>Log</td></tr>
+    <tr><td><span class="badge review">needs review</span></td><td>The build stopped for you: after the view
+      selection, after the part list, or because it needs the API key again. Check the views or the part list, then
+      press Build: see <a href="#review">Review the views</a> and <a href="#parts">Parts</a>.</td><td>Inputs</td></tr>
+    <tr><td><span class="badge done">done</span></td><td>The build made all its results.</td><td>Results</td></tr>
+    <tr><td><span class="badge failed">failed</span></td><td>A stage failed, and the error box gives the reason. Check
+      the log, then Retry: see <a href="#troubleshooting">Troubleshooting</a>.</td><td>Log</td></tr>
+    <tr><td><span class="badge cancelled">cancelled</span></td><td>You cancelled the job. Retry it, or build again:
+      see <a href="#retry">Retry, cancel and build again</a>.</td><td>Log</td></tr>
+  </tbody>
+</table>
+<p>The waiting panels (camera topic, review, part list, LiDAR failure) show above the tabs.</p>
+
+<h3>The Log tab</h3>
+<p>The first line counts the build stages that are done or failed, and names the one that runs. Under it, each stage
+  shows its name, what it does, GPU when it runs on the GPU, its status and its time. A stage that does not apply is
+  skipped, and its note says why, such as turned off: rigid object.</p>
+<p>While the job runs, the live log of the running stage shows next to the stages. After the job stops, click a
+  stage's name to see its log. Full log opens the whole log file in a new tab.</p>
+<table>
+  <thead><tr><th>Stage</th><th>What it does</th><th>GPU</th></tr></thead>
+  <tbody>
+    <tr><td><code>topics</code></td><td>Lists the camera topics of a rosbag.</td><td></td></tr>
+    <tr><td><code>frames</code></td><td>Reads the input, measures the sharpness of each frame and finds the candidate
+      frames.</td><td></td></tr>
+    <tr><td><code>extract</code></td><td>Writes the candidate frames, and your picks in manual mode.</td><td></td></tr>
+    <tr><td><code>masks</code></td><td>Masks the object in each frame with SAM 3.</td><td>GPU</td></tr>
+    <tr><td><code>prep</code></td><td>Prepares the views.</td><td></td></tr>
+    <tr><td><code>da3</code></td><td>Estimates depth and cameras with Depth Anything 3.</td><td>GPU</td></tr>
+    <tr><td><code>lidar</code></td><td>Finds the metric scale from LiDAR.</td><td></td></tr>
+    <tr><td><code>select</code></td><td>Chooses the views.</td><td></td></tr>
+    <tr><td><code>sam3d</code></td><td>Makes the mesh with MV-SAM3D.</td><td>GPU</td></tr>
+    <tr><td><code>place</code></td><td>Fits the mesh's pose and scale to the masks.</td><td></td></tr>
+    <tr><td><code>propose</code></td><td>Lists the parts of an articulated object.</td><td></td></tr>
+    <tr><td><code>parts</code></td><td>Splits the mesh into parts.</td><td>GPU</td></tr>
+    <tr><td><code>agent</code></td><td>The agent refines the mesh or sets the joints.</td><td>GPU</td></tr>
+    <tr><td><code>align</code></td><td>Turns the mesh upright.</td><td></td></tr>
+    <tr><td><code>vomp</code></td><td>Predicts the materials with VoMP.</td><td>GPU</td></tr>
+    <tr><td><code>mjcf</code></td><td>Builds the MuJoCo model.</td><td></td></tr>
+    <tr><td><code>usd</code></td><td>Builds the USD model.</td><td></td></tr>
+    <tr><td><code>urdf</code></td><td>Builds the URDF model.</td><td></td></tr>
+    <tr><td><code>package</code></td><td>Writes results.zip.</td><td></td></tr>
+  </tbody>
+</table>
+<p><code>topics</code> and <code>frames</code> read the input. The others are the build stages. The agent stage has a time budget: see
+  <a href="#agent">The agent and API keys</a>.</p>
+</section>
+
+<section id="topics">
+<h2>Camera topics of a rosbag</h2>
+<p>When a rosbag has more than one camera topic, the job asks you to choose one. The table gives each topic's preview
+  frame, message type, number of messages, rate, image size and lens. Press Use on the topic to build from, and the
+  app reads its frames.</p>
+<p>Prefer a rectified topic, because MV-SAM3D expects undistorted images. The Lens column says:</p>
+<ul>
+  <li><span class="badge rectified">rectified</span>: the images are undistorted.</li>
+  <li><span class="badge raw">raw</span>: the lens distortion is still in the images.</li>
+  <li><span class="badge unknown">unknown</span>: there is no camera_info next to the topic, so the distortion is not
+    known.</li>
+</ul>
+<p>Not usable lists the topics that cannot be used, each with the reason.</p>
+<p>To change the topic later, press Change topic in the Inputs tab. It shows while the job is not running, in review
+  or done. The table opens again, with in use next to the current topic. Keep the current topic closes it.</p>
+<p>A bag read before the app listed LiDAR topics shows none. To list them, press Change topic and choose the same
+  camera topic again. When the job is in review or done, this is not possible: add the bag again as a new job.</p>
+</section>
+
+<section id="settings">
+<h2>Build settings</h2>
+<p>The Settings tab holds the build settings once the input is read. It is locked while the job runs.</p>
+<dl>
+  <dt>Object name</dt>
+  <dd>The noun that SAM 3 looks for in every frame, such as coffee cup. Use a short noun for the whole object.</dd>
+  <dt>Auto</dt>
+  <dd>The app picks the number of views that you set, 2 to 12, from the candidate frames. See
+    <a href="#review">Review the views</a>.</dd>
+  <dt>Manual</dt>
+  <dd>Open Candidate frames and click a frame to pick it. Click it again to unpick it. A click snaps to the sharpest
+    frame within 0.25 s. Pick 2 to 12 frames. The list under the frames gives each pick with its frame and time, and
+    the buttons make view 0 and remove.</dd>
+  <dt>View 0</dt>
+  <dd>In manual mode, view 0 is the pick that you make view 0 (★), or else the pick with the best quality. In auto
+    mode, the app takes the best view whose mask stays off the image border. View 0 sets the frame of every mesh, and
+    it is the photo that the VLM sees. You can change it in the review.</dd>
+  <dt>Agent</dt>
+  <dd>The model that refines the mesh or sets the joints. See <a href="#agent">The agent and API keys</a>.</dd>
+  <dt>Articulated</dt>
+  <dd>For an object with moving parts. See <a href="#parts">Parts of an articulated object</a>.</dd>
+  <dt>Use LiDAR for metric scale</dt>
+  <dd>See <a href="#lidar">Metric scale and LiDAR</a>.</dd>
+  <dt>Review views before building</dt>
+  <dd>On at first. The build stops after the view selection, so you can check the views before the mesh is made.</dd>
+</dl>
+<p>When the input has warnings, a line at the top counts them, and Show opens them in the Inputs tab. Some bear on the
+  settings, such as LiDAR.</p>
+<p>Start begins the build. In review the button says Start over, and after a build it says Build again: see
+  <a href="#retry">Retry, cancel and build again</a>.</p>
+</section>
+
+<section id="review">
+<h2>Review the views</h2>
+<p>With Review views before building on, the build stops after the view selection. Check the views, change them if
+  needed, then press Build. Build uses the picked views as they are.</p>
+
+<h3>The top view</h3>
+<p>The plot shows the cameras seen from above, around the object:</p>
+<ul class="legend">
+  <li>● a filled dot: a picked view, with its view number</li>
+  <li>■ a square: a pick set to always use</li>
+  <li>★ a star: view 0</li>
+  <li>○ a hollow dot: a view that can be used but is not picked</li>
+  <li>× a cross: a view left out, because its mask is small or inconsistent</li>
+  <li>+ the object</li>
+</ul>
+<p>Views set to never use, and views with no mask, are not shown.</p>
+
+<h3>The summary line</h3>
+<p>It reads N of M views · coverage X° · spacing Y°. N views were picked of the M that you asked for. Coverage:
+  every candidate is within X° of a pick, so a smaller number means that the picks surround the object better.
+  Spacing: the two closest picks are Y° apart. Picks closer than 15° get a warning, and auto mode picks one view fewer
+  while two picks are that close, down to 3 views.</p>
+
+<h3>The view cards</h3>
+<p>The picked views come first, in view order, then the other candidates. Each card shows the frame with its SAM 3
+  mask, its name and time, its status and these numbers:</p>
+<dl>
+  <dt>q</dt>
+  <dd>The view's quality, from SAM 3's score, the mask's area, whether the mask touches the image border, the
+    sharpness and the clipped pixels. Higher is better.</dd>
+  <dt>agree</dt>
+  <dd>How well the view's mask agrees with the other views, through DA3's depth, from 0 to 1.</dd>
+  <dt>N° from a pick</dt>
+  <dd>For a view that is not picked: the angle to the nearest pick.</dd>
+  <dt>LiDAR</dt>
+  <dd>With LiDAR, the view's own scale and point count. See <a href="#lidar">Metric scale and LiDAR</a>.</dd>
+</dl>
+<p>The status of a view:</p>
+<dl>
+  <dt><span class="badge picked">picked</span></dt>
+  <dd>The selection uses the view.</dd>
+  <dt><span class="badge locked">locked</span></dt>
+  <dd>A pick set to always use.</dd>
+  <dt><span class="badge available">available</span></dt>
+  <dd>The view can be used, but it is not picked.</dd>
+  <dt><span class="badge small">small</span></dt>
+  <dd>The mask covers under 1% of the image, so the view is left out.</dd>
+  <dt><span class="badge inconsistent">inconsistent</span></dt>
+  <dd>agree is below 0.5, so the view is left out. SAM 3 found something else or more than the object, or DA3 placed
+    the camera wrong.</dd>
+  <dt><span class="badge excluded">excluded</span></dt>
+  <dd>The view is set to never use.</dd>
+  <dt><span class="badge no_mask">no mask</span></dt>
+  <dd>SAM 3 found no mask of the object in the frame.</dd>
+</dl>
+
+<h3>Change the views</h3>
+<p>Each card has two menus and a view 0 choice:</p>
+<ul>
+  <li>Use: <b>auto</b> lets the app decide, <b>always use</b> keeps the view in, and <b>never use</b> leaves it
+    out.</li>
+  <li>Mask: <b>top mask</b> is SAM 3's mask with the highest score. <b>mask i (score)</b> takes another mask that
+    SAM 3 found in the frame. <b>not in frame</b> says that the object is not in this frame.</li>
+  <li>The <b>view 0</b> choice makes this view view 0. It shows on a pick that is not set to never use, and on a view
+    set to always use.</li>
+</ul>
+<p>After a change, the card says what will happen, such as Added when you select again. Build turns off until you
+  press <b>Select again</b>, which runs the selection with your changes. <b>Discard changes</b> goes back to the views
+  as they are.</p>
+<p>To add another candidate, set it to always use and select again.</p>
+<p>The selection fails when over a third of the masked views are inconsistent, or when fewer than 2 views can be used.
+  Then set some views to always use or never use and select again, or press Pick frames manually. That opens the
+  Settings tab in manual mode, with the candidate frames open.</p>
+<p>With LiDAR, the top of the panel also gives the metric scale and the LiDAR check images: see
+  <a href="#lidar">Metric scale and LiDAR</a>.</p>
+</section>
+
+<section id="parts">
+<h2>Parts of an articulated object</h2>
+<p>An articulated object has parts that move, such as doors, drawers or a lid. Turn on Articulated in the Settings tab
+  for such an object. The build then lists its parts, splits the mesh into them, and the agent sets the joints. For a
+  rigid object, the parts stages are skipped.</p>
+<p>When the agent is off or skipped, the parts are split but get no joints, so physics welds them into one body.</p>
+
+<h3>The part list</h3>
+<p>Part list says who lists the moving parts. The VLM is the agent's model, and it looks at view 0.</p>
+<ul>
+  <li><b>VLM</b>: the VLM lists the parts, and the build goes on.</li>
+  <li><b>VLM, then I check</b>: the build stops after the VLM lists the parts, so you can check the list.</li>
+  <li><b>I type them</b>: you type the list in the Settings tab.</li>
+</ul>
+<p>Write one part per line, as name &gt; parent : joint. For example:</p>
+<pre>cabinet body
+door &gt; cabinet body : revolute
+drawer x3 &gt; cabinet body : prismatic</pre>
+<ul>
+  <li>The first line is the base. It has no parent, and it does not move.</li>
+  <li><code>revolute</code>: the part turns about a hinge or an axle, like a door or a lid.</li>
+  <li><code>prismatic</code>: the part slides, like a drawer.</li>
+  <li><code>fixed</code>: the part does not move on its parent.</li>
+  <li><code>unknown</code>: you cannot tell.</li>
+  <li><code>drawer x3</code> means three identical drawers.</li>
+</ul>
+<p>The joint in the list is a guess. The agent sets the joints.</p>
+
+<h3>Check the part list</h3>
+<p>With VLM, then I check, the job stops at the Part list panel. It shows view 0 with the object's SAM 3 mask, the
+  VLM's list, and its axis hints: a few words on where each hinge or slide is and which way the part moves. Edit the
+  list if it is wrong, then press Build. Undo edits brings back the VLM's list. A part that keeps its name and joint
+  keeps its axis hint.</p>
+
+<h3>How the parts are split</h3>
+<p>SAM 3 masks each part's name in every view used, the base included. The masks vote on every face of the posed
+  mesh, and Blender cuts the mesh and fills the holes. The vote starts from every mask with a score of at least 0.4.
+  It drops the masks that lie outside the object, cover the whole object, are the union of two or more others, or
+  repeat a mask with a higher score. Part masks, in the Results tab, shows these masks, one color per part.</p>
+<p>Parts not split off, in the Results tab, lists each group of masks of a listed name that did not become a part.
+  So a name can show there and still have a part. <b>not found</b> means that no mask of the name was left in any view:
+  SAM 3 found none with a score of at least 0.4, or the vote dropped them all. Otherwise the vote gives the reason:
+  the group covers less than 0.3% of the surface, or fewer than half of the views that see it well and found the name
+  hold it.</p>
+</section>
+
+<section id="agent">
+<h2>The agent and API keys</h2>
+<p>The agent works on the posed mesh. For a rigid object it edits the mesh in Blender. For an articulated object it
+  sets the joints of the split parts. You choose it in the Settings tab:</p>
+<ul>
+  <li>GPT-6-Astra runs through the Codex CLI. It needs an OpenAI key, which starts with sk-.</li>
+  <li>Claude Opus 5.5 runs through the Anthropic API. It needs an Anthropic key, which starts with sk-ant-.</li>
+  <!-- local:agent-none -->
+  <li>None runs no agent and needs no key.</li>
+  <!-- /local:agent-none -->
+</ul>
+<p>Both models run at xhigh effort. The agent has 600 s to edit the mesh, or 900 s to set the joints. Time spent
+  exporting GLBs does not count, up to 600 s. The agent is skipped when it is turned off, or when the mean mask IoU is
+  below 0.5 (see <a href="#results">Results</a>). Physics then uses the posed mesh, or the split parts without
+  joints.</p>
+
+<h3>GPT-6-Astra and the network</h3>
+<p>GPT-6-Astra runs the Codex CLI in a container that can reach the network. Text in your video or images, such as a
+  sign or a label, could steer it to run commands that reach the network. These commands run on the GPU machine that
+  runs the job. Claude Opus 5.5 runs its shell with no network access. If this matters to you, choose Opus.</p>
+
+<h3>API keys</h3>
+<p>Each job uses your own key, and your provider bills you for it. A key is one word of letters, digits, - and _.
+  Use a key with a spending limit, and delete it at your provider when you no longer need it.</p>
+<!-- local:keys -->
+<p>The page sends the key to the server when you press Start, Build, Select again or Retry, and it does not keep it.
+  The server checks the key with your provider and keeps it in memory while the job needs it. It forgets the key when
+  the job is done or cancelled, and when the server restarts.</p>
+<!-- /local:keys -->
+<p>When a stage needs the key again, a key field shows next to its button.</p>
+
+<h3>What the Results tab says about the agent</h3>
+<dl>
+  <dt>Agent</dt>
+  <dd>The model that ran, or off when the agent was turned off, or skipped with the reason.</dd>
+  <dt>Agent verdict</dt>
+  <dd>The agent's verdict when it called finish. For a refined mesh it is complete, unchanged or needs_review. For
+    joints it is articulated, unchanged (no joints) or needs review. In brackets is where the result came from: finish,
+    checkpoint, export or fallback_original. A checkpoint or an export means that the session ended without a valid
+    finish, so the verdict is needs review. <code>fallback_original</code> means that the agent left no valid result,
+    so its input was kept.</dd>
+  <dt>Agent reason</dt>
+  <dd>The agent's own words when it called finish. When the session ended without a valid finish, it is the defect
+    noted at the last checkpoint, or the app's note on the export or the fallback. When the agent's result held your
+    API key, the reason and the limitations are left out.</dd>
+  <dt>Limitation</dt>
+  <dd>A flaw that the agent says is still in its result, written when it called finish. The agent can list at most
+    3.</dd>
+  <dt>Joint changes</dt>
+  <dd>The set_joint calls that set or removed a joint, which the app accepted during the session. A change that added
+    a problem to the joint tree was refused and undone, and it does not count.</dd>
+  <dt>Agent tokens</dt>
+  <dd>For Claude Opus 5.5: the tokens of the whole session, from its log: new input, output, cache reads and cache
+    writes. A turn is one reply of the model.</dd>
+  <dt>Agent cost (estimate)</dt>
+  <dd>An estimate from the token counts at Claude Opus 5.5's prices per million tokens: $4 input, $20 output, $0.20
+    cache read and $5 cache write. In a turn with a refusal fallback, both tries count, each at its own model's prices.
+    A try that failed and was sent again does not count, so the estimate can be low. A ? means that the log gave no
+    cost. Your Anthropic bill gives the real cost.</dd>
+</dl>
+</section>
+
+<section id="lidar">
+<h2>Metric scale and LiDAR</h2>
+<p>The models need the object's size in meters. Without LiDAR, Depth Anything 3 (DA3) estimates the scale from the
+  images. That scale is not measured, so sizes and masses can be off. With LiDAR, the scale comes from measured
+  depth:</p>
+<ul>
+  <li>for a rosbag, the points of a LiDAR topic (PointCloud2 or Livox), linked to the camera by the bag's TF or by a
+    calibration file;</li>
+  <li>for a Stray Scanner capture, the iPhone's LiDAR depth, which is already aligned with the color camera. A Stray
+    job starts with LiDAR on.</li>
+</ul>
+<p>A video has no LiDAR. The Use LiDAR for metric scale checkbox in the Settings tab turns it on or off.</p>
+
+<h3>How the scale is found</h3>
+<p>For each view, the lidar stage takes the LiDAR points inside the object's mask and divides each point's LiDAR depth
+  by DA3's depth at the same pixel. The view's scale is the median of these ratios. The job's scale is the weighted
+  median of the views that agree. The select stage multiplies DA3's depth and camera positions by it before MV-SAM3D,
+  so every later size is in meters. Without LiDAR, the sizes come from DA3's own depth estimate.</p>
+<p>Each view shows its scale and its number of points, and a word when the view is not used:</p>
+<dl>
+  <dt>outlier</dt>
+  <dd>Its scale is more than 5% from the others' (or more, when the views spread more).</dd>
+  <dt>scattered</dt>
+  <dd>Its ratios spread too much: the middle half of them spans over 25% of its scale.</dd>
+  <dt>few points</dt>
+  <dd>The view has under 30 points in its mask.</dd>
+  <dt>no mask</dt>
+  <dd>The view has no mask.</dd>
+  <dt>no points</dt>
+  <dd>No LiDAR point falls on the view.</dd>
+</dl>
+<p>The lidar stage fails when fewer than 3 views have points, when fewer than 3 views or under half of them agree,
+  when the spread is over 8%, or when the scale is outside 0.5 to 2. A scale outside 0.5 to 2 often means an inverted
+  transform or wrong units.</p>
+
+<h3>Check images</h3>
+<p>LiDAR check images, in the review and in the failure panel, show each view's LiDAR points on the frame. The green
+  line is the mask outline. Blue points are nearer than the scaled depth, and red points are farther. White points
+  agree with it. When no scale was found, each view uses its own scale, and a view without one shows all its points
+  white. Open an image to see it larger. When the points sit shifted or turned against the object, the calibration or
+  the time offset is likely wrong.</p>
+
+<h3>The link between LiDAR and camera</h3>
+<p>For a rosbag, choose the LiDAR topic. The line under it says how the LiDAR links to the camera: linked by
+  /tf_static (or /tf) with the chain of frames, Linked by the calibration, or No TF link: upload a calibration.</p>
+<p>Upload calibration takes a .yaml, .yml or .json file, and it replaces the bag's TF. Its keys:</p>
+<dl>
+  <dt><code>T_cam_lidar</code></dt>
+  <dd>A 4 × 4 transform in meters that takes LiDAR points to the camera's frame, before rectification. Its translation
+    is at most 2 m; a larger one is likely in millimeters. <code>T_lidar_cam</code>, its inverse, works too, and so do
+    FAST-LIVO2's <code>Rcl</code> and <code>Pcl</code>.</dd>
+  <dt><code>camera_axes</code></dt>
+  <dd><code>optical</code>, the default: x right, y down, z forward. Or <code>body</code>: x forward, y left, z
+    up.</dd>
+  <dt><code>K</code>, <code>D</code></dt>
+  <dd>Optional: the camera's intrinsics and distortion. Without K, it comes from the bag's camera_info.</dd>
+  <dt><code>time_offset_s</code></dt>
+  <dd>Optional: the LiDAR clock minus the camera clock, in seconds.</dd>
+</dl>
+<pre>T_cam_lidar:
+  - [0, -1, 0, 0.02]
+  - [0, 0, -1, -0.05]
+  - [1, 0, 0, 0.01]
+  - [0, 0, 0, 1]
+camera_axes: optical
+time_offset_s: 0.0</pre>
+<p>Once the file is saved, the line under the button gives its name, the LiDAR's distance and turn from the camera,
+  where K comes from (the file or camera_info), Body axes when the file uses them, and the time offset. Replace
+  calibration and Remove change it.</p>
+<p>When you change the calibration after the scale was found, Retry starts from the lidar stage. In review, the panel
+  says Calibration changed, and Build finds the scale again, then stops in review.</p>
+
+<h3>When the scale fails</h3>
+<p>The LiDAR scale failed panel shows the lidar record with its check images, and LiDAR settings opens the LiDAR
+  settings in the Settings tab. Then:</p>
+<ul>
+  <li>For a rosbag, upload or replace the calibration and Retry, or turn LiDAR off and build again.</li>
+  <li>For a Stray capture, turn LiDAR off or change the views, then build again. Retry reads the same depth and masks
+    again, so it helps only after a file or disk error.</li>
+</ul>
+</section>
+
+<section id="inputs">
+<h2>Inputs tab</h2>
+<p>The Inputs tab shows the input once it is read: its name and kind, a preview video, facts about the frames, and the
+  views that the build used.</p>
+
+<h3>Preview and views</h3>
+<p>The app makes the preview video when it reads the input. A job read before the app made previews has none. The
+  preview keeps only some frames, so it can show the nearest kept frame before the one you ask for.</p>
+<p>Under Views used, click a view to see its frame in the video. The line under the video gives the view, its frame
+  and its time. ★ marks view 0.</p>
+<p>After the place stage, Mesh fit draws the posed mesh in red and the outline of the SAM 3 mask in green on each view.
+  A mesh that strays from the green outline shows a poor fit.</p>
+
+<h3>Frame facts</h3>
+<p>The Video line (Stray capture for a Stray Scanner capture) opens the facts: frames, length, frame rate, size, codec
+  and the number of candidate views.</p>
+<p>The sharpness chart shows each frame's sharpness over time, compared with the median of the frames around it. The
+  dashed line is 0.6 of that median, and the dots are the candidate views. The app cuts the input into equal time
+  bins, about 2 per second and 16 to 32 in all, and takes the sharpest frame of each bin as a candidate. A bin gives
+  none when that frame is under the line or badly exposed.</p>
+<p>HDR video: colors may look flat. Record with HDR off next time: see <a href="#capture">Record a capture</a>.</p>
+<p>A Stray capture also says how far the frames are turned counterclockwise to stand upright, from gravity, and in how many of the
+  frames that show gravity it agrees. It counts the frames with a depth image, with its size, and the frames with a
+  confidence image. Its warnings follow.</p>
+<p>For a rosbag, Change topic opens the camera topic table: see <a href="#topics">Camera topics</a>.</p>
+</section>
+
+<section id="results">
+<h2>Results</h2>
+<p>The Results tab shows the meshes in 3D viewers, then a list of facts. Drag to turn a mesh, and scroll to zoom.</p>
+<dl>
+  <dt>Posed mesh</dt>
+  <dd>MV-SAM3D's mesh from all the views used, with its size, position and a small turn fitted to the SAM 3
+    masks. The log and the Agent row call it the Stage A mesh.</dd>
+  <dt>Split parts</dt>
+  <dd>For an articulated object: the posed mesh cut into parts, without joints. See
+    <a href="#parts">Parts</a>.</dd>
+  <dt>Refined</dt>
+  <dd>The agent's GLB: the posed mesh after the agent edited it in Blender, or as it was when the verdict is unchanged.
+    Physics uses it.</dd>
+  <dt>Parts with joints</dt>
+  <dd>The split parts as the agent delivered them, in one GLB, with the joints that it set. The title says no joints
+    when it set none. Physics uses it.</dd>
+</dl>
+<p>The title of the agent's viewer names the model that made it. Every mesh is in view 0's camera frame, where the
+  viewer's up is the camera's forward axis, so the object looks tipped over. aligned.glb, in the Downloads tab, is the
+  upright copy. The size under each viewer is the box around the mesh along view 0's camera axes, in cm. So a tilted
+  object gives a box larger than the object.</p>
+
+<h3>Facts</h3>
+<dl>
+  <dt>Metric scale</dt>
+  <dd>The scale from LiDAR, or Depth Anything 3's estimate. See <a href="#lidar">Metric scale and LiDAR</a>.</dd>
+  <dt>Mask IoU</dt>
+  <dd>For each view, the app draws the posed mesh from that view's camera and compares it with the SAM 3 mask: the
+    shared area divided by the area of both together, from 0 to 1. The row gives the mean over the views used. Below
+    0.5, the agent is skipped, and physics uses the posed mesh or its split parts.</dd>
+  <dt>Parts</dt>
+  <dd>Parts not split off and Part masks: see <a href="#parts">Parts</a>.</dd>
+  <dt>Agent</dt>
+  <dd>The agent's rows: see <a href="#agent">The agent and API keys</a>.</dd>
+  <dt>Joints</dt>
+  <dd>Joints, Links, Base and the joint of each part: see <a href="#joints">Joints and links</a>.</dd>
+  <dt>Physics</dt>
+  <dd>Mass, center of mass and the materials: see <a href="#physics">Mass and materials</a>.</dd>
+</dl>
+</section>
+
+<section id="joints">
+<h2>Joints and links</h2>
+<p>Physics builds the MuJoCo, USD and URDF models from the GLB that the agent delivered. Each part becomes a link, and
+  each joint that the agent set becomes a joint. A part without a joint is welded to the nearest part above it in the
+  GLB's node tree, or else to the base. When the GLB has no joints, the models hold the whole object as one rigid
+  body. That happens when the agent is off or skipped, or when it delivered no joints.</p>
+<dl>
+  <dt>Joints</dt>
+  <dd>The number of joints in the GLB that the agent delivered, fixed joints included. With 0, physics welds the parts
+    into one body. A ? means that the app could not read the GLB's joints.</dd>
+  <dt>Links</dt>
+  <dd>The bodies of the MuJoCo model (mjcf.json), one for each part of the GLB that physics used. <b>1 (no joints,
+    one rigid body)</b> means that the GLB had no joints.</dd>
+  <dt>Base</dt>
+  <dd>The link that the other links hang from. It is fixed to the world when the agent gave it a fixed joint to the
+    world. Otherwise it can move freely.</dd>
+  <dt>Joint of a part</dt>
+  <dd>How the part moves on its parent, from the joint that the agent set: it turns about an axis (revolute, with its
+    range in degrees), slides along one (prismatic, in cm) or is fixed. The range runs from the lower to the upper
+    limit, where 0 is the part's pose in the mesh. <b>none (welded to X)</b> means that the agent gave the part no
+    joint, so physics welds it as above.</dd>
+</dl>
+</section>
+
+<section id="physics">
+<h2>Mass and materials</h2>
+<p>VoMP predicts the material of every occupied voxel of the aligned mesh, on a 64³ grid. An articulated object puts
+  each link on its own grid. A link with no VoMP result, such as a thin lid with no occupied voxel, gets its collision
+  hulls filled at the object's median density when the parts have joints. When they have none, it is left out.</p>
+<dl>
+  <dt>Mass</dt>
+  <dd>The sum of density times voxel volume over the voxels of all links. Mass grows with the size cubed, so a 5% size
+    error gives about a 16% mass error.</dd>
+  <dt>Center of mass</dt>
+  <dd>The mass-weighted mean of the voxel centers, and of any link filled from its collision hulls, as x, y and z in
+    meters. The frame is that of the physics models: z up, x along the long side, and the origin at the center of the
+    footprint at the bottom of the object.</dd>
+  <dt>Link masses</dt>
+  <dd>Each link's mass. <b>(from hulls)</b> marks a link filled from its collision hulls.</dd>
+  <dt>Mass note</dt>
+  <dd>Names the links that VoMP gave no result for, when the parts have no joints. The mass and the center of mass
+    leave them out, and so do the MuJoCo, USD and URDF models, which still keep their shapes.</dd>
+  <dt>Young's modulus (median)</dt>
+  <dd>Stiffness, in pascals (Pa). 1 GPa is 1e9 Pa. In our tests VoMP v1.1 gave about 4 GPa to most objects, steel and
+    glass included.</dd>
+  <dt>Poisson ratio (median)</dt>
+  <dd>How much the material bulges sideways when it is squeezed, with no unit (usually 0 to 0.5).</dd>
+  <dt>Density (median)</dt>
+  <dd>In kg/m³. The mass uses each voxel's own density, not this median. In our tests VoMP v1.1 gave about
+    1,000 kg/m³ to most objects.</dd>
+</dl>
+<p>The three material rows are medians of VoMP's prediction over the object's voxels. For an articulated object, the
+  voxels of all links count, each by its volume.</p>
+</section>
+
+<section id="downloads">
+<h2>Downloads</h2>
+<p>The Downloads tab lists the job's files by group, each with its size. A file downloads as
+  <code>&lt;job&nbsp;id&gt;_&lt;name&gt;</code>, so the files of two jobs do not clash. The files hide while a build runs, because the
+  build replaces them. Before results.zip exists, the tab lists the files made so far.</p>
+
+<h3>results.zip</h3>
+<p>The last stage (package) writes results.zip. A file that holds your API key is left out, such as the agent's result
+  when the key was found in it.</p>
+<table>
+  <thead><tr><th>In results.zip</th><th>What it is</th><th>When the job has it</th></tr></thead>
+  <tbody>
+    <tr><td><code>mjcf/</code></td><td>The MuJoCo (MJCF) model with its meshes.</td><td>Always.</td></tr>
+    <tr><td><code>usd/</code></td><td>The USD model with its meshes.</td><td>Always.</td></tr>
+    <tr><td><code>urdf/</code></td><td>model.urdf with its meshes in urdf/meshes.</td><td>Jobs built since the app
+      made URDF models.</td></tr>
+    <tr><td><code>posed.glb</code>, <code>aligned.glb</code></td><td>The meshes below.</td><td>Always.</td></tr>
+    <tr><td><code>refined.glb</code></td><td>The agent's GLB.</td><td>When the agent ran.</td></tr>
+    <tr><td><code>parts.glb</code>, <code>parts.json</code></td><td>The split parts and their record.</td><td>An
+      articulated object.</td></tr>
+    <tr><td><code>summary.json</code>, <code>placement.json</code>, <code>selection.json</code></td><td>The records
+      below.</td><td>Always.</td></tr>
+    <tr><td><code>lidar.json</code></td><td>The LiDAR record below.</td><td>With LiDAR.</td></tr>
+    <tr><td><code>agent_result.json</code></td><td>The agent's result: its verdict, reason, limitations and
+      counts.</td><td>When the agent ran.</td></tr>
+  </tbody>
+</table>
+<p>The MJCF and USD models, the URDF's meshes and the agent's result come only in results.zip.</p>
+
+<h3>Meshes</h3>
+<dl>
+  <dt><code>posed.glb</code></dt>
+  <dd>The posed mesh in view 0's camera frame, in meters, with the scale from LiDAR when LiDAR is on, else from Depth
+    Anything 3's estimate.</dd>
+  <dt><code>parts.glb</code></dt>
+  <dd>The split parts in one GLB, one node per part, without joints, in the same frame as posed.glb.</dd>
+  <dt><code>refined.glb</code></dt>
+  <dd>The agent's GLB, in the same frame as posed.glb. For an articulated object, each joint that the agent set is in
+    its child part's node extras (gator_joint); a part without one has none.</dd>
+  <dt><code>aligned.glb</code></dt>
+  <dd>The GLB that physics used, turned upright, with the bottom at 0, the footprint centered on the origin and the
+    long side on x (z up in MuJoCo, y up in glTF). Up is the object's own axis closest to the up of the table or floor
+    under it in view 0, or to the cameras' mean up when no plane fits there. Materials that let light through are made
+    opaque, because VoMP rejects them.</dd>
+</dl>
+
+<h3>Simulation</h3>
+<dl>
+  <dt><code>model.urdf</code></dt>
+  <dd>A URDF of the object, built from the MuJoCo model's meshes and masses: one link when the GLB has no joints, else
+    one link per part. Each part but the base gets the agent's joint to its parent, or a fixed one to the link that
+    physics welds it to when the agent gave it none. A fixed base adds a world link. It needs urdf/meshes from
+    results.zip.</dd>
+</dl>
+
+<h3>Records</h3>
+<dl>
+  <dt><code>placement.json</code></dt>
+  <dd>The record of the place stage: the pose that puts the MV-SAM3D mesh in view 0's camera frame, the scale and pose
+    fitted to the SAM 3 masks, and the metric scale. Its check gives each view's mask IoU and how close view 0's DA3
+    points lie to the mesh.</dd>
+  <dt><code>summary.json</code></dt>
+  <dd>VoMP's summary of the aligned mesh: the voxel counts, the median and the 5th to 95th percentile of Young's
+    modulus, Poisson ratio and density, and the mass, center of mass and inertia of the rigid body. For an articulated
+    object it adds each link's numbers and the links that VoMP could not voxelize.</dd>
+  <dt><code>lidar.json</code></dt>
+  <dd>The record of the lidar stage: the metric scale, each view's scale, point count and status, how the views were
+    combined, the LiDAR source, and the link to the camera (for a rosbag the TF chain or the uploaded calibration; a
+    Stray capture's depth is already aligned with the color camera). When no scale was found, ok is false and reason
+    says why.</dd>
+  <dt><code>selection.json</code></dt>
+  <dd>The view selection: every candidate frame with its quality and status, such as picked or excluded, the picks in
+    run order with view 0 first, the cameras seen from above, the warnings and the metric scale that select applied
+    (null without LiDAR). ok is false when the selection failed, and the warnings say why.</dd>
+  <dt><code>parts.json</code></dt>
+  <dd>The record of the parts stage: each part's name, parent, guessed joint, share of the surface and box, then the
+    parts that were not split off, with the reason. It also gives the seams between parts that touch, with up to 4
+    fitted lines that may be hinge axes.</dd>
+  <dt><code>mjcf.json</code></dt>
+  <dd>The record of the MuJoCo model: its inputs, versions, counts and start height. For an object with joints it also
+    lists the links with their masses, the joints, the base, the welded parts and the pairs that do not collide. The
+    model itself comes only in results.zip.</dd>
+</dl>
+</section>
+
+<section id="retry">
+<h2>Retry, cancel and build again</h2>
+<dl>
+  <dt>Retry</dt>
+  <dd>On a failed or cancelled job. It continues from the first stage that is not done, and its label names that
+    stage, such as Retry from sam3d. Read input again means that the input was not read yet. Back to part list means
+    that the job stopped before you confirmed its part list. After a change of the calibration, Retry starts from
+    lidar.</dd>
+  <dt>Cancel job</dt>
+  <dd>Stops the running stage. For the API key, see <a href="#agent">The agent and API keys</a>.</dd>
+  <dt>Build again</dt>
+  <dd>In the Settings tab of a stopped job. It runs every stage with the settings in the form and replaces the
+    results, so it asks first. In review the button says Start over.</dd>
+  <dt>Delete</dt>
+  <dd>The trash can at the end of a row in the jobs list. It deletes the job and its files, after it asks. It is not
+    offered while the job runs.</dd>
+</dl>
+</section>
+
+<section id="troubleshooting">
+<h2>Troubleshooting</h2>
+<h3>A failed job</h3>
+<p>The error box under the status gives the failed stage and the reason. For example,
+  <code>masks: exit 1: out of memory</code> names the stage, its exit code and the last line of its log. The Log tab
+  opens with that stage's log, and Full log opens the whole file. Fix the cause, then Retry.</p>
+<h3>Messages</h3>
+<dl>
+  <dt>lidar: …</dt>
+  <dd>The LiDAR scale failed. See <a href="#lidar">Metric scale and LiDAR</a>.</dd>
+  <dt>the server stopped while this job ran; resume it</dt>
+  <dd>The server restarted during the build. Press Retry.</dd>
+  <dt>The server no longer holds the … API key</dt>
+  <dd>The server restarted while the job waited in review. Paste the key next to Build, then press Build.</dd>
+  <dt>Selection failed</dt>
+  <dd>The view selection needs your help. See <a href="#review">Review the views</a>.</dd>
+  <dt>Agent: skipped</dt>
+  <dd>Not an error: the agent did not run, and the row says why, such as a low mask IoU. See
+    <a href="#results">Results</a>.</dd>
+</dl>
+<!-- local:troubleshooting -->
+<h3>The page and the server</h3>
+<dl>
+  <dt>Cannot reach the server. Is the SSH tunnel up?</dt>
+  <dd>The page lost the server. When the server started, it printed the ssh -L command that forwards its port. Run it
+    again, then reload the page.</dd>
+  <dt>Not logged in. Open the ?token= link the server printed.</dt>
+  <dd>This browser has no login for this server, for example after the server restarted with a new token. Open the
+    URL with ?token= that the server printed. The server also writes it to ~/.config/gator/webapp.json.</dd>
+  <dt>live log lost</dt>
+  <dd>The live log stopped. Reload the page.</dd>
+  <dt>file type not supported</dt>
+  <dd>See <a href="#capture">Record a capture</a> for the file types.</dd>
+  <dt>upload failed</dt>
+  <dd>The upload stopped, or the server refused the file, and the message says why. Upload the file again.</dd>
+</dl>
+<!-- /local:troubleshooting -->
+</section>
+</main>
+</body>
+</html>

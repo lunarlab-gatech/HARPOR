@@ -83,8 +83,9 @@ def csp_of_headers(out):
 
 def test_build_writes_every_part_of_the_site(built):
     files = sorted(p.relative_to(built).as_posix() for p in built.rglob("*") if p.is_file())
-    assert files == sorted([".nojekyll", "_headers", "index.html", "privacy.html", "static/app.js", "static/config.js",
-                            "static/style.css", "static/supa.js"] + [f"static/vendor/{v}" for v in site.VENDOR])
+    assert files == sorted([".nojekyll", "_headers", "help.html", "index.html", "privacy.html", "static/app.js",
+                            "static/config.js", "static/style.css", "static/supa.js"] +
+                           [f"static/vendor/{v}" for v in site.VENDOR])
     for name in ("app.js", "style.css", "supa.js"):
         assert (built / "static" / name).read_bytes() == (site.STATIC / name).read_bytes()
     for rel in site.VENDOR:
@@ -108,7 +109,7 @@ def test_csp_is_strict_and_the_same_in_headers_and_meta(built):
     assert rules["media-src"] == "blob: https://abcdefghijklmnop.supabase.co"
     assert rules["frame-ancestors"] == "'none'" and rules["base-uri"] == "'none'" and rules["form-action"] == "'none'"
     assert "'unsafe-inline'" not in head and "'unsafe-eval'" not in head and not CDN.search(head)
-    for page in ("index.html", "privacy.html"):
+    for page in ("index.html", "help.html", "privacy.html"):
         assert csp_of_meta(built / page) == head.replace("frame-ancestors 'none'; ", "")
     text = (built / "_headers").read_text()
     for h in ("Referrer-Policy: no-referrer", "Strict-Transport-Security: max-age=31536000",
@@ -132,9 +133,10 @@ def test_local_stack_policy_uses_its_own_origin(tmp_path):
 
 def test_public_index_is_the_tunnel_page_made_public(built):
     """Relative paths only, each to a file of the site; the CSP and referrer metas before anything that loads; the
-    site's own model-viewer; the Supabase scripts before app.js; the markup that supa.js draws into; the upload area
-    hidden, with its message line moved out of it, after the machines panel; no "No agent" choice; no inline script,
-    style attribute or event attribute, which the CSP would block."""
+    site's own model-viewer; the Supabase scripts before app.js; the markup that supa.js draws into; the header's Help
+    link before the account menu; the upload area hidden, with its message line moved out of it, after the machines
+    panel, which links to the help page's machine setup; no "None" agent; no inline script, style attribute or event
+    attribute, which the CSP would block."""
     page = parse(built / "index.html")
     assert page.head[:3] == [("meta", {"charset": "utf-8"}),
                              ("meta", {"http-equiv": "Content-Security-Policy", "content": csp_of_meta(built / "index.html")}),
@@ -149,21 +151,26 @@ def test_public_index_is_the_tunnel_page_made_public(built):
     ids = {a.get("id") for _, a in page.tags}
     for i in ("harpor-account", "harpor-email", "harpor-storage", "harpor-signout", "harpor-banner", "harpor-signin",
               "harpor-google", "harpor-github", "harpor-signinmsg", "harpor-waiting", "harpor-request", "harpor-note",
-              "harpor-send", "harpor-requestmsg", "harpor-own", "harpor-ownnote", "harpor-machines", "harpor-howto",
-              "harpor-pending", "drop", "file", "upmsg", "jobs", "startform", "keylabel"):
+              "harpor-send", "harpor-requestmsg", "harpor-own", "harpor-machines", "harpor-pending", "drop", "file",
+              "upmsg", "jobs", "startform", "keylabel", "helplink"):
         assert i in ids, i
-    assert "harpor-resume" not in ids
+    for gone in ("harpor-resume", "harpor-ownnote", "harpor-howto"):
+        assert gone not in ids, gone
     for i in ("harpor-account", "harpor-banner", "harpor-signin", "harpor-waiting", "harpor-own", "harpor-pending", "drop"):
         assert "hidden" in next(a for _, a in page.tags if a.get("id") == i), i
     agents = [a["value"] for t, a in page.tags if t == "input" and a.get("name") == "agent"]
     assert agents == ["astra", "opus"]
     assert page.inline == [] and not any("style" in a or any(k.startswith("on") for k in a) for _, a in page.tags)
     html = (built / "index.html").read_text()
-    assert not CDN.search(html) and "No agent" not in html and "tus" not in html.lower().replace("status", "")
+    assert not CDN.search(html) and 'value="none"' not in html and "tus" not in html.lower().replace("status", "")
+    header = html[html.index("<header>"):html.index("</header>")]
+    assert header.index('id="helplink"') < header.index('id="conn"') < header.index('id="harpor-account"')
     drop = html[html.index('<div id="drop"'):html.index("</div>", html.index('<div id="drop"'))]
     assert 'id="file"' in drop and 'id="upmsg"' not in drop and html.count('id="upmsg"') == 1
     assert html.index('id="harpor-own"') < html.index('id="upmsg"') < html.index("<h2>Jobs</h2>")
-    assert "python -m gator.webapp --worker</code>" in html and "--worker own" not in html
+    own = html[html.index('id="harpor-own"'):html.index("</section>", html.index('id="harpor-own"'))]
+    assert '<a href="help.html#machine" target="_blank" rel="noopener">Set up a machine</a>' in own
+    assert "<code>" not in own and "--worker" not in html  # the steps are on the help page
 
 
 def test_tunnel_index_is_unchanged_and_loads_no_supabase_script():
@@ -177,11 +184,14 @@ def test_tunnel_index_is_unchanged_and_loads_no_supabase_script():
 def test_privacy_page_says_where_data_lives_and_who_can_see_keys(built):
     """The privacy page says that inputs stay on the user's machine; that state, logs, review images and results are
     copied to the owner's Supabase project, which the owner can read; how long each is kept; that keys go sealed only
-    to the user's machine, and what the owner could do with the database; Astra's network access; and how to reach the
-    owner. Nothing of a shared GPU is left."""
+    to the user's machine, and what the owner could do with the database; and how to reach the owner. The choice of
+    agent (Astra's network access) is on the help page, which the header links too. Nothing of a shared GPU is
+    left."""
     page = parse(built / "privacy.html")
     for link in page.links:
-        assert not re.match(r"[a-z]+:|/", link) and (built / link).is_file(), link
+        assert not re.match(r"[a-z]+:|/", link) and (built / link.split("#")[0]).is_file(), link
+    assert ("a", {"id": "helplink", "href": "help.html"}) in page.tags and "brandsub" not in (built / "privacy.html").read_text()
+    assert ("a", {"href": "help.html#agent"}) in page.tags
     text = html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", (built / "privacy.html").read_text())))
     for want in ("Your input file stays on that machine and never comes to this site.",
                  "copies each job's state, the logs of its stages, its review images and its result files to this "
@@ -197,18 +207,94 @@ def test_privacy_page_says_where_data_lives_and_who_can_see_keys(built):
                  "Only that worker can open the sealed key",
                  "could list another key and read the keys that you send after that",
                  "keep the key in a file on your machine",
-                 "GPT-6-Astra runs the Codex CLI in a container that can reach the network.",
-                 "These commands run on your machine.",
-                 "Claude Opus 5.5 runs its shell with no network access.",
+                 "Choosing an agent: see Help.",
                  "write to the site's owner: the lab's front desk."):
         assert want in text, want
-    for gone in ("Georgia Tech", "shared GPU", "GPU server", "in clear", "upload", "72 hours"):
+    for gone in ("Georgia Tech", "shared GPU", "GPU server", "in clear", "upload", "72 hours", "can reach the network",
+                 "spending limit"):  # the help page says these
         assert gone not in text, gone
     assert page.inline == [] and not CDN.search((built / "privacy.html").read_text())
 
 
+def test_public_help_page(built):
+    """help.html on the public site: the CSP and referrer metas first, as on every page; no script, inline style or
+    event attribute; relative links only, each to a file of the site or a section of the page. It adds the sections
+    that only the public site has (the account, setting up a machine, the machines' status) after About, in the
+    contents too, with the machine steps and the agents' network access, and holds none of the tunnel page's own
+    text: the upload, the SSH tunnel, the ?token= link and the agent "None"."""
+    page = parse(built / "help.html")
+    assert page.head[:3] == [("meta", {"charset": "utf-8"}),
+                             ("meta", {"http-equiv": "Content-Security-Policy", "content": csp_of_meta(built / "help.html")}),
+                             ("meta", {"name": "referrer", "content": "no-referrer"})]
+    assert ("a", {"href": "index.html", "class": "brand"}) in page.tags
+    assert not [t for t, _ in page.tags if t == "script"] and page.inline == []
+    assert not any("style" in a or any(k.startswith("on") for k in a) for _, a in page.tags)
+    ids = [a["id"] for _, a in page.tags if "id" in a]
+    assert len(ids) == len(set(ids))
+    for link in page.links:
+        assert not re.match(r"[a-z]+:|/", link), link
+        target, _, anchor = link.partition("#")
+        assert (built / target).is_file() if target else anchor in ids, link
+    sections = [a["id"] for t, a in page.tags if t == "section"]
+    assert sections[:4] == ["about", "account", "machine", "machine-status"] and "troubleshooting" in sections
+    source = (built / "help.html").read_text()
+    nav = re.search(r'<nav class="toc" aria-label="Contents">(.*?)</nav>', source, re.S)[1]
+    assert re.findall(r'href="#([\w-]+)"', nav) == sections
+    text = html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", source)))
+    for want in ("pip install cryptography==50.0.2", "python -m gator.webapp.worker login",
+                 "ssh -L 8767:127.0.0.1:8767 <machine>", "python -m gator.webapp --worker. Add --local-keys opus",
+                 "python -m gator.webapp.worker add PATH", "offline or stopping",
+                 "GPT-6-Astra runs the Codex CLI in a container that can reach the network.",
+                 "These commands run on the GPU machine that runs the job.",
+                 "Claude Opus 5.5 runs its shell with no network access.", "Signed out. Reload to sign in."):
+        assert want in text, want
+    for gone in ("SSH tunnel", "?token=", "Choose a file", "Cancel upload", "20 GB", "None"):
+        assert gone not in text, gone
+    assert "<!-- local:" not in source and "<!-- /local:" not in source and not CDN.search(source)
+
+
+def test_tunnel_help_page_and_its_public_blocks():
+    """The server serves static/help.html as it is: its own paths, no CSP meta, no "harpor-" id and none of the public
+    sections. Each of its local blocks has a HELP_PUBLIC text and each text has a block; the build stops when a block
+    is missing, has another name or is there twice."""
+    src = (site.STATIC / "help.html").read_text()
+    ids = {a["id"] for _, a in parse(site.STATIC / "help.html").tags if "id" in a}
+    assert not [i for i in ids if i.startswith("harpor-")] and not ids & {"account", "machine", "machine-status"}
+    assert "Content-Security-Policy" not in src and 'href="/static/style.css"' in src and 'href="/"' in src
+    names = [m[2] for m in site.LOCAL_BLOCK.finditer(src)]
+    assert sorted(names) == sorted(site.HELP_PUBLIC) and len(names) == len(set(names))
+    keys = re.search(r"<!-- local:keys -->.*?<!-- /local:keys -->", src, re.S)[0]
+    for broken in (src.replace(keys, ""), src.replace("local:keys -->", "local:key -->"),
+                   src.replace(keys, keys + "\n" + keys)):
+        with pytest.raises(site.SiteError, match="local blocks"):
+            site.public_help(broken, CFG)
+    # A marker without its partner, a stray one before a block (which would swallow the text after it), and a block
+    # with other spacing, which LOCAL_BLOCK does not read: its local text would ship.
+    for broken in (src.replace(keys, keys + "<!-- local:keys -->"),
+                   src.replace(keys, "<!-- local:keys -->\n<p>more</p>\n" + keys),
+                   src.replace("</main>", "<!--local:upload--><p>Choose a file</p><!--/local:upload-->\n</main>")):
+        with pytest.raises(site.SiteError, match="marker without its partner"):
+            site.public_help(broken, CFG)
+
+
+def test_public_help_numbers_are_the_databases(built):
+    """The public help page's own numbers come from the SQL: how long a request waits for its machine
+    (settings.pending_days), how long a machine that has not run still shows (the workers' row policy), the length of
+    an access request and how often one can be sent. Its storage line has the form that supa.js writes."""
+    sql = "\n".join(p.read_text() for p in sorted((ROOT / "supabase" / "migrations").glob("*.sql")))
+    pending = re.search(r"pending_days int not null default (\d+)", sql)[1]
+    seen = re.search(r"last_seen > now\(\) - interval '(\d+) days'", sql)[1]
+    low, high = re.search(r"char_length\(p_note\) not between (\d+) and (\d+)", sql).groups()
+    assert "request_at < now() - interval '1 day'" in sql and "'you can send one request a day'" in sql
+    text = html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", (built / "help.html").read_text())))
+    for want in (f"within {pending} days", f"in the last {seen} days", f"in {low} to {high} characters",
+                 "one request a day", "Storage: 120 of 2,048 MB"):
+        assert want in text, want
+    assert "`Storage: ${mib(r.data)} of ${mib(access.max_result_bytes)} MB`" in (site.STATIC / "supa.js").read_text()
+
+
 def test_site_served_under_a_repo_path_loads_every_asset(built, tmp_path):
-    """Served as GitHub Pages serves a project site (under /HARPOR/), every src and href of both pages, and the
+    """Served as GitHub Pages serves a project site (under /HARPOR/), every src and href of the three pages, and the
     decoder files that supa.js names, load by their relative URL."""
     www = tmp_path / "www"
     shutil.copytree(built, www / "HARPOR")
@@ -219,7 +305,7 @@ def test_site_served_under_a_repo_path_loads_every_asset(built, tmp_path):
     try:
         base = f"http://127.0.0.1:{httpd.server_address[1]}/HARPOR/"
         urls = {base, base + "privacy.html"}
-        for page in ("index.html", "privacy.html"):
+        for page in ("index.html", "help.html", "privacy.html"):
             urls |= {urllib.parse.urljoin(base + page, link.split("#")[0]) for link in parse(built / page).links}
         supa = (site.STATIC / "supa.js").read_text()
         for folder in re.findall(r'new URL\("(static/vendor/[^"]+/)", location\.href\)', supa):

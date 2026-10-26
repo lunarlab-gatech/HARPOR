@@ -455,6 +455,10 @@ def make_app(cfg, token, key_dir=None):
     def index():
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
+    @app.get("/help.html")
+    def help_page():  # the Help link opens it in a new tab
+        return FileResponse(STATIC / "help.html", headers={"Cache-Control": "no-cache"})
+
     @app.get("/static/{name}")
     def static(name: str):  # no-cache, so the browser takes a new app.js after an update
         if name not in ("app.js", "style.css"):
@@ -877,7 +881,10 @@ def make_app(cfg, token, key_dir=None):
 
 
 class TokenGate:
-    """ASGI middleware: the login cookie passes; GET /?token=T sets it and redirects to /; else 401."""
+    """ASGI middleware: the login cookie passes; GET /?token=T sets it and redirects to /; else 401. The help page and
+    its stylesheet pass without the cookie: they hold no job data, and their troubleshooting says how to log in."""
+
+    OPEN = ("/help.html", "/static/style.css")
 
     def __init__(self, app, token):
         self.app, self.token = app, token.encode()
@@ -896,7 +903,7 @@ class TokenGate:
             resp = RedirectResponse("/", status_code=303)  # the token leaves the address bar
             resp.set_cookie(COOKIE, self.token.decode(), httponly=True, samesite="strict")
             return await resp(scope, receive, send)
-        if self.ok(req.cookies.get(COOKIE)):
+        if self.ok(req.cookies.get(COOKIE)) or (scope["method"] == "GET" and scope["path"] in self.OPEN):
             return await self.app(scope, receive, send)
         resp = PlainTextResponse("open the URL with ?token= that the server printed", status_code=401)
         return await resp(scope, receive, send)

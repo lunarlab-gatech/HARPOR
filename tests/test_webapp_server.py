@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import math
 import os
 import secrets
 import shutil
@@ -128,8 +129,11 @@ def all_files(root):
 
 def test_token_gate(client):
     c, _ = client
-    for path in ("/", "/static/app.js", "/api/jobs", "/api/jobs/x/file/selection.json"):
+    for path in ("/", "/static/app.js", "/static/index.html", "/api/jobs", "/api/jobs/x/file/selection.json"):
         assert c.get(path).status_code == 401
+    # The help page and its stylesheet hold no job data: they pass, so the page's troubleshooting reads without a login.
+    assert c.get("/help.html").status_code == c.get("/static/style.css").status_code == 200
+    assert c.head("/static/app.js").status_code == c.post("/help.html").status_code == 401
     assert c.put("/api/upload?name=a.mp4", content=b"x").status_code == 401
     assert c.get("/?token=wrong").status_code == 401 and c.get("/?token=").status_code == 401
     cookie = login(c).headers["set-cookie"].lower()
@@ -1177,6 +1181,20 @@ def test_the_tunnel_page_stays_as_it_was(client):
     assert c.get("/static/supa.js").status_code == 404 and c.get("/static/config.js").status_code == 404
 
 
+def test_help_page_is_served_with_or_without_the_login(client):
+    """GET /help.html gives static/help.html as it is, with no-cache like the page, also without the cookie (the
+    token gate lets it and its stylesheet pass), so its "Not logged in" entry reads when the cookie is stale."""
+    c, _ = client
+    for logged_in in (False, True):
+        if logged_in:
+            login(c)
+        r = c.get("/help.html")
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+        assert r.headers["cache-control"] == "no-cache" and r.text == (server.STATIC / "help.html").read_text()
+        assert "<!-- local:troubleshooting -->" in r.text and 'href="/static/style.css"' in r.text
+        assert "Not logged in. Open the ?token= link the server printed." in r.text
+
+
 def test_stop_hooks_run_before_the_runner_stops(tmp_path, capsys):
     """on_stop hooks (a worker's stop) run in order when the server stops, before runner.shutdown cancels
     the stages; one that fails does not stop the others. There are none by default."""
@@ -1539,17 +1557,15 @@ def test_app_js_topics_and_the_agent_off():
           console.log(JSON.stringify({ table, state, results: [...texts] }));
         })()
         """)
-    assert {"rectified", "raw lens distortion", "unknown", "/cam_a", "/image_rect", "/compressed", "CompressedImage jpeg", "1280x1024",
-            "10.0 Hz", "Use this topic"} <= set(out["table"])
-    assert "MV-SAM3D expects undistorted images; pick a rectified topic if the bag has one" in out["table"]
-    assert "no camera_info next to it, so the lens distortion is not known. MV-SAM3D expects undistorted images; " \
-           "pick a rectified topic if the bag has one" in out["table"]  # a raw bag without camera_info gets the hint too
-    assert out["table"].count("Use this topic") == 3 and "Not usable: /depth (16UC1)" not in out["table"]  # textContent
+    assert {"rectified", "raw", "unknown", "/cam_a", "/image_rect", "/compressed", "CompressedImage jpeg", "1280x1024",
+            "10.0 Hz", "Use", "Use /cam_b/image/compressed"} <= set(out["table"])
+    assert not any("MV-SAM3D" in t or "camera_info" in t for t in out["table"])  # why a rectified topic is better: help.html
+    assert out["table"].count("Use") == 3 and "Not usable: /depth (16UC1)" not in out["table"]  # textContent
     # A stage that is turned off shows the plain "skipped" badge; its note says why (a longer badge broke the row on a phone).
     assert "skipped" in out["state"] and "turned off: physics uses the Stage A mesh" in out["state"]
     assert "skipped (turned off)" not in out["state"]
     # Once, in the facts' Agent row: the viewers have no placeholder that says it again.
-    assert out["results"].count("not refined (agent turned off)") == 1
+    assert out["results"].count("off") == 1
 
 
 def test_app_js_shows_the_opus_agent_and_its_cost():
@@ -1571,7 +1587,7 @@ def test_app_js_shows_the_opus_agent_and_its_cost():
           console.log(JSON.stringify({ opus, astra: [...texts] }));
         })()
         """)
-    assert "Refined by Claude Opus 5.5" in out["opus"] and "Claude Opus 5.5 (claude-opus-5-5)" in out["opus"]
+    assert "Refined (Claude Opus 5.5)" in out["opus"] and "Claude Opus 5.5 (claude-opus-5-5)" in out["opus"]
     assert "41,000 input, 9,000 output, 380,000 cache read, 52,000 cache write in 12 turns" in out["opus"]
     assert "about $0.67" in out["opus"] and "fixed the lid" in out["opus"]
     assert "GPT-6-Astra (gpt-6-astra)" in out["astra"] and "Agent tokens" not in out["astra"]
@@ -1610,7 +1626,7 @@ def test_app_js_start_form_sends_the_parts():
     out = run_form_js("""
         (async () => {
           const sent = [], form = [];
-          const state = () => ({ box: $("#partsbox").hidden, list: $("#partlistbox").hidden, pause: $("#partspause").hidden,
+          const state = () => ({ box: $("#partsbox").hidden, list: $("#partlistbox").hidden,
             noagent: $("#partsnoagent").hidden, required: $("#partlist").required,
             checked: partsModes.filter((r) => r.checked).map((r) => r.value), disabled: partsModes.map((r) => r.disabled) });
           const pick = (i) => { agents.forEach((r, j) => { r.checked = j === i; }); agents[i].onchange(); };
@@ -1650,13 +1666,11 @@ def test_app_js_start_form_sends_the_parts():
     rigid, vlm_edit, user, bad, none = out["sent"]
     assert rigid["articulated"] is False and "parts_mode" not in rigid and "parts" not in rigid
     assert out["form"] == [
-        {"box": False, "list": True, "pause": True, "noagent": True, "required": False, "checked": ["vlm"],
+        {"box": False, "list": True, "noagent": True, "required": False, "checked": ["vlm"], "disabled": [False, False, False]},
+        {"box": False, "list": True, "noagent": True, "required": False, "checked": ["vlm_edit"],
          "disabled": [False, False, False]},
-        {"box": False, "list": True, "pause": False, "noagent": True, "required": False, "checked": ["vlm_edit"],
-         "disabled": [False, False, False]},
-        {"box": False, "list": False, "pause": True, "noagent": False, "required": True, "checked": ["user"],
-         "disabled": [True, True, False]},
-        {"box": False, "list": True, "pause": False, "noagent": True, "required": False, "checked": ["vlm_edit"],
+        {"box": False, "list": False, "noagent": False, "required": True, "checked": ["user"], "disabled": [True, True, False]},
+        {"box": False, "list": True, "noagent": True, "required": False, "checked": ["vlm_edit"],
          "disabled": [False, False, False]}]
     assert (vlm_edit["articulated"], vlm_edit["parts_mode"], vlm_edit["parts"], vlm_edit["api_key"]) == (True, "vlm_edit", [], "sk-typed")
     assert (user["parts_mode"], user["agent"]) == ("user", "astra") and user["parts"] == [
@@ -1709,20 +1723,21 @@ def test_app_js_part_list_panel():
           await $("#partsbuild").onclick();
           $("#partsedit").value = "body\\nleft door > body : revolute";
           await $("#partsbuild").onclick();
-          const labels = [stageLabel("agent", true), stageLabel("agent", false), stageLabel("agent", true, true),
-            stageLabel("propose"), stageLabel("parts"), stageLabel("urdf")];
+          const labels = [stageLabel("agent", true), stageLabel("agent", false), stageLabel("propose"), stageLabel("parts"),
+            stageLabel("urdf")];
           V = { id: "j" };  // act's refresh left a stand-in job
           renderState({ status: "running", current: "agent", stages, agent: "opus", key_ok: true, warnings: [], articulated: true });
+          renderState({ status: "running", current: "sam3d", stages, agent: "opus", key_ok: true, warnings: [], articulated: true });
           console.log(JSON.stringify({ shown, next, reset, posts: sent, colon: posts, error, labels, build: BUILD,
-            running: texts.filter((t) => t.startsWith("Running ")) }));
+            running: texts.filter((t) => t.startsWith("Running")) }));
         })()
         """, replies)
     shown = out["shown"]
-    assert "Claude Opus 5.5 listed 1 moving part of the wooden box. The base, which does not move, is body." in shown["texts"]
+    assert "Claude Opus 5.5: 1 moving part. Base: body." in shown["texts"]
     assert {"a warning", "lid", ": a hinge along the back top edge"} <= set(shown["texts"])
     assert shown["text"] == "body\nlid > body : revolute" and shown["reset"] is True and shown["fig"] is False
     assert shown["photo"] == "/api/jobs/j/file/scene/sam3_wooden_box/check/f00012.jpg"
-    assert out["next"] == "Check the part list, edit it if it is wrong, then Build with these parts."
+    assert out["next"] == "Check the part list, then Build."
     assert out["reset"] is False
     assert out["posts"] == [
         {"url": "/api/jobs/j/continue", "body": {"api_key": None}},
@@ -1735,9 +1750,8 @@ def test_app_js_part_list_panel():
                             {"url": "/api/jobs/j/parts", "body": {"api_key": None, "parts": [
                                 {"name": "body", "parent": None, "joint": None, "count": 1},
                                 {"name": "left door", "parent": "body", "joint": "revolute", "count": 1}]}}]
-    assert out["labels"] == ["agent sets the joints, 15 min budget", "agent refinement, 10 min budget",
-                             "agent sets the joints", "part list", "split into parts", "URDF"]
-    assert out["running"] == ["Running agent (agent sets the joints, 15 min budget)"]
+    assert out["labels"] == ["agent sets the joints", "agent refinement", "part list", "split into parts", "URDF"]
+    assert out["running"] == ["Running: agent sets the joints", "Running: mesh (MV-SAM3D)"]
     assert out["build"] == steps.NAMES[steps.NAMES.index("extract"):] == jobs.BUILD  # lidar after da3
 
 
@@ -1747,7 +1761,7 @@ def test_app_js_results_of_an_articulated_job():
     Downloads tab, not in Results. Without the agent the parts are welded into one body. A rigid job's part
     stages show as turned off."""
     mjcf = {"name": "wooden_box", "root": "body", "fixed_base": False, "welded": {},
-            "inertial": {"mass": 2.5, "com": [0.0, 0.01, 0.1], "fullinertia": [0.01] * 6},
+            "inertial": {"mass": 2.5, "com": [-1.51e-18, 0.01, 0.1], "fullinertia": [0.01] * 6},  # float noise in x
             "links": {"body": {"source": "vomp", "inertial": {"mass": 2.0, "com": [0, 0, 0.1], "fullinertia": [0.01] * 6}},
                       "lid": {"source": "hull", "inertial": {"mass": 0.5, "com": [0, 0, 0.2], "fullinertia": [0.001] * 6}}},
             "joints": [{"child": "lid", "parent": "body", "type": "revolute", "pos": [0, 0.1, 0.2], "axis": [-1, 0, 0],
@@ -1798,22 +1812,21 @@ def test_app_js_results_of_an_articulated_job():
         })()
         """)
     art = out["art"]
-    for t in ("Parts (split, before rigging)", "Parts with joints, by Claude Opus 5.5", "articulated: the parts have joints (finish)",
-              "Joints", "1", "Joint changes by the agent", "2", "Links", "2: body, lid", "Base", "body, free to move",
-              "Joint of lid", "turns on body, 0 to 86 deg", "Mass", "2.50 kg", "Link masses",
-              "body 2.00 kg, lid 0.500 kg (from its collision hulls)", "Parts not split off", "drawer (no SAM 3 mask in any view)",
-              "Part masks in the views (2)"):
+    for t in ("Split parts", "Parts with joints (Claude Opus 5.5)", "articulated (finish)",
+              "Joints", "1", "Joint changes", "2", "Links", "2: body, lid", "Base", "body, free to move",
+              "Joint of lid", "turns on body, 0° to 86°", "Mass", "2.50 kg", "Center of mass", "0.000, 0.010, 0.100 m",
+              "Density (median)", "600 kg/m³", "Link masses",
+              "body 2.00 kg, lid 0.500 kg (from hulls)", "Parts not split off", "drawer (no SAM 3 mask in any view)",
+              "Part masks (2)", "One color per part."):
         assert t in art, t
     assert "Mass note" not in art  # the MJCF's mass covers the link that VoMP skipped
     assert not {"parts.glb", "model.urdf", "results.zip"} & set(art)  # no downloads in Results
     assert {"parts.glb", "parts.json", "model.urdf", "results.zip", "Meshes", "Simulation", "Records"} <= set(out["dl"])
-    assert any("the agent's result and the split parts (parts.glb, parts.json)." in t for t in out["dl"])
-    welded = "no joints (agent turned off), so physics welds the parts into one body"
-    assert out["none"].count(welded) == 1 and "1: the parts have no joints, so physics welds them into one body" in out["none"]
-    assert "Mass note" in out["none"] and "VoMP could not voxelize lid, so the mass covers only body." in out["none"]
+    assert out["none"].count("off (parts welded into one body)") == 1 and "1 (no joints, one rigid body)" in out["none"]
+    assert "Mass note" in out["none"] and "Leaves out lid (no VoMP result)" in out["none"]
     assert out["state"].count("turned off: rigid object") == 2 and out["state"].count("skipped") == 2
-    assert "agent refinement, 10 min budget" in out["state"]
-    assert "Agent result without joints, by Claude Opus 5.5" in out["unchanged"]
+    assert "agent refinement" in out["state"]
+    assert "Agent result, no joints (Claude Opus 5.5)" in out["unchanged"]
     assert not any(t.startswith("Parts with joints") for t in out["unchanged"])
 
 
@@ -1841,8 +1854,8 @@ def frames_meta(**video):
 
 
 def test_app_js_upload_kinds_and_the_jobs_list():
-    """A .zip is a Stray Scanner upload; another suffix is refused with the three kinds named. The jobs list
-    names each job's kind, and the stage list has the lidar stage after da3."""
+    """A .zip is a Stray Scanner upload; another suffix is refused (help.html names the kinds). The jobs list names
+    each job's kind, and the stage list has the lidar stage after da3."""
     rows = [{"id": "a", "created": "2026-10-21T09:00:00", "status": "ready", "prompt": None, "video": "a.mp4", "kind": "video"},
             {"id": "b", "created": "2026-10-21T08:00:00", "status": "ready", "prompt": None, "video": "b.bag", "kind": "rosbag"},
             {"id": "c", "created": "2026-10-21T07:00:00", "status": "done", "prompt": "box", "video": "c.zip", "kind": "stray"}]
@@ -1861,9 +1874,7 @@ def test_app_js_upload_kinds_and_the_jobs_list():
         })()
         """)
     assert out["kinds"] == [True, True, True, True, True, False, False]
-    assert out["refused"] == ("notes.txt is not a video (.mp4 .mov .m4v .avi .mkv .webm), a rosbag (.bag .mcap .db3) or a "
-                              "Stray Scanner export (.zip). For a ROS 2 bag folder, upload the .mcap or .db3 file in it. "
-                              "For a Stray Scanner export folder, zip the folder first.")
+    assert out["refused"] == "notes.txt: file type not supported."
     assert out["opened"] == [["PUT", "/api/upload?name=my%20capture.zip"], "my capture.zip"]
     assert {"video", "rosbag", "Stray capture"} <= set(out["list"]) and "stray" not in out["list"]
     assert out["label"] == "metric scale (LiDAR)"
@@ -1874,7 +1885,8 @@ def test_app_js_lidar_box_per_kind():
     """The LiDAR box of the start form and the start body's "lidar" for each kind of input: hidden for a
     video (null); a bag with one LiDAR topic preselects it, and its TF chain shows; a bag with two asks for
     one and says when TF does not link it; a bag without LiDAR topics, or listed before they were, has the
-    box turned off with the reason; a Stray capture starts with LiDAR on, and its turn and depth show."""
+    box turned off with the reason (the box's hint says nothing else); a Stray capture starts with LiDAR on, and
+    its turn and depth show."""
     static_tf = [{"parent": "base_link", "child": "camera_link", "static": True, "T_parent_child": EYE},
                  {"parent": "camera_link", "child": "camera_optical_frame", "static": True, "T_parent_child": EYE},
                  {"parent": "base_link", "child": "livox_frame", "static": True, "T_parent_child": EYE},
@@ -1975,23 +1987,21 @@ def test_app_js_lidar_box_per_kind():
             V = { id };
             texts.length = 0;
             await loadTopics(read);
-            out["table_" + id] = texts.filter((t) => t === "Use this topic" || t === "in use");
+            out["table_" + id] = texts.filter((t) => t === "Use" || t === "in use");
           }
           console.log(JSON.stringify(out));
         })()
         """, replies)
-    off = "Off: Depth Anything 3 estimates the scale."
     v = out["v"]
     assert v["box"]["hidden"] is True and v["sent"] is None
 
     b1 = out["b1"]
     assert b1["labels"] == ["/livox/lidar (Livox, 10 Hz, livox_frame)"]
-    assert b1["box"] == {"hidden": False, "on": False, "off": False, "hint": off, "opts": True, "topic": "/livox/lidar",
+    assert b1["box"] == {"hidden": False, "on": False, "off": False, "hint": "", "opts": True, "topic": "/livox/lidar",
                          "link": None, "warn": None, "skipped": None}
     assert b1["sent"] is None  # off by default for a bag
-    assert b1["on"] == {"hidden": False, "on": True, "off": False, "hint": "The LiDAR's points set the metric scale.",
-                        "opts": False, "topic": "/livox/lidar", "warn": False,
-                        "link": "linked by /tf_static: camera_optical_frame <- camera_link <- base_link <- livox_frame",
+    assert b1["on"] == {"hidden": False, "on": True, "off": False, "hint": "", "opts": False, "topic": "/livox/lidar", "warn": False,
+                        "link": "Linked by /tf_static: camera_optical_frame <- camera_link <- base_link <- livox_frame",
                         "skipped": "Not usable: /ouster/points (no messages)"}
     assert b1["sent_on"] == {"topic": "/livox/lidar"} and b1["stray_hidden"] is True
 
@@ -1999,40 +2009,36 @@ def test_app_js_lidar_box_per_kind():
     assert b2["labels"] == ["Choose a LiDAR topic", "/livox/lidar (Livox, 10 Hz, livox_frame)",
                             "/lidar/points (PointCloud2, 9.9 Hz, lidar)"]
     assert (b2["box"]["topic"], b2["box"]["on"]) == ("", False)  # two topics: none preselected
-    assert b2["none"]["link"] == "choose a LiDAR topic to see its link to the camera"
+    assert b2["none"]["link"] == ""  # no topic chosen yet
     assert b2["error"] == "choose a LiDAR topic, or turn LiDAR off" and b2["focused"] is True  # the page's text, not a bubble
-    assert (b2["cloud"]["link"], b2["cloud"]["warn"]) == ("no TF link: upload the calibration", True)
-    assert (b2["livox"]["link"], b2["livox"]["warn"]) == ("linked by /tf: camera_optical_frame <- base_link <- livox_frame", False)
+    assert (b2["cloud"]["link"], b2["cloud"]["warn"]) == ("No TF link: upload a calibration", True)
+    assert (b2["livox"]["link"], b2["livox"]["warn"]) == ("Linked by /tf: camera_optical_frame <- base_link <- livox_frame", False)
     assert b2["sent"] == {"topic": "/livox/lidar"}
     assert (out["b3"]["on"], out["b3"]["topic"], out["b3"]["opts"]) == (True, "/livox/lidar", False)  # the job's own setting
 
     no_lidar, old, old_done = out["b4"], out["b5"], out["b6"]
     assert no_lidar["box"]["off"] is True and no_lidar["box"]["on"] is False and no_lidar["box"]["opts"] is True
-    assert no_lidar["box"]["hint"] == ("This bag has no LiDAR topic (PointCloud2 or Livox). Not usable: /ouster/points "
-                                       "(no messages).")
-    assert old["box"]["off"] is True and old["box"]["hint"] == (
-        "This bag was read before the app listed LiDAR topics. To list them, use Change the camera topic in the Inputs tab, "
-        "and choose the same topic again.")
-    assert old_done["box"]["hint"] == ("This bag was read before the app listed LiDAR topics. To use its LiDAR, upload the "
-                                       "bag again.")
+    assert no_lidar["box"]["hint"] == "No LiDAR topic in this bag. Not usable: /ouster/points (no messages)."
+    assert old["box"]["off"] is True and old["box"]["hint"] == ("LiDAR topics not listed. In Inputs, pick the same camera "
+                                                                "topic again.")
+    assert old_done["box"]["hint"] == "LiDAR topics not listed. Upload the bag again to use LiDAR."
     assert no_lidar["sent"] is None and old["sent"] is None and old_done["sent"] is None
     assert old_done["checked_off"] == [True, None]
 
     s1 = out["s1"]
-    assert s1["box"] == {"hidden": False, "on": True, "off": False, "hint": "The iPhone's LiDAR depth sets the metric scale.",
-                         "opts": True, "topic": "", "link": None, "warn": None, "skipped": None}
+    assert s1["box"] == {"hidden": False, "on": True, "off": False, "hint": "", "opts": True, "topic": "", "link": None,
+                         "warn": None, "skipped": None}
     assert s1["sent"] == {"kind": "stray"}
-    assert (s1["off"]["on"], s1["off"]["hint"], s1["sent_off"]) == (False, off, None)
+    assert (s1["off"]["on"], s1["off"]["hint"], s1["sent_off"]) == (False, "", None)
     assert s1["info"] is False and s1["vsum"] == "Stray capture: 20 frames, 2.0 s, 3 candidate views"
-    assert s1["facts"] == ("The frames are turned 270 deg counterclockwise to stand upright. Gravity gives this turn in 96% "
-                           "of the frames that show it. 19 of 20 frames have a depth image (256x192). 19 have a confidence image.")
+    assert s1["facts"] == "Turned 270° to upright (gravity agrees: 96%). Depth: 19/20 frames (256x192). Confidence: 19."
     assert s1["warn"] == ["1 of the 20 frames have no depth image, so they have no LiDAR samples"]
     s2 = out["s2"]
-    assert s2["box"]["on"] is False and s2["box"]["hint"] == off  # a Start turned it off
-    assert s2["facts"].startswith("No frame shows gravity, so the frames stay as stored. 19 of 20 frames")
+    assert s2["box"]["on"] is False and s2["box"]["hint"] == ""  # a Start turned it off
+    assert s2["facts"].startswith("No gravity data: frames as stored. Depth: 19/20 frames")
     # Only a bag's frames load its topics.json, once per load.
     assert out["topics"] == ["b1", "b2", "b3", "b4", "b5", "b6", "b1"]
-    assert out["table_b5"] == ["Use this topic"] and out["table_b1"] == ["in use"]
+    assert out["table_b5"] == ["Use"] and out["table_b1"] == ["in use"]
 
 
 def test_app_js_calibration_upload():
@@ -2100,25 +2106,21 @@ def test_app_js_calibration_upload():
           console.log(JSON.stringify(out));
         })()
         """, replies)
-    assert out["before"] == {"link": "no TF link: upload the calibration", "warn": True, "sum": None, "btn": "Upload a calibration",
+    assert out["before"] == {"link": "No TF link: upload a calibration", "warn": True, "sum": None, "btn": "Upload calibration",
                              "remove": True, "msg": "", "bad": False}
     assert out["cleared"] == ""  # the same file can be chosen again
-    assert out["good"] == {"link": "no TF link: the calibration links them", "warn": False, "remove": False,
-                           "msg": "The calibration my_calib.json is saved.", "bad": False, "btn": "Replace the calibration",
-                           "sum": "Calibration my_calib.json: the LiDAR is 12.3 cm from the camera, turned 120.0 deg. "
-                                  "K comes from the camera_info."}
+    assert out["good"] == {"link": "Linked by the calibration", "warn": False, "remove": False, "msg": "Saved my_calib.json.",
+                           "bad": False, "btn": "Replace calibration", "sum": "my_calib.json: 12.3 cm, 120.0°. K from camera_info."}
     # A refused file changes nothing on the server: the summary stays, and the reason shows.
     assert out["bad"] == {**out["good"], "msg": "T_cam_lidar has 3 numbers; give a 4x4 matrix or 16 numbers", "bad": True}
     assert out["job"] == "my_calib.json"
-    assert out["removed"] == {**out["before"], "msg": "The calibration is removed."}
+    assert out["removed"] == {**out["before"], "msg": "Removed."}
     assert out["during"] == [[True] * 5] * 3 and out["after"] == [False] * 5
     # The upload keeps the focus; Remove hides after a delete, so the upload button takes it.
     assert out["focused"] == ["#calfile", "#calfile", "#calfile"]
-    assert out["k"] == ("Calibration k.yaml: the LiDAR is 12.3 cm from the camera, turned 120.0 deg. It gives K. Its camera "
-                        "axes are body axes (x forward, y left, z up). Its time offset is 0.02 s.")
+    assert out["k"] == "k.yaml: 12.3 cm, 120.0°. K from file. Body axes. Offset 0.02 s."
     assert out["sent"] == {"topic": "/lidar/points"}
-    assert "The calibration changed after this scale was found. Build finds the scale again first, then stops here." \
-        in out["review"]
+    assert "Calibration changed. Build finds the scale again, then stops here." in out["review"]
     assert out["requests"] == ["PUT /api/jobs/b/calibration?name=my%20calib.json", "PUT /api/jobs/b/calibration?name=bad.yaml",
                                "DELETE /api/jobs/b/calibration", "PUT /api/jobs/b/calibration?name=k.yaml",
                                "PUT /api/jobs/b/calibration?name=my%20calib.json", "GET /api/jobs/b/selection"]
@@ -2176,37 +2178,141 @@ def test_app_js_review_shows_the_lidar_scale():
           await refresh();
           out.before = [V.tab, $("#frames").hidden, $("#framesbody").hidden];
           toLidarSettings();
-          out.edit = [V.tab, V.pick, $("#frames").hidden, focused, $("#framesum").textContent, $("#start").textContent,
-            mode(), $("#lidaropts").hidden, location.hash];
+          out.edit = [V.tab, V.pick, $("#frames").hidden, focused, $("#start").textContent, mode(), $("#lidaropts").hidden,
+            location.hash];
           await refresh();  // the same status: the tab stays
           out.kept = [V.tab, $("#frames").hidden, $("#review").hidden];
           console.log(JSON.stringify(out));
         })()
         """, replies)
     j = out["j"]
-    for t in ("Metric scale from LiDAR: x1.043 (14 of 16 views, spread 2.1%)", "a LiDAR warning", "LiDAR check images (3)",
-              "f00003: x1.05 (280 pts)", "f00009: x1.21 (1,200 pts, outlier)", "f00015: few points (12 pts)",
-              "LiDAR x1.05 (280 pts)", "LiDAR x1.21 (1,200 pts, outlier)", "LiDAR: few points (12 pts)",
+    for t in ("LiDAR scale ×1.043 (14/16 views, spread 2.1%)", "a LiDAR warning", "LiDAR check images (3)",
+              "f00003: ×1.05 (280 pts)", "f00009: ×1.21 (1,200 pts, outlier)", "f00015: few points (12 pts)",
+              "LiDAR ×1.05 (280 pts)", "LiDAR ×1.21 (1,200 pts, outlier)", "LiDAR: few points (12 pts)",
               "/api/jobs/j/file/lidar/check/f00009.jpg", "LiDAR points in f00009"):
         assert t in j, t
     assert not any("calibration changed" in t for t in j)
-    assert ("The green line is the mask outline. Blue points are nearer than the scaled depth, and red points are farther. "
-            "White points agree with it. Open an image to see it larger.") in j
+    assert "Green: mask outline. Blue: nearer. Red: farther. White: agrees." in j
     assert "Scale: Depth Anything 3's estimate (no LiDAR)" in out["k"] and not any("LiDAR x" in t for t in out["k"])
     # LiDAR is on, but its record is not there yet (Build runs the lidar stage first).
-    assert "Metric scale from LiDAR: not found yet. Build finds it first, then stops here." in out["m"]
+    assert "LiDAR scale: not found yet. Build finds it, then stops here." in out["m"]
     # Only a bag with LiDAR on can change its calibration in review.
     assert "Change the calibration" in j and "Change the calibration" not in out["k"] + out["m"]
     assert out["before"] == ["inputs", True, False]  # the review sits above the Inputs tab; the form waits in Settings
-    assert out["edit"] == ["settings", "settings", False, "#calfile", "Start over with other settings", "Start over", "auto",
-                           False, "#/job/j/settings"]
+    assert out["edit"] == ["settings", "settings", False, "#calfile", "Start over", "auto", False, "#/job/j/settings"]
     assert out["kept"] == ["settings", False, False]
 
 
+def test_app_js_review_marks_edits_and_draws_the_ring():
+    """The review cards and the ring. A locked pick says "locked", with a badge of its own (not the picked one), and is
+    a square on the ring; an available view is a hollow dot, a small or inconsistent one a cross, and an excluded one
+    is not on the ring. Each pick's view number sits outward from the object, clear of its mark and of the cameras
+    beside it, and no mark has a color of its own (style.css gives them). An edit says what Select again does to its
+    card: a pick set to "never use" is left out, a view set to "always use" is added. While edits wait, Select again is
+    the primary button and Build is off; undoing them brings Build back. View 0 is offered only on picks and on views
+    set to "always use", and a view 0 that no card offers any more goes out as null. An added view taken as view 0 and
+    set back to "auto" gives view 0 back to the saved choice, so its card shows no edit. Build and Select again bring
+    the job's head back into view."""
+    names = [f"f{4 * i:05d}" for i in range(12)]
+    status = {"f00000": "picked", "f00012": "picked", "f00024": "picked", "f00036": "picked", "f00008": "small",
+              "f00032": "inconsistent", "f00044": "excluded"}
+    cand = [{"name": n, "frame": int(n[1:]), "time_s": int(n[1:]) / 10, "status": status.get(n, "available"), "q": 0.9,
+             "consistency": 0.9, "angle_to_nearest_pick": 20} for n in names]
+    points = [None if n == "f00044" else [math.cos(math.pi * i / 6), math.sin(math.pi * i / 6)] for i, n in enumerate(names)]
+    sel = {"ok": True, "picks": [{"name": n} for n in ("f00000", "f00012", "f00024", "f00036")], "n_requested": 4,
+           "coverage_deg": 30, "min_spacing_deg": 90, "warnings": [], "anchor": "f00000", "view0": None,
+           "overrides": {"locked": ["f00024"], "excluded": ["f00044"], "instance": {}}, "candidates": cand,
+           "ring": {"center": [0, 0], "points": points}, "sam3": {}, "check_dir": "scene/sam3_box/check", "lidar": None}
+    replies = {"/api/jobs/j/selection": sel, "/api/jobs/j/overrides": {"status": "queued", "from": "select"},
+               "/api/jobs/j/continue": {"status": "queued", "from": "sam3d"}}
+    out = run_form_js(ELEMENTS + """
+        document.createElementNS = (ns, tag) => document.createElement(tag);
+        (async () => {
+          const marks = [], cls = { "#build": new Set(), "#reselect": new Set() }, scrolled = [];
+          $("#ring").replaceChildren = () => { marks.length = 0; };
+          $("#ring").append = (...k) => marks.push(...k);
+          for (const id of Object.keys(cls)) $(id).classList = { toggle: (c, on) => on ? cls[id].add(c) : cls[id].delete(c) };
+          $("#jtitle").scrollIntoView = (o) => scrolled.push(o);
+          $("#key2").value = "";
+          V = { id: "j", state: { warnings: [] }, job: { kind: "video", lidar: null } };
+          await loadReview();
+          const out = {};
+          out.ring = marks.filter((m) => m.kids.length).map((m) => [m.kids[0].textContent, m.tag, m.attrs.class || null]);
+          out.colors = marks.flatMap((m) => ["fill", "stroke"].map((k) => m.attrs[k]).filter((v) => v != null));
+          // Each view number's distance from its own camera and from the nearest other camera, in units of d.
+          const d = 1.3 / 30, cams = V.sel.ring.points.map((p, i) => p && [p[0], -p[1], V.sel.candidates[i].name]).filter(Boolean);
+          const own = [], other = [];
+          for (const m of marks.filter((m) => m.tag === "text")) {
+            const name = V.sel.picks[Number(m.textContent)].name;
+            for (const [x, y, n] of cams) (n === name ? own : other).push(Math.hypot(m.attrs.x - x, m.attrs.y - y) / d);
+          }
+          out.gaps = [Math.min(...own), Math.min(...other)];
+          const entry = (n) => [...V.cards].find(([c]) => c.name === n)[1];
+          const ctl = (n) => made.find((e) => e.tag === "select" && e.attrs["aria-label"] === n + ": use");
+          const card = (n) => ({ cls: [...entry(n).el.cls], note: entry(n).note.textContent, view0: !entry(n).zero.hidden });
+          const bar = () => ({ build: $("#build").disabled, reselect: $("#reselect").disabled,
+            primary: cls["#build"].has("secondary") ? "reselect" : "build", discard: $("#discard").hidden, msg: $("#revmsg").textContent });
+          const badgeOf = (n) => entry(n).el.kids[2].kids[0];
+          out.badges = ["f00000", "f00024", "f00004", "f00044"].map((n) => [text(badgeOf(n)), badgeOf(n).className]);
+          out.before = [bar(), card("f00012"), card("f00004"), card("f00044")];
+          ctl("f00012").onchange({ target: { value: "out" } });
+          ctl("f00004").onchange({ target: { value: "in" } });
+          out.edited = [bar(), card("f00012"), card("f00004")];
+          ctl("f00000").onchange({ target: { value: "out" } });  // view 0 itself
+          await $("#reselect").onclick();
+          out.sent = posts.map((p) => p.body);
+          out.reselected = scrolled.splice(0);
+          for (const n of ["f00012", "f00004", "f00000"]) ctl(n).onchange({ target: { value: "auto" } });
+          out.undone = [bar(), card("f00012"), card("f00004")];
+          await $("#build").onclick();
+          out.built = scrolled.splice(0);
+          // An added view taken as view 0, then set back to auto: its choice hides, view 0 goes back to the saved choice
+          // (the anchor), and the radios follow.
+          ctl("f00004").onchange({ target: { value: "in" } });
+          entry("f00004").radio.onchange();
+          const chosen = [card("f00004"), entry("f00004").radio.checked, entry("f00000").radio.checked];
+          ctl("f00004").onchange({ target: { value: "auto" } });
+          out.unadded = [chosen, card("f00004"), V.ov.view0, entry("f00004").radio.checked, entry("f00000").radio.checked, bar()];
+          await $("#reselect").onclick();
+          out.unadded.push(posts.at(-1).body.view0);
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    assert out["ring"] == [["f00000 (picked)", "polygon", None], ["f00004 (available)", "circle", "cand"],
+                           ["f00008 (small)", "path", "out"], ["f00012 (picked)", "circle", "pick"],
+                           ["f00016 (available)", "circle", "cand"], ["f00020 (available)", "circle", "cand"],
+                           ["f00024 (locked)", "rect", "lock"], ["f00028 (available)", "circle", "cand"],
+                           ["f00032 (inconsistent)", "path", "out"], ["f00036 (picked)", "circle", "pick"],
+                           ["f00040 (available)", "circle", "cand"]]
+    assert set(out["colors"]) <= {"currentColor", "none"}
+    assert out["gaps"][0] >= 3.4 - 1e-9 and out["gaps"][1] > 4  # the font is 2.4 d high
+    assert out["badges"] == [["picked", "badge picked"], ["locked", "badge locked"], ["available", "badge available"],
+                             ["excluded", "badge excluded"]]
+    plain = {"cls": [], "note": "", "view0": False}
+    assert out["before"] == [{"build": False, "reselect": True, "primary": "build", "discard": True, "msg": ""},
+                             {**plain, "view0": True}, plain, plain]
+    assert out["edited"] == [{"build": True, "reselect": False, "primary": "reselect", "discard": False,
+                              "msg": "Select again to apply changes."},
+                             {"cls": ["drops"], "note": "Left out when you select again.", "view0": False},
+                             {"cls": ["adds"], "note": "Added when you select again.", "view0": True}]
+    assert out["sent"] == [{"locked": ["f00024", "f00004"], "excluded": ["f00044", "f00012", "f00000"], "instance": {},
+                            "view0": None, "api_key": None}]
+    assert out["undone"] == out["before"][:3]
+    assert out["reselected"] == out["built"] == [{"block": "nearest"}]
+    assert out["unadded"] == [[{"cls": ["adds"], "note": "Added when you select again.", "view0": True}, True, False],
+                              plain, None, False, True, out["before"][0], None]
+    # A locked pick's badge mark is hollow, so it differs from a pick's filled one without the word.
+    import re
+    css = (server.STATIC / "style.css").read_text()
+    locked = re.search(r"\.badge\.locked::before \{([^}]*)\}", css).group(1)
+    assert "background: transparent" in locked and "box-shadow: inset" in locked
+
+
 def test_app_js_lidar_failure_panel():
-    """A job that failed at the lidar stage: a panel with the reason from pool/lidar.json and the check
-    images, and the next step (a calibration for a bag, another one when it has one; not for a Stray capture).
-    Retry starts at lidar. refresh() shows the panel only for a job that failed there."""
+    """A job that failed at the lidar stage: a panel with the warnings and the check images from pool/lidar.json, and
+    the next step (a calibration for a bag, another one when it has one; not for a Stray capture). The status line
+    gives the reason, so neither the panel nor the stage's note repeats it. Retry starts at lidar. refresh() shows the
+    panel only for a job that failed there, and only once the panel is drawn."""
     reason = ("LiDAR points cover the object in only 2 of 6 views (at least 3 are needed); the object may be outside the "
               "LiDAR's view, or the time window or T_cam_lidar is wrong (see the check images)")
     rec = {"version": 1, "ok": False, "s": None, "reason": reason, "warnings": ["a stage warning"],
@@ -2255,7 +2361,17 @@ def test_app_js_lidar_failure_panel():
           await renderLidarFail({ ...job, files: [] });
           out.norecord = [...texts];
           out.failed = [lidarFailed("failed", job.progress), lidarFailed("cancelled", job.progress), lidarFailed("failed", [])];
+          // The stage's note: left out when the status line's error gives it, kept otherwise.
+          const note = job.progress[6].note;
+          texts.length = 0;
+          renderState({ ...state(job.progress), error: "lidar: " + note });
+          out.note = texts.includes(note);
+          texts.length = 0;
+          renderState(state(job.progress));
+          out.note2 = texts.includes(note);
           // The page as refresh() draws it: the panel for the job that failed at lidar, not for a done job.
+          const draw0 = renderLidarFail;
+          renderLidarFail = async (j) => { out.hiddenWhileDrawn = $("#lidarfail").hidden; return draw0(j); };
           out.shown = [];
           for (const id of ["j", "d"]) {
             V = { id, picks: [], view0: null };
@@ -2263,36 +2379,33 @@ def test_app_js_lidar_failure_panel():
             $("#lidarfail").hidden = true;
             texts.length = 0;
             await refresh();
-            out.shown.push([$("#lidarfail").hidden, texts.some((x) => x.startsWith("No metric scale from LiDAR: "))]);
+            out.shown.push([$("#lidarfail").hidden, texts.includes("LiDAR check images (2)"),
+              texts.some((x) => x.startsWith("No metric scale from LiDAR"))]);
           }
           console.log(JSON.stringify(out));
         })()
         """, replies)
-    for t in ("No metric scale from LiDAR: " + reason, "a stage warning", "LiDAR check images (2)", "f00003: x1.05 (280 pts)",
-              "Go to the LiDAR settings"):
+    for t in ("a stage warning", "LiDAR check images (2)", "f00003: ×1.05 (280 pts)", "LiDAR settings",
+              "Green: mask outline. Blue: nearer. Red: farther. White: agrees."):
         assert t in out["panel"], t
-    # The scale failed, so each view's points are coloured by its own scale (white without one).
-    assert ("The green line is the mask outline. Blue points are nearer than the scaled depth, and red points are farther. "
-            "White points agree with it. Each view uses its own scale here. A view without one shows all its points white. "
-            "Open an image to see it larger.") in out["panel"]
+    assert not any(t.startswith("No metric scale from LiDAR") for t in out["panel"])  # the status line gives it
     # The next step names the tab where the calibration and the LiDAR box are.
-    assert out["next"] == "Upload a calibration in the Settings tab, then Retry. Or turn LiDAR off there and build again."
-    assert out["cal"] == "Replace the calibration in the Settings tab, then Retry. Or turn LiDAR off there and build again."
+    assert out["next"] == "In Settings, upload a calibration and Retry, or turn LiDAR off and build again."
+    assert out["cal"] == "In Settings, replace the calibration and Retry, or turn LiDAR off and build again."
     assert out["retry"] == [False, "Retry from lidar"]
-    assert out["stray"] == ("Turn LiDAR off or change the views in the Settings tab, then build again. Retry helps only "
-                            "after a file or disk error.")
-    assert out["masks"] == "Read the log of the failed stage, then Retry."
-    assert ("The stage stopped before it wrote its record. The reason is above, and its log is in the Stages and log "
-            "tab.") in out["norecord"]
+    assert out["stray"] == "In Settings, turn LiDAR off or change the views, then build again."
+    assert out["masks"] == "Check the log, then Retry."
+    assert "No LiDAR record was written. See the log." in out["norecord"]
     assert out["failed"] == [True, False, False]
-    assert out["shown"] == [[False, True], [True, False]]
+    assert out["note"] is False and out["note2"] is True
+    assert out["shown"] == [[False, True, False], [True, False, False]] and out["hiddenWhileDrawn"] is True
 
 
 def test_app_js_changed_calibration_retries_from_lidar():
     """A failed or cancelled bag job whose scale was found with another calibration: the server retries from
-    lidar (Runner.resume), so Retry says so, sends from lidar, and the next step and the Build again hint say
-    why. The page learns it from /selection's calibration_changed after a load or an upload, or, without a
-    selection, from pool/lidar.json's calibration file. A reply that starts earlier than asked is shown."""
+    lidar (Runner.resume), so Retry says so and sends from lidar. The page learns it from /selection's
+    calibration_changed after a load or an upload, or, without a selection, from pool/lidar.json's calibration
+    file. A reply that starts earlier than asked is shown."""
     stages = [{"name": n, "status": "done"} for n in ("topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select")] + [
         {"name": "sam3d", "status": "failed"}] + [{"name": n, "status": "pending"} for n in ("place", "propose", "parts", "agent")]
     job = {"id": "c", "kind": "rosbag", "status": "failed", "video": {"name": "scan.bag"}, "prompt": "box", "current": None,
@@ -2315,7 +2428,7 @@ def test_app_js_changed_calibration_retries_from_lidar():
           globalThis.fetch = (url, opt) => url === "/api/jobs/c/selection" ? reply({ lidar: { ok: true, calibration_changed: stale } })
             : url === "/api/jobs/c/file/pool/lidar.json" ? reply({ ok: true, extrinsic: ext })
               : url.includes("/file/logs/") ? Promise.resolve({ ok: false, status: 404, text: async () => "" }) : fetch0(url, opt);
-          const page = () => [$("#retry").textContent, $("#jnext").textContent, $("#rebuildhint").textContent];
+          const page = () => [$("#retry").textContent, $("#jnext").textContent];
           const out = {};
           $("#log").textContent = "a log";
           V = { id: "c", picks: [], view0: null };
@@ -2357,27 +2470,19 @@ def test_app_js_changed_calibration_retries_from_lidar():
           console.log(JSON.stringify(out));
         })()
         """, replies)
-    stopped = " Retry, at the top, continues from the stage that stopped instead."
-    changed = (" Retry, at the top, starts from the lidar stage instead, because the calibration changed since the scale was "
-               "found.")
-    again = "This runs every stage again with these settings."
-    stale_next = "The calibration changed since the scale was found. Retry starts again from the lidar stage."
-    assert out["current"] == ["Retry from sam3d", "Read the log of the failed stage, then Retry.", again + stopped]
-    assert out["upload"] == ["Retry from lidar", stale_next, again + changed,
-                             "The calibration c.yaml is saved. The scale was found with the old calibration, so Retry starts "
-                             "from the lidar stage."]
+    assert out["current"] == ["Retry from sam3d", "Check the log, then Retry."]
+    assert out["upload"] == ["Retry from lidar", "Check the log, then Retry.", "Saved c.yaml."]  # the button says it
     assert out["sent"] == "lidar" and out["runmsg"] == ""  # the server started where the page said
-    assert out["removed"] == [*out["current"], "The calibration is removed."]
-    assert out["reload"] == out["upload"][:3]
-    assert out["asked"] == ["sam3d", "The calibration changed since the scale was found, so the run starts from lidar."]
+    assert out["removed"] == [*out["current"], "Removed."]
+    assert out["reload"] == out["upload"][:2]
+    assert out["asked"] == ["sam3d", "Starting from lidar (calibration changed)."]
     assert out["bylidar"] == [False, True, False, True, True]
     assert out["never"] == [False, False, False, False]
 
 
 def test_app_js_results_show_the_metric_scale():
     """The results give the metric scale that select applied (placement.json) with its LiDAR source, views
-    and spread, or DA3's own estimate; the Downloads tab's sentence on results.zip names lidar.json when the job
-    has it, and the agent's result only when there is one."""
+    and spread, or DA3's own estimate."""
     place = {"metric_scale": 1.04321, "units": "meters (LiDAR scale applied in select)", "check": {"mean_mask_iou": 0.91}}
     rec = {"ok": True, "s": 1.04321, "source": {"kind": "rosbag", "topic": "/livox/lidar"},
            "combine": {"views": 16, "views_used": 14, "spread_rel": 0.0213}}
@@ -2401,19 +2506,14 @@ def test_app_js_results_show_the_metric_scale():
             texts.length = 0;
             await renderResults(job);
             const k = texts.indexOf("Metric scale");
-            out[id] = { row: k >= 0 ? texts[k + 2] : null };
-            renderDownloads(job);
-            out[id].zip = texts.find((t) => t.startsWith("results.zip holds")) || null;
+            out[id] = k >= 0 ? texts[k + 2] : null;
           }
           console.log(JSON.stringify(out));
         })()
         """)
-    assert out["j"]["row"] == "x1.043 from LiDAR (/livox/lidar, 14 views, spread 2.1%)"
-    assert out["j"]["zip"].endswith(", the view selection and the LiDAR scale (lidar.json). "  # the agent was off
-                                    "The MJCF and USD models come only in it.")
-    assert out["s"]["row"] == "x1.250 from LiDAR (iPhone LiDAR depth, 6 views, spread 0.4%)"
-    assert out["n"]["row"] == out["o"]["row"] == "Depth Anything 3's estimate (no LiDAR)"
-    assert "lidar.json" not in out["n"]["zip"] and out["o"]["zip"] is None
+    assert out["j"] == "×1.043 from LiDAR (/livox/lidar, 14 views, spread 2.1%)"
+    assert out["s"] == "×1.250 from LiDAR (iPhone LiDAR depth, 6 views, spread 0.4%)"
+    assert out["n"] == out["o"] == "Depth Anything 3's estimate (no LiDAR)"
 
 
 # ---- the input panel: the preview video and the views used ----
@@ -2460,9 +2560,10 @@ def test_app_js_input_panel_and_views():
     input's name and kind, and one figure per view in run order with its image and "view i, frame f, t s"; view 0
     has the star. A click on a view puts the video at the frame that the preview shows for it (1 ms in), paused,
     marks that view as current and says which frame it shows. Place's later end adds the mesh fit toggle without
-    drawing the video again; the toggle swaps every image for place's overlay. A job without a preview says why in
-    one sentence, and its views are no buttons. The panel is drawn once per selection, so a refresh does not stop
-    the video, and a selection.json that comes after another job's page draws nothing."""
+    drawing the video again; the toggle swaps every image for place's overlay, and the hint names the overlay's
+    colors while it shows. A job without a preview says so in a few words, and its views are no buttons. The panel
+    is drawn once per selection, so a refresh does not stop the video, and a selection.json that comes after another
+    job's page draws nothing."""
     seek = {"152": {"frame": 152, "at": 15.0}, "40": {"frame": 40, "at": 3.8}, "301": {"frame": 300, "at": 29.9}}
     first = input_job("j", preview={**PREVIEW, "seek": seek})
     run = {**first, "files": ["selection.json", "run/placement.json"]}  # place has ended since
@@ -2496,11 +2597,11 @@ def test_app_js_input_panel_and_views():
           out.placed = [made.filter((e) => e.tag === "video").length, made.filter((e) => e.tag === "img").length, made.length - n,
             [...figs[0].cls], btns[0].attrs["aria-current"], text(head), $("#inputmsg").textContent];
           out.hint1 = hint();
-          const toggle = made.find((e) => e.tag === "button" && text(e) === "Show the mesh fit");
+          const toggle = made.find((e) => e.tag === "button" && text(e) === "Mesh fit");
           toggle.onclick({ currentTarget: toggle });
-          out.overlay = [toggle.attrs["aria-pressed"], btns.map((b) => b.kids[0].attrs.src)];
+          out.overlay = [toggle.attrs["aria-pressed"], btns.map((b) => b.kids[0].attrs.src), hint()];
           toggle.onclick({ currentTarget: toggle });
-          out.photos = [toggle.attrs["aria-pressed"], btns[2].kids[0].attrs.src];
+          out.photos = [toggle.attrs["aria-pressed"], btns[2].kids[0].attrs.src, hint()];
           const m = made.length;
           await renderInput(""" + json.dumps(run) + """);  // a refresh of the same job: nothing drawn again
           out.again = made.length === m && !video.calls.includes("play") && !video.calls.includes("load");
@@ -2537,37 +2638,35 @@ def test_app_js_input_panel_and_views():
     assert out["video"] == {"src": "/api/jobs/j/file/frames/preview.mp4", "controls": "", "preload": "metadata", "playsinline": "",
                             "muted": True, "width": "640", "height": "360", "style": "--ar: 640 / 360",
                             "aria-label": "Preview of table.MOV"}
-    assert out["caption"] == "table.MOV (video) Preview at 640x360, 15 fps."
+    assert out["caption"] == "table.MOV (video)"
     caps = ["view 0, frame 152, 15.2 s", "view 1, frame 40, 4.0 s", "view 2, frame 301, 30.1 s"]
     assert out["caps"] == caps
     assert out["buttons"] == [["button", c + ": show it in the video", t] for c, t in zip(caps, ["★", "", ""])]
     assert [i["src"] for i in out["imgs"]] == [f"/api/jobs/j/file/run/input/images/{i}.png" for i in range(3)]
     assert all(i["loading"] == "lazy" and i["alt"] == "" and i["style"] == "aspect-ratio: 640 / 360" for i in out["imgs"])
     assert out["head0"] == "Views used (3)"  # no toggle before place
-    assert "Click a view to see its frame in the video. ★ marks view 0." in out["hint0"]
+    assert out["hint0"] == ["★ view 0"]
     time1, msg1, calls, at1, at0, current = out["seek1"]
     assert time1 == pytest.approx(3.801) and calls == ["pause", "scroll"] and at1 == ["at"] and at0 == []
-    assert msg1 == "The video shows view 1 at 3.8 s: frame 40." and current == ["false", "true", "false"]
+    assert msg1 == "View 1, frame 40, at 3.8 s" and current == ["false", "true", "false"]
     assert out["seek2"][0] == pytest.approx(29.901)
-    assert out["seek2"][1] == "The video shows view 2 at 29.9 s: frame 300, since the preview has no frame 301."
+    assert out["seek2"][1] == "View 2, frame 300, at 29.9 s"  # the frame that the preview kept
     assert out["seek0"][0] == pytest.approx(15.001)
-    assert out["seek0"][1:] == ["The video shows view 0 at 15.0 s: frame 152.", ["at"], [], ["true", "false", "false"]]
+    assert out["seek0"][1:] == ["View 0, frame 152, at 15.0 s", ["at"], [], ["true", "false", "false"]]
     # The same video and images, still at view 0; the heading gains the toggle.
-    assert out["placed"][:6] == [1, 3, 2, ["at"], "true", "Views used (3)Show the mesh fit"]
-    assert out["placed"][6] == "The video shows view 0 at 15.0 s: frame 152."
-    assert ("Click a view to see its frame in the video. ★ marks view 0. The mesh fit shows the posed mesh in red and the "
-            "outline of the SAM 3 mask in green.") in out["hint1"]
-    assert out["overlay"] == ["true", [f"/api/jobs/j/file/run/overlay_{i}.png" for i in range(3)]]
-    assert out["photos"] == ["false", "/api/jobs/j/file/run/input/images/2.png"]
+    assert out["placed"][:6] == [1, 3, 2, ["at"], "true", "Views used (3)Mesh fit"]
+    assert out["placed"][6] == "View 0, frame 152, at 15.0 s"
+    assert out["hint1"] == ["★ view 0"]  # the overlay's colors only while it shows
+    assert out["overlay"] == ["true", [f"/api/jobs/j/file/run/overlay_{i}.png" for i in range(3)],
+                              ["★ view 0. Red: mesh. Green: mask outline."]]
+    assert out["photos"] == ["false", "/api/jobs/j/file/run/input/images/2.png", ["★ view 0"]]
     assert out["again"] is True
-    assert out["m"][0] == pytest.approx(30.1333 - 0.2 + 0.001) and out["m"][1] == "The video shows view 2 at 29.9 s."
+    assert out["m"][0] == pytest.approx(30.1333 - 0.2 + 0.001) and out["m"][1] == "View 2, at 29.9 s"
     assert out["k"] == {"video": False, "tags": ["div"] * 3, "alt": "", "toggle": False,
-                        "p": ["scan.bag (rosbag, camera topic /cam/image_rect)",
-                              "This job has no preview video, because its input was read before the app made previews.",
-                              "★ marks view 0."]}
-    assert out["s"]["p"][:2] == ["capture.zip (Stray capture)", "The app could not make a preview video: ValueError: no libx264"]
+                        "p": ["scan.bag (rosbag, camera topic /cam/image_rect)", "No preview video.", "★ view 0"]}
+    assert out["s"]["p"][:2] == ["capture.zip (Stray capture)", "No preview video: ValueError: no libx264"]
     assert out["s"]["video"] is False and out["s"]["tags"] == ["div"] * 3
-    assert out["g"]["p"][:2] == ["table.MOV (video)", "The preview video of this job is missing on the server."]
+    assert out["g"]["p"][:2] == ["table.MOV (video)", "Preview video missing."]
     assert out["slow"] == [True, 3, True]
 
 
@@ -2626,7 +2725,7 @@ def test_app_js_input_panel_follows_the_selection():
           now = "placed";
           streams[0].on.state(state(jobs.placed));
           await pending;
-          const toggles = () => made.filter((e) => e.tag === "button" && text(e) === "Show the mesh fit").length;
+          const toggles = () => made.filter((e) => e.tag === "button" && text(e) === "Mesh fit").length;
           out.placed = [refreshes, made.filter((e) => e.tag === "video").length, toggles(), selections];
           streams[0].on.state(state(jobs.placed));
           out.placedAgain = [refreshes, toggles()];
@@ -2641,7 +2740,7 @@ def test_app_js_input_panel_follows_the_selection():
     assert out["placed"] == [3, 1, 1, 1] and out["placedAgain"] == [3, 1]
 
 
-# ---- the job page's tabs: Results, Inputs, Settings, Stages and log ----
+# ---- the job page's tabs: Results, Downloads, Inputs, Settings, Log ----
 
 # For FORM_HARNESS: the tab buttons keep their attributes in tabAttrs and their data-tab, and record focus calls in
 # focusedTabs; tabs() is the tab shown, the picked tab, the panels that show, the tabs with aria-selected="true",
@@ -2694,10 +2793,10 @@ def page_ids():
 
 
 def test_index_html_tabs_and_their_panels():
-    """The job page: the waiting panels, then the tab bar (Results, Downloads, Inputs, Settings, Stages and log)
-    with the WAI-ARIA roles and links, then the five panels in tab order, hidden until app.js picks one. Each panel
-    has the sentence it shows while it has nothing (the Settings one is set by app.js). The Results panel starts with
-    the line that points to the Downloads tab, whose tab name is a button."""
+    """The job page: the waiting panels, then the tab bar (Results, Downloads, Inputs, Settings, Log) with the
+    WAI-ARIA roles and links, then the five panels in tab order, hidden until app.js picks one. Each panel has the
+    few words it shows while it has nothing (the Settings one is set by app.js). The Results panel holds the viewers
+    and the facts, with no download link; the Settings heading is for screen readers only."""
     els = page_ids()
     order = [a["id"] for _, a in els]
     at = {a["id"]: (tag, a) for tag, a in els}
@@ -2710,20 +2809,17 @@ def test_index_html_tabs_and_their_panels():
     import re
     assert re.findall(r'role="tab" id="tab-(\w+)"[^>]*>([^<]+)</button>', html) == [
         ("results", "Results"), ("downloads", "Downloads"), ("inputs", "Inputs"), ("settings", "Settings"),
-        ("log", "Stages and log")]
+        ("log", "Log")]
     for name, panel in zip(TAB_ORDER, panels):
         tag, tab = at["tab-" + name]
         assert (tag, tab["type"], tab["role"], tab["data-tab"], tab["aria-controls"], tab["aria-selected"], tab["tabindex"]) == \
             ("button", "button", "tab", name, panel, "false", "-1")
         p = at[panel][1]
         assert (p["role"], p["aria-labelledby"], p["tabindex"], "hidden" in p) == ("tabpanel", "tab-" + name, "0", True)
-    for none, text in (("resultsnone", "The results appear here when the build has made them."),
-                       ("downloadsnone", "The files appear here when the build has made them."),
-                       ("inputnone", "The input's facts appear here after the app reads its frames."),
-                       ("framesnone", ""),
-                       ("runnone", "The stages and the log appear here when the job starts.")):
+    for none, text in (("resultsnone", "No results yet."), ("downloadsnone", "No files yet."),
+                       ("inputnone", "Input not read yet."), ("framesnone", ""), ("runnone", "Not started yet.")):
         assert re.search(rf'<p id="{none}" class="emptytab">([^<]*)</p>', html).group(1) == text, none
-    # The input's facts sit in the Inputs panel, the start form in the Settings panel, the log in Stages and log.
+    # The input's facts sit in the Inputs panel, the start form in the Settings panel, the log in Log.
     def inside(child, parent):
         start = html.index(f'id="{parent}"')
         return start < html.index(f'id="{child}"') < html.index(f'id="{panels[panels.index(parent) + 1]}"') \
@@ -2732,17 +2828,27 @@ def test_index_html_tabs_and_their_panels():
         assert inside(child, "input"), child
     for child in ("framesum", "inputwarn", "towarn", "startform", "grid", "lidarbox", "start"):
         assert inside(child, "frames"), child
-    assert at["hdr"][1]["tabindex"] == at["straywarn"][1]["tabindex"] == "-1"  # "Show the warnings" focuses them
+    assert at["hdr"][1]["tabindex"] == at["straywarn"][1]["tabindex"] == "-1"  # "Show" focuses them
+    assert at["framesum"][1] == {"id": "framesum", "class": "sr-only"}  # a heading for a screen reader, not a focus target
+    assert inside("gridsum", "frames") and at["gridsum"][0] == "summary"  # "Pick frames manually" focuses it
     for child in ("runsum", "stages", "log"):
         assert inside(child, "run"), child
     assert order.index("retry") < order.index("tabs") and order.index("cancel") < order.index("tabs")  # in the job's header
-    # Results: the pointer to the Downloads tab first, then the viewers and the facts, and no download links.
-    assert [order.index(x) for x in ("resultsbody", "todl", "todlbtn", "viewers", "facts2")] == \
-        sorted(order.index(x) for x in ("resultsbody", "todl", "todlbtn", "viewers", "facts2"))
-    assert inside("todl", "results") and inside("downloadsbody", "downloads")
-    assert re.search(r'<p id="todl" class="todl">(.*?)</p>', html).group(1) == \
-        'Download the files from the <button type="button" id="todlbtn" class="link" aria-controls="downloads">Downloads' \
-        '</button> tab.'
+    # Results: the viewers, then the facts and the part masks, and no download links.
+    assert [order.index(x) for x in ("resultsbody", "viewers", "facts2", "partchecks")] == \
+        sorted(order.index(x) for x in ("resultsbody", "viewers", "facts2", "partchecks"))
+    assert inside("viewers", "results") and inside("downloadsbody", "downloads") and "todl" not in html
+    # The part list's Undo edits is a full-height button, like the review bar's.
+    assert at["partsreset"][1]["class"] == "secondary"
+    # The ring's legend: short marks on screen, the same in words for a screen reader, with the views it leaves out.
+    legend = re.search(r'<figure class="ringbox">.*?<figcaption class="hint">(.*?)</figcaption>', html, re.S).group(1)
+    assert ('<span aria-hidden="true">Top view: ● picked, ■ always use, ○ available, × left out, ★ view 0, + object'
+            '</span>') in legend
+    words = " ".join(re.search(r'<span class="sr-only">(.*?)</span>', legend, re.S).group(1).split())
+    assert all(w in words for w in ("A filled dot is a picked view", "a square a pick set to always use",
+                                    "a hollow dot a view that is not picked", "a cross a view left out",
+                                    "a star view 0", "a plus the object",
+                                    "Views set to never use and views without a mask are not drawn."))
 
 
 def test_app_js_tabs_follow_the_status():
@@ -2925,29 +3031,33 @@ def test_app_js_tabs_keyboard():
 
 
 def test_app_js_tabs_say_when_they_are_empty():
-    """Each tab shows one sentence while it has nothing: Results until a build made them (and while a new build
+    """Each tab shows a few words while it has nothing: Results until a build made them (and while a new build
     runs), Downloads until a file exists (and while a build runs), Inputs until the frames are read, Settings
-    until the frames are read and while the job runs, Stages and log until a stage started. The Inputs tab's
-    views strip says when the views are not selected yet."""
+    until the frames are read and while the job runs, Log until a stage started. After a failed or cancelled job,
+    Results and Downloads say that the job stopped. The Inputs tab's views strip says when the views are not
+    selected yet."""
     all_done = {n: "done" for n in ("frames", "extract", "masks", "prep", "da3", "select", "sam3d", "place", "agent")}
     cases = {"a": tab_job("a", "analyzing", files=(), frames="running"), "u": tab_job("u", "uploading", files=()),
              "r": tab_job("r", "running", frames="done", extract="done", masks="running"),
              "y": tab_job("y", "ready", files=(), frames="done"),
              "d": tab_job("d", "done", files=["selection.json", "run/posed.glb"], lidar="skipped", **all_done),
              "b": tab_job("b", "running", files=["selection.json", "run/posed.glb"], lidar="skipped",
-                          **{**all_done, "sam3d": "running", "place": "pending", "agent": "pending"})}
+                          **{**all_done, "sam3d": "running", "place": "pending", "agent": "pending"}),
+             "f": tab_job("f", "failed", files=(), frames="done", extract="done", masks="failed"),
+             "c": tab_job("c", "cancelled", files=(), frames="done", extract="done", masks="done")}
     replies = {f"/api/jobs/{i}": j for i, j in cases.items()}
     replies.update({f"/api/jobs/{i}/frames": frames_meta() for i in cases})
     replies.update({f"/api/jobs/{i}/file/selection.json": {"ok": True, "picks": PICKS} for i in cases})
     out = run_form_js(ELEMENTS + TAB_SETUP + """
         (async () => {
           globalThis.EventSource = class { addEventListener() {} close() {} };
-          const out = { texts: [SETTINGS_LATER, SETTINGS_BUSY, NO_VIEWS, FILES_LATER, FILES_BUSY] };
+          const out = { texts: [SETTINGS_LATER, SETTINGS_BUSY, NO_VIEWS, FILES_LATER, FILES_BUSY, RESULTS_LATER,
+            RESULTS_STOPPED, FILES_NONE_STOPPED] };
           for (const id of """ + json.dumps(list(cases)) + """) {
             made.length = 0;
             V = { id, picks: [], view0: null };
             await refresh();
-            out[id] = { tab: V.tab, results: [$("#resultsnone").hidden, $("#resultsbody").hidden],
+            out[id] = { tab: V.tab, results: [$("#resultsnone").hidden, $("#resultsbody").hidden, $("#resultsnone").textContent],
               downloads: [$("#downloadsnone").hidden, $("#downloadsbody").hidden, $("#downloadsnone").textContent],
               inputs: [$("#inputnone").hidden, $("#inputbody").hidden],
               settings: [$("#framesnone").hidden, $("#framesbody").hidden, $("#framesnone").textContent],
@@ -2958,29 +3068,33 @@ def test_app_js_tabs_say_when_they_are_empty():
           console.log(JSON.stringify(out));
         })()
         """, replies)
-    later, busy, no_views, files_later, files_busy = out["texts"]
-    assert later == "The settings appear here after the app reads the frames."
-    assert busy == "You can change the settings when the job stops."
-    assert no_views == "The views used appear here after the app selects them."
-    assert files_later == "The files appear here when the build has made them."
-    assert files_busy == "The files appear here when the build stops."
+    later, busy, no_views, files_later, files_busy, results_later, results_stopped, files_stopped = out["texts"]
+    assert later == "Available after the input is read." and busy == "Locked while the job runs."
+    assert no_views == "No views selected yet."
+    assert files_later == "No files yet." and files_busy == "Files show when the build stops."
+    assert results_later == "No results yet."
+    assert results_stopped == "Job stopped before any results." and files_stopped == "Job stopped before any files."
     none, shown = [False, True], [True, False]  # [the sentence hidden, the content hidden]
-    assert out["a"] == {"tab": "log", "results": none, "downloads": [*none, files_later], "inputs": none,
+    assert out["a"] == {"tab": "log", "results": [*none, results_later], "downloads": [*none, files_later], "inputs": none,
                         "settings": [*none, later], "log": shown, "noViews": 0}
-    assert out["u"] == {"tab": "log", "results": none, "downloads": [*none, files_later], "inputs": none,
+    assert out["u"] == {"tab": "log", "results": [*none, results_later], "downloads": [*none, files_later], "inputs": none,
                         "settings": [*none, later], "log": none, "noViews": 0}
-    assert out["r"] == {"tab": "log", "results": none, "downloads": [*none, files_busy], "inputs": shown,
+    assert out["r"] == {"tab": "log", "results": [*none, results_later], "downloads": [*none, files_busy], "inputs": shown,
                         "settings": [*none, busy], "log": shown, "noViews": 1}
-    assert out["y"] == {"tab": "settings", "results": none, "downloads": [*none, files_later], "inputs": shown,
-                        "settings": [*shown, busy], "log": shown, "noViews": 1}
-    assert out["d"] == {"tab": "results", "results": shown, "downloads": [*shown, files_later], "inputs": shown,
-                        "settings": [*shown, busy], "log": shown, "noViews": 0}
+    assert out["y"] == {"tab": "settings", "results": [*none, results_later], "downloads": [*none, files_later],
+                        "inputs": shown, "settings": [*shown, busy], "log": shown, "noViews": 1}
+    assert out["d"] == {"tab": "results", "results": [*shown, results_later], "downloads": [*shown, files_later],
+                        "inputs": shown, "settings": [*shown, busy], "log": shown, "noViews": 0}
     # A new build hides the old results and files.
-    assert out["b"]["results"] == none and out["b"]["downloads"] == [*none, files_busy] and out["b"]["noViews"] == 0
+    assert out["b"]["results"] == [*none, results_later] and out["b"]["downloads"] == [*none, files_busy]
+    assert out["b"]["noViews"] == 0
+    # A failed or cancelled job says that it stopped: nothing more comes until Retry or a new build.
+    for job_id in ("f", "c"):
+        assert out[job_id]["results"] == [*none, results_stopped] and out[job_id]["downloads"] == [*none, files_stopped], job_id
 
 
 def test_app_js_hidden_log_keeps_up_without_layout():
-    """While the Stages and log tab is hidden, the live log takes its text and the stage clocks tick without
+    """While the Log tab is hidden, the live log takes its text and the stage clocks tick without
     reading any layout. When the tab opens, the log is at its end, or where the user left it."""
     out = run_form_js(TAB_SETUP + """
         (() => {
@@ -3029,9 +3143,9 @@ def test_app_js_hidden_log_keeps_up_without_layout():
 
 
 def test_app_js_tabs_wait_for_the_end_of_a_run():
-    """A running job's state event that says done changes the header but not the tab: the Stages and log tab stays
+    """A running job's state event that says done changes the header but not the tab: the Log tab stays
     while the stream sends the last lines of the log. The refresh after the stream's end draws the results, then
-    shows the Results tab with them."""
+    shows the Results tab with them. The log's heading says the log stopped."""
     built = {n: "done" for n in ("frames", "extract", "masks", "prep", "da3", "select", "sam3d", "place")}
     files = ["selection.json", "run/placement.json"]
     running = tab_job("r", "running", files=files, lidar="skipped", agent="running", **built)
@@ -3053,6 +3167,9 @@ def test_app_js_tabs_wait_for_the_end_of_a_run():
           location._hash = "#/job/r";
           await refresh();
           const out = { running: [V.tab, streams.length, $("#resultsbody").hidden] };
+          Object.assign($("#log"), { textContent: "", scrollTop: 0, clientHeight: 0, scrollHeight: 0 });
+          streams[0].on.log({ data: JSON.stringify({ stage: "agent", text: "agent: done\\n" }) });
+          out.live = $("#logname").textContent;
           const event = (job) => ({ data: JSON.stringify({ status: job.status, current: null, error: null, warnings: [],
             key_ok: true, agent: "none", articulated: false, parts_mode: "vlm", parts_review: false, stages: job.progress }) });
           streams[0].on.state(event(jobs.done));
@@ -3061,22 +3178,54 @@ def test_app_js_tabs_wait_for_the_end_of_a_run():
           streams[0].on.end();
           await pending;
           out.end = [V.tab, V.pick, refreshes, $("#resultsbody").hidden, $("#resultsnone").hidden, location.hash];
+          out.logname = $("#logname").textContent;
           console.log(JSON.stringify(out));
         })()
         """, {"/api/jobs/r/frames": frames_meta(), "/api/jobs/r/file/selection.json": {"ok": True, "picks": PICKS}})
     assert out["running"] == ["log", 1, True]
-    # The next step names Results only: the Results tab's first line names the Downloads tab.
-    assert out["state"] == ["log", "Look at the meshes in the Results tab.", 0, 1, True]
+    # A done job has no next step: the Results tab shows itself.
+    assert out["state"] == ["log", "", 0, 1, True]
     assert out["end"] == ["results", None, 2, False, True, "#/job/r"]
+    # The log heading no longer says live once the stream ends.
+    assert out["live"] == "live log: agent" and out["logname"] == "log until the job stopped"
+
+
+def test_app_js_cancelled_stage_is_not_a_failure():
+    """The stage that Cancel stopped (the runner records it as failed with the note "cancelled") shows as cancelled,
+    with no note, and the summary counts it as cancelled. A failed stage leaves out its note when the status line's
+    error gives it, and keeps any other note."""
+    out = run_form_js(ELEMENTS + TAB_SETUP + """
+        (() => {
+          let lis = [];
+          $("#stages").replaceChildren = (...k) => { lis = k; };
+          const stages = (note) => [{ name: "frames", status: "done" }, { name: "extract", status: "done" },
+            { name: "masks", status: "failed", note }, { name: "prep", status: "pending" }];
+          const out = {};
+          V = { id: "j" };
+          for (const [status, note, error] of [["cancelled", "cancelled", null],
+            ["failed", "exit 1: out of memory", "masks: exit 1: out of memory"],
+            ["failed", "the server stopped", "the server stopped while this job ran; resume it"]]) {
+            renderState({ ...st(status), error, stages: stages(note) }, false);
+            const li = lis[2];
+            out[note] = [li.className, li.kids.find((k) => /^badge/.test(k.className || "")).className, text(li),
+              $("#runsum").textContent];
+          }
+          console.log(JSON.stringify(out));
+        })()
+        """)
+    assert out["cancelled"] == ["cancelled", "badge cancelled", "masksSAM 3 maskscancelled", "1/3 done · 1 cancelled"]
+    assert out["exit 1: out of memory"] == ["failed", "badge failed", "masksSAM 3 masksfailed", "1/3 done · 1 failed"]
+    assert out["the server stopped"] == ["failed", "badge failed", "masksSAM 3 masksfailedthe server stopped",
+                                         "1/3 done · 1 failed"]
 
 
 def test_app_js_tabs_take_the_focus_after_actions():
     """When an action hides or disables the focused button, the focus goes where the page goes. After Build, the
-    tab that the new status shows takes it; after a refused Start, Start takes it back. "Start over in manual
-    mode" opens the Settings tab (a pick) with the frames open and focuses its heading. "Change the camera topic"
-    focuses the topic table's heading, and "Keep the current topic" gives the focus back to the button, or to the
-    tab shown when the Inputs tab does not show. The Settings tab counts the input's warnings, and "Show the
-    warnings" opens the Inputs tab at the first one."""
+    tab that the new status shows takes it; after a refused Start, Start takes it back. "Pick frames manually"
+    opens the Settings tab (a pick) with the frames open and focuses its heading. "Change topic" focuses the topic
+    table's heading, and "Keep the current topic" gives the focus back to the button, or to the tab shown when the
+    Inputs tab does not show. The Settings tab counts the input's warnings, and "Show" opens the Inputs tab at the
+    first one."""
     analyzed = {n: "done" for n in ("frames", "extract", "masks", "prep", "da3", "select")}
     review = tab_job("v", "review", lidar="skipped", **analyzed)
     queued = tab_job("v", "queued", lidar="skipped", **analyzed)
@@ -3102,7 +3251,7 @@ def test_app_js_tabs_take_the_focus_after_actions():
           globalThis.fetch = (url, opt) => url === "/api/jobs/v"
             ? Promise.resolve({ ok: true, status: 200, json: async () => jobs[now] }) : fetch0(url, opt);
           const focused = [], spy = (sel) => { $(sel).focus = () => focused.push(sel); };
-          ["#framesum", "#start", "#topicshead", "#chtopic", "#hdr", "#straywarn"].forEach(spy);
+          ["#gridsum", "#start", "#topicshead", "#chtopic", "#hdr", "#straywarn"].forEach(spy);
           const out = {};
           const open = async (id) => {
             V = { id, picks: [], view0: null };
@@ -3118,7 +3267,7 @@ def test_app_js_tabs_take_the_focus_after_actions():
           await $("#build").onclick();
           out.build = [V.tab, focusedTabs.splice(0), posts.map((x) => x.url)];
           closeStream();
-          // Start over in manual mode.
+          // Pick frames manually.
           now = "review";
           await open("v");
           $("#gridbox").open = false;
@@ -3157,31 +3306,110 @@ def test_app_js_tabs_take_the_focus_after_actions():
         """, replies)
     assert out["review"] == "inputs"
     assert out["build"] == ["log", ["log"], ["/api/jobs/v/continue"]]
-    assert out["manual"] == ["settings", "settings", "#/job/v/settings", True, ["#framesum"], True]
+    assert out["manual"] == ["settings", "settings", "#/job/v/settings", True, ["#gridsum"], True]
     assert out["refused"] == ["settings", ["#start"], [], "the OpenAI key was refused"]
     assert out["change"] == [False, False, ["#topicshead"]]
     assert out["keep"] == [True, False, ["#chtopic"], []]
     assert out["keepElsewhere"] == ["settings", [], ["settings"]]
     assert out["bagWarn"] is True
-    assert out["warn"] == ["settings", False, "The input has 3 warnings."]
+    assert out["warn"] == ["settings", False, "3 input warnings"]
     assert out["towarn"] == ["inputs", "inputs", "#/job/s/inputs", ["#hdr"]]
 
 
-# ---- the Results tab's info buttons (app.js info()) ----
+def test_app_js_help_link_follows_the_screen():
+    """The header has one Help link, after the job's name and before the connection line, to help.html in a new tab
+    (it stays there until app.js routes), and no subtitle. Its section follows the screen: the jobs list goes to
+    adding a job, a waiting panel to its own section (the first one shown, in page order), else the tab shown. A
+    refresh that shows a waiting panel moves it there; a job that does not load leaves it at the top of the page. The link is quiet and sits at the right of the header."""
+    import re
+    html = (server.STATIC / "index.html").read_text()
+    header = html[html.index("<header>"):html.index("</header>")]
+    link = '<a id="helplink" href="help.html" target="_blank" rel="noopener">Help</a>'
+    assert '<a href="#/" class="brand">HARPOR</a>' in header and "brandsub" not in html and "title=" not in header
+    assert header.index('id="where"') < header.index(link) < header.index('id="conn"') and header.count("<a ") == 2
+    review = tab_job("v", "review", lidar="skipped", **{n: "done" for n in ("frames", "extract", "masks", "prep", "da3", "select")})
+    out = run_form_js(ELEMENTS + TAB_SETUP + """
+        (async () => {
+          globalThis.EventSource = class { addEventListener() {} close() {} };
+          let href = null;
+          $("#helplink").setAttribute = (k, v) => { if (k === "href") href = v; };
+          const out = {};
+          show("list");
+          out.list = href;
+          V = { id: "j" };
+          location._hash = "#/job/j";
+          show("job");
+          const panels = ["lidarfail", "topics", "review", "partsreview"];
+          for (const x of panels) $("#" + x).hidden = true;
+          renderState(st("done", ["topics", "frames", ...BUILD]));
+          out.tabs = [href];
+          for (const n of ["downloads", "inputs", "settings", "log"]) { clickTab(n); out.tabs.push(href); }
+          // The waiting panels shown from the last on the page to the first: the first one shown wins.
+          out.panels = [...panels].reverse().map((x) => { $("#" + x).hidden = false; clickTab("results"); return href; });
+          for (const x of panels) $("#" + x).hidden = true;
+          clickTab("inputs");
+          out.back = href;
+          // A refresh of a job in review shows the review panel, and the link follows it.
+          V = { id: "v", picks: [], view0: null };
+          location._hash = "#/job/v";
+          $("#log").textContent = "a log";
+          await refresh();
+          out.refresh = [$("#review").hidden, V.tab, href];
+          // Another job that does not load: the link does not keep the last job's section.
+          out.gone = await openJob("gone").then(() => "loaded", (e) => e.message);
+          out.goneHref = href;
+          console.log(JSON.stringify({ ...out, at: HELP_AT }));
+        })()
+        """, {"/api/jobs/v": review, "/api/jobs/v/frames": frames_meta(),
+              "/api/jobs/gone": {"__status": 404, "detail": "no such job"}})
+    assert out["list"] == "help.html#add-job"
+    assert out["tabs"] == ["help.html#" + x for x in ("results", "downloads", "inputs", "settings", "status")]
+    assert out["panels"] == ["help.html#" + x for x in ("parts", "review", "topics", "lidar")]
+    assert out["back"] == "help.html#inputs"
+    assert out["refresh"] == [False, "inputs", "help.html#review"]
+    assert out["gone"] == "no such job" and out["goneHref"] == "help.html"
+    # tests/test_help_page.py checks that help.html has each of these sections.
+    assert sorted(out["at"].values()) == sorted(["add-job", "lidar", "topics", "review", "parts", "results", "downloads",
+                                                 "inputs", "settings", "status"])
+    css = (server.STATIC / "style.css").read_text()
+    rule = lambda sel: re.search(r"(?:^|\n)" + re.escape(sel) + r" \{([^}]*)\}", css).group(1)  # noqa: E731
+    assert all(x in rule("#helplink") for x in ("margin-left: auto", "var(--muted)", "var(--t-s)"))
+    assert "margin-left" not in rule(".conn") and "margin-left" not in rule("header .account")
+
+
+def test_app_js_error_box_links_to_troubleshooting():
+    """A failed job's error ends with a Help link to help.html's troubleshooting section, in a new tab. A job
+    without an error has no error box."""
+    out = run_form_js(ELEMENTS + TAB_SETUP + """
+        (() => {
+          V = { id: "j" };
+          location._hash = "#/job/j";
+          renderState({ ...st("failed", ["topics", "frames"]), error: "masks: exit 1: out of memory" });
+          const box = made.find((e) => e.className === "msg errbox"), link = box.kids.find((k) => k.tag === "a");
+          made.length = 0;
+          renderState(st("done", ["topics", "frames", ...BUILD]));
+          console.log(JSON.stringify({ kids: box.kids.map((k) => typeof k === "string" ? k : k.tag), link: link.attrs,
+            label: text(link), again: made.some((e) => e.className === "msg errbox") }));
+        })()
+        """)
+    assert out["kids"] == ["masks: exit 1: out of memory", " ", "a"]
+    assert out["link"] == {"href": "help.html#troubleshooting", "target": "_blank", "rel": "noopener"}
+    assert out["label"] == "Help" and out["again"] is False
+
+
+# ---- the Results and Downloads tabs in a small DOM ----
 
 # static/app.js in node with a small DOM: every element keeps its tag, attributes, children and parent, its class
-# names, a style and a box (rect, which the test sets) for getBoundingClientRect; `hidden` is the attribute. Every
-# selector gives one such element (byId). document's and window's addEventListener calls go to `listeners` as
-# [target, type, handler, options], and setTimeout's callbacks to `timers` ({f, ms}; clearTimeout empties f). The
-# window is 375 x 700 px. fetch answers with the replies, by URL.
-INFO_HARNESS = r"""
+# names and a style; `hidden` is the attribute. Every selector gives one such element (byId). setTimeout's callbacks
+# go to `timers` ({f, ms}). window.customElements says that <model-viewer> is defined, unless a test replaces it.
+# fetch answers with the replies, by URL.
+DOM_HARNESS = r"""
 const fs = require("fs"), vm = require("vm");
 const replies = JSON.parse(process.argv[4] || "{}");
-const made = [], listeners = [], timers = [], byId = {};
+const made = [], timers = [], byId = {};
 class Elem {
   constructor(tag) {
-    Object.assign(this, { tag, attrs: {}, kids: [], parent: null, style: {}, cls: new Set(),
-      rect: { left: 0, top: 0, width: 0, height: 0 } });
+    Object.assign(this, { tag, attrs: {}, kids: [], parent: null, style: {}, cls: new Set() });
     made.push(this);
   }
   setAttribute(k, v) { this.attrs[k] = String(v); }
@@ -3200,71 +3428,40 @@ class Elem {
   replaceChildren(...k) { this.kids = []; this.append(...k); }
   contains(x) { for (let e = x; e; e = e.parent) if (e === this) return true; return false; }
   get parentElement() { return this.parent; }
-  getBoundingClientRect() { const r = this.rect; return { ...r, right: r.left + r.width, bottom: r.top + r.height }; }
   get textContent() { return this.kids.map((k) => typeof k === "string" ? k : k.textContent).join(""); }
   set textContent(v) { this.kids = [String(v)]; }
   addEventListener() {}
   focus() {}
   scrollIntoView() {}
 }
-const document = { title: "", activeElement: null, body: {}, documentElement: { clientWidth: 375 },
+const document = { title: "", activeElement: null, body: {},
   querySelector: (sel) => byId[sel] || (byId[sel] = new Elem("div")), querySelectorAll: () => [],
-  createElement: (tag) => new Elem(tag), createElementNS: (ns, tag) => new Elem(tag),
-  addEventListener: (type, fn, opt) => listeners.push(["document", type, fn, opt]) };
-const window = { innerWidth: 375, innerHeight: 700,
-  addEventListener: (type, fn, opt) => listeners.push(["window", type, fn, opt]) };
+  createElement: (tag) => new Elem(tag), createElementNS: (ns, tag) => new Elem(tag) };
+const window = { addEventListener() {}, customElements: { get: () => class {}, whenDefined: () => new Promise(() => {}) } };
 const location = { hash: "" }, history = { state: null, replaceState() {} };
-const setTimeout = (f, ms) => timers.push({ f, ms }), clearTimeout = (i) => { if (timers[i - 1]) timers[i - 1].f = null; };
+const setTimeout = (f, ms) => timers.push({ f, ms });
 const fetch = async (url) => ({ ok: true, status: 200, json: async () => url in replies ? replies[url] : url === "/api/jobs" ? [] : {} });
-const ctx = vm.createContext({ console, document, window, location, history, setInterval() {}, setTimeout, clearTimeout,
+const ctx = vm.createContext({ console, document, window, location, history, setInterval() {}, setTimeout,
   EventSource: class { addEventListener() {} close() {} }, fetch, matchMedia: () => ({ matches: false }), confirm: () => true,
-  Elem, made, listeners, timers, byId });
+  Elem, made, timers, byId });
 Promise.resolve(vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "\n" + process.argv[3], ctx))
   .catch((e) => { console.error(e.stack); process.exitCode = 1; });
 """
 
 
-def run_info_js(code, replies=None):
-    """Load app.js in INFO_HARNESS, then run code in its scope; returns the JSON that code printed last."""
+def run_dom_js(code, replies=None):
+    """Load app.js in DOM_HARNESS, then run code in its scope; returns the JSON that code printed last."""
     if shutil.which("node") is None:
         pytest.skip("no node")
-    p = subprocess.run(["node", "-e", INFO_HARNESS, "-", str(server.STATIC / "app.js"), textwrap.dedent(code),
+    p = subprocess.run(["node", "-e", DOM_HARNESS, "-", str(server.STATIC / "app.js"), textwrap.dedent(code),
                         json.dumps(replies or {})], capture_output=True, text=True, timeout=60)
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout.splitlines()[-1])
 
 
-# Helpers for INFO_HARNESS: the rendered Results and Downloads tabs as [kind, label, the info wrapper, its parent] for
-# every row (dt), viewer (figcaption), any hint among the viewers (p.hint: there should be none), the part masks' hint
-# and every file of the Downloads tab (li.dlrow); the info wrapper's button and note; a row's dd; the key of a note's
-# text in INFO; and whether a placed note (its style's left and top, its rect's size) meets a box.
-INFO_ITEMS = """
+# For DOM_HARNESS: walk(e) is e and every element under it, in order.
+WALK = """
 const walk = (e, out = []) => { if (e && typeof e === "object") { out.push(e); e.kids.forEach((k) => walk(k, out)); } return out; };
-const isInfo = (e) => e && typeof e === "object" && e.cls.has("info");
-const items = () => [
-  ...walk($("#facts2")).filter((e) => e.tag === "dt").map((e) => ["row", e.kids[0], e.kids.find(isInfo), e]),
-  ...walk($("#viewers")).filter((e) => e.tag === "figcaption").map((e) => ["viewer", e.kids[0].textContent, e.kids.find(isInfo), e]),
-  ...walk($("#viewers")).filter((e) => e.tag === "p" && e.cls.has("hint")).map((e) => ["placeholder", "Agent result", e.kids.find(isInfo), e]),
-  ...walk($("#partchecks")).filter((e) => e.tag === "p" && e.cls.has("hint"))  // the item is the folded check images
-    .map((e) => ["masks", "Part masks in the views", e.kids.find(isInfo), e]),
-  ...walk($("#downloadsbody")).filter((e) => e.cls.has("dlrow")).map((e) => ["download", e.kids[0].textContent, e.kids.find(isInfo), e])];
-const parts = (wrap) => ({ btn: wrap.kids[0], note: wrap.kids[1] });
-const ddOf = (dt) => dt.parent.kids[dt.parent.kids.indexOf(dt) + 1];
-const meets = (note, box) => {
-  const n = { left: parseFloat(note.style.left), top: parseFloat(note.style.top), width: note.rect.width, height: note.rect.height };
-  const b = box.rect;
-  return n.left < b.left + b.width && b.left < n.left + n.width && n.top < b.top + b.height && b.top < n.top + n.height;
-};
-const keyOf = (text) => Object.keys(INFO).find((k) => INFO[k] === text) || null;
-const shown = () => made.filter((e) => e.cls.has("infonote") && !e.hidden).map((e) => e.attrs.id);
-const describe = (kind, label, wrap, owner) => {
-  if (!wrap) return { kind, label, missing: true };
-  const { btn, note } = parts(wrap);
-  return { kind, label, last: owner.kids[owner.kids.length - 1] === wrap, wrap: wrap.tag, btn: btn.tag, type: btn.attrs.type,
-    cls: btn.className, aria: btn.attrs["aria-label"], text: btn.textContent, describedby: btn.attrs["aria-describedby"],
-    id: note.attrs.id, role: note.attrs.role, hidden: note.hidden, noteCls: note.className, key: keyOf(note.textContent),
-    note: note.textContent };
-};
 """
 
 ART_MJCF = {"name": "cabinet", "root": "body", "fixed_base": True,
@@ -3284,10 +3481,9 @@ ART_RESULT = {"source": "finish", "verdict": "articulated", "reason": "the door 
                                                        "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 800}}
 
 
-def info_jobs():
-    """(jobs, replies) for INFO_HARNESS: an articulated Opus job with every row, the same job without an agent (its
-    parts welded, a link VoMP skipped), a rigid Astra job with a refined mesh, and a rigid job whose agent was skipped
-    for its mask IoU."""
+def results_job():
+    """(job, replies) for DOM_HARNESS: an articulated Opus job with every result file, so every row of the facts
+    and every viewer shows."""
     place = {"metric_scale": 1.25, "check": {"mean_mask_iou": 0.82}}
     lidar = {"ok": True, "s": 1.25, "source": {"kind": "rosbag", "topic": "/lidar/points"},
              "combine": {"views": 8, "views_used": 8, "spread_rel": 0.01}}
@@ -3299,372 +3495,121 @@ def info_jobs():
     every = ["run/posed.glb", "run/parts.glb", "run/parts.json", "refined.glb", "run/placement.json", "pool/lidar.json",
              "physics/aligned.glb", "physics/summary.json", "physics/mjcf/mjcf.json", "physics/urdf/model.urdf", "results.zip",
              "selection.json"]
-    jobs = {
-        "a": {"id": "a", "articulated": True, "agent": "opus", "files": every, "stages": {"agent": {"status": "done"}},
-              "agent_result": ART_RESULT},
-        "w": {"id": "w", "articulated": True, "agent": "none", "agent_result": None,
-              "files": [f for f in every if f not in ("refined.glb", "pool/lidar.json")],
-              "stages": {"agent": {"status": "skipped", "note": "turned off"}}},
-        "r": {"id": "r", "articulated": False, "agent": "astra", "files": ["run/posed.glb", "refined.glb", "run/placement.json",
-                                                                             "physics/summary.json", "results.zip"],
-              "stages": {"agent": {"status": "done"}},
-              "agent_result": {"source": "checkpoint", "verdict": "needs_review", "reason": "seams on the lid", "limitations": [],
-                               "agent": "codex", "model": "gpt-6-astra", "mode": "refinement"}},
-        "s": {"id": "s", "articulated": False, "agent": "astra", "agent_result": None, "files": ["run/posed.glb", "run/placement.json"],
-              "stages": {"agent": {"status": "skipped", "note": "Stage A mean mask IoU 0.41 is below 0.5; physics uses "
-                                                               "run/posed.glb"}}}}
-    replies = {}
-    for i in jobs:
-        replies.update({f"/api/jobs/{i}/file/run/placement.json": place, f"/api/jobs/{i}/file/pool/lidar.json": lidar,
-                        f"/api/jobs/{i}/file/physics/summary.json": summary, f"/api/jobs/{i}/file/run/parts.json": parts,
-                        f"/api/jobs/{i}/parts": {"checks": ["run/parts/sam3/check/0.jpg"]}})
-    replies["/api/jobs/a/file/physics/mjcf/mjcf.json"] = ART_MJCF
-    replies["/api/jobs/w/file/physics/mjcf/mjcf.json"] = {"name": "cabinet", "inertial": ART_MJCF["inertial"]}
-    return jobs, replies
+    job = {"id": "a", "articulated": True, "agent": "opus", "files": every, "stages": {"agent": {"status": "done"}},
+           "agent_result": ART_RESULT}
+    replies = {"/api/jobs/a/file/run/placement.json": place, "/api/jobs/a/file/pool/lidar.json": lidar,
+               "/api/jobs/a/file/physics/summary.json": summary, "/api/jobs/a/file/run/parts.json": parts,
+               "/api/jobs/a/parts": {"checks": ["run/parts/sam3/check/0.jpg"]},
+               "/api/jobs/a/file/physics/mjcf/mjcf.json": ART_MJCF}
+    return job, replies
 
 
-def test_app_js_results_have_an_info_button_per_item():
-    """Every row of the Results tab's facts list, every viewer, the part masks' hint and every file of the
-    Downloads tab end with an info button: a real button with the text
-    "i", the label "About <item>" and aria-describedby on its note, a hidden tooltip with the item's text from INFO.
-    Every note of INFO shows for some item, each id is unique, and the notes hold the numbers of the code they
-    explain."""
-    jobs, replies = info_jobs()
-    out = run_info_js(INFO_ITEMS + """
+def test_app_js_results_facts_rows():
+    """The Results tab's facts are plain dt/dd rows, in a fixed order: for an articulated Opus job every row, with the
+    welded part's row; for a rigid job whose agent was skipped for its mask IoU, the scale, the IoU and the Agent row
+    with the skip note. help.html (#results, #agent, #joints, #physics) explains each label."""
+    job, replies = results_job()
+    rigid = {"id": "s", "articulated": False, "agent": "astra", "agent_result": None,
+             "files": ["run/posed.glb", "run/placement.json"],
+             "stages": {"agent": {"status": "skipped", "note": "Stage A mean mask IoU 0.41 is below 0.5; physics uses "
+                                                              "run/posed.glb"}}}
+    replies["/api/jobs/s/file/run/placement.json"] = {"metric_scale": None, "check": {"mean_mask_iou": 0.41}}
+    out = run_dom_js("""
         (async () => {
-          const out = { info: INFO }, jobs = """ + json.dumps(jobs) + """;
-          for (const [id, job] of Object.entries(jobs)) {
-            V = { id };
-            made.length = 0;
+          const out = {};
+          for (const job of """ + json.dumps([job, rigid]) + """) {
+            V = { id: job.id };
             await renderResults(job);
-            renderDownloads(job);
-            out[id] = items().map(([kind, label, wrap, owner]) => describe(kind, label, wrap, owner));
+            const [dl, ...more] = $("#facts2").kids;
+            out[job.id] = { more: more.length, tag: dl.tag, rows: dl.kids.map((k) => [k.tag, k.textContent, k.kids.length]) };
           }
           console.log(JSON.stringify(out));
         })()
         """, replies)
-    notes = out.pop("info")
-    assert all(isinstance(v, str) and v.strip() for v in notes.values())
-    used, ids = set(), []
-    for job_id, found in out.items():
-        assert found, job_id
-        for it in found:
-            assert not it.get("missing"), (job_id, it)
-            assert (it["wrap"], it["btn"], it["type"], it["cls"], it["text"]) == ("span", "button", "button", "infobtn", "i"), it
-            assert it["aria"] == "About " + it["label"] and it["describedby"] == it["id"], it
-            assert (it["role"], it["hidden"], it["noteCls"], it["last"]) == ("tooltip", True, "infonote", True), it
-            assert it["key"] in notes and it["note"].strip(), it
-            used.add(it["key"])
-            ids.append(it["id"])
-    assert used == set(notes), set(notes) - used
-    assert len(ids) == len(set(ids))
-    keys = lambda found, kind: [(it["label"], it["key"]) for it in found if it["kind"] == kind]  # noqa: E731
-    assert keys(out["a"], "row") == [
-        ("Metric scale", "metric_scale"), ("Stage A mean mask IoU", "mask_iou"), ("Parts not split off", "parts_lost"),
-        ("Agent", "agent"), ("Agent verdict", "agent_verdict"), ("Agent reason", "agent_reason"),
-        ("Limitation", "limitation"), ("Limitation", "limitation"), ("Joints", "joints"),
-        ("Joint changes by the agent", "joint_changes"), ("Agent tokens", "agent_tokens"),
-        ("Agent cost (estimate)", "agent_cost"), ("Links", "links"), ("Base", "base"), ("Joint of door", "joint"),
-        ("Joint of drawer", "joint"), ("Joint of body", "joint"), ("Joint of knob", "joint_welded"), ("Mass", "mass"),
-        ("Center of mass", "com"), ("Link masses", "link_masses"), ("Young's modulus (median)", "youngs"),
-        ("Poisson ratio (median)", "poisson"), ("Density (median)", "density")]
-    assert keys(out["a"], "viewer") == [("Stage A (MV-SAM3D, posed)", "view_posed"),
-                                        ("Parts (split, before rigging)", "view_parts"),
-                                        ("Parts with joints, by Claude Opus 5.5", "view_rigged")]
-    assert keys(out["a"], "download") == [("results.zip", "dl_zip"), ("posed.glb", "dl_posed"), ("parts.glb", "dl_parts"),
-                                          ("refined.glb", "dl_refined"), ("aligned.glb", "dl_aligned"),
-                                          ("model.urdf", "dl_urdf"), ("placement.json", "dl_placement"),
-                                          ("summary.json", "dl_summary"), ("lidar.json", "dl_lidar"),
-                                          ("selection.json", "dl_selection"), ("parts.json", "dl_parts_json"),
-                                          ("mjcf.json", "dl_mjcf")]
-    assert keys(out["s"], "download") == [("posed.glb", "dl_posed"), ("placement.json", "dl_placement")]
-    assert keys(out["a"], "masks") == [("Part masks in the views", "part_masks")]
-    assert ("Links", "links_welded") in keys(out["w"], "row") and ("Mass note", "mass_note") in keys(out["w"], "row")
-    assert ("Agent", "agent") in keys(out["w"], "row")  # the agent was off: its row says so, and no hint repeats it
-    assert all(not keys(out[j], "placeholder") for j in ("a", "w", "r", "s"))
-    assert keys(out["r"], "viewer")[1] == ("Refined by GPT-6-Astra", "view_refined")
-    assert keys(out["s"], "row") == [("Metric scale", "metric_scale"), ("Stage A mean mask IoU", "mask_iou"),
-                                     ("Agent", "agent")]
-    # The notes give the rules and numbers of the code they explain (read from the code, so a changed constant fails
-    # here), and what a missing value means.
-    import inspect
-
-    from gator.agent import controller, tools
-    from gator.parts import geometry, vote
-    from gator.stage_a import part_masks
-    from gator.webapp import agent_step
-    num = lambda x: f"{x:g}"  # noqa: E731
-    seam_lines = inspect.signature(geometry.seams).parameters["max_lines"].default
-    usd = lambda x: f"${x:.2f}".removesuffix(".00")  # noqa: E731  4.0 -> $4, 0.2 -> $0.20
-    iou, small = num(steps.MIN_IOU), f"{vote.MIN_AREA:.1%}"
-    score = num(inspect.signature(part_masks.run).parameters["threshold"].default)
-    prices = [f"{usd(controller.PRICES[k])} {w}" for k, w in (("input_tokens", "input"), ("output_tokens", "output"),
-                                                                ("cache_read_input_tokens", "cache read"),
-                                                                ("cache_creation_input_tokens", "cache write"))]
-    facts = {"mask_iou": [f"Below {iou}"],
-             "agent": [f"{num(agent_step.BUDGET_S['refinement'])} s to edit",
-                       f"{num(agent_step.BUDGET_S['articulation'])} s to set", f"up to {num(tools.MAX_EXCLUDED_S)} s",
-                       f"{controller.CLAUDE_EFFORT} effort", f"below {iou}", "skipped"],
-             "mass": ["64^3", "density", "16%", "collision hulls", "left out"],
-             "metric_scale": ["median", "LiDAR", "before MV-SAM3D", "Without LiDAR"],
-             "agent_cost": [*prices, "A ? means", "refusal fallback"], "joints": ["A ? means", "With 0"],
-             "part_masks": [f"at least {score}", "outside the object", "union"],
-             "parts_lost": ["not found", f"at least {score}", f"less than {small}", "still have a part"],
-             "limitation": [f"at most {tools.MAX_LIMITATIONS}"], "link_masses": ["64^3", "median density"],
-             "agent_verdict": [*tools.VERDICTS["refinement"], "fallback_original", "checkpoint", "export"],
-             "agent_reason": ["API key"], "youngs": ["Pa"], "density": ["kg/m^3", "by its volume"],
-             "poisson": ["by its volume"], "view_posed": ["view 0's camera frame", "aligned.glb", "larger than"],
-             "view_rigged": ["without joints"], "dl_aligned": ["cameras' mean up"],
-             "dl_urdf": ["fixed one to the link that physics welds it to"],
-             "mass_note": ["MuJoCo, USD and URDF"], "com": ["bottom of the object"],
-             "dl_zip": ["(package)", "API key", "the agent's result when the key was found in it"],
-             "dl_refined": ["each joint that the agent set", "a part without one has none"],
-             "dl_placement": ["view 0's camera frame", "mask IoU"],
-             "dl_summary": ["5th to 95th percentile", "could not voxelize"],
-             "dl_lidar": ["ok is false", "uploaded calibration", "Stray capture", "aligned with the color camera"],
-             "dl_selection": ["view 0 first", "null without LiDAR", "ok is false", "excluded"],
-             "dl_parts_json": [f"up to {seam_lines} fitted lines", "not split off"], "dl_mjcf": ["only in results.zip"]}
-    for key, want in facts.items():
-        assert all(f in notes[key] for f in want), (key, [f for f in want if f not in notes[key]])
-    # A file's note does not repeat its group's sentence (zipText, SIM_TEXT): what results.zip holds, and that
-    # model.urdf does not load alone.
-    assert "MJCF" not in notes["dl_zip"] and "does not load" not in notes["dl_urdf"]
-    # One to three short sentences each (a "?" that stands for a missing value ends none).
-    import re
-    sentences = {k: len(re.findall(r"[\w)%'\"][.!?](?:\s|$)", v)) for k, v in notes.items()}
-    assert all(1 <= n <= 3 for n in sentences.values()), sentences
-    assert max(len(v) for v in notes.values()) <= 450
+    for found in out.values():
+        assert found["tag"] == "dl" and found["more"] == 0
+        assert [t for t, _, _ in found["rows"]] == ["dt", "dd"] * (len(found["rows"]) // 2)
+        assert all(n == 1 for _, _, n in found["rows"])  # the text alone: no button, link or note
+    rows = lambda job_id: [tuple(x[1] for x in out[job_id]["rows"][i:i + 2]) for i in range(0, len(out[job_id]["rows"]), 2)]  # noqa: E731
+    assert rows("a") == [
+        ("Metric scale", "×1.250 from LiDAR (/lidar/points, 8 views, spread 1.0%)"), ("Mask IoU", "0.820"),
+        ("Parts not split off", "handle (under 0.3% of the surface)"), ("Agent", "Claude Opus 5.5 (claude-opus-5-5)"),
+        ("Agent verdict", "articulated (finish)"), ("Agent reason", "the door hinges and the drawer slides"),
+        ("Limitation", "the door's range is a guess"), ("Limitation", "the drawer has no tray"), ("Joints", "3"),
+        ("Joint changes", "4"), ("Agent tokens", "1,000 input, 500 output, 9,000 cache read, 800 cache write in 9 turns"),
+        ("Agent cost (estimate)", "about $0.31"), ("Links", "4: body, door, drawer, knob"),
+        ("Base", "body, fixed to the world"), ("Joint of door", "turns on body, 0° to 86°"),
+        ("Joint of drawer", "slides on body, 0.0 to 30.0 cm"), ("Joint of body", "fixed to world"),
+        ("Joint of knob", "none (welded to door)"), ("Mass", "12.5 kg"), ("Center of mass", "0.000, 0.010, 0.400 m"),
+        ("Link masses", "body 10.0 kg, door 1.50 kg, drawer 0.900 kg, knob 0.100 kg (from hulls)"),
+        ("Young's modulus (median)", "4.10e+9 Pa"), ("Poisson ratio (median)", "0.300"), ("Density (median)", "990 kg/m³")]
+    assert rows("s") == [("Metric scale", "Depth Anything 3's estimate (no LiDAR)"), ("Mask IoU", "0.410"),
+                         ("Agent", "skipped: Stage A mean mask IoU 0.41 is below 0.5; physics uses run/posed.glb")]
+    # The skip note says "Stage A" (steps.py), and the help page says what that is.
+    assert "call it the Stage A mesh" in (server.STATIC / "help.html").read_text()
 
 
-def test_app_js_info_notes_open_and_close():
-    """A note shows on hover (a mouse, with a short delay before it closes so the pointer can reach it; a touch is
-    no hover) and on focus. A click, a tap, Enter or Space toggles it: a note that showed before the press hides, and
-    one that did not shows and stays open (a tap that focuses the button first counts as not shown). Escape, a
-    pointer down outside the button and its note, and focus that moves on close it. One note shows at a time. A
-    viewer's or a download's note sits under its button, or above it when only that fits, inside the 375 px window; a
-    facts row's note sits under the row's value or above its label, so it covers neither the value nor another row's
-    info button. It follows a scroll, never goes above over the sticky header, and closes when its button goes under
-    the header. A new rendering of the results, the jobs list and another tab close it."""
-    jobs, replies = info_jobs()
-    out = run_info_js(INFO_ITEMS + """
+def test_app_js_viewer_says_while_its_mesh_loads():
+    """Until its mesh shows, a viewer's box says "Loading the mesh" in model-viewer's poster slot, hidden from a
+    screen reader, and its caption says "loading" where the size goes. Once the mesh loads, the caption gives its
+    size in cm (only the name when model-viewer gives no size); when it cannot load, the caption is the name again
+    and a line offers the file. When model-viewer's own script does not load, each viewer waits for it MV_WAIT_MS,
+    then offers its file the same way; when the element is defined within that time, the viewer keeps waiting for
+    its mesh. Captions are plain text."""
+    out = run_dom_js(WALK + """
         (async () => {
-          const out = {};
-          V = { id: "s" };
-          await renderResults(""" + json.dumps(jobs["s"]) + """);
-          const all = items(), row = (x) => ({ wrap: x[2], ...parts(x[2]), dt: x[3], dd: ddOf(x[3]) });
-          const [A, B] = all.filter((x) => x[0] === "row").map(row);
-          const [W] = all.filter((x) => x[0] === "viewer").map((x) => ({ wrap: x[2], ...parts(x[2]) }));
-          const at = (x, left, top, width, height) => { x.rect = { left, top, width, height }; };
-          // A phone: one column, each value under its label.
-          at(A.dt, 12, 100, 351, 28); at(A.btn, 110, 106, 18, 18); at(A.dd, 12, 128, 351, 28);
-          at(B.dt, 12, 156, 351, 28); at(B.btn, 140, 162, 18, 18); at(B.dd, 12, 184, 351, 28);
-          at(W.btn, 300, 100, 18, 18);
-          for (const x of [A, B, W]) at(x.note, 0, 0, 320, 80);
-          const on = (x) => !x.note.hidden && x.wrap.cls.has("on");
-          const fire = (target, type, e) => listeners.filter((l) => l[0] === target && l[1] === type).forEach((l) => l[2](e));
-          const flush = () => timers.splice(0).forEach((t) => t.f && t.f());
-          const mouse = { pointerType: "mouse" }, touch = { pointerType: "touch" };
-          const press = (x, e) => { fire("document", "pointerdown", { target: x.btn }); x.btn.onpointerdown(e); };
-          const click = (x, detail) => x.btn.onclick({ detail });  // detail 0: Enter or Space
-          const pos = (x) => [x.note.style.left, x.note.style.top];
-          out.listeners = listeners.filter((l) => ["keydown", "pointerdown", "scroll"].includes(l[1]))
-            .map((l) => [l[0], l[1], l[2].name, l[3] === true || !!(l[3] && l[3].capture)]);
-          out.start = shown();
-          // Hover: open at once, closed TIP_DELAY ms after the pointer leaves, kept when it comes back (to the note).
-          A.wrap.onpointerenter(mouse);
-          out.hover = [on(A), ...pos(A), shown().length];
-          A.wrap.onpointerleave(mouse);
-          out.leave = [on(A), timers.map((t) => t.ms)];
-          flush();
-          out.left = on(A);
-          A.wrap.onpointerenter(mouse);
-          A.wrap.onpointerleave(mouse);
-          A.wrap.onpointerenter(mouse);
-          flush();
-          out.back = on(A);
-          A.wrap.onpointerleave(mouse);
-          flush();
-          A.wrap.onpointerenter(touch);
-          out.touch = on(A);
-          // Focus: open; another button's focus opens its note alone; blur closes.
-          A.btn.onfocus();
-          out.focus = [on(A), on(B)];
-          A.btn.onblur();
-          B.btn.onfocus();
-          out.other = [on(A), on(B), shown().length];
-          B.btn.onblur();
-          out.blur = on(B);
-          // A tap that does not focus the button (Safari) opens the note and keeps it; a second tap closes it.
-          press(A, touch);
-          click(A, 1);
-          A.wrap.onpointerleave(mouse);
-          flush();
-          out.tap = on(A);
-          press(A, touch);
-          click(A, 1);
-          out.tap2 = on(A);
-          // A tap that focuses the button first (Chrome): focus opens, the click keeps it; a second tap closes it.
-          press(A, touch);
-          A.btn.onfocus();
-          click(A, 1);
-          out.chromeTap = on(A);
-          press(A, touch);
-          click(A, 1);
-          out.chromeTap2 = on(A);
-          A.btn.onblur();
-          // A mouse: a click on a hovered note closes it; a second click opens it and keeps it after the pointer leaves.
-          A.wrap.onpointerenter(mouse);
-          press(A, mouse);
-          A.btn.onfocus();
-          click(A, 1);
-          out.mouse = on(A);
-          press(A, mouse);
-          click(A, 1);
-          A.wrap.onpointerleave(mouse);
-          flush();
-          out.mouse2 = on(A);
-          // The focus moves on from a clicked note: it closes.
-          A.btn.onblur();
-          out.moveOn = on(A);
-          // The keyboard: Tab opens the note, Enter closes it, Enter again opens it.
-          A.btn.onfocus();
-          click(A, 0);
-          out.key = on(A);
-          click(A, 0);
-          out.key2 = on(A);
-          A.btn.onblur();
-          // A press with no click (the pointer slid off) does not change what a later key does.
-          press(A, mouse);
-          A.btn.onfocus();
-          click(A, 0);
-          out.stale = on(A);
-          A.btn.onblur();
-          // Escape closes; another key does not.
-          press(A, touch);
-          click(A, 1);
-          fire("document", "keydown", { key: "Enter" });
-          out.enter = on(A);
-          fire("document", "keydown", { key: "Escape" });
-          out.escape = on(A);
-          // A pointer down on the button or the note keeps it; anywhere else closes it.
-          press(A, touch);
-          click(A, 1);
-          fire("document", "pointerdown", { target: A.note });
-          fire("document", "pointerdown", { target: A.btn });
-          out.inside = on(A);
-          fire("document", "pointerdown", { target: B.btn });
-          out.outside = on(A);
-          // One at a time: a clicked note closes when another one opens on hover.
-          press(A, touch);
-          click(A, 1);
-          B.wrap.onpointerenter(mouse);
-          out.one = [on(A), on(B), shown().length];
-          B.wrap.onpointerleave(mouse);
-          flush();
-          // A row on a phone: under its value (12 px in), and above its label near the bottom of the window.
-          press(A, touch);
-          click(A, 1);
-          out.phone = [...pos(A), meets(A.note, A.dd), meets(A.note, A.btn), meets(A.note, A.dt)];
-          at(A.dt, 12, 560, 351, 28); at(A.btn, 110, 566, 18, 18); at(A.dd, 12, 588, 351, 28);
-          fire("window", "scroll", {});
-          out.phoneAbove = [...pos(A), meets(A.note, A.dd), meets(A.note, A.btn), meets(A.note, A.dt)];
-          fire("document", "keydown", { key: "Escape" });
-          // A row at desktop width: from the value's left edge, under the row, clear of the column of info buttons, so
-          // the pointer goes straight down from one button to the next.
-          window.innerWidth = document.documentElement.clientWidth = 1280;
-          window.innerHeight = 800;
-          at(A.dt, 16, 100, 190, 34); at(A.btn, 182, 108, 18, 18); at(A.dd, 222, 100, 500, 34);
-          at(B.dt, 16, 134, 190, 34); at(B.btn, 160, 142, 18, 18); at(B.dd, 222, 134, 500, 34);
-          at(A.note, 0, 0, 320, 120);
-          A.wrap.onpointerenter(mouse);
-          out.desk = [...pos(A), meets(A.note, A.dd), meets(A.note, B.btn), meets(A.note, B.dt)];
-          A.wrap.onpointerleave(mouse);
-          B.wrap.onpointerenter(mouse);
-          out.deskNext = [on(A), on(B)];
-          B.wrap.onpointerleave(mouse);
-          flush();
-          window.innerWidth = document.documentElement.clientWidth = 375;
-          window.innerHeight = 700;
-          // A viewer's note sits under its button, or above it near the bottom of the window, 12 px in near the left edge.
-          W.wrap.onpointerenter(mouse);
-          out.button = pos(W);  // 375 - 12 - 320 = 43 px from the left, 100 + 18 + 6 = 124 px from the top
-          W.wrap.onpointerleave(mouse);
-          flush();
-          at(W.btn, 4, 650, 18, 18);
-          press(W, touch);
-          click(W, 1);
-          out.above = pos(W);
-          at(W.btn, 300, 100, 18, 18);
-          fire("window", "scroll", {});
-          out.scrolled = pos(W);
-          // A narrow note sits centred under its button.
-          fire("document", "keydown", { key: "Escape" });
-          at(W.note, 0, 0, 100, 40);
-          at(W.btn, 150, 100, 18, 18);
-          press(W, touch);
-          click(W, 1);
-          out.centred = pos(W);
-          fire("document", "keydown", { key: "Escape" });
-          at(W.note, 0, 0, 320, 80);
-          // The sticky header (48 px): a note does not go above over it, and it closes when its button goes under it.
-          at($("header"), 0, 0, 375, 48);
-          window.innerHeight = 220;
-          at(W.btn, 300, 120, 18, 18);
-          press(W, touch);
-          click(W, 1);
-          out.underHeader = pos(W);
-          window.innerHeight = 700;
-          at(W.btn, 300, 60, 18, 18);
-          fire("window", "scroll", {});
-          out.belowHeader = on(W);
-          at(W.btn, 300, 20, 18, 18);
-          fire("window", "scroll", {});
-          out.gone = [on(W), tip === null];
-          at($("header"), 0, 0, 0, 0);
-          await renderResults(""" + json.dumps(jobs["s"]) + """);
-          out.redrawn = [on(A), tip === null, shown()];
-          // The jobs list (show) and another tab close an open note too.
-          const [C, D] = items().filter((x) => x[0] === "row").map((x) => ({ wrap: x[2], ...parts(x[2]) }));
-          for (const x of [C, D]) { at(x.btn, 300, 100, 18, 18); at(x.note, 0, 0, 320, 80); }
-          press(C, touch);
-          click(C, 1);
-          out.page = [on(C)];
-          show("list");
-          out.page.push(on(C), tip === null);
-          V.tab = "results";
-          press(D, touch);
-          click(D, 1);
-          out.tab = [on(D)];
-          selectTab("log");
-          out.tab.push(on(D), tip === null);
+          V = { id: "j" };
+          const job = { id: "j", agent: "astra", articulated: false, files: ["run/posed.glb", "refined.glb"],
+            stages: { agent: { status: "done" } }, agent_result: { agent: "codex", model: "gpt-6-astra", source: "finish",
+              verdict: "complete", reason: "fixed the lid", limitations: [] } };
+          const figs = async () => {
+            made.length = 0;
+            await renderResults(job);
+            return walk($("#viewers")).filter((e) => e.tag === "figure");
+          };
+          const settle = async () => { for (let i = 0; i < 5; i++) await null; };
+          const cap = (f) => f.kids[0].kids, mv = (f) => f.kids.find((k) => k.tag === "model-viewer");
+          let [a, b] = await figs();
+          const poster = mv(a).kids[0];
+          const out = { loading: [cap(a), cap(b)], poster: [poster.tag, poster.attrs.slot, poster.className,
+            poster.attrs["aria-hidden"], poster.textContent], timers: timers.length };
+          mv(a).onload({ target: { getDimensions: () => ({ x: 0.604, y: 0.4, z: 0.295 }) } });
+          mv(b).onload({ target: {} });
+          out.loaded = [cap(a), cap(b)];
+          [a] = await figs();
+          mv(a).onerror();
+          out.failed = [cap(a), a.kids.length, a.kids[1].textContent];
+          // model-viewer's script did not load: the viewers wait, then offer their files.
+          let define = null;
+          const defined = new Promise((r) => { define = r; });
+          window.customElements = { get: () => undefined, whenDefined: () => defined };
+          [a, b] = await figs();
+          out.waiting = [cap(a), cap(b), timers.map((t) => t.ms)];
+          timers.splice(0).forEach((t) => t.f());
+          await settle();
+          out.gone = [cap(a), a.kids.length, a.kids[1].textContent, cap(b)];
+          // It is defined within the wait: the viewer keeps waiting for its mesh.
+          [a] = await figs();
+          define();
+          await settle();
+          timers.splice(0).forEach((t) => t.f());
+          await settle();
+          out.defined = [cap(a), a.kids.length, MV_WAIT_MS];
           console.log(JSON.stringify(out));
         })()
-        """, replies)
-    assert out["listeners"] == [["document", "keydown", "tipKey", False], ["document", "pointerdown", "tipOutside", True],
-                                ["window", "scroll", "tipPlace", True]]
-    assert out["start"] == []
-    # A row's note: 12 px from the left (its value's edge), 6 px under its value (128 + 28 + 6).
-    assert out["hover"] == [True, "12px", "162px", 1]
-    assert out["leave"] == [True, [150]] and out["left"] is False and out["back"] is True and out["touch"] is False
-    assert out["focus"] == [True, False] and out["other"] == [False, True, 1] and out["blur"] is False
-    assert out["tap"] is True and out["tap2"] is False
-    assert out["chromeTap"] is True and out["chromeTap2"] is False
-    assert out["mouse"] is False and out["mouse2"] is True and out["moveOn"] is False
-    assert out["key"] is False and out["key2"] is True and out["stale"] is False
-    assert out["enter"] is True and out["escape"] is False
-    assert out["inside"] is True and out["outside"] is False
-    assert out["one"] == [False, True, 1]
-    assert out["phone"] == ["12px", "162px", False, False, False]
-    assert out["phoneAbove"] == ["12px", f"{560 - 6 - 80}px", False, False, False]  # above the whole label (dt)
-    assert out["desk"] == ["222px", f"{134 + 6}px", False, False, False]
-    assert out["deskNext"] == [False, True]
-    assert out["button"] == ["43px", "124px"]
-    assert out["above"] == ["12px", f"{650 - 6 - 80}px"] and out["scrolled"] == ["43px", "124px"]
-    assert out["centred"] == [f"{150 + 9 - 50}px", "124px"]
-    assert out["underHeader"] == ["43px", f"{120 + 18 + 6}px"]  # above would be 34 px, under the 48 px header
-    assert out["belowHeader"] is True and out["gone"] == [False, True]
-    assert out["redrawn"] == [False, True, []]
-    assert out["page"] == [True, False, True] and out["tab"] == [True, False, True]
+        """)
+    assert out["loading"] == [["Posed mesh: loading"], ["Refined (GPT-6-Astra): loading"]]
+    assert out["poster"] == ["p", "poster", "mvload", "true", "Loading the mesh"] and out["timers"] == 0
+    assert out["loaded"] == [["Posed mesh: 60 x 40 x 30 cm"], ["Refined (GPT-6-Astra)"]]
+    assert out["failed"] == [["Posed mesh"], 2, "Could not show posed.glb: download it."]
+    wait = out["defined"][2]
+    assert out["waiting"] == [["Posed mesh: loading"], ["Refined (GPT-6-Astra): loading"], [wait, wait]] and wait >= 5000
+    assert out["gone"] == [["Posed mesh"], 2, "Could not show posed.glb: download it.", ["Refined (GPT-6-Astra)"]]
+    assert out["defined"][:2] == [["Posed mesh: loading"], 2]
+    import re
+    css = (server.STATIC / "style.css").read_text()
+    mvload = re.search(r"\.mvload \{([^}]*)\}", css).group(1)
+    assert all(x in mvload for x in ("height: 100%", "align-items: center", "var(--muted)"))  # "Loading the mesh"
 
 
 # ---- the Downloads tab (app.js renderDownloads) ----
@@ -3676,18 +3621,17 @@ DL_SIZES = {"results.zip": 12_345_678, "run/posed.glb": 1_234_567, "run/parts.gl
 
 
 def test_app_js_downloads_tab():
-    """The Downloads tab lists the job's files that exist, in four groups, each under an h3: Everything (results.zip,
-    with what it holds, the URDF only when the job has one, and that the MJCF and USD models come only in it),
-    Meshes, Simulation (model.urdf, which says that it does not load alone) and Records. Each row is the file name
-    as a download link that saves as <job id>_<file>, its size from job.sizes (none when the server gave none) and
-    its info button with its note from INFO. Groups without files are left out, a file that the tab does not know is
-    ignored, and a running build lists none. Without results.zip, one sentence above the groups says why: the build
-    has not made it yet, or it stopped first. An empty tab says one sentence. The tab offers exactly the server's
-    outputs, all of which the file route serves, and the Results tab has no download link left."""
-    jobs, replies = info_jobs()
+    """The Downloads tab lists the job's files that exist, in four groups, each under an h3: Everything (results.zip),
+    Meshes, Simulation (model.urdf, which says that it needs the meshes in results.zip) and Records. Each row is the
+    file name as a download link that saves as <job id>_<file>, and its size from job.sizes (none when the server
+    gave none), and nothing else. Groups without files are left out, a file that the tab does not know is ignored,
+    and a running build lists none. Without results.zip, a line above the groups says why: the build has not made it
+    yet, or it stopped first. An empty tab says a few words. The tab offers exactly the server's outputs, all of
+    which the file route serves, and the Results tab has no download link."""
+    job, replies = results_job()
     every = list(DL_SIZES)
     cases = {
-        "a": {**jobs["a"], "status": "done", "files": every, "sizes": DL_SIZES},
+        "a": {**job, "status": "done", "files": every, "sizes": DL_SIZES},
         "r": {"id": "r", "status": "done", "agent": "none", "agent_result": None, "articulated": False,
               "files": [f for f in every if f not in ("run/parts.glb", "run/parts.json", "refined.glb", "pool/lidar.json")]
               + ["frames/preview.mp4"], "sizes": {k: v for k, v in DL_SIZES.items() if k != "physics/aligned.glb"}},
@@ -3699,14 +3643,11 @@ def test_app_js_downloads_tab():
               "files": [f for f in every if f not in ("physics/urdf/model.urdf", "run/parts.glb", "run/parts.json")]},
         "y": {"id": "y", "status": "ready", "files": [], "sizes": {}},
         "z": {"id": "z", "status": "analyzing", "files": [], "sizes": {}},
-        "q": {"id": "q", "status": "running", "files": ["selection.json", "run/posed.glb"], "sizes": DL_SIZES},
-        # The agent's result held the API key, so jobs.package left it out of results.zip.
-        "k": {"id": "k", "status": "done", "agent": "astra", "files": ["results.zip", "run/posed.glb"],
-              "agent_result": {"source": "finish", "verdict": "complete", "limitations": [],
-                               "reason": "left out: the agent's result held the API key"}}}
-    out = run_info_js(INFO_ITEMS + """
+        "n": {"id": "n", "status": "cancelled", "files": [], "sizes": {}},
+        "q": {"id": "q", "status": "running", "files": ["selection.json", "run/posed.glb"], "sizes": DL_SIZES}}
+    out = run_dom_js(WALK + """
         (async () => {
-          const out = { paths: DOWNLOADS.flatMap(([, rows]) => rows.map(([p]) => p)), sim: SIM_TEXT, keyed: KEYED_RESULT,
+          const out = { paths: DOWNLOADS.flatMap(([, rows]) => rows.map(([p]) => p)), sim: SIM_TEXT,
             partial: FILES_PARTIAL, stopped: FILES_STOPPED,
             sizes: [0, 999, 1000, 9_949, 9_950, 10_000, 999_499, 999_500, 99_949_999, 99_960_000, 100_000_000,
               999_499_999, 999_600_000, 1_000_000_000, 2_500_000_000].map(fileSize) };
@@ -3722,9 +3663,8 @@ def test_app_js_downloads_tab():
                 cls: [g.className, list.tag, list.className], text: hint ? hint.textContent : null,
                 rows: list.kids.map((li) => {
                   const a = li.kids[0], size = li.kids.find((k) => k.cls && k.cls.has("dlsize"));
-                  const info = describe("download", a.textContent, li.kids.find(isInfo), li);
                   return { name: a.textContent, href: a.attrs.href, download: a.attrs.download, cls: a.className,
-                    size: size ? size.textContent : null, key: info.key, aria: info.aria, last: info.last, li: li.className };
+                    size: size ? size.textContent : null, kids: li.kids.length, li: li.className };
                 }) };
             });
             out[id] = { groups, none: [$("#downloadsnone").hidden, $("#downloadsnone").textContent], body: $("#downloadsbody").hidden,
@@ -3749,93 +3689,42 @@ def test_app_js_downloads_tab():
     assert [g["title"] for g in a["groups"]] == ["Everything", "Meshes", "Simulation", "Records"]
     assert all(g["labelled"] and g["tag"] == "h3" and g["cls"] == ["dlgroup", "ul", "dlist"] for g in a["groups"])
     rows = [r for g in a["groups"] for r in g["rows"]]
-    assert [(r["name"], r["size"], r["key"]) for r in rows] == [
-        ("results.zip", "12.3 MB", "dl_zip"), ("posed.glb", "1.2 MB", "dl_posed"), ("parts.glb", "988 KB", "dl_parts"),
-        ("refined.glb", "2.5 MB", "dl_refined"), ("aligned.glb", "1.3 MB", "dl_aligned"), ("model.urdf", "4.3 KB", "dl_urdf"),
-        ("placement.json", "5.7 KB", "dl_placement"), ("summary.json", "3.2 KB", "dl_summary"), ("lidar.json", "46 KB", "dl_lidar"),
-        ("selection.json", "23 KB", "dl_selection"), ("parts.json", "812 B", "dl_parts_json"), ("mjcf.json", "6.8 KB", "dl_mjcf")]
+    assert [(r["name"], r["size"]) for r in rows] == [
+        ("results.zip", "12.3 MB"), ("posed.glb", "1.2 MB"), ("parts.glb", "988 KB"), ("refined.glb", "2.5 MB"),
+        ("aligned.glb", "1.3 MB"), ("model.urdf", "4.3 KB"), ("placement.json", "5.7 KB"), ("summary.json", "3.2 KB"),
+        ("lidar.json", "46 KB"), ("selection.json", "23 KB"), ("parts.json", "812 B"), ("mjcf.json", "6.8 KB")]
     by_name = {r["name"]: r for r in rows}
     assert sorted(r["href"] for r in rows) == sorted(f"/api/jobs/a/file/{p}" for p in every)
     assert all(r["href"].endswith("/" + r["name"]) for r in rows)  # each file downloads as its own name
     # Every file saves under the job id, so files of two jobs do not clash; the label stays the short name.
     assert all(r["download"] == "a_" + r["name"] for r in rows)
     assert by_name["results.zip"]["cls"] == "dl primary" and all(r["cls"] == "dl" for r in rows if r["name"] != "results.zip")
-    assert all(r["aria"] == "About " + r["name"] and r["last"] and r["li"] == "dlrow" for r in rows)
+    assert all(r["kids"] == 2 and r["li"] == "dlrow" for r in rows)  # the link and its size, nothing else
     texts = {g["title"]: g["text"] for g in a["groups"]}
-    assert texts["Everything"] == ("results.zip holds the MuJoCo (MJCF), USD and URDF models with their meshes, the GLB "
-                                   "meshes, the physics summary, the placement, the view selection, the LiDAR scale "
-                                   "(lidar.json), the agent's result and the split parts (parts.glb, parts.json). "
-                                   "The MJCF and USD models come only in it.")
-    assert texts["Simulation"] == out["sim"] and "does not load alone" in out["sim"] and "MJCF" not in out["sim"]
-    assert texts["Meshes"] is None and texts["Records"] is None
+    assert texts == {"Everything": None, "Meshes": None, "Simulation": out["sim"], "Records": None}
+    assert out["sim"] == "Needs the meshes in results.zip."
     # A rigid job without the agent or LiDAR: only its files, a file with no size shows none, an unknown file is left out.
     r = out["r"]
     assert {g["title"]: [x["name"] for x in g["rows"]] for g in r["groups"]} == {
         "Everything": ["results.zip"], "Meshes": ["posed.glb", "aligned.glb"], "Simulation": ["model.urdf"],
         "Records": ["placement.json", "summary.json", "selection.json", "mjcf.json"]}
-    assert [x["size"] for x in r["groups"][1]["rows"]] == ["1.2 MB", None]
-    assert r["groups"][0]["text"].endswith("the placement and the view selection. The MJCF and USD models come only in it.")
-    # A job without a URDF (from before the URDF stage): results.zip does not claim one, no Simulation group, and the
-    # Everything sentence still says that the MJCF and USD models come only in results.zip.
-    u = out["u"]
-    assert [g["title"] for g in u["groups"]] == ["Everything", "Meshes", "Records"] and u["note"] is None
-    assert u["groups"][0]["text"].startswith("results.zip holds the MuJoCo (MJCF) and USD models with their meshes, ")
-    assert "URDF" not in u["groups"][0]["text"] and u["groups"][0]["text"].endswith("The MJCF and USD models come only in it.")
-    # A result that held the API key is not in results.zip (jobs.package), and the server says so in its reason.
-    import inspect
-    assert out["keyed"] in inspect.getsource(server.make_app)
-    assert out["k"]["groups"][0]["text"].endswith("the placement and the view selection. The MJCF and USD models come only in it.")
+    assert [(x["size"], x["kids"]) for x in r["groups"][1]["rows"]] == [("1.2 MB", 2), (None, 1)]
+    # A job without a URDF (from before the URDF stage): no Simulation group.
+    assert [g["title"] for g in out["u"]["groups"]] == ["Everything", "Meshes", "Records"] and out["u"]["note"] is None
     # In review: the records alone; after a failure: what exists, without sizes when the server gave none. Without
     # results.zip, the first line says why the tab holds only these.
     assert [(g["title"], [x["name"] for x in g["rows"]]) for g in out["v"]["groups"]] == [("Records", ["lidar.json", "selection.json"])]
-    assert out["v"]["note"] == [0, "p", out["partial"]] and out["partial"].startswith("results.zip and the other files")
+    assert out["v"]["note"] == [0, "p", out["partial"]] and out["partial"] == "More files after the build."
     assert [(g["title"], [(x["name"], x["size"]) for x in g["rows"]]) for g in out["f"]["groups"]] == [
         ("Meshes", [("posed.glb", None)]), ("Records", [("placement.json", None), ("selection.json", None)])]
     assert out["f"]["note"] == [0, "p", out["stopped"]] and out["c"]["note"] == [0, "p", out["stopped"]]
-    assert "stopped before it made results.zip" in out["stopped"]
-    assert all(out[j]["note"] is None for j in ("r", "k", "y", "z", "q"))  # results.zip is there, or no file is
-    # Nothing to list: one sentence.
-    later, busy = "The files appear here when the build has made them.", "The files appear here when the build stops."
-    for job_id, text in (("y", later), ("z", later), ("q", busy)):
+    assert out["stopped"] == "Build stopped before results.zip."
+    assert all(out[j]["note"] is None for j in ("r", "y", "z", "n", "q"))  # results.zip is there, or no file is
+    # Nothing to list: a few words.
+    for job_id, text in (("y", "No files yet."), ("z", "No files yet."), ("n", "Job stopped before any files."),
+                         ("q", "Files show when the build stops.")):
         assert out[job_id] == {"groups": [], "none": [False, text], "body": True, "note": None}, job_id
     assert out["resultLinks"] == 0
-
-
-def test_app_js_downloads_tab_opens_from_results():
-    """The Results tab's line "Download the files from the Downloads tab." opens the Downloads tab as a pick (in
-    the hash), and the tab takes the focus from the button, which hides with its panel, and scrolls into view. A
-    link with the tab opens it, and the Downloads tab sits second in the keyboard order."""
-    out = run_form_js(TAB_SETUP + """
-        (() => {
-          V = { id: "j" };
-          location._hash = "#/job/j";
-          const all = ["topics", "frames", ...BUILD];
-          renderState(st("done", all));
-          const out = { first: tabs() };
-          document.activeElement = $("#todlbtn");
-          $("#results").contains = (x) => x === $("#todlbtn");
-          const scrolls = [];
-          $("#tab-downloads").scrollIntoView = (opt) => scrolls.push([V.tab, opt]);
-          $("#todlbtn").onclick();
-          out.opened = [tabs(), focusedTabs.splice(0), history.state];
-          out.scrolls = scrolls;
-          V = { id: "d", hashTab: "downloads" };  // a reload of #/job/d/downloads
-          location._hash = "#/job/d/downloads";
-          history.state = null;
-          renderState(st("done", all));
-          out.link = tabs();
-          console.log(JSON.stringify(out));
-        })()
-        """)
-    assert out["first"]["tab"] == "results"  # a done job opens on Results
-    opened, focused, state = out["opened"]
-    assert opened == {"tab": "downloads", "pick": "downloads", "shown": ["downloads"], "selected": ["downloads"],
-                      "roving": [-1, 0, -1, -1, -1], "hash": "#/job/j/downloads"}
-    assert focused == ["downloads"] and state == {"tab": "downloads", "status": "done"}
-    # selectTab focuses without scrolling, so the link brings the tab into view itself (below the sticky header, by
-    # scroll-padding-top), once the tab shows.
-    assert out["scrolls"] == [["downloads", {"block": "nearest"}]]
-    assert (out["link"]["tab"], out["link"]["pick"], out["link"]["hash"]) == ("downloads", "downloads", "#/job/d/downloads")
 
 
 def test_app_js_downloads_survive_a_results_file_that_does_not_parse():
@@ -3847,7 +3736,7 @@ def test_app_js_downloads_survive_a_results_file_that_does_not_parse():
            "progress": [], "files": ["run/posed.glb", "run/placement.json", "selection.json"],
            "sizes": {"run/posed.glb": 1_200_000, "run/placement.json": 5_700, "selection.json": 23_000},
            "agent": "none", "agent_result": None, "articulated": False, "parts_review": False}
-    out = run_info_js(INFO_ITEMS + """
+    out = run_dom_js("""
         (async () => {
           const fetch0 = fetch;
           fetch = async (url) => url.endsWith("/run/placement.json")
@@ -3876,9 +3765,10 @@ def test_app_js_downloads_survive_a_results_file_that_does_not_parse():
 
 
 def test_style_css_downloads():
-    """A Downloads row wraps on a narrow phone, its link keeps a 36 px height (44 px on a touch screen), and the
-    rows use the color tokens. The link's arrow has empty alternative text, the group headings are h3, and one
-    Results viewer has the facts beside it on a wide screen."""
+    """A Downloads row wraps on a narrow phone, its link keeps a 32 px height (44 px on a touch screen), and the
+    rows use the color tokens: a link in the accent color and mono, results.zip filled in the primary color. The
+    link's arrow has empty alternative text, the group headings are h3, and one Results viewer has the facts beside
+    it on a wide screen."""
     import re
     css = (server.STATIC / "style.css").read_text()
 
@@ -3888,8 +3778,8 @@ def test_style_css_downloads():
         return m.group(1)
     assert "flex-wrap: wrap" in rule(".dlrow")
     link = rule("a.dl")
-    assert all(x in link for x in ("min-height: 36px", "var(--line-strong)", "var(--surface)", "var(--fg)"))
-    assert all(x in rule("a.dl.primary") for x in ("var(--accent)", "var(--accent-fg)"))
+    assert all(x in link for x in ("min-height: 32px", "var(--accent)", "var(--mono)"))
+    assert all(x in rule("a.dl.primary") for x in ("var(--primary)", "var(--primary-fg)"))
     assert "var(--muted)" in rule(".dlsize") and "list-style: none" in rule(".dlist")
     coarse = css[css.index("@media (pointer: coarse)"):]
     assert "min-height: 44px" in rule("a.dl", coarse)
@@ -3899,35 +3789,10 @@ def test_style_css_downloads():
     arrow = rule("a.dl::before")
     assert 'content: "\\2193" / "";' in arrow and arrow.index('content: "\\2193";') < arrow.index('content: "\\2193" / "";')
     # The group headings are h3 in the text color (not the muted h4), and the note above them is muted.
-    assert "font-size: 16px" in rule(".dlgroup h3") and ".dlgroup h4" not in css
+    assert "font-size: var(--t-m)" in rule(".dlgroup h3") and ".dlgroup h4" not in css
     assert "var(--muted)" in rule(".dlnote")
     # One viewer: on a wide screen the facts sit beside it.
     wide = css[css.index("@media (min-width: 1100px)"):]
     wide = wide[:wide.index("\n}\n")]
     assert re.search(r"#resultsbody\.onefig \{[^}]*display: grid", wide)
     assert re.search(r"#resultsbody\.onefig > #partchecks \{[^}]*grid-column: 1 / -1", wide)
-
-
-def test_style_css_info_buttons():
-    """The info button is a small circle whose larger target takes no room; on a touch screen it stays small (no
-    44 px min-height). Its note is fixed to the window above the header, at most the window less 24 px wide, and
-    uses the color tokens, with a shadow token for each scheme."""
-    import re
-    css = (server.STATIC / "style.css").read_text()
-
-    def rule(selector, text=css):
-        m = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", text)
-        assert m, selector
-        return m.group(1)
-    btn = rule("button.infobtn")
-    assert all(x in btn for x in ("width: 18px", "height: 18px", "min-height: 0", "border-radius: 50%", "position: relative"))
-    assert "position: absolute" in rule("button.infobtn::before")
-    note = rule(".infonote")
-    assert all(x in note for x in ("position: fixed", "max-width: min(320px, calc(100vw - 24px))", "z-index: 30",
-                                   "var(--surface)", "var(--fg)", "var(--line-strong)", "var(--shadow)"))
-    coarse = css[css.index("@media (pointer: coarse)"):]
-    assert "min-height: 0" in rule("button.infobtn", coarse)
-    assert "bottom: -6px" in rule("dt button.infobtn::before", coarse)  # a row's target stops above its value
-    assert "display: flex" in rule(".viewers figcaption")  # a long viewer name wraps beside its button
-    dark = css[css.index("@media (prefers-color-scheme: dark)"):css.index("* { box-sizing")]
-    assert "--shadow:" in css[:css.index("@media (prefers-color-scheme: dark)")] and "--shadow:" in dark

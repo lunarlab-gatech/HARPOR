@@ -5,8 +5,8 @@
 // answer is the server's own status and JSON. Files are Storage objects behind short signed URLs, and an API key is
 // sealed in the page to the public key of the machine's worker (WebCrypto) before it leaves. This page uploads
 // nothing: inputs go in on the machine. This file also draws the sign-in, the account menu, the banner of the user's
-// machines, the waiting-for-approval panel, the line of requests that wait for a machine, and the panel about the
-// machines; site.py writes their markup into the public index.html.
+// machines that are offline or stopping, the waiting-for-approval panel, the line of requests that wait for a machine,
+// and the panel about the machines; site.py writes their markup into the public index.html.
 // site.py loads static/vendor/supabase-2.118.0.js, then config.js (HARPOR_CONFIG), then this file, then app.js. In
 // tunnel mode none of them load, HARPOR_TRANSPORT stays undefined and app.js uses its default.
 "use strict";
@@ -37,17 +37,17 @@
     ["align", false], ["vomp", true], ["mjcf", false], ["usd", false], ["urdf", false], ["package", false]];
   const SNAP_NONE = { frames: "the frames are not analyzed yet", selection: "the views are not selected yet",
     parts: "the part list is not on the site yet" };
-  const ROUTE_NAME = { topic: "Camera topic", calibration_put: "Calibration", calibration_delete: "Remove the calibration",
-    start: "Start", overrides: "Select again", parts: "Build with these parts", continue: "Build", cancel: "Cancel", delete: "Delete" };
+  const ROUTE_NAME = { topic: "Camera topic", calibration_put: "Calibration", calibration_delete: "Remove calibration",
+    start: "Start", overrides: "Select again", parts: "Build", continue: "Build", cancel: "Cancel", delete: "Delete" };
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const OFFLINE = "Cannot reach Supabase. Check your connection.";
   const MISSING = "data:,missing:";  // the URL of a file that is not on the site: an image fails at once, T.fetch gives 404
+  // What a relay refusal says when the machine went, stops or restarted (relay() has already tried once more); others as
+  // they are.
+  const WORKER_GONE = { offline: "The machine went offline. Try again.", ending: "The machine is stopping. Try again.",
+    restarted: "The machine restarted. Paste the key again." };
   const JOB_COLS = "id,created_at,status,note,prompt,queue_pos,input_name,input_kind,input_bytes,machine_id";
   const WORKER_COLS = "id,machine_id,public_key,local_keys,started_at,last_seen,ends_at,accepting,stopped_at";
-  // The note of the machines panel; a list in it is a command, drawn as code.
-  const OWN_ONLY = ["Jobs run on your own GPU machines. Start HARPOR on a machine with ", ["python -m gator.webapp --worker"],
-    ", and its jobs show here. To add a job, add its file on that machine: in the machine's own HARPOR page, or with ",
-    ["python -m gator.webapp.worker add PATH"], ". The input files stay on the machines."];
 
   // supabase-js 2.118.0 starts the implicit flow by default; PKCE keeps the tokens out of the URL.
   const sb = supabase.createClient(C.url, C.publishableKey, { auth: { flowType: "pkce", persistSession: true,
@@ -80,7 +80,10 @@
       : /waiting for approval|may use the agents|runs the agents/.test(msg) ? 403 : /^worker_/.test(msg) ? 503
         : /^the job is|still waits|already waits|does not wait/.test(msg) ? 409 : 400;
   }
-  const plain = (msg) => String(msg || "").replace(/^worker_(offline|ending|restarted): /, "");
+  function plain(msg) {
+    const s = String(msg || ""), m = /^worker_(offline|ending|restarted): /.exec(s);
+    return m ? WORKER_GONE[m[1]] : s;
+  }
   // localStorage, which a private window or blocked site data can take away: the page works without it.
   const keep = {
     get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
@@ -135,42 +138,38 @@
     banner();
     ownPanel();
   }
-  function machineLine(name, w) {  // [text, online]
+  // [text, online, stopping]; help.html#machine-status says what each state means.
+  function machineLine(name, w) {
     if (isOnline(w)) {
-      if (w.accepting === false) return [`${name}: stops ${w.ends_at ? "at " + hm(w.ends_at) : "soon"}; new builds wait ` +
-        "until it runs again", true];
-      return [w.ends_at ? `${name}: online until ${hm(w.ends_at)}` : `${name}: online`, true];
+      if (w.accepting === false) return [`${name}: stopping ${w.ends_at ? "at " + hm(w.ends_at) : "soon"}`, true, true];
+      return [w.ends_at ? `${name}: online until ${hm(w.ends_at)}` : `${name}: online`, true, false];
     }
-    return [w ? `${name}: offline since ${when(w.stopped_at || w.last_seen)}. Its jobs wait until it runs again.`
-      : `${name}: has not run in the last 30 days. Its jobs wait until it runs again.`, false];
+    // no worker row: RLS shows only the workers seen in the last 30 days
+    return [w ? `${name}: offline since ${when(w.stopped_at || w.last_seen)}` : `${name}: offline`, false, false];
   }
-  function banner() {  // one line for each of the user's machines
+  function banner() {  // a line for each of the user's machines that is offline or stopping; the machines panel lists all
     const box = $("#harpor-banner");
     if (!box || !access) return;
-    const lines = [...machines].map(([id, name]) => machineLine(name, own.get(id)));
+    const lines = [...machines].map(([id, name]) => machineLine(name, own.get(id))).filter(([, on, stopping]) => !on || stopping);
     const key = JSON.stringify(lines);
     if (box.dataset.lines === key) return;  // a status region: only a change is read out
     box.dataset.lines = key;
-    box.replaceChildren(...lines.map(([text, on]) => el("p", { class: on ? "on" : "off" }, text)));
+    box.replaceChildren(...lines.map(([text, on]) => el("p", { class: on ? "stopping" : "off" }, text)));
     box.hidden = !lines.length;
   }
-  // The panel about the user's GPU machines, where the tunnel page has its upload area: how jobs get here, each
-  // machine with its state, and how to set one up.
+  // The panel about the user's GPU machines, where the tunnel page has its upload area: each machine with its state
+  // and the keys it holds. site.py adds the link to help.html#machine, which says how to set one up.
   function ownPanel() {
     const box = $("#harpor-own");
     if (!box || !access || !access.approved) return;
     box.hidden = false;
     const list = [...machines].map(([id, name]) => {
       const w = own.get(id), keys = isOnline(w) ? (w.local_keys || []).map((a) => PROVIDER[a]).filter(Boolean) : [];
-      const state = machineLine(name, w)[0].slice(name.length + 2);  // "online", or "offline since ... again."
-      return el("li", {}, el("b", {}, name), ": " + state + (state.endsWith(".") ? "" : "."),
-        keys.length ? ` It holds the ${keys.join(" and ")} key, so its jobs need no key from this page.` : null);
+      const state = machineLine(name, w)[0].slice(name.length + 2);  // "online", "offline since Oct 24 05:35", ...
+      return el("li", {}, el("b", {}, name), `: ${state}.`,
+        keys.length ? ` Has its own ${keys.join(" and ")} key${keys.length > 1 ? "s" : ""}.` : null);
     });
-    $("#harpor-machines").replaceChildren(...(list.length ? list : [el("li", { class: "hint" }, "No machine yet.")]));
-    if (box.dataset.drawn === "1") return;
-    $("#harpor-ownnote").replaceChildren(...OWN_ONLY.map((x) => typeof x === "string" ? x : el("code", {}, x[0])));
-    $("#harpor-howto").open = !machines.size;  // open at first while there is none
-    box.dataset.drawn = "1";
+    $("#harpor-machines").replaceChildren(...(list.length ? list : [el("li", { class: "hint" }, "No machines yet.")]));
   }
   // T.keyless: a job on a machine whose live worker holds that agent's key needs no key from the page.
   function keyless(id, agent) {
@@ -210,16 +209,16 @@
   }
   function waiting() {  // signed in, not approved: the request-access box, once a day
     panel("waiting");
-    if (access && access.request_at) say($("#harpor-requestmsg"), `You sent a request on ${when(access.request_at)}.`, true);
+    if (access && access.request_at) say($("#harpor-requestmsg"), `Request sent ${when(access.request_at)}.`, true);
     $("#harpor-request").onsubmit = async (e) => {
       e.preventDefault();
       $("#harpor-send").disabled = true;
       const r = await q(sb.rpc("request_access", { p_note: $("#harpor-note").value.trim() })).catch(() => ({ error: { message: OFFLINE } }));
       $("#harpor-send").disabled = false;
-      say($("#harpor-requestmsg"), r.error ? plain(r.error.message) : "Sent. The site's owner reads it and approves accounts by hand.", !r.error);
+      say($("#harpor-requestmsg"), r.error ? plain(r.error.message) : "Request sent.", !r.error);
     };
   }
-  // The agent radios: only the agents the account may use (site.py has already removed "No agent").
+  // The agent radios: only the agents the account may use (site.py has already removed the "None" agent).
   function agentRadios() {
     const radios = [...document.querySelectorAll("input[name=agent]")];
     for (const r of radios) {
@@ -479,13 +478,13 @@
       if ("api_key" in b || key) b.api_key = null;
       if (live && (w.local_keys || []).includes(agent)) delete b.key_later;  // the machine reads its own key file
       else if (live && key) {
-        if (!KEY.test(key)) return reply(400, { detail: "an API key is one word of letters, digits, - and _" });
+        if (!KEY.test(key)) return reply(400, { detail: "Not a valid API key." });
         const bad = keyKindError(key, agent);
         if (bad) return reply(400, { detail: bad });
         sealed = await seal(key, id, user.id, agent, w);
       } else if (!live) {
         const who = machineName(row.machine_id) + (isOnline(w) ? " stops soon" : " is offline");
-        if (key) note = `${who}, so the key was not sent. The job asks for it when it needs it.`;
+        if (key) note = `Key not sent: ${who}. The job will ask for it later.`;
         if (route !== "overrides") b.key_later = true;
       }
     }
@@ -581,7 +580,7 @@
   async function tFetch(url, opts = {}) {
     try {
       if (/^https?:\/\//.test(url)) return await fetch(url, opts);  // a signed Storage URL
-      if (url.startsWith(MISSING)) return reply(404, { detail: "the file is not on the site (yet)" });
+      if (url.startsWith(MISSING)) return reply(404, { detail: "File not on the site yet." });
       const u = new URL(url, location.href), m = (opts.method || "GET").toUpperCase();
       const p = u.pathname.replace(/^.*?\/api\//, "api/").split("/");  // any prefix before /api/: the site's folder
       const [api, jobs, id, sub] = p;
@@ -722,11 +721,11 @@
     events: (url) => new RelayEventSource(String(url).split("/")[3]),  // /api/jobs/<id>/events
     live: LIVE,
     keyless,
-    noJobs: "No jobs yet. Add a file in HARPOR on your GPU machine, and its job shows here.",
+    noJobs: "No jobs yet. Add a file on your GPU machine.",
     ready: new Promise((resolve) => { readyFn = resolve; }),
-    liveLog: "live log (via Supabase)",
+    liveLog: "live log",
     offline: OFFLINE,
-    unauthorized: "You are signed out. Reload the page to sign in again.",
+    unauthorized: "Signed out. Reload to sign in.",
   };
   gate().catch(() => {
     $("#conn").hidden = false;

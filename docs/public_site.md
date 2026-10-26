@@ -22,8 +22,16 @@ Where the code is:
 |---|---|
 | Database | `supabase/migrations/` (six files), `supabase/seed.sql` and `supabase/config.toml` (local stack only) |
 | Worker | `gator/webapp/worker.py`, `relay.py`, `supa.py`, `keybox.py` and `session.py` (the worker's sign-in and commands) |
-| Page | `gator/webapp/static/supa.js`, the transport seam in `static/app.js`, and `gator/webapp/site.py` |
-| Tests | `tests/test_supabase_sql.py` with `tests/pgcheck/`, `test_webapp_supa.py`, `test_webapp_keybox.py`, `test_webapp_relay.py`, `test_webapp_worker.py`, `test_webapp_session.py`, `test_webapp_contract.py`, `test_webapp_supa_js.py`, `test_site.py` and `fake_supabase.py` |
+| Page | `gator/webapp/static/supa.js`, the transport seam in `static/app.js`, `static/help.html` and `gator/webapp/site.py` |
+| Tests | `tests/test_supabase_sql.py` with `tests/pgcheck/`, `test_webapp_supa.py`, `test_webapp_keybox.py`, `test_webapp_relay.py`, `test_webapp_worker.py`, `test_webapp_session.py`, `test_webapp_contract.py`, `test_webapp_supa_js.py`, `test_site.py`, `test_help_page.py` and `fake_supabase.py` |
+
+Help for users is in one file, `static/help.html`. The server serves it at `/help.html`, and `site.py` builds the
+public site's copy. The build puts the public text of `site.py`'s `HELP_PUBLIC` in place of each block that the file
+marks `<!-- local:NAME -->`: the upload, the SSH tunnel, the `?token=` link and the agent "None" go, and the sections
+on the account, setting up a machine and the machines' status come in. The header's Help link opens the section of
+the screen that shows, in a new tab. On the public jobs list, the machines panel lists each machine with its state,
+and its "Set up a machine" link opens the setup steps on the help page. The banner under the header shows only the
+machines that are offline or stopping.
 
 ## What the worker does
 
@@ -275,10 +283,8 @@ The public site runs GPT-6-Astra (`astra`) and Claude Opus 5.5 (`opus`), each wi
 OpenAI key for astra and an Anthropic key for opus. The agent "none" stays in the tunnel mode. The owner can
 narrow `access.agents` to `{opus}` or `{astra}` for one user.
 
-GPT-6-Astra runs the Codex CLI in a container that can reach the network. Text in your video or images, such
-as a sign or a label, could steer it to run commands that reach the network. These commands run on your
-machine. Claude Opus 5.5 runs its shell with no network access. If this matters to you, choose Opus. Each job
-uses your own API key, and your provider bills you for it.
+GPT-6-Astra runs the Codex CLI in a container that can reach the network, and Claude Opus 5.5 runs its shell
+with no network access. The help page's agent section (`help.html#agent`) says what this means for users.
 
 ## Limits
 

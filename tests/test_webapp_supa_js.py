@@ -347,9 +347,9 @@ def test_tunnel_page_has_no_transport_and_routes_at_once():
     assert out["transport"] == "undefined" and out["client"] == 0 and out["pub"] is False
     assert out["keyless"] == [False, False] and out["url"] == "/api/jobs/j/file/run/posed.glb" and out["live"] is True
     assert out["liveLog"] == "live log" and out["offline"] == "Cannot reach the server. Is the SSH tunnel up?"
-    assert out["unauthorized"] == "not logged in: open the URL with ?token= that the server printed"
+    assert out["unauthorized"] == "Not logged in. Open the ?token= link the server printed."
     assert out["fetched"] == [{"url": "/api/jobs", "method": "GET"}] and out["routing"] is True and out["xhr"] == "function"
-    assert out["empty"] == "No jobs yet. Upload a video, a rosbag or a Stray Scanner export of one object to start."
+    assert out["empty"] == "No jobs yet."
 
 
 def test_app_js_list_shows_where_and_the_queue_place():
@@ -363,13 +363,16 @@ def test_app_js_list_shows_where_and_the_queue_place():
                           ("running", {"where": "on lab-box", "deletable": True}), ("running", {})]]
     out = run_js("""
         renderJobs(""" + json.dumps(rows) + """);
-        out($("#jobs tbody").kids.map((tr) => ({ act: tr.cls.has("act"), badge: text(tr.kids[4]), hint: text(tr.kids[1].kids[1] || ""),
-          del: text(tr.kids[5]), thumb: tr.kids[0].kids[0].attrs.src })));
+        const btn = (td) => td.kids.find((k) => typeof k === "object");  // the trash can button, when the row has one
+        out($("#jobs tbody").kids.map((tr) => ({ act: tr.cls.has("act"), badge: text(tr.kids[3]), hint: text(tr.kids[1].kids[1] || ""),
+          del: btn(tr.kids[5]) ? btn(tr.kids[5]).attrs.title : "", label: btn(tr.kids[5]) ? btn(tr.kids[5]).attrs["aria-label"] : "",
+          icon: btn(tr.kids[5]) ? btn(tr.kids[5]).kids[0].tag : "", thumb: tr.kids[0].kids[0].attrs.src })));
         """, config=None)
     assert [r["badge"] for r in out] == ["queued (2nd)", "queued (11th)", "queued (23rd)", "queued", "needs review", "failed",
                                          "uploaded", "uploading", "uploading", "running", "running"]
     assert [r["act"] for r in out] == [False] * 4 + [True, True] + [False] * 5
     assert [r["del"] for r in out] == ["", "", "", "", "Delete", "Delete", "Delete", "", "Delete", "Delete", ""]
+    assert out[4]["label"] == "Delete review.mp4" and out[4]["icon"] == "svg"  # a trash can, named for screen readers
     assert out[0]["hint"] == "video, on lab-box" and out[4]["hint"] == "video, on desk-pc" and out[1]["hint"] == "video"
     assert out[0]["thumb"] == "/api/jobs/a/thumb/0"
 
@@ -391,9 +394,9 @@ def test_app_js_job_page_where_and_queue_place():
         out({ page, queued: text($("#jstatus").kids[0]), where: text($("#where")), title: document.title });
         """, setup='net["/api/jobs/j"] = [200, ' + json.dumps(job) + "];", config=None)
     assert out["page"]["jid"] == "job j, on lab-box" and out["page"]["es"] is False
-    assert out["page"]["status"].startswith("uploaded Uploaded") and out["page"]["next"] == ""
-    assert out["page"]["where"] == "/ chair.mp4uploaded" and out["page"]["title"] == "uploaded · chair.mp4 · HARPOR"
-    assert out["queued"] == "queued (2nd)" and out["where"] == "/ chair.mp4queued (2nd)"
+    assert out["page"]["status"] == "Uploaded" and out["page"]["next"] == ""
+    assert out["page"]["where"] == "/ chair.mp4" and out["page"]["title"] == "uploaded · chair.mp4 · HARPOR"
+    assert out["queued"] == "queued (2nd)" and out["where"] == "/ chair.mp4"  # the status shows under the title only
     assert out["title"] == "Queued · chair.mp4 · HARPOR"
 
 
@@ -533,83 +536,73 @@ def test_account_waiting_for_approval_can_request_access():
         """, setup=account(approved=False) + "db.rpc.request_access = () => ({ data: 'sent' });")
     assert out["waiting"] is False and out["signin"] is True and out["email"] == "ana@example.org" and out["account"] is False
     assert out["rpc"] == [["request_access", {"p_note": "I build robot props for the lab."}]]
-    assert out["msg"] == "Sent. The site's owner reads it and approves accounts by hand." and out["own"] is True
+    assert out["msg"] == "Request sent." and out["own"] is True
     assert out["read"] == [["access", "approved,agents,max_result_bytes,request_at"], ["settings", "worker_online_s,max_machines"]]
 
 
 def test_approved_account_gets_the_machine_panel():
-    """Approved: the machines panel, where the tunnel page has its upload area. Its note says that jobs run on the
-    user's own machines and that inputs are added there (the commands as code); the how-to is open while there is no
-    machine; each machine shows its state and the keys it holds. Agent radios outside access.agents are disabled and
+    """Approved: the machines panel, where the tunnel page has its upload area: each machine with its state and the
+    keys it holds (site.py adds the link to help.html#machine). Agent radios outside access.agents are disabled and
     hidden. The account menu shows the storage."""
     code = """
         await advance(0);
-        const radios = lists["input[name=agent]"], note = $("#harpor-ownnote");
-        out({ own: $("#harpor-own").hidden, note: text(note), codes: note.kids.filter((k) => k.tag === "code").map(text),
-          machines: $("#harpor-machines").kids.map(text), howto: $("#harpor-howto").open, storage: $("#harpor-storage").textContent,
+        const radios = lists["input[name=agent]"];
+        out({ own: $("#harpor-own").hidden, machines: $("#harpor-machines").kids.map(text), storage: $("#harpor-storage").textContent,
           radios: radios.map((r) => [r.value, r.disabled, r.parentElement.hidden, r.checked]),
           routed: calls.some((c) => c.table === "jobs") });
         """
     none = run_js(code, setup=account(agents=("opus",), machines=()))
-    assert none["own"] is False and none["howto"] is True and none["routed"] is True
-    assert none["note"] == ("Jobs run on your own GPU machines. Start HARPOR on a machine with python -m gator.webapp "
-                            "--worker, and its jobs show here. To add a job, add its file on that machine: in the "
-                            "machine's own HARPOR page, or with python -m gator.webapp.worker add PATH. The input files "
-                            "stay on the machines.")
-    assert none["codes"] == ["python -m gator.webapp --worker", "python -m gator.webapp.worker add PATH"]
-    assert none["machines"] == ["No machine yet."] and none["storage"] == "Storage: 120 of 2,048 MB"
+    assert none["own"] is False and none["routed"] is True
+    assert none["machines"] == ["No machines yet."] and none["storage"] == "Storage: 120 of 2,048 MB"
     assert none["radios"] == [["astra", True, True, False], ["opus", False, False, True]]
     two = run_js(code, setup=account(workers=[worker(local_keys=["opus"], ends_in=None)]))
-    assert two["howto"] is False and two["note"] == none["note"]
-    assert two["machines"] == ["lab-box: online. It holds the Anthropic key, so its jobs need no key from this page.",
-                               "desk-pc: has not run in the last 30 days. Its jobs wait until it runs again."]
+    assert two["machines"] == ["lab-box: online. Has its own Anthropic key.", "desk-pc: offline."]
     assert two["radios"] == [["astra", False, False, True], ["opus", False, False, False]]
+    both = run_js(code, setup=account(machines=MACHINES[:1], workers=[worker(local_keys=["astra", "opus"], accepting=False)]))
+    assert both["machines"] == [f"lab-box: stopping at {hm(worker()['ends_at'])}. Has its own OpenAI and Anthropic keys."]
 
 
-def test_banner_has_one_line_per_machine():
-    """The banner: one line for each of the user's machines, in the order they were added: online (until the end of
-    its Slurm job), stopping soon (builds wait), offline since when, or not run in the last 30 days. No machine, no
-    banner."""
+def test_banner_shows_the_machines_that_are_offline_or_stopping():
+    """The banner: one line for each of the user's machines that is offline or stopping, in the order they were added:
+    stopping at the end of its Slurm job, or soon (builds wait); offline since when, or offline (not run in the last 30
+    days). An online machine has no line (the machines panel lists it); with none to show, no banner. A stopping
+    machine's line has the warning mark, an offline one the hollow mark."""
     def lines(workers, machines=MACHINES[:1]):
         return run_js("await advance(0); out({ lines: $('#harpor-banner').kids.map((p) => [text(p), p.className]), "
                       "hidden: $('#harpor-banner').hidden });", setup=account(machines=machines, workers=workers))
-    on = worker(ends_in=7200)
-    assert lines([on])["lines"] == [[f"lab-box: online until {hm(on['ends_at'])}", "on"]]
-    assert lines([worker(ends_in=None)])["lines"] == [["lab-box: online", "on"]]
+    for on in (worker(ends_in=7200), worker(ends_in=None)):
+        assert lines([on]) == {"lines": [], "hidden": True}
     ending = worker(accepting=False, ends_in=1800)
-    assert lines([ending])["lines"] == [[f"lab-box: stops at {hm(ending['ends_at'])}; new builds wait until it runs again", "on"]]
-    assert lines([worker(accepting=False, ends_in=None)])["lines"][0][0] == ("lab-box: stops soon; new builds wait until "
-                                                                              "it runs again")
+    assert lines([ending]) == {"lines": [[f"lab-box: stopping at {hm(ending['ends_at'])}", "stopping"]], "hidden": False}
+    assert lines([worker(accepting=False, ends_in=None)])["lines"] == [["lab-box: stopping soon", "stopping"]]
     gone = worker(seen_ago=4000, started_ago=9000)
     out = lines([gone, worker(W2, MACHINE2, seen_ago=5)], machines=MACHINES)
-    assert out["lines"] == [[f"lab-box: offline since {when(gone['last_seen'])}. Its jobs wait until it runs again.", "off"],
-                            ["desk-pc: online until " + hm(worker()["ends_at"]), "on"]]
+    assert out["lines"] == [[f"lab-box: offline since {when(gone['last_seen'])}", "off"]]
     away = worker(seen_ago=600, stopped=True)
-    assert lines([away])["lines"] == [[f"lab-box: offline since {when(away['stopped_at'])}. Its jobs wait until it runs "
-                                       "again.", "off"]]
-    assert lines([])["lines"] == [["lab-box: has not run in the last 30 days. Its jobs wait until it runs again.", "off"]]
+    assert lines([away])["lines"] == [[f"lab-box: offline since {when(away['stopped_at'])}", "off"]]
+    assert lines([])["lines"] == [["lab-box: offline", "off"]]
     assert lines([], machines=()) == {"lines": [], "hidden": True}
+    css = (server.STATIC / "style.css").read_text()
+    assert ".banner p.stopping::before { background: var(--warn);" in css and ".banner p.on" not in css
 
 
 def test_banner_and_machine_panel_keep_still_between_reads():
-    """The read every 20 s draws the banner (a status region) only when a line changes, leaves the how-to as the user
-    left it, and finds a machine that was added after the page opened."""
+    """The read every 20 s draws the banner (a status region) only when a line changes, and finds a machine that was
+    added after the page opened."""
     out = run_js("""
         await advance(0);
         const first = $("#harpor-banner").kids[0];
-        $("#harpor-howto").open = true;
         await advance(41000);
-        const same = $("#harpor-banner").kids[0] === first, open = $("#harpor-howto").open;
+        const same = $("#harpor-banner").kids[0] === first;
         db.tables.workers[0].stopped_at = new Date(Date.now()).toISOString();
         db.tables.machines.push({ id: "cccccccc-0000-4000-8000-000000000009", name: "new-box", created_at: new Date(Date.now()).toISOString() });
         await advance(21000);
-        out({ same, open, reads: calls.filter((c) => c.table === "workers").length, now: $("#harpor-banner").kids.map(text),
+        out({ same, reads: calls.filter((c) => c.table === "workers").length, now: $("#harpor-banner").kids.map(text),
           panel: $("#harpor-machines").kids.map(text) });
-        """, setup=account(machines=MACHINES[:1], workers=[worker(seen_ago=-100)]))
-    assert out["same"] is True and out["open"] is True and out["reads"] >= 4
-    assert out["now"][0].startswith("lab-box: offline since ") and len(out["now"]) == 2
-    assert out["now"][1] == "new-box: has not run in the last 30 days. Its jobs wait until it runs again."
-    assert out["panel"][1] == "new-box: has not run in the last 30 days. Its jobs wait until it runs again."
+        """, setup=account(machines=MACHINES[:1], workers=[worker(seen_ago=-100, accepting=False)]))
+    assert out["same"] is True and out["reads"] >= 4
+    assert out["now"][0].startswith("lab-box: offline since ") and out["now"][1:] == ["new-box: offline"]
+    assert out["panel"][0].startswith("lab-box: offline since ") and out["panel"][1:] == ["new-box: offline."]
 
 
 def test_a_live_machine_stays_found_behind_many_restarts_of_another():
@@ -622,13 +615,13 @@ def test_a_live_machine_stays_found_behind_many_restarts_of_another():
     machine = worker(started_ago=40 * 86400, seen_ago=2, public_key=pub)
     out = run_js(f"""
         await advance(0);
-        const lines = $("#harpor-banner").kids.map(text);
+        const lines = $("#harpor-machines").kids.map(text);
         setTimeout(() => answer(7, 200, {{ status: "queued" }}), 1000);
         await settle(T.fetch("/api/jobs/{JOB}/continue", {{ method: "POST", body: JSON.stringify({{ api_key: "sk-ant-key1" }}) }}));
         out({{ lines, queries: calls.filter((c) => c.table === "workers").map((c) => [c.cols, c.filters, c.ord, c.lim]),
           sent: relayed.map((a) => [a.p_body, (a.p_sealed || {{}}).worker_id || null]) }});
         """, setup=relay_setup(restarts + [machine], [job_row()], [view()]))
-    assert out["lines"][0] == "lab-box: online until " + hm(machine["ends_at"])
+    assert out["lines"][0] == f"lab-box: online until {hm(machine['ends_at'])}."
     assert out["lines"][1].startswith("desk-pc: offline since ")
     assert out["queries"][0] == ["id,machine_id,public_key,local_keys,started_at,last_seen,ends_at,accepting,stopped_at", [],
                                  ["last_seen", -1], 50]
@@ -666,7 +659,8 @@ def test_job_list_rows_thumbnails_and_missing_files():
         out({{ list, thumb: T.url("/api/jobs/{JOB}/thumb/0"), other: T.url("/api/jobs/{JOB2}/thumb/0"),
           missing: [miss.status, await miss.json()], cols: calls.filter((c) => c.table === "jobs").map((c) => c.cols),
           signed: calls.filter((c) => c.sign).map((c) => c.seconds),
-          drawn: $("#jobs tbody").kids.map((tr) => [text(tr.kids[1].kids[1] || ""), text(tr.kids[5])]) }});
+          drawn: $("#jobs tbody").kids.map((tr) => [text(tr.kids[1].kids[1] || ""),
+            (tr.kids[5].kids.find((k) => typeof k === "object") || {{ attrs: {{}} }}).attrs.title || ""]) }});
         """, setup=setup)
     assert out["list"][0]["created"] == local("2026-10-24T14:42:05+00:00").strftime("%Y-%m-%dT%H:%M:%S")
     assert [(x["id"], x["status"], x["video"], x["kind"], x["where"], x["queue_pos"], x["deletable"]) for x in out["list"]] == [
@@ -675,7 +669,7 @@ def test_job_list_rows_thumbnails_and_missing_files():
         (JOB3, "done", "bag.mcap", "rosbag", "on lab-box", None, False)]
     assert out["thumb"].startswith("https://abcdefghijklmnop.supabase.co/storage/v1/object/sign/job-files/")
     assert out["other"] == "data:,missing:frames%2Fthumbs%2F0.jpg"
-    assert out["missing"] == [404, {"detail": "the file is not on the site (yet)"}]
+    assert out["missing"] == [404, {"detail": "File not on the site yet."}]
     assert out["cols"] and set(out["cols"]) == {"id,created_at,status,note,prompt,queue_pos,input_name,input_kind,input_bytes,machine_id"}
     assert 3600 in out["signed"]
     assert out["drawn"] == [["video, on lab-box", ""], ["video, on desk-pc", "Delete"], ["rosbag, on lab-box", "Delete"]]
@@ -688,8 +682,8 @@ def test_an_empty_list_says_where_jobs_come_from():
         await advance(0);
         out({ xhr: "xhr" in T, text: text($("#jobs tbody")), noJobs: T.noJobs });
         """, setup=account())
-    assert out == {"xhr": False, "text": "No jobs yet. Add a file in HARPOR on your GPU machine, and its job shows here.",
-                   "noJobs": "No jobs yet. Add a file in HARPOR on your GPU machine, and its job shows here."}
+    assert out == {"xhr": False, "text": "No jobs yet. Add a file on your GPU machine.",
+                   "noJobs": "No jobs yet. Add a file on your GPU machine."}
 
 
 def test_job_view_signs_its_files_and_download_links():
@@ -875,7 +869,7 @@ def test_a_machine_that_holds_the_key_gets_none_from_the_page():
 def test_with_the_machine_offline_a_request_waits_as_pending_with_a_withdraw_button():
     """With the job's machine offline the key is not sent: the body says key_later (not for overrides), relay() keeps
     the request pending, the page answers 202, and the job page's line says what waits and for which machine, with
-    Withdraw (rpc withdraw_request)."""
+    Withdraw (rpc withdraw_request). Each line names the request as its button does."""
     out = run_js(f"""
         await advance(0);
         db.online = false;
@@ -889,20 +883,26 @@ def test_with_the_machine_offline_a_request_waits_as_pending_with_a_withdraw_but
         location.hash = "#/job/{JOB2}";
         await T.fetch("/api/jobs/{JOB2}");
         await T.fetch("/api/jobs/{JOB2}/start", {{ method: "POST", body: JSON.stringify({{ agent: "astra", api_key: "sk-x1" }}) }});
-        out({{ status: r.status, body: await r.json(), line, hidden, after, other: $("#harpor-pending").kids.map(text),
+        const other = $("#harpor-pending").kids.map(text);
+        location.hash = "#/job/{JOB}";
+        await T.fetch("/api/jobs/{JOB}/parts", {{ method: "POST", body: JSON.stringify({{ list: [] }}) }});
+        await T.fetch("/api/jobs/{JOB}/calibration", {{ method: "DELETE" }});
+        const named = $("#harpor-pending").kids.map((p) => text(p).split(",")[0]);
+        out({{ status: r.status, body: await r.json(), line, hidden, after, other, named,
           relayed: relayed.map((a) => [a.p_route, a.p_body, a.p_sealed]), withdrawn: calls.filter((c) => c.rpc === "withdraw_request").map((c) => c.args) }});
         """, setup=relay_setup([worker(seen_ago=999, started_ago=2000)],
                                [job_row(), job_row(JOB2, "ready", MACHINE2)], [view()]),
         href=f"https://x.pages.dev/#/job/{JOB}")
     assert out["status"] == 202 and out["body"] == {"status": "pending", "request": 7}
     assert re.fullmatch(r"Build, sent \d\d:\d\d: waits for lab-box Withdraw", out["line"][0])
-    assert out["line"][1] == "lab-box is offline, so the key was not sent. The job asks for it when it needs it."
+    assert out["line"][1] == "Key not sent: lab-box is offline. The job will ask for it later."
     assert out["hidden"] is False and out["withdrawn"] == [{"p_id": 7}] and out["after"] is True
     assert out["relayed"][0] == ["continue", {"api_key": None, "key_later": True}, None]
     assert out["relayed"][1] == ["overrides", {"locked": [], "api_key": None}, None]
     assert out["relayed"][2] == ["start", {"agent": "astra", "api_key": None, "key_later": True}, None]
     assert re.fullmatch(r"Start, sent \d\d:\d\d: waits for desk-pc Withdraw", out["other"][0])
-    assert out["other"][1] == "desk-pc is offline, so the key was not sent. The job asks for it when it needs it."
+    assert out["other"][1] == "Key not sent: desk-pc is offline. The job will ask for it later."
+    assert out["named"] == ["Select again", "Build", "Remove calibration"]
 
 
 def test_a_machine_that_stops_soon_gets_no_key_for_a_build():
@@ -919,7 +919,7 @@ def test_a_machine_that_stops_soon_gets_no_key_for_a_build():
         """, setup=relay_setup([worker(accepting=False, public_key=p256()[1])], [job_row()], [view()]),
         href=f"https://x.pages.dev/#/job/{JOB}")
     assert out["status"] == 202 and re.fullmatch(r"Build, sent \d\d:\d\d: waits for lab-box Withdraw", out["line"][0])
-    assert out["line"][1] == "lab-box stops soon, so the key was not sent. The job asks for it when it needs it."
+    assert out["line"][1] == "Key not sent: lab-box stops soon. The job will ask for it later."
     assert out["relayed"] == [["continue", {"api_key": None, "key_later": True}, None], ["cancel", {}, None]]
     assert out["cancel"] == [200, {"status": "cancelled"}]
 
@@ -954,8 +954,8 @@ def test_an_answer_that_comes_later_shows_on_the_job_page_once():
 
 def test_relay_refusals_and_a_machine_that_restarted():
     """A key of the wrong provider is refused in the page (jobs.key_kind_error) and never sent; relay()'s refusals keep
-    their message with a matching status; worker_restarted and worker_offline read the workers again and send once
-    more, and a second refusal shows without its worker_ prefix."""
+    their message with a matching status; worker_restarted, worker_offline and worker_ending read the workers again and
+    send once more, and a second refusal says in plain words that the machine went or stops, or that it restarted."""
     out = run_js(f"""
         await advance(0);
         const send = async (route, body) => {{ const r = await settle(T.fetch("/api/jobs/{JOB}/" + route, {{ method: "POST", body: JSON.stringify(body) }})); return [r.status, (await r.json()).detail || null]; }};
@@ -978,11 +978,16 @@ def test_relay_refusals_and_a_machine_that_restarted():
         db.refuse = ["worker_offline: the machine that runs this job is offline; send the request without the key",
           "worker_offline: the machine that runs this job is offline; send the request without the key"];
         got.push(await send("continue", {{ api_key: "sk-ant-ok" }}));
+        for (const why of ["worker_ending: the machine stops soon; send the request without the key",
+          "worker_restarted: the machine restarted; paste the key again"]) {{
+          db.refuse = [why, why];
+          got.push(await send("continue", {{ api_key: "sk-ant-ok" }}));
+        }}
         out({{ got, before, restarted }});
         """, setup=relay_setup([worker(public_key=p256()[1])], [job_row()], [view()]))
     assert out["got"][:4] == [[400, jobs.key_kind_error("sk-ant-abc", "astra")], [400, jobs.key_kind_error("sk-abc", "opus")],
                               [400, jobs.key_kind_error("pk-abc", "astra")],
-                              [400, "an API key is one word of letters, digits, - and _"]]
+                              [400, "Not a valid API key."]]
     assert out["before"] == 0
     assert out["got"][4:11] == [[429, "too many requests: at most 60 an hour"],
                                 [409, "the job is running; wait until it stops, or cancel it"],
@@ -992,7 +997,8 @@ def test_relay_refusals_and_a_machine_that_restarted():
                                 [403, "your account is waiting for approval"], [404, "no such job"]]
     # two reads of the workers (before the request, and once after the refusal), one query each
     assert out["got"][11] == [200, None] and out["restarted"] == {"sent": 2, "reads": 2, "sealed": [True, True]}
-    assert out["got"][12] == [503, "the machine that runs this job is offline; send the request without the key"]
+    assert out["got"][12:] == [[503, "The machine went offline. Try again."], [503, "The machine is stopping. Try again."],
+                               [503, "The machine restarted. Paste the key again."]]
 
 
 def test_the_sealed_agent_is_the_one_the_server_will_run():
@@ -1099,7 +1105,7 @@ def test_offline_and_signed_out_reads_say_so():
         out({ off, out1, conn: $("#conn").textContent });
         """, setup=account())
     assert out == {"off": "Cannot reach Supabase. Check your connection.",
-                   "out1": "You are signed out. Reload the page to sign in again.",
+                   "out1": "Signed out. Reload to sign in.",
                    "conn": "Cannot reach Supabase. Check your connection."}
 
 

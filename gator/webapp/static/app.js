@@ -1,7 +1,7 @@
 // HARPOR web app UI: jobs list and upload; a job page with the panels that wait for the user (camera topic, review of
 // the views and of the part list, a LiDAR failure) above five tabs: Results (the viewers and the facts), Downloads (the
 // files, by group), Inputs (the input's facts, its preview video and the views the build used), Settings (the build
-// settings, with LiDAR for the metric scale) and Stages and log.
+// settings, with LiDAR for the metric scale) and Log. The header's Help link opens help.html at the screen's section.
 // Plain DOM code, no build step. The API key is only read from the password fields and sent once.
 "use strict";
 
@@ -20,38 +20,27 @@ const STAGE_LABEL = { topics: "camera topics", frames: "frame analysis", extract
   prep: "prepare views", da3: "depth (Depth Anything 3)", lidar: "metric scale (LiDAR)", select: "view selection",
   sam3d: "mesh (MV-SAM3D)", place: "pose and scale", propose: "part list", parts: "split into parts", agent: "agent refinement", align: "align upright", vomp: "materials (VoMP)",
   mjcf: "MuJoCo model", usd: "USD", urdf: "URDF", package: "results.zip" };
-// The agent's time budget (agent_step.BUDGET_S): it sets the joints of an articulated object in 900 s.
-const AGENT_BUDGET_S = { refinement: 600, articulation: 900 };
-// A stage's label; the agent's names its task and, unless the stage is skipped, its time budget.
-const stageLabel = (name, articulated, skipped) => name !== "agent" ? STAGE_LABEL[name] || ""
-  : (articulated ? "agent sets the joints" : STAGE_LABEL.agent) +
-    (skipped ? "" : `, ${AGENT_BUDGET_S[articulated ? "articulation" : "refinement"] / 60} min budget`);
+// A stage's label; the agent's names its task.
+const stageLabel = (name, articulated) => name !== "agent" ? STAGE_LABEL[name] || ""
+  : articulated ? "agent sets the joints" : STAGE_LABEL.agent;
 const PARTS_MODES = ["vlm", "vlm_edit", "user"];  // steps.PARTS_MODES
 const JOINTS = ["revolute", "prismatic", "fixed", "unknown"];  // gator.parts.propose.JOINTS
 // agent_result.verdict of an articulation (the agent sets joints); a refinement's verdicts show as they are.
-const VERDICT = { articulated: "articulated: the parts have joints", unchanged: "unchanged: the parts have no joints",
-  needs_review: "needs review" };
-const LIST_STATUS = { review: "needs review", ready: "ready to start", choose_topic: "choose topic" };  // badge text in the jobs list
+const VERDICT = { unchanged: "unchanged (no joints)", needs_review: "needs review" };
+const LIST_STATUS = { review: "needs review" };  // badge text in the jobs list; the others are the status
 const NEEDS_YOU = ["review", "ready", "choose_topic", "failed"];  // the list marks these rows
 // "1st", "2nd", "11th": a queued job's place, from the public site's queue_pos (1 is next).
 const ordinal = (n) => n + ([11, 12, 13].includes(n % 100) ? "th" : ["th", "st", "nd", "rd"][n % 10] || "th");
 const queueText = (status, pos) => status === "queued" && Number.isInteger(pos) && pos > 0 ? `queued (${ordinal(pos)})` : null;
-const NEXT = { choose_topic: "Pick the camera topic below.", ready: "Name the object, check the settings, then Start.",
-  analyzing: "Reading the input. This takes a few seconds to a minute.",
-  queued: "The job waits for the GPU. You can close this page; the job keeps going.",
-  running: "This runs on the GPU node. You can close this page; the job keeps going.",
-  review: "Check the picked views, then Build.",
-  done: "Look at the meshes in the Results tab.",  // the Results tab's first line names the Downloads tab
-  failed: "Read the log of the failed stage, then Retry.", cancelled: "Retry continues from the first stage that is not done.",
-  parts: "Check the part list, edit it if it is wrong, then Build with these parts.",  // a review of the part list
+// The next step under the status; a status without one has none.
+const NEXT = { ready: "Name the object, then Start.", queued: "You can close this page.", running: "You can close this page.",
+  review: "Check the picked views, then Build.", failed: "Check the log, then Retry.",
+  parts: "Check the part list, then Build.",  // a review of the part list
   // The lidar stage failed (a rosbag); ... that has a calibration.
-  lidar: "Upload a calibration in the Settings tab, then Retry. Or turn LiDAR off there and build again.",
-  lidar_cal: "Replace the calibration in the Settings tab, then Retry. Or turn LiDAR off there and build again.",
+  lidar: "In Settings, upload a calibration and Retry, or turn LiDAR off and build again.",
+  lidar_cal: "In Settings, replace the calibration and Retry, or turn LiDAR off and build again.",
   // A Stray capture takes no calibration, and a retry reads the same depth and masks again.
-  lidar_stray: "Turn LiDAR off or change the views in the Settings tab, then build again. Retry helps only after a file " +
-    "or disk error.",
-  // A failed or cancelled job whose scale ran with another calibration (V.scaleStale).
-  stale: "The calibration changed since the scale was found. Retry starts again from the lidar stage." };
+  lidar_stray: "In Settings, turn LiDAR off or change the views, then build again." };
 const KIND_LABEL = { video: "video", rosbag: "rosbag", stray: "Stray capture" };  // job.json source kind, in the jobs list
 // How the page reaches its data: the server itself (tunnel mode), or Supabase (static/supa.js, on the public site).
 // Factories, not the globals themselves, so the node test harnesses (no XMLHttpRequest) still load. typeof on the bare
@@ -68,11 +57,11 @@ const T = PUBLIC ? HARPOR_TRANSPORT : {
   events: (url) => new EventSource(url),
   live: ACTIVE,  // the statuses that keep the live view open
   keyless: () => false,
-  noJobs: "No jobs yet. Upload a video, a rosbag or a Stray Scanner export of one object to start.",
+  noJobs: "No jobs yet.",
   ready: Promise.resolve(),
   liveLog: "live log",
   offline: "Cannot reach the server. Is the SSH tunnel up?",
-  unauthorized: "not logged in: open the URL with ?token= that the server printed",
+  unauthorized: "Not logged in. Open the ?token= link the server printed.",
 };
 const OFFLINE = T.offline;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -87,22 +76,27 @@ const tabOf = (status) => TAB_OF[status] || "log";
 // The statuses of a job that runs (analyzing, queued, running) count as one for the tabs: a tab picked while the job
 // waits for the GPU stays when it starts.
 const phase = (status) => ACTIVE.includes(status) ? "active" : status;
-// What the Settings and Downloads tabs and the views strip of the Inputs tab say while they have nothing to show.
-const SETTINGS_LATER = "The settings appear here after the app reads the frames.";
-const SETTINGS_BUSY = "You can change the settings when the job stops.";
-const FILES_LATER = "The files appear here when the build has made them.";
-const FILES_BUSY = "The files appear here when the build stops.";  // a build replaces the files as it runs
+// What the Results, Settings and Downloads tabs and the views strip of the Inputs tab say while they have nothing to
+// show. After a failed or cancelled job, Results and Downloads say that it stopped: nothing more comes until Retry or
+// a new build.
+const RESULTS_LATER = "No results yet.";  // index.html's first text
+const RESULTS_STOPPED = "Job stopped before any results.";
+const SETTINGS_LATER = "Available after the input is read.";
+const SETTINGS_BUSY = "Locked while the job runs.";
+const FILES_LATER = "No files yet.";
+const FILES_BUSY = "Files show when the build stops.";  // a build replaces the files as it runs
+const FILES_NONE_STOPPED = "Job stopped before any files.";
 // What the Downloads tab says above its files when results.zip is not one of them: before the build (in review), and
 // after a build that stopped.
-const FILES_PARTIAL = "results.zip and the other files appear here when the build has made them.";
-const FILES_STOPPED = "The build stopped before it made results.zip, so the tab lists only the files that it made.";
+const FILES_PARTIAL = "More files after the build.";
+const FILES_STOPPED = "Build stopped before results.zip.";
 const RESULTS_UNREAD = "Could not read the results: ";  // a result file that does not parse (drawJob)
-const NO_VIEWS = "The views used appear here after the app selects them.";
-// The open job page: id, job, meta, picks, view0, sel, ov (pending overrides), es, state, scaleStale (the LiDAR scale
-// ran with another calibration); tab (the tab shown), pick (the tab the user picked), tabPhase (the phase of the status
-// that the tab follows) and hashTab (the hash's tab when the page opened); logAtEnd and logTop (where the log was
-// left); and input, inputKey, videoKey, video, selected, inputPlaced, inputAsked, placeAsked and overlay (the Inputs
-// tab: renderInput).
+const NO_VIEWS = "No views selected yet.";
+// The open job page: id, job, meta, picks, view0, sel, ov and ov0 (the review's overrides as edited and as saved),
+// cards (the review cards: renderCards), es, state, scaleStale (the LiDAR scale ran with another calibration); tab (the
+// tab shown), pick (the tab the user picked), tabPhase (the phase of the status that the tab follows) and hashTab (the
+// hash's tab when the page opened); logAtEnd and logTop (where the log was left); and input, inputKey, videoKey, video,
+// selected, inputPlaced, inputAsked, placeAsked and overlay (the Inputs tab: renderInput).
 let V = {};
 let listKey = null, upXhr = null;  // the jobs list as last drawn; the running upload
 
@@ -202,7 +196,16 @@ function refocus() {
 
 function show(id) {
   for (const x of ["list", "job"]) $("#" + x).hidden = x !== id;
-  tipClose();  // an open info note of the Results or Downloads tab goes with its page
+  helpAt();
+}
+// The section of help.html that the header's Help link opens: the jobs list's, a waiting panel's (the first one shown,
+// in page order), else the shown tab's. Before app.js routes (the public site's sign-in), the link stays help.html.
+const HELP_AT = { list: "add-job", lidarfail: "lidar", topics: "topics", review: "review", partsreview: "parts",
+  results: "results", downloads: "downloads", inputs: "inputs", settings: "settings", log: "status" };
+function helpAt() {
+  const panel = ["lidarfail", "topics", "review", "partsreview"].find((x) => $("#" + x).hidden === false);
+  const at = $("#list").hidden === false ? "list" : $("#job").hidden === false ? panel || V.tab : null;
+  $("#helplink").setAttribute("href", "help.html" + (HELP_AT[at] ? "#" + HELP_AT[at] : ""));
 }
 // A job page's hash, "#/job/<id>" or "#/job/<id>/<tab>": [id, the tab's name or null]; null for another hash.
 function jobHash(hash) {
@@ -249,10 +252,17 @@ function renderJobs(rows) {
       onerror: (e) => e.target.replaceWith(h("span", { class: "noimg" })) })),
     h("td", { class: "input" }, h("a", { href: "#/job/" + j.id }, j.video), hint(j) ? h("div", { class: "hint" }, hint(j)) : null),
     h("td", { class: "obj" }, j.prompt || ""),
-    h("td", { class: "when", title: j.created.replace("T", " ") }, shortTime(j.created)),
     h("td", { class: "stat" }, badge(j.status, queueText(j.status, j.queue_pos) || LIST_STATUS[j.status])),
+    h("td", { class: "when", title: j.created.replace("T", " ") }, shortTime(j.created)),
     h("td", { class: "acts" }, !deletable(j) ? ""
-      : h("button", { class: "small danger", type: "button", "aria-label": "Delete " + j.video, onclick: () => remove(j) }, "Delete")))));
+      : h("button", { class: "icon danger", type: "button", title: "Delete", "aria-label": "Delete " + j.video,
+        onclick: () => remove(j) }, trashIcon())))));
+}
+function trashIcon() {  // the row's Delete button: a trash can drawn in the text color
+  const svg = s("svg", { viewBox: "0 0 24 24", width: 16, height: 16, "aria-hidden": "true", focusable: "false" });
+  svg.append(s("path", { d: "M4 7h16M10 7V4h4v3M6 7l1 13h10l1-13M10 11v6M14 11v6", fill: "none", stroke: "currentColor",
+    "stroke-width": 1.6, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  return svg;
 }
 // A row's Delete button: not while the job runs or uploads, unless the row says it may go (the public site: a job whose
 // machine is offline).
@@ -269,7 +279,7 @@ async function pollList() {  // the 5 s refresh: draws the list again only when 
 }
 setInterval(pollList, 5000);
 async function remove(j) {
-  if (!confirm(`Delete the job ${j.video}${j.prompt ? " (" + j.prompt + ")" : ""} from ${shortTime(j.created)} and all its files?`)) return;
+  if (!confirm(`Delete ${j.video}${j.prompt ? ` (${j.prompt})` : ""} from ${shortTime(j.created)} and all its files?`)) return;
   try { await api("/api/jobs/" + j.id, { method: "DELETE" }); } catch (e) { say($("#upmsg"), e.message); }
   showList();
 }
@@ -277,9 +287,7 @@ const KINDS = /\.(mp4|mov|m4v|avi|mkv|webm|bag|mcap|db3|zip)$/i;  // jobs.VIDEOS
 function upload(f) {
   if (!f || upXhr) return;
   if (!KINDS.test(f.name)) {
-    say($("#upmsg"), `${f.name} is not a video (.mp4 .mov .m4v .avi .mkv .webm), a rosbag (.bag .mcap .db3) or a Stray ` +
-      "Scanner export (.zip). For a ROS 2 bag folder, upload the .mcap or .db3 file in it. For a Stray Scanner " +
-      "export folder, zip the folder first.");
+    say($("#upmsg"), `${f.name}: file type not supported.`);
     return;
   }
   const xhr = upXhr = T.xhr(), prog = $("#upprog"), t0 = Date.now();
@@ -300,8 +308,8 @@ function upload(f) {
     if (!e.lengthComputable) return;
     prog.value = e.loaded / e.total;
     const rate = e.loaded / Math.max((Date.now() - t0) / 1000, 0.001), left = (e.total - e.loaded) / Math.max(rate, 1);
-    $("#uprate").textContent = `${size(e.loaded)} of ${size(e.total)}, ${Math.round(100 * e.loaded / e.total)}%, ` +
-      `${(rate / 1e6).toFixed(1)} MB/s, about ${fmt(Math.round(left))} left`;  // not a live region: it changes many times a second
+    // not a live region: it changes many times a second
+    $("#uprate").textContent = `${size(e.loaded)} of ${size(e.total)}, about ${fmt(Math.round(left))} left`;
   };
   xhr.onload = () => {
     done();
@@ -329,11 +337,12 @@ window.addEventListener("drop", (e) => e.preventDefault());
 // ---- the job page ----
 
 async function openJob(id, tab) {
-  show("job");
   V = { id, picks: [], view0: null, hashTab: tab || null };
-  // The last job's, until refresh draws this one's: the waiting panels, the tabs and what the tabs show.
+  // The last job's, until refresh draws this one's: the waiting panels, the tabs and what the tabs show. They hide
+  // before show(), so the Help link does not keep the last job's section when this one does not load.
   for (const x of ["review", "partsreview", "lidarfail", "topics", "tabs", ...Object.values(TABS), "resultsnone", "resultsbody",
     "downloadsnone", "downloadsbody", "inputnone", "inputbody", "framesnone", "framesbody"]) $("#" + x).hidden = true;
+  show("job");
   clearInput();
   $("#log").textContent = "";
   $("#logname").textContent = "";
@@ -342,7 +351,7 @@ async function openJob(id, tab) {
 }
 async function refresh() {
   const job = V.job = await api(`/api/jobs/${V.id}`);
-  $("#jtitle").textContent = `${job.video.name}${job.prompt ? " - " + job.prompt : ""}`;
+  fill($("#jtitle"), job.video.name, job.prompt ? [" ", h("span", { class: "jobobj" }, job.prompt)] : null);
   $("#jid").textContent = "job " + job.id + (job.where ? ", " + job.where : "");
   if (T.live.includes(job.status)) openStream();
   // A scale found with another calibration: Retry then starts from lidar (retryFrom).
@@ -350,18 +359,24 @@ async function refresh() {
   renderState({ status: job.status, current: job.current, error: job.error, warnings: job.warnings, key_ok: job.key_ok,
     agent: job.agent, articulated: job.articulated, parts_mode: job.parts_mode, parts_review: job.parts_review,
     stages: job.progress }, false);
-  // The tab follows the status at the end, once its panel is drawn; also when a panel could not be drawn.
-  try { await drawJob(job); } finally { if (V.job === job) followStatus(job.status); }
+  // The tab follows the status at the end, once its panel is drawn; also when a panel could not be drawn. The Help
+  // link follows the waiting panel that shows.
+  try { await drawJob(job); } finally { if (V.job === job) { followStatus(job.status); helpAt(); } }
 }
 async function drawJob(job) {  // refresh's panels: the waiting panels and what the tabs show
   const analyzed = job.stages.frames.status === "done", rosbag = job.source && job.source.kind === "rosbag";
-  // A rosbag job chooses its camera topic when it has several, after a failed frames run, or on "Change the camera topic".
+  // The lidar stage failed: its record (pool/lidar.json, ok false) with the check images; the status line gives the
+  // reason. The panel is drawn first and shows only once drawn, so it does not come late or grow above the tabs.
+  const lidarFail = lidarFailed(job.status, job.progress);
+  if (lidarFail) await renderLidarFail(job).catch((e) => fill($("#lidarfailbody"), h("p", { class: "msg" }, e.message)));
+  $("#lidarfail").hidden = !lidarFail;
+  // A rosbag job chooses its camera topic when it has several, after a failed frames run, or on "Change topic".
   const idle = !ACTIVE.includes(job.status) && !["review", "done"].includes(job.status);
   $("#topics").hidden = !rosbag || !job.stages.topics || job.stages.topics.status !== "done" || !(job.status === "choose_topic" ||
     (idle && (V.pickTopic || (["failed", "cancelled"].includes(job.status) && !analyzed))));
   if (!$("#topics").hidden) await loadTopics(job).catch((e) => { say($("#topicmsg"), e.message); });
   $("#tkeep").hidden = !(V.pickTopic && analyzed);
-  // "Change the camera topic", in the Inputs tab (whose label names the topic), while the table does not show.
+  // "Change topic", in the Inputs tab (whose label names the topic), while the table does not show.
   $("#topicrow").hidden = !rosbag || !idle || !$("#topics").hidden;
   // Once the frames are read, the Inputs tab has the input's facts and the Settings tab the build settings. The
   // settings change only while the job does not run; in review they start over.
@@ -378,9 +393,6 @@ async function drawJob(job) {  // refresh's panels: the waiting panels and what 
   $("#manualstart").hidden = !!V.manual;
   if (views) await loadReview().catch((e) => { $("#selsum").textContent = e.message; });
   if (partList) await loadParts().catch((e) => { say($("#partsmsg"), e.message); });
-  // The lidar stage failed: its record (pool/lidar.json, ok false) with the reason and the check images.
-  $("#lidarfail").hidden = !lidarFailed(job.status, job.progress);
-  if (!$("#lidarfail").hidden) await renderLidarFail(job).catch((e) => fill($("#lidarfailbody"), h("p", { class: "msg" }, e.message)));
   // The files, by group, once the job stops. They come first, so a result file that does not parse (renderResults)
   // does not hide them.
   renderDownloads(job);
@@ -391,9 +403,9 @@ async function drawJob(job) {  // refresh's panels: the waiting panels and what 
     fill($("#facts2"), h("p", { class: "msg" }, RESULTS_UNREAD + e.message));
     fill($("#partchecks"));  // the check images of an earlier draw
   });
-  else tipClose();  // its button hides with the old results
   $("#resultsbody").hidden = !results;
   $("#resultsnone").hidden = results;
+  $("#resultsnone").textContent = ["failed", "cancelled"].includes(job.status) ? RESULTS_STOPPED : RESULTS_LATER;
   // The input's preview video, and the views used once they are selected (in review, during the build and after).
   V.inputAsked = false;
   V.selected = (job.stages.select || {}).status === "done";
@@ -407,12 +419,7 @@ async function drawJob(job) {  // refresh's panels: the waiting panels and what 
   }
 }
 async function settings(job) {  // the build settings (Settings tab) and the input's facts (Inputs tab)
-  const again = job.status !== "ready";
-  $("#framesum").textContent = !again ? "Frames and build settings" : job.status === "review" ? "Start over with other settings"
-    : "Build again with other settings";
-  $("#start").textContent = !again ? "Start" : job.status === "review" ? "Start over" : "Build again";
-  $("#rebuildhint").hidden = !again;
-  rebuildHint();
+  $("#start").textContent = job.status === "ready" ? "Start" : job.status === "review" ? "Start over" : "Build again";
   await loadFrames();
 }
 
@@ -425,7 +432,6 @@ function selectTab(name, pick) {
   const old = V.tab && V.tab !== name ? $("#" + TABS[V.tab]) : null, had = document.activeElement, tab = $("#tab-" + name);
   const lost = !!had && had !== tab && ((!!old && old.contains(had) === true) || $("#tabs").contains(had) === true);
   if (V.tab === "inputs" && name !== "inputs" && V.video) V.video.pause();
-  if (V.tab !== name) tipClose();  // an open info note of the Results or Downloads tab
   V.tab = name;
   V.pick = pick ? name : null;
   for (const n of TAB_NAMES) {
@@ -437,6 +443,7 @@ function selectTab(name, pick) {
   tabHash(V.pick);
   if (lost) tab.focus({ preventScroll: true });
   revealTab(tab);
+  helpAt();
   if (name === "log") showRun();
 }
 // The hash of the open job with the picked tab (or none), by replaceState: a tab adds no step to the back button.
@@ -483,13 +490,6 @@ $("#tabs").onclick = (e) => {
   const tab = e.target && e.target.closest ? e.target.closest("[role=tab]") : null;
   if (tab) selectTab(tab.dataset.tab, true);
 };
-// "Download the files from the Downloads tab." at the top of the Results tab: the tab name opens that tab. The button
-// hides with its panel, so the Downloads tab takes the focus (selectTab). selectTab does not scroll, so the tab comes
-// into view here, below the sticky header (scroll-padding-top in style.css).
-$("#todlbtn").onclick = () => {
-  selectTab("downloads", true);
-  $("#tab-downloads").scrollIntoView({ block: "nearest" });
-};
 $("#tabs").onkeydown = (e) => {  // Left and Right go to the tab before or after (round), Home and End to the first or last
   const i = TAB_NAMES.indexOf(e.target && e.target.dataset ? e.target.dataset.tab : null);
   const to = i < 0 || e.altKey || e.ctrlKey || e.metaKey ? undefined
@@ -500,23 +500,14 @@ $("#tabs").onkeydown = (e) => {  // Left and Right go to the tab before or after
   selectTab(name, true);
   $("#tab-" + name).focus();
 };
-function rebuildHint() {  // under "Build again": what Retry, at the top, does instead
-  const from = $("#retry").hidden || !V.state ? null : retryFrom(V.state);
-  $("#rebuildhint").textContent = "This runs every stage again with these settings." + (from === null ? ""
-    : V.scaleStale === true && from === "lidar" ? " Retry, at the top, starts from the lidar stage instead, because the " +
-      "calibration changed since the scale was found." : " Retry, at the top, continues from the stage that stopped instead.");
-}
 
 // ---- the camera topic of a rosbag (frames/topics.json) ----
 
-const RAW_HINT = "MV-SAM3D expects undistorted images; pick a rectified topic if the bag has one";
 async function loadTopics(job) {
   const r = await api(file("frames/topics.json")), cur = job.source.topic;
   // A listing from before LiDAR topics were listed (no "lidar"): choosing the current topic again lists them.
   const inUse = job.stages.frames.status === "done" && Array.isArray(r.lidar);
-  const lens = (t) => t.rectified === true ? badge("rectified") : t.rectified === false
-    ? [badge("raw", "raw lens distortion"), h("div", { class: "hint" }, RAW_HINT)]
-    : [badge("unknown"), h("div", { class: "hint" }, "no camera_info next to it, so the lens distortion is not known. " + RAW_HINT)];
+  const lens = (t) => badge(t.rectified === true ? "rectified" : t.rectified === false ? "raw" : "unknown");
   $("#ttable tbody").replaceChildren(...r.topics.map((t) => h("tr", { class: t.topic === cur ? "current" : null, "aria-current": t.topic === cur ? "true" : null },
     h("td", {}, t.preview ? h("img", { src: file(t.preview), alt: "", loading: "lazy" }) : ""),
     h("td", { class: "topic" }, h("code", {}, t.topic.split("/").flatMap((x, i) => i > 1 ? [h("wbr"), "/" + x] : i ? ["/" + x] : [x]))),
@@ -525,7 +516,8 @@ async function loadTopics(job) {
     h("td", { "data-label": "Size" }, t.width ? `${t.width}x${t.height}` : "?"),
     h("td", { class: "lens" }, lens(t)),
     h("td", {}, t.topic === cur && inUse ? h("span", { class: "hint" }, "in use")
-      : h("button", { class: "small", type: "button", onclick: (e) => useTopic(t.topic, e.target) }, "Use this topic")))));
+      : h("button", { class: "small", type: "button", "aria-label": "Use " + t.topic, onclick: (e) => useTopic(t.topic, e.target) },
+        "Use")))));
   $("#tskipped").textContent = r.skipped.length ? "Not usable: " + r.skipped.map((x) => `${x.topic} (${x.why})`).join(", ") : "";
 }
 async function useTopic(topic, btn) {
@@ -543,7 +535,7 @@ $("#chtopic").onclick = async () => {  // the topic table, above the tabs, takes
   $("#topicshead").focus({ preventScroll: true });
   $("#topics").scrollIntoView({ block: "start", behavior: smooth() });
 };
-$("#tkeep").onclick = async () => {  // back to "Change the camera topic", in the Inputs tab
+$("#tkeep").onclick = async () => {  // back to "Change topic", in the Inputs tab
   V.pickTopic = false;
   await refresh().catch((e) => say($("#topicmsg"), e.message));
   if ($("#input").hidden === false && $("#topicrow").hidden === false) $("#chtopic").focus({ preventScroll: true });
@@ -558,33 +550,36 @@ function renderState(st, follow) {
   const build = st.stages.filter((x) => BUILD.includes(x.name));
   const nDone = build.filter((x) => ["done", "skipped"].includes(x.status)).length;
   const art = st.articulated === true, partList = st.status === "review" && st.parts_review === true;
-  const cur = st.current, curText = cur ? cur + (stageLabel(cur, art) ? " (" + stageLabel(cur, art) + ")" : "") : "";
-  const sum = { analyzing: cur === "topics" ? "Listing the camera topics of the bag" : "Reading the frames",
-    choose_topic: "Choose the camera topic of the bag", ready: "Ready: choose the frames and start", queued: "Waiting for the GPU",
-    running: "Running " + curText, review: partList ? "Waiting for you to check the part list" : "Waiting for your review",
+  // "Running: mesh (MV-SAM3D)": the stage's label, or its name when it has none.
+  const cur = st.current;
+  const sum = { analyzing: cur === "topics" ? "Listing topics" : "Reading input", choose_topic: "Choose topic", ready: "Ready",
+    queued: "Waiting for GPU", running: cur ? "Running: " + (stageLabel(cur, art) || cur) : "Running",
+    review: partList ? "Part list waiting" : "Needs review",
     done: "Done", failed: "Failed", cancelled: "Cancelled", uploaded: "Uploaded" }[st.status] || st.status;
   const overall = ["queued", "running"].includes(st.status) ? h("div", { class: "overall" },
     h("progress", { max: build.length, value: nDone, "aria-label": "build progress" }),
-    h("span", { class: "hint" }, `${nDone} of ${build.length} build stages done`)) : null;
+    h("span", { class: "hint" }, `${nDone}/${build.length} stages`)) : null;
   const stText = queueText(st.status, V.job && V.job.queue_pos);
-  fill($("#jstatus"), badge(st.status, stText), " ", sum, overall, st.error ? h("div", { class: "msg errbox" }, st.error) : null);
+  // The badge says the state once: the summary ("Done"), or a queued job's place in the queue. A failed job's error ends
+  // with the help page's troubleshooting section.
+  fill($("#jstatus"), badge(st.status, stText || sum), overall, st.error ? h("div", { class: "msg errbox" }, st.error, " ",
+    h("a", { href: "help.html#troubleshooting", target: "_blank", rel: "noopener" }, "Help")) : null);
   const from = retryFrom(st);
   let next = ["failed", "cancelled"].includes(st.status) && from === null ? "Build again from the Settings tab."
     : partList ? NEXT.parts : lidarFailed(st.status, st.stages)
       ? NEXT[!V.job ? "lidar" : V.job.kind === "stray" ? "lidar_stray" : V.job.calibration ? "lidar_cal" : "lidar"]
-      : V.scaleStale === true && from === "lidar" && ["failed", "cancelled"].includes(st.status) ? NEXT.stale
-        : NEXT[st.status] || "";
+      : NEXT[st.status] || "";
   const ran = (name) => build.some((x) => x.name === name && x.status === "done");
   if (["queued", "running"].includes(st.status) && V.job && V.job.auto_continue === false && !ran("select"))
-    next += " It stops after the view selection for your review.";
+    next += " It pauses for your review.";
   if (["queued", "running"].includes(st.status) && art && st.parts_mode === "vlm_edit" && !ran("propose"))
-    next += " It stops after the VLM lists the parts, so you can check the list.";
+    next += " It pauses for the part list.";
   $("#jnext").textContent = next;
   const said = sum + (st.error ? ". " + st.error : "");
   if (said !== V.said) { V.said = said; $("#announce").textContent = said; }
   $("#jwarn").replaceChildren(...(st.warnings || []).map((w) => h("li", {}, w)));
   const name = V.job ? V.job.video.name : V.id || "";
-  $("#where").replaceChildren(h("span", { class: "crumb" }, "/ " + name), badge(st.status, stText));
+  $("#where").replaceChildren(h("span", { class: "crumb" }, "/ " + name));  // the status shows once, under the title
   document.title = ({ running: `${cur || "running"} ${Math.min(nDone + 1, build.length)}/${build.length}`, queued: "Queued",
     review: partList ? "Part list waiting" : "Review waiting", done: "Done", failed: "Failed", cancelled: "Cancelled", ready: "Ready", analyzing: "Reading",
     choose_topic: "Choose topic" }[st.status] || st.status) + (name ? " · " + name : "") + " · HARPOR";
@@ -592,16 +587,20 @@ function renderState(st, follow) {
   const started = st.stages.some((x) => x.started || x.status !== "pending");
   $("#runbody").hidden = !started;
   $("#runnone").hidden = started;
-  const nFailed = st.stages.filter((x) => x.status === "failed").length;
-  $("#runsum").textContent = `${nDone} of ${build.length} build stages done` + (nFailed ? `, ${nFailed} failed` : "") +
-    (st.status === "running" && cur ? `, running ${cur}` : "");
+  // The stage that Cancel stopped is recorded as failed with the note "cancelled" (jobs.Runner._run_stage): it shows as
+  // cancelled. A failed stage's note that the status line's error already gives ("<stage>: <note>") is left out.
+  const stages = st.stages.map((x) => x.status === "failed" && x.note === "cancelled" ? { ...x, status: "cancelled", note: null }
+    : x.status === "failed" && st.error === `${x.name}: ${x.note}` ? { ...x, note: null } : x);
+  const nOf = (status) => stages.filter((x) => x.status === status).length, nFailed = nOf("failed"), nCancelled = nOf("cancelled");
+  $("#runsum").textContent = `${nDone}/${build.length} done` + (nFailed ? ` · ${nFailed} failed` : "") +
+    (nCancelled ? ` · ${nCancelled} cancelled` : "") + (st.status === "running" && cur ? ` · running ${cur}` : "");
   const now = Date.now() / 1000, live = !!V.es;
   const focused = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.stage;
-  $("#stages").replaceChildren(...st.stages.map((x) => h("li", { class: x.status },
+  $("#stages").replaceChildren(...stages.map((x) => h("li", { class: x.status },
     h("div", { class: "nm" }, live ? h("span", { class: "name" }, x.name)
       : h("button", { type: "button", class: "name link", "data-stage": x.name, "aria-controls": "log", "aria-pressed": String(x.name === V.logStage),
         onclick: () => showLog(x.name) }, x.name),
-    h("span", { class: "label" }, stageLabel(x.name, art, x.status === "skipped"))),
+    h("span", { class: "label" }, stageLabel(x.name, art))),
     h("span", { class: "gpu" }, x.gpu ? "GPU" : ""),
     badge(x.status),  // a stage that is turned off says so in its note ("turned off: rigid object")
     h("span", { class: "secs", "data-started": x.started || null, "data-ended": x.ended || null },
@@ -615,8 +614,8 @@ function renderState(st, follow) {
 
   $("#cancel").hidden = !(ACTIVE.includes(st.status) || st.status === "review");
   $("#retry").hidden = !["failed", "cancelled"].includes(st.status) || from === null;
-  if (!$("#retry").hidden) $("#retry").textContent = from === "frames" ? "Retry: read the input again"
-    : from === "propose" && (st.stages.find((y) => y.name === "propose") || {}).status === "done" ? "Retry: check the part list"
+  if (!$("#retry").hidden) $("#retry").textContent = from === "frames" ? "Read input again"
+    : from === "propose" && (st.stages.find((y) => y.name === "propose") || {}).status === "done" ? "Back to part list"
       : "Retry from " + from;
   const agent = agentOf(st.agent);
   $("#keyrow").hidden = st.key_ok || agent === "none" || !["review", "failed", "cancelled"].includes(st.status) || from === "frames" ||
@@ -663,7 +662,7 @@ $("#log").onscroll = () => {  // where the user left the log, for when its tab o
   V.logTop = log.scrollTop;
   V.logAtEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
 };
-function showRun() {  // the Stages and log tab opens: the log where it was left, the clocks current
+function showRun() {  // the Log tab opens: the log where it was left, the clocks current
   const log = $("#log");
   log.scrollTop = V.logAtEnd === false ? V.logTop || 0 : log.scrollHeight;
   tick();
@@ -701,7 +700,13 @@ function openStream() {
     appendLog(d.text);
     if (d.stage) $("#logname").textContent = "live log: " + d.stage;
   });
-  es.addEventListener("end", () => { closeStream(); if (V.id === id) refresh(); });
+  // The job stopped: the log keeps the lines that came, and the stage names (drawn again) load each stage's own log.
+  es.addEventListener("end", () => {
+    closeStream();
+    if (V.id !== id) return;
+    $("#logname").textContent = $("#log").textContent ? "log until the job stopped" : "";
+    refresh();
+  });
 }
 function closeStream() {
   if (V.es) V.es.close();
@@ -720,8 +725,7 @@ async function showLog(stage) {
   for (const b of document.querySelectorAll("#stages button.name")) b.setAttribute("aria-pressed", String(b.dataset.stage === stage));
 }
 $("#cancel").onclick = () => {
-  if (!confirm("Cancel this job? The running stage stops and the server forgets the API key. " +
-    "Retry continues from the first stage that is not done.")) return;
+  if (!confirm("Cancel this job?")) return;
   act([$("#cancel"), $("#retry")], $("#runmsg"), "cancelling", () => post(`/api/jobs/${V.id}/cancel`), null, true);
 };
 $("#retry").onclick = () => {
@@ -734,7 +738,7 @@ $("#retry").onclick = () => {
       $("#log").textContent = "";
       // The server may start earlier than the page asked: say where the run starts.
       if (r && r.from && r.from !== from) say($("#runmsg"), r.from === "lidar"
-        ? "The calibration changed since the scale was found, so the run starts from lidar." : `The run starts from ${r.from}.`, true);
+        ? "Starting from lidar (calibration changed)." : `Starting from ${r.from}.`, true);
     });
 };
 
@@ -780,8 +784,7 @@ async function loadFrames() {
     $("#gridbox").open = mode() === "manual";
   }
   const m = V.meta, v = m.video, stray = v.kind === "stray";
-  $("#facts").textContent = `${v.n_frames} frames, ${v.duration_s.toFixed(1)} s, ${v.fps} fps, ${v.width}x${v.height}, ` +
-    `${v.codec}${v.bit_depth ? " " + v.bit_depth + "-bit" : ""}; ${m.candidates.length} candidate views`;
+  $("#facts").textContent = `${v.fps} fps, ${v.width}x${v.height}, ${v.codec}${v.bit_depth ? " " + v.bit_depth + "-bit" : ""}`;
   $("#vsum").textContent = `${stray ? "Stray capture" : "Video"}: ${v.n_frames} frames, ${v.duration_s.toFixed(1)} s, ` +
     `${m.candidates.length} candidate views`;
   $("#hdr").hidden = !v.hdr;
@@ -792,7 +795,7 @@ async function loadFrames() {
   // The Settings tab points to the input's warnings in the Inputs tab: some bear on the settings, such as LiDAR.
   const nWarn = (v.hdr ? 1 : 0) + (stray ? (v.warnings || []).length : 0);
   $("#inputwarn").hidden = !nWarn;
-  $("#inputwarntext").textContent = nWarn === 1 ? "The input has a warning." : `The input has ${nWarn} warnings.`;
+  $("#inputwarntext").textContent = nWarn === 1 ? "1 input warning" : `${nWarn} input warnings`;
   lidarToggle();
   sparkline(m);
   renderFrames();
@@ -806,11 +809,10 @@ $("#towarn").onclick = () => {  // the Inputs tab at the input's first warning
 function strayFacts(v) {  // frames/meta.json "video" of a Stray capture (stray.probe)
   const a = v.upright_agreement, d = v.depth_size || [];
   // stray.upright_turns: counterclockwise quarter turns; the agreement counts only the frames that show gravity.
-  return [a == null ? "No frame shows gravity, so the frames stay as stored."
-    : (v.rotation ? `The frames are turned ${v.rotation} deg counterclockwise to stand upright.`
-      : "The frames stand upright as stored.") + ` Gravity gives this turn in ${Math.round(100 * a)}% of the frames that show it.`,
-  `${v.n_depth} of ${v.n_frames} frames have a depth image${d.length === 2 ? ` (${d[0]}x${d[1]})` : ""}.`,
-  `${v.n_confidence} have a confidence image.`].join(" ");
+  return [a == null ? "No gravity data: frames as stored."
+    : (v.rotation ? `Turned ${v.rotation}° to upright` : "Upright as stored") + ` (gravity agrees: ${Math.round(100 * a)}%).`,
+  `Depth: ${v.n_depth}/${v.n_frames} frames${d.length === 2 ? ` (${d[0]}x${d[1]})` : ""}.`,
+  `Confidence: ${v.n_confidence}.`].join(" ");
 }
 function sparkline(m) {
   const t0 = m.times[0], span = (m.times[m.times.length - 1] - t0) || 1;
@@ -838,9 +840,9 @@ function agentToggle() {
   partsToggle();
 }
 for (const r of document.querySelectorAll("input[name=agent]")) r.onchange = agentToggle;
-let partsPick = "vlm";  // the parts mode the user chose; "No agent" shows "I type the parts" and keeps this choice
+let partsPick = "vlm";  // the parts mode the user chose; agent "None" shows "I type them" and keeps this choice
 const chosenPartsMode = () => chosenAgent() === "none" ? "user" : partsPick;  // steps.parts_mode: no agent, no VLM
-function partsToggle() {  // the parts settings of an articulated object; the typed list only for "I type the parts"
+function partsToggle() {  // the parts settings of an articulated object; the typed list only for "I type them"
   const art = $("#articulated").checked === true, none = chosenAgent() === "none", pm = chosenPartsMode();
   for (const r of document.querySelectorAll("input[name=partsmode]")) {
     r.disabled = none && r.value !== "user";
@@ -848,7 +850,6 @@ function partsToggle() {  // the parts settings of an articulated object; the ty
   }
   $("#partsbox").hidden = !art;
   $("#partsnoagent").hidden = !none;
-  $("#partspause").hidden = pm !== "vlm_edit";
   $("#partlistbox").hidden = pm !== "user";
   $("#partlist").required = art && pm === "user";
 }
@@ -857,13 +858,9 @@ $("#articulated").onchange = partsToggle;
 
 // ---- 2b. LiDAR for the metric scale: a bag's LiDAR topic with its TF link or the calibration; a Stray capture's depth ----
 
-const LIDAR_ON = { rosbag: "The LiDAR's points set the metric scale.", stray: "The iPhone's LiDAR depth sets the metric scale." };
-const LIDAR_OFF = "Off: Depth Anything 3 estimates the scale.";
 // topics.json from before LiDAR topics were listed (lidar.OLD_TOPICS); POST /topic lists them, but not in review or done.
-const OLD_TOPICS = {
-  idle: "This bag was read before the app listed LiDAR topics. To list them, use Change the camera topic in the Inputs tab, " +
-    "and choose the same topic again.",
-  late: "This bag was read before the app listed LiDAR topics. To use its LiDAR, upload the bag again." };
+const OLD_TOPICS = { idle: "LiDAR topics not listed. In Inputs, pick the same camera topic again.",
+  late: "LiDAR topics not listed. Upload the bag again to use LiDAR." };
 // A topics.json "lidar" entry: "/livox/lidar (Livox, 10 Hz, livox_frame)".
 const lidarLabel = (t) => `${t.topic} (${t.type === "CustomMsg" ? "Livox" : t.type || "?"}, ` +
   `${t.rate_hz != null ? Number(Number(t.rate_hz).toFixed(1)) + " Hz" : "rate unknown"}, ${t.frame_id || "no frame_id"})`;
@@ -892,19 +889,17 @@ function tfChain(edges, target, source) {
 }
 // The status line of the camera topic's link to a LiDAR topic: [text, true when the user must act].
 function lidarLink(found, camTopic, lidarTopic, cal) {
-  if (!lidarTopic) return ["choose a LiDAR topic to see its link to the camera", false];
+  if (!lidarTopic) return ["", false];
   const cam = (found.topics || []).find((t) => t.topic === camTopic), lid = (found.lidar || []).find((t) => t.topic === lidarTopic);
   const how = cam && (cam.tf_links || {})[lidarTopic];
-  if (!how) return [cal ? "no TF link: the calibration links them" : "no TF link: upload the calibration", !cal];
+  if (!how) return [cal ? "Linked by the calibration" : "No TF link: upload a calibration", !cal];
   const chain = (lid && tfChain(found.tf || [], cam.frame_id, lid.frame_id)) || [cam.frame_id, lid ? lid.frame_id : lidarTopic];
-  return [`linked by ${how === "static" ? "/tf_static" : "/tf"}: ${chain.join(" <- ")}`, false];
+  return [`Linked by ${how === "static" ? "/tf_static" : "/tf"}: ${chain.join(" <- ")}`, false];
 }
-// job.json "calibration" in short (server.calibration_summary).
-const calText = (c) => [
-  `Calibration ${c.name}: the LiDAR is ${(100 * c.translation_m).toFixed(1)} cm from the camera, turned ${Number(c.rotation_deg).toFixed(1)} deg.`,
-  c.has_intrinsics ? "It gives K." : "K comes from the camera_info.",
-  c.camera_axes === "body" ? "Its camera axes are body axes (x forward, y left, z up)." : null,
-  c.time_offset_s ? `Its time offset is ${c.time_offset_s} s.` : null].filter(Boolean).join(" ");  // #calhelp says it replaces TF
+// job.json "calibration" in short (server.calibration_summary): the LiDAR's distance from the camera and its turn.
+const calText = (c) => [`${c.name}: ${(100 * c.translation_m).toFixed(1)} cm, ${Number(c.rotation_deg).toFixed(1)}°.`,
+  c.has_intrinsics ? "K from file." : "K from camera_info.", c.camera_axes === "body" ? "Body axes." : null,
+  c.time_offset_s ? `Offset ${c.time_offset_s} s.` : null].filter(Boolean).join(" ");
 function lidarSetup(job) {  // the job's own setting, each time the frames load: a Stray capture starts with LiDAR on
   const list = V.topics && Array.isArray(V.topics.lidar) ? V.topics.lidar : [];
   const had = job.lidar && job.lidar.kind === "rosbag" && list.some((t) => t.topic === job.lidar.topic) ? job.lidar.topic : null;
@@ -923,10 +918,11 @@ function lidarToggle() {  // the LiDAR box follows the input kind, the checkbox,
   if (!usable) $("#uselidar").checked = false;
   const on = $("#uselidar").checked === true;
   const skipped = (found.lidar_skipped || []).map((x) => `${x.topic} (${x.why})`).join(", ");
-  $("#lidarhint").textContent = usable ? on ? LIDAR_ON[kind] : LIDAR_OFF
-    : found.error ? "The bag's topics cannot be read: " + found.error
+  // Only why the box is off: what LiDAR on and off do is in help.html.
+  $("#lidarhint").textContent = usable ? ""
+    : found.error ? "Cannot read the bag's topics: " + found.error
       : !list ? OLD_TOPICS[["review", "done"].includes(job.status) ? "late" : "idle"]
-        : "This bag has no LiDAR topic (PointCloud2 or Livox)." + (skipped ? " Not usable: " + skipped + "." : "");
+        : "No LiDAR topic in this bag." + (skipped ? " Not usable: " + skipped + "." : "");
   // The topic, its link and the calibration: a bag's only. No "required" on the select: lidarChoice says what to do.
   $("#lidaropts").hidden = stray || !usable || !on;
   if ($("#lidaropts").hidden) return;
@@ -937,7 +933,7 @@ function lidarToggle() {  // the LiDAR box follows the input kind, the checkbox,
   $("#lidarskipped").textContent = skipped ? "Not usable: " + skipped : "";
   $("#calsum").hidden = !cal;
   $("#calsum").textContent = cal ? calText(cal) : "";
-  $("#calbtn").textContent = cal ? "Replace the calibration" : "Upload a calibration";
+  $("#calbtn").textContent = cal ? "Replace calibration" : "Upload calibration";
   $("#calremove").hidden = !cal;
 }
 $("#uselidar").onchange = lidarToggle;
@@ -966,8 +962,8 @@ async function scaleStale(job) {
   return cal ? ext.source !== "calibration" || ext.file !== cal.name : ext.source === "calibration";
 }
 // Upload a calibration file at once (PUT: the server checks and summarises it), or remove it (f null). The summary or
-// the server's reason shows in the box. A review shows again whether the scale is current; a failed or cancelled job
-// says when Retry starts from lidar.
+// the server's reason shows in the box. A review shows again whether the scale is current; a failed or cancelled job's
+// Retry names lidar when the scale is stale.
 async function calibrate(f) {
   const focus = document.activeElement;
   // Retry and Build wait for the upload: they would run with the old calibration.
@@ -980,15 +976,13 @@ async function calibrate(f) {
     const r = await (f ? api(url + "?name=" + encodeURIComponent(f.name), { method: "PUT", body: f })
       : api(url, { method: "DELETE" }));
     if (V.job) V.job.calibration = f ? r : null;
-    done = f ? `The calibration ${r.name} is saved.` : "The calibration is removed.";
+    done = f ? `Saved ${r.name}.` : "Removed.";
   } catch (e) { say($("#calmsg"), e.message); }
   if (done !== null && V.sel && $("#review").hidden === false) {
     try { V.sel.lidar = (await api(`/api/jobs/${V.id}/selection`)).lidar; renderSelLidar(); } catch (e) { /* the old summary stays */ }
   } else if (done !== null && V.job && ["failed", "cancelled"].includes(V.job.status)) {
     V.scaleStale = await scaleStale(V.job).catch(() => false);
     if (V.state) renderState(V.state);  // the Retry button names the stage it starts from
-    rebuildHint();
-    if (V.scaleStale) done += " The scale was found with the old calibration, so Retry starts from the lidar stage.";
   }
   btns.forEach((b, i) => { b.disabled = was[i]; });
   lidarToggle();
@@ -1026,9 +1020,8 @@ function renderFrames() {
     const b = document.querySelector('#grid [data-i="' + fi + '"]');
     if (b) b.focus();
   }
-  $("#pickcount").textContent = `${V.picks.length} picked (2 to 12)` + (V.picks.length && V.view0 == null ? "; view 0 is the first pick" : "");
-  $("#picks").replaceChildren(...V.picks.map((p, k) => h("li", {},
-    `${k + 1}. frame ${snap(p)}` + (snap(p) !== p ? ` (sharper than ${p})` : "") + ` at ${m.times[snap(p)].toFixed(2)} s `,
+  $("#pickcount").textContent = `${V.picks.length} picked (2 to 12)`;
+  $("#picks").replaceChildren(...V.picks.map((p, k) => h("li", {}, `${k + 1}. frame ${snap(p)}, ${m.times[snap(p)].toFixed(2)} s `,
     h("button", { class: "small secondary", type: "button", "aria-pressed": String(V.view0 === p), onclick: () => { V.view0 = p; renderFrames(); } },
       V.view0 === p ? "view 0 ★" : "make view 0"), " ",
     h("button", { class: "small secondary", type: "button", onclick: () => togglePick(p) }, "remove"))));
@@ -1039,7 +1032,7 @@ function togglePick(i) {
     if (V.view0 === V.picks[k]) V.view0 = null;
     V.picks.splice(k, 1);
   } else if (V.picks.length >= 12) {
-    $("#pickcount").textContent = "12 picked, the most allowed: remove one first";
+    $("#pickcount").textContent = "12 is the maximum. Remove one first.";
     return;
   } else V.picks.push(i);
   say($("#startmsg"), "");
@@ -1058,7 +1051,7 @@ $("#startform").onsubmit = async (e) => {
   e.preventDefault();
   const manual = mode() === "manual";
   if (manual && V.picks.length < 2) { say($("#startmsg"), "pick at least 2 frames"); return; }
-  // An articulated object sends who lists its parts, and the typed list for "I type the parts".
+  // An articulated object sends who lists its parts, and the typed list for "I type them".
   const articulated = $("#articulated").checked === true, pm = chosenPartsMode();
   let parts = [];
   if (articulated && pm === "user") {
@@ -1071,7 +1064,7 @@ $("#startform").onsubmit = async (e) => {
     return;
   }
   if (V.job && V.job.files && (V.job.files.includes("run/posed.glb") || V.job.files.includes("results.zip")) &&
-      !confirm("Build again? This replaces the current results of this job (meshes, physics and results.zip).")) return;
+      !confirm("Build again? This replaces the current results.")) return;
   const agent = chosenAgent(), keyed = agent !== "none", typed = keyed && !T.keyless(V.id, agent);
   $("#start").disabled = true;
   say($("#startmsg"), keyed ? "checking the key" : "", true);
@@ -1099,21 +1092,21 @@ async function loadReview() {
   const sel = V.sel = await api(`/api/jobs/${V.id}/selection`);
   // job.view0 is a pool name once set here; from the start form it is a clicked frame, which became the anchor.
   const view0 = typeof sel.view0 === "string" ? sel.view0 : sel.view0 != null ? sel.anchor : null;
-  V.ov = { locked: [...sel.overrides.locked], excluded: [...sel.overrides.excluded], instance: { ...sel.overrides.instance }, view0 };
-  V.dirty = false;
+  const saved = () => ({ locked: [...sel.overrides.locked], excluded: [...sel.overrides.excluded],
+    instance: { ...sel.overrides.instance }, view0 });
+  V.ov = saved();
+  V.ov0 = saved();  // what this selection ran with: change() compares the edits with it
   const pick = (x) => x == null ? "?" : x;
+  // Coverage: every candidate is within that angle of a pick. Spacing: the closest picks are that far apart.
   $("#selsum").textContent = sel.ok
-    ? `${sel.picks.length} views (asked for ${sel.n_requested}); every candidate is within ${pick(sel.coverage_deg)} deg of a pick; the closest picks are ${pick(sel.min_spacing_deg)} deg apart.`
-    : "The automatic selection needs help: lock or exclude views and select again, or start over in manual mode.";
+    ? `${sel.picks.length} of ${sel.n_requested} views · coverage ${pick(sel.coverage_deg)}° · spacing ${pick(sel.min_spacing_deg)}°`
+    : "Selection failed. Change some views and select again, or pick frames manually.";
   renderSelLidar();
   $("#selwarn").replaceChildren(...sel.warnings.filter((w) => !V.state.warnings.includes(w)).map((w) => h("li", {}, w)));
-  $("#build").disabled = !sel.ok;
-  $("#reselect").disabled = true;
-  $("#discard").hidden = true;
-  say($("#revmsg"), "", true);
   $("#ring").setAttribute("aria-label", `camera positions seen from above: ${sel.picks.length} picked of ${sel.candidates.length} candidates`);
   ring(sel);
   renderCards();
+  reviewBar();
 }
 
 // ---- 4a. the metric scale from LiDAR: in the review header, and in a panel when the lidar stage failed ----
@@ -1132,28 +1125,26 @@ function lidarCompact(rec) {
     warnings: rec.warnings || [], check_dir: "lidar/check",
     views: (rec.views || []).map((v) => ({ name: v.name, s: v.s, points_used: v.points_used, status: v.status })) };
 }
-// One view's scale and point count: "x1.05 (280 pts)", "x1.21 (90 pts, outlier)", "few points (12 pts)", "no points".
+// One view's scale and point count: "×1.05 (280 pts)", "×1.21 (90 pts, outlier)", "few points (12 pts)", "no points".
 function lidarViewText(v) {
   const st = v.status in LIDAR_STATUS ? LIDAR_STATUS[v.status] : String(v.status || "").replace(/_/g, " ");
   const pts = count(v.points_used) + " pts";
-  return v.s != null ? `x${Number(v.s).toFixed(2)} (${pts}${st ? ", " + st : ""})`
+  return v.s != null ? `×${Number(v.s).toFixed(2)} (${pts}${st ? ", " + st : ""})`
     : (st || "no scale") + (v.points_used ? ` (${pts})` : "");
 }
-// The scale (or why there is none), a changed calibration, the warnings, and the check images folded.
-function lidarView(lid) {
+// The scale (or why there is none), a changed calibration, the warnings, and the check images folded. head false leaves
+// out the first line: the panel of a failed lidar stage, whose reason the status line gives.
+function lidarView(lid, head) {
   const c = lid.counts || {}, views = lid.views || [], dir = lid.check_dir || "lidar/check";
-  return [lid.ok ? h("p", { class: "lidarhead" }, `Metric scale from LiDAR: x${Number(lid.s).toFixed(3)} ` +
-      `(${c.views_used} of ${c.views} views, spread ${pct(lid.spread_rel)})`)
+  return [head === false ? null : lid.ok ? h("p", { class: "lidarhead" }, `LiDAR scale ×${Number(lid.s).toFixed(3)} ` +
+      `(${c.views_used}/${c.views} views, spread ${pct(lid.spread_rel)})`)
     : h("p", { class: "msg" }, "No metric scale from LiDAR: " + (lid.reason || "no reason given")),
-  lid.calibration_changed ? h("p", { class: "warn" }, "The calibration changed after this scale was found. " +
-      "Build finds the scale again first, then stops here.") : null,
+  lid.calibration_changed ? h("p", { class: "warn" }, "Calibration changed. Build finds the scale again, then stops here.") : null,
   (lid.warnings || []).length ? h("ul", { class: "warnings" }, lid.warnings.map((w) => h("li", {}, w))) : null,
   views.length ? h("details", { class: "sub", open: V.lidarOpen === true, ontoggle: (e) => { V.lidarOpen = e.target.open; } },
     h("summary", {}, `LiDAR check images (${views.length})`),
     // lidar_scale.check_image: r / s against the combined s; without one, each view's own s, and white without that.
-    h("p", { class: "hint" }, "The green line is the mask outline. Blue points are nearer than the scaled depth, and red " +
-      "points are farther. White points agree with it." + (lid.ok ? "" : " Each view uses its own scale here. A view " +
-      "without one shows all its points white.") + " Open an image to see it larger."),
+    h("p", { class: "hint" }, "Green: mask outline. Blue: nearer. Red: farther. White: agrees."),
     h("div", { class: "checks" }, views.map((v) => h("figure", {},
       h("a", { href: file(`${dir}/${v.name}.jpg`), target: "_blank", rel: "noopener" },
         h("img", { src: file(`${dir}/${v.name}.jpg`), loading: "lazy", alt: "LiDAR points in " + v.name })),
@@ -1162,7 +1153,7 @@ function lidarView(lid) {
 function renderSelLidar() {  // the review header: LiDAR's scale, or DA3's own
   const lid = V.sel.lidar, job = V.job || {};
   fill($("#sellidar"), lid ? lidarView(lid) : h("p", {}, job.lidar
-    ? "Metric scale from LiDAR: not found yet. Build finds it first, then stops here." : NO_LIDAR),
+    ? "LiDAR scale: not found yet. Build finds it, then stops here." : NO_LIDAR),
   // A bag's calibration can change in review, in the Settings tab, without a start over.
   job.kind === "rosbag" && job.lidar ? h("p", {}, h("button", { class: "small secondary", type: "button",
     onclick: toLidarSettings }, "Change the calibration")) : null);
@@ -1172,10 +1163,8 @@ const lidarFailed = (status, stages) => status === "failed"
   && ((stages || []).find((x) => x.name === "lidar") || {}).status === "failed";
 async function renderLidarFail(job) {
   const rec = job.files.includes("pool/lidar.json") ? lidarCompact(await api(file("pool/lidar.json"))) : null;
-  fill($("#lidarfailbody"), rec ? lidarView(rec)
-    : h("p", { class: "hint" }, "The stage stopped before it wrote its record. The reason is above, and its log is in the " +
-      "Stages and log tab."),
-  h("p", {}, h("button", { class: "small secondary", type: "button", onclick: toLidarSettings }, "Go to the LiDAR settings")));
+  fill($("#lidarfailbody"), rec ? lidarView(rec, false) : h("p", { class: "hint" }, "No LiDAR record was written. See the log."),
+    h("p", {}, h("button", { class: "small secondary", type: "button", onclick: toLidarSettings }, "LiDAR settings")));
 }
 function toLidarSettings() {  // the LiDAR box in the Settings tab: the calibration upload, or LiDAR off
   selectTab("settings", true);
@@ -1183,29 +1172,47 @@ function toLidarSettings() {  // the LiDAR box in the Settings tab: the calibrat
   ($("#lidaropts").hidden ? $("#uselidar") : $("#calfile")).focus({ preventScroll: true });
 }
 
+// A view's use in overrides ov: "in" (always use: locked), "out" (never use: excluded) or "auto".
+const useOf = (ov, name) => ov.locked.includes(name) ? "in" : ov.excluded.includes(name) ? "out" : "auto";
+// A candidate's status word in the review: "locked" for a pick that is set to "always use", else its status.
+const candStatus = (c, sel) => c.status === "picked" && sel.overrides.locked.includes(c.name) ? "locked"
+  : c.status.replace("_", " ");
+// The cameras seen from above, as this selection ran: view 0 is a star, a pick a filled dot (a locked pick a square),
+// each with its view number outward from the object, an available view a hollow dot, and a view that the app leaves
+// out (small or inconsistent) a cross. style.css (#ring) gives the colors; the attributes here use only currentColor,
+// so the marks still read without the stylesheet.
 function ring(sel) {
   const svg = $("#ring"), c = sel.ring.center, pts = sel.ring.points;
   svg.replaceChildren();
   if (!c) return;
-  const r = 1.2 * Math.max(1e-3, ...pts.filter(Boolean).map((p) => Math.hypot(p[0] - c[0], p[1] - c[1])));
+  // 1.3: room for the view numbers outside the outermost camera
+  const r = 1.3 * Math.max(1e-3, ...pts.filter(Boolean).map((p) => Math.hypot(p[0] - c[0], p[1] - c[1])));
   svg.setAttribute("viewBox", `${c[0] - r} ${-c[1] - r} ${2 * r} ${2 * r}`);
   const d = r / 30, order = new Map(sel.picks.map((p, k) => [p.name, k]));
-  svg.append(s("path", { d: `M${c[0] - d} ${-c[1]}h${2 * d}M${c[0]} ${-c[1] - d}v${2 * d}`, stroke: "#333", "stroke-width": d / 3 }));
+  const line = { fill: "none", stroke: "currentColor", "stroke-width": d / 3 };
+  svg.append(s("path", { d: `M${c[0] - d} ${-c[1]}h${2 * d}M${c[0]} ${-c[1] - d}v${2 * d}`, ...line }));
   sel.candidates.forEach((cand, i) => {
     const p = pts[i];
-    if (!p) return;
-    const [x, y] = [p[0], -p[1]], picked = order.has(cand.name), color = picked ? "#1a66d6" : "#999";
-    let mark;
+    if (!p) return;  // no camera direction: an excluded view, or one without a mask
+    const [x, y] = [p[0], -p[1]], picked = order.has(cand.name), word = candStatus(cand, sel);
+    let mark, size = 1.2 * d;  // how far the mark reaches from the camera
     if (cand.name === sel.anchor) {
-      const star = [...Array(10)].map((_, k) => { const a = Math.PI * k / 5 - Math.PI / 2, rr = k % 2 ? d : 2.4 * d; return `${x + rr * Math.cos(a)},${y + rr * Math.sin(a)}`; });
-      mark = s("polygon", { points: star.join(" "), fill: "#ffb300", stroke: "#333", "stroke-width": d / 4 });
-    } else mark = s("circle", { class: picked ? "pick" : "cand", cx: x, cy: y, r: 1.2 * d, fill: picked ? color : "#fff", stroke: color, "stroke-width": d / 3 });
+      size = 2.4 * d;
+      const star = [...Array(10)].map((_, k) => { const a = Math.PI * k / 5 - Math.PI / 2, rr = k % 2 ? d : size; return `${x + rr * Math.cos(a)},${y + rr * Math.sin(a)}`; });
+      mark = s("polygon", { points: star.join(" "), fill: "currentColor", stroke: "currentColor", "stroke-width": d / 4 });
+    } else if (word === "locked") {
+      mark = s("rect", { class: "lock", x: x - d, y: y - d, width: 2 * d, height: 2 * d, ...line, fill: "currentColor" });
+    } else if (picked || cand.status === "available") {
+      mark = s("circle", { class: picked ? "pick" : "cand", cx: x, cy: y, r: size, ...line, fill: picked ? "currentColor" : "none" });
+    } else mark = s("path", { class: "out", d: `M${x - d} ${y - d}l${2 * d} ${2 * d}m0 ${-2 * d}l${-2 * d} ${2 * d}`, ...line });
     const title = s("title");
-    title.textContent = `${cand.name} (${cand.status})`;
+    title.textContent = `${cand.name} (${word})`;
     mark.append(title);
     svg.append(mark);
-    if (picked) {
-      const label = s("text", { x, y: y - 2.6 * d, "font-size": 2.4 * d, "text-anchor": "middle" });
+    if (picked) {  // outward from the object: clear of the mark and of the cameras beside it
+      const ux = x - c[0], uy = y + c[1], n = Math.hypot(ux, uy), at = size + 2.2 * d;
+      const label = s("text", { x: n ? x + at * ux / n : x, y: n ? y + at * uy / n : y - at, "font-size": 2.4 * d,
+        "text-anchor": "middle", "dominant-baseline": "central", fill: "currentColor" });
       label.textContent = String(order.get(cand.name));
       svg.append(label);
     }
@@ -1214,36 +1221,78 @@ function ring(sel) {
 function renderCards() {
   const sel = V.sel, ov = V.ov, order = new Map(sel.picks.map((p, k) => [p.name, k]));
   const lviews = new Map(((sel.lidar && sel.lidar.views) || []).map((v) => [v.name, v]));  // each view's LiDAR scale
+  V.cards = new Map();  // candidate -> its card, its change line and its view 0 choice with its radio (markCards)
   const card = (c) => {
     const sam = sel.sam3[c.name] || { instances: [] }, k = order.get(c.name), lv = lviews.get(c.name);
-    const use = ov.locked.includes(c.name) ? "in" : ov.excluded.includes(c.name) ? "out" : "auto";
-    const inst = ov.instance[c.name] || "";
-    return h("div", { class: "card " + c.status, role: "group", "aria-labelledby": "card-" + c.name },
+    const use = useOf(ov, c.name), inst = ov.instance[c.name] || "", word = candStatus(c, sel);
+    const note = h("div", { class: "change", id: "change-" + c.name });
+    const radio = h("input", { type: "radio", name: "view0", checked: (ov.view0 || sel.anchor) === c.name,
+      onchange: () => edit(c.name, "view0") });
+    const zero = h("label", { class: "check" }, radio, " view 0");
+    const el = h("div", { class: "card " + c.status, role: "group", "aria-labelledby": "card-" + c.name },
       h("div", { class: "cimg" }, h("img", { src: file(`${sel.check_dir}/${c.name}.jpg`), loading: "lazy", alt: "" }),
         k != null ? h("b", { class: "chip" }, `view ${k}${c.name === sel.anchor ? " ★" : ""}`) : null),
       h("div", { class: "meta", id: "card-" + c.name }, `${c.name} at ${c.time_s.toFixed(2)} s`),
-      h("div", {}, badge(c.status), c.q != null ? ` q ${c.q.toFixed(2)}` : "",
+      // A locked pick's badge has its own mark (style.css .badge.locked), so it differs from a pick without the word.
+      h("div", {}, badge(word === "locked" ? "locked" : c.status, word), c.q != null ? ` q ${c.q.toFixed(2)}` : "",
         c.consistency != null ? ` agree ${c.consistency.toFixed(2)}` : "",
-        c.angle_to_nearest_pick != null && k == null ? ` ${c.angle_to_nearest_pick} deg from a pick` : ""),
+        c.angle_to_nearest_pick != null && k == null ? ` ${c.angle_to_nearest_pick}° from a pick` : ""),
       lv ? h("div", { class: "lidar" + (lv.status === "used" ? "" : " off") }, (lv.s != null ? "LiDAR " : "LiDAR: ") + lidarViewText(lv)) : null,
-      h("select", { "aria-label": c.name + ": use", onchange: (e) => edit(c.name, "use", e.target.value, e.target) },
+      note,
+      h("select", { "aria-label": c.name + ": use", "aria-describedby": "change-" + c.name, onchange: (e) => edit(c.name, "use", e.target.value) },
         h("option", { value: "auto", selected: use === "auto" }, "auto"),
         h("option", { value: "in", selected: use === "in" }, "always use"),
         h("option", { value: "out", selected: use === "out" }, "never use")),
-      h("select", { "aria-label": c.name + ": mask", onchange: (e) => edit(c.name, "instance", e.target.value, e.target) },
-        h("option", { value: "", selected: !inst }, "mask: top score"),
-        ...sam.instances.map((x) => h("option", { value: String(x.index), selected: inst === String(x.index) }, `mask: instance ${x.index} (${x.score.toFixed(2)})`)),
-        h("option", { value: "none", selected: inst === "none" }, "not in this frame")),
-      h("label", { class: "check" }, h("input", { type: "radio", name: "view0", checked: (ov.view0 || sel.anchor) === c.name,
-        onchange: (e) => edit(c.name, "view0", null, e.target) }), " view 0"));
+      h("select", { "aria-label": c.name + ": mask", onchange: (e) => edit(c.name, "instance", e.target.value) },
+        h("option", { value: "", selected: !inst }, "top mask"),
+        ...sam.instances.map((x) => h("option", { value: String(x.index), selected: inst === String(x.index) }, `mask ${x.index} (${x.score.toFixed(2)})`)),
+        h("option", { value: "none", selected: inst === "none" }, "not in frame")),
+      zero);
+    V.cards.set(c, { el, note, zero, radio });
+    return el;
   };
   const picked = sel.candidates.filter((c) => order.has(c.name)).sort((a, b) => order.get(a.name) - order.get(b.name));
   const others = sel.candidates.filter((c) => !order.has(c.name)).sort((a, b) => a.frame - b.frame);
   fill($("#cards"), h("h4", {}, `Picked views (${picked.length})`), h("div", { class: "cards" }, ...picked.map(card)),
-    others.length ? h("h4", {}, `Other candidates (${others.length}): set "always use" to add one`) : null,
+    others.length ? h("h4", {}, `Other candidates (${others.length})`) : null,
     others.length ? h("div", { class: "cards" }, ...others.map(card)) : null);
+  markCards();
 }
-function edit(name, what, value, el) {
+// What a card says about its edit until Select again (change()).
+const CHANGED = { adds: "Added when you select again.", drops: "Left out when you select again.",
+  edited: "Changed. Select again to apply it." };
+// A candidate's edit that waits for Select again (V.ov against V.ov0): "adds" (always use, on a view that is not
+// picked), "drops" (never use, on a pick), "edited" (another change of its use, its mask or view 0) or "".
+function change(c) {
+  const n = c.name, use = useOf(V.ov, n), picked = c.status === "picked", v0 = (o) => (o.view0 || V.sel.anchor) === n;
+  if (use !== useOf(V.ov0, n)) return use === "out" && picked ? "drops" : use === "in" && !picked ? "adds" : "edited";
+  return (V.ov.instance[n] || "") !== (V.ov0.instance[n] || "") || v0(V.ov) !== v0(V.ov0) ? "edited" : "";
+}
+// Where view 0 can go, with the overrides ov: a pick that is not set to "never use", or a view set to "always use".
+const offers0 = (c, ov) => { const use = useOf(ov, c.name); return use === "in" || (use === "auto" && c.status === "picked"); };
+// Each card shows its edit, and offers view 0 only where it can go (offers0); its radio follows V.ov.
+function markCards() {
+  for (const [c, e] of V.cards) {
+    const what = change(c);
+    e.el.classList.toggle("adds", what === "adds");
+    e.el.classList.toggle("drops", what === "drops");
+    e.note.textContent = CHANGED[what] || "";
+    e.zero.hidden = !offers0(c, V.ov);
+    e.radio.checked = (V.ov.view0 || V.sel.anchor) === c.name;
+  }
+}
+// The bar: while edits wait, "Select again" is the primary button and Build is off; else Build is the primary button
+// (off when the selection failed).
+function reviewBar() {
+  const edited = V.sel.candidates.some((c) => change(c));
+  $("#build").disabled = edited || !V.sel.ok;
+  $("#reselect").disabled = !edited;
+  $("#build").classList.toggle("secondary", edited);
+  $("#reselect").classList.toggle("secondary", !edited);
+  $("#discard").hidden = !edited;
+  say($("#revmsg"), edited ? "Select again to apply changes." : "", true);
+}
+function edit(name, what, value) {
   const ov = V.ov;
   if (what === "use") {
     ov.locked = ov.locked.filter((n) => n !== name);
@@ -1253,12 +1302,11 @@ function edit(name, what, value, el) {
   } else if (what === "instance") {
     if (value) ov.instance[name] = value; else delete ov.instance[name];
   } else ov.view0 = name;
-  V.dirty = true;
-  if (el && el.closest) el.closest(".card").classList.add("edited");
-  $("#reselect").disabled = false;
-  $("#build").disabled = true;
-  $("#discard").hidden = false;
-  say($("#revmsg"), "select again to apply your changes before the build", true);
+  // A card that holds view 0 and no longer offers it (an added view set back to "auto") gives it back to the saved choice.
+  const held = V.sel.candidates.find((c) => c.name === ov.view0);
+  if (held && !offers0(held, ov)) ov.view0 = V.ov0.view0;
+  markCards();
+  reviewBar();
 }
 $("#discard").onclick = () => loadReview().catch((e) => say($("#revmsg"), e.message));
 $("#manualstart").onclick = async () => {  // the Settings tab in manual mode, with the frames open
@@ -1267,25 +1315,30 @@ $("#manualstart").onclick = async () => {  // the Settings tab in manual mode, w
   await refresh().catch((e) => say($("#revmsg"), e.message));
   selectTab("settings", true);
   $("#gridbox").open = true;
-  $("#framesum").focus({ preventScroll: true });
+  $("#gridsum").focus({ preventScroll: true });
   $("#tabs").scrollIntoView({ block: "start", behavior: smooth() });
 };
-$("#reselect").onclick = () => act([$("#reselect"), $("#build")], $("#revmsg"), "selecting the views again",
-  () => post(`/api/jobs/${V.id}/overrides`, { ...V.ov, api_key: $("#key2").value || null }),
-  () => { $("#key2").value = ""; $("#log").textContent = ""; });
-$("#build").onclick = () => act([$("#build"), $("#reselect")], $("#revmsg"), "checking the key and queuing the build",
+// Build or Select again closes the waiting panel, which would leave the page scrolled past the job's head: the
+// title, the status and the progress come back into view, with the tabs under them.
+const toHead = () => $("#jtitle").scrollIntoView({ block: "nearest" });
+// A view 0 that no card offers now (a saved choice set to "never use") goes: the app takes the best view again.
+$("#reselect").onclick = () => act([$("#reselect"), $("#build")], $("#revmsg"), "selecting",
+  () => post(`/api/jobs/${V.id}/overrides`, { ...V.ov,
+    view0: V.sel.candidates.some((c) => c.name === V.ov.view0 && offers0(c, V.ov)) ? V.ov.view0 : null,
+    api_key: $("#key2").value || null }),
+  () => { $("#key2").value = ""; $("#log").textContent = ""; toHead(); });
+$("#build").onclick = () => act([$("#build"), $("#reselect")], $("#revmsg"), "checking the key",
   () => post(`/api/jobs/${V.id}/continue`, { api_key: $("#key2").value || null }),
-  () => { $("#key2").value = ""; $("#log").textContent = ""; });
+  () => { $("#key2").value = ""; $("#log").textContent = ""; toHead(); });
 
-// ---- 4b. the part list ("The VLM proposes, I edit the list": the job waits after propose) ----
+// ---- 4b. the part list ("VLM, then I check": the job waits after propose) ----
 
 async function loadParts() {
   const r = V.parts = await api(`/api/jobs/${V.id}/parts`), p = r.proposal || { parts: [], warnings: [] };
   const moving = p.parts.filter((x) => x.parent), n = moving.length;
   const who = p.source === "vlm" ? VLM[p.agent] || "The VLM" : "You";
-  fill($("#partssum"), !p.parts.length ? "There is no part list yet." : n
-    ? `${who} listed ${n} moving ${n === 1 ? "part" : "parts"} of the ${r.noun}. The base, which does not move, is ${p.base}.`
-    : `${who} found no moving part. Add the parts that move, one per line under the base, ${p.base}.`);
+  fill($("#partssum"), !p.parts.length ? "No part list yet." : n ? `${who}: ${n} moving ${n === 1 ? "part" : "parts"}. Base: ${p.base}.`
+    : `${who} found no moving parts. Add them under the base (${p.base}).`);
   $("#partswarn").replaceChildren(...(p.warnings || []).map((w) => h("li", {}, w)));
   fill($("#partshints"), moving.filter((x) => x.axis_hint).map((x) => h("li", {}, h("b", {}, x.name), ": " + x.axis_hint)));
   $("#partsfig").hidden = !r.photo;
@@ -1320,310 +1373,107 @@ $("#partsbuild").onclick = () => {  // the VLM's list as it is (continue), or th
   if (!same) try { parts = parseParts($("#partsedit").value); } catch (e) { say($("#partsmsg"), e.message); return; }
   const proposed = (V.parts && V.parts.proposal && V.parts.proposal.parts) || [];
   const api_key = $("#key2").value || null;
-  return act([$("#partsbuild"), $("#partsreset")], $("#partsmsg"), "checking the parts and queuing the build",
+  return act([$("#partsbuild"), $("#partsreset")], $("#partsmsg"), "checking the parts",
     () => same ? post(`/api/jobs/${V.id}/continue`, { api_key }) : post(`/api/jobs/${V.id}/parts`, { parts: keepHints(parts, proposed), api_key }),
-    () => { $("#key2").value = ""; $("#log").textContent = ""; V.partsKey = null; });
+    () => { $("#key2").value = ""; $("#log").textContent = ""; V.partsKey = null; toHead(); });
 };
 
 // ---- 5. results ----
 
-// What each item of the Results and Downloads tabs is and how it was found, shown by its info button (info()): the rows
-// of the facts list, the viewers and the files to download (dl_). One to three plain sentences each. Sources:
-// build_plan.md notes 4b, 5, 9, 11 and 12, and the code they name (mvsam3d.place, lidar_scale, views, steps,
-// agent_step, controller, vomp_run, mjcf, urdf, parts.stage, jobs.package).
-const INFO = {
-  metric_scale: "With LiDAR, each view's scale is the median, over the LiDAR points inside the object's mask, of the " +
-    "LiDAR depth divided by Depth Anything 3's depth at the same pixel. The number shown is the weighted median of " +
-    "the views that agree, and select multiplies DA3's depth and camera positions by it before MV-SAM3D, so later " +
-    "sizes are in meters. Without LiDAR, the sizes come from DA3's own depth estimate, which is not measured.",
-  mask_iou: "For each view, the app draws the posed mesh from that view's camera and compares it with the SAM 3 mask: " +
-    "the shared area divided by the area of both together, from 0 to 1. This number is the mean over the views used. " +
-    "Below 0.5 the agent is skipped, and physics uses the Stage A mesh or its split parts.",
-  parts_lost: "Each entry is a group of SAM 3 masks of a listed name that did not become a part, so a name can show " +
-    "here and still have a part. \"not found\" means that no mask of the name was left in any view, because SAM 3 " +
-    "found none with a score of at least 0.4 or the vote dropped them all. Otherwise the face vote gives the reason: " +
-    "the group covers less than 0.3% of the surface, or fewer than half of the views that see it well and found the " +
-    "name hold it.",
-  agent: "GPT-6-Astra (through the Codex CLI) or Claude Opus 5.5 (through the Anthropic API), both at xhigh effort. It " +
-    "has 600 s to edit the Stage A mesh in Blender, or 900 s to set the joints of an articulated object's split " +
-    "parts, and time spent exporting GLBs does not count, up to 600 s. It is skipped when it is turned off or the " +
-    "mean mask IoU is below 0.5, and physics then uses the Stage A mesh or the split parts without joints.",
-  agent_verdict: "The agent's verdict when it called finish: complete, unchanged or needs_review for a refined mesh, " +
-    "or articulated, unchanged or needs review for joints. In brackets is where the result came from: finish, " +
-    "checkpoint, export or fallback_original. A checkpoint or an export means that the session ended without a " +
-    "valid finish, so the verdict is needs review; fallback_original means that the agent left no valid result, so " +
-    "its input was kept.",
-  agent_reason: "The agent's own words when it called finish. When the session ended without a valid finish, it is " +
-    "the defect noted at the last checkpoint, or the app's note on the export or the fallback. When the agent's " +
-    "result held your API key, the reason and the limitations are left out.",
-  limitation: "A flaw that the agent says is still in its result, written when it called finish. The agent can list " +
-    "at most 3.",
-  joints: "The number of joints in the GLB that the agent delivered, fixed joints included. With 0, physics welds the " +
-    "parts into one body. A ? means that the app could not read the GLB's joints.",
-  joint_changes: "The joint changes (set_joint calls that set or removed a joint) that the app accepted during the " +
-    "session. A change that added a problem to the joint tree was refused and undone, and it is not counted.",
-  agent_tokens: "The tokens that the Claude agent used over the whole session, from its log: new input, output, " +
-    "cache reads and cache writes. A turn is one reply of the model.",
-  agent_cost: "An estimate from the token counts at Claude Opus 5.5's prices per million tokens: $4 input, $20 " +
-    "output, $0.20 cache read and $5 cache write. In a turn with a refusal fallback, both tries count, each at its " +
-    "own model's prices, but a try that failed and was sent again does not, so the estimate can be low. A ? means " +
-    "that the log gave no cost; your Anthropic bill gives the real cost.",
-  links: "The bodies of the MuJoCo model (mjcf.json), one for each part of the GLB that physics used. Each link " +
-    "has its own mass, which the Link masses row lists.",
-  links_welded: "The GLB that physics used has no joints, so the MuJoCo, USD and URDF models hold the whole object as " +
-    "one rigid body. This happens when the agent is off or skipped, or when it delivered no joints.",
-  base: "The link that the other links hang from. It is fixed to the world when the agent gave it a fixed joint to " +
-    "the world, and otherwise it can move freely.",
-  joint: "How this part moves on its parent, from the joint that the agent set: it turns about an axis (revolute), " +
-    "slides along one (prismatic) or is fixed. The range runs from the lower to the upper limit, where 0 is the " +
-    "part's pose in the mesh.",
-  joint_welded: "The agent gave this part no joint, so physics welds it to the named link: the nearest part above " +
-    "it in the GLB's node tree, or else the base.",
-  mass: "VoMP predicts a density for every occupied voxel of the aligned mesh on a 64^3 grid, and the mass is the sum " +
-    "of density times voxel volume. An articulated object adds up its links, each on its own grid; a link with no " +
-    "VoMP result counts with its collision hulls filled at the median density when the parts have joints, and is " +
-    "left out when they have none. Mass grows with the size cubed, so a 5% size error gives about a 16% mass error.",
-  com: "The mass-weighted mean of the voxel centers (and of any link filled from its collision hulls), as x, y and z " +
-    "in meters. The frame is that of the physics models: z up, x along the long side, and the origin at the center " +
-    "of the footprint at the bottom of the object.",
-  link_masses: "Each link's mass from VoMP, each link on its own 64^3 grid. A link with no VoMP result, such as a " +
-    "thin lid with no occupied voxel, gets its collision hulls filled at the object's median density instead.",
-  mass_note: "VoMP gave no result for these links, for example a thin lid with no occupied voxel on its 64^3 grid. " +
-    "The mass and center of mass above leave them out, and so do the MuJoCo, USD and URDF models, which still keep " +
-    "their shapes.",
-  youngs: "Stiffness: the median of VoMP's predicted Young's modulus over the object's voxels, in pascals (1 GPa is " +
-    "1e9 Pa). For an articulated object, the voxels of all links count, each by its volume. In our tests VoMP v1.1 " +
-    "gave about 4 GPa to most objects, steel and glass included.",
-  poisson: "How much the material bulges sideways when it is squeezed, with no unit (usually 0 to 0.5). It is the " +
-    "median of VoMP's prediction over the object's voxels; for an articulated object, each voxel counts by its volume.",
-  density: "The median of VoMP's predicted density over the object's voxels, in kg/m^3; for an articulated object, " +
-    "each voxel counts by its volume. The mass uses each voxel's own density, not this median. In our tests VoMP " +
-    "v1.1 gave about 1,000 kg/m^3 to most objects.",
-  view_posed: "MV-SAM3D's mesh from all the views used, with its size, position and a small turn fitted to the SAM 3 " +
-    "masks. It is in view 0's camera frame, where the viewer's up is the camera's forward axis, so the object looks " +
-    "tipped over; aligned.glb is the upright copy. The size is the box around it along view 0's camera axes, in cm, " +
-    "so a tilted object gives a box larger than the object.",
-  view_parts: "The posed mesh cut into parts: SAM 3 masked each part's name in the views, the masks voted on every " +
-    "face, and Blender cut the mesh and filled the holes. The parts have no joints yet, and they are in the same " +
-    "frame as the Stage A mesh. The size is the box around them along view 0's camera axes, in cm.",
-  view_refined: "The agent's GLB, in the same frame as the Stage A mesh: that mesh after the agent edited it in " +
-    "Blender, or as it was when the verdict is unchanged. Physics uses it. The size is the box around it along view " +
-    "0's camera axes, in cm.",
-  view_rigged: "The split parts as the agent delivered them, in one GLB in the Stage A mesh's frame, with the joints " +
-    "it set (none when the caption says without joints). Physics makes each part a link and each joint a joint, " +
-    "welds a part without a joint to the part above it, and makes one body when there are no joints. The size is " +
-    "the box around it along view 0's camera axes, in cm.",
-  dl_zip: "The last stage (package) writes it. A file that holds your API key is left out, such as the agent's " +
-    "result when the key was found in it.",
-  dl_posed: "The Stage A mesh in view 0's camera frame, in meters, with the scale from LiDAR when LiDAR is on, else " +
-    "from Depth Anything 3's estimate.",
-  dl_parts: "The split parts in one GLB, one node per part, without joints, in the same frame as posed.glb.",
-  dl_refined: "The agent's GLB, in the same frame as posed.glb. For an articulated object, each joint that the agent " +
-    "set is in its child part's node extras (gator_joint); a part without one has none.",
-  dl_aligned: "The GLB that physics used, turned upright, with the bottom at 0, the footprint centered on the origin " +
-    "and the long side on x (z up in MuJoCo, y up in glTF). Up is the object's own axis closest to the up of the " +
-    "table or floor under it in view 0, or to the cameras' mean up when no plane fits there. Materials that let " +
-    "light through are made opaque, because VoMP rejects them.",
-  dl_urdf: "A URDF of the object, built from the MuJoCo model's meshes and masses: one link when the GLB has no " +
-    "joints, else one link per part. Each part but the base gets the agent's joint to its parent, or a fixed one to " +
-    "the link that physics welds it to when the agent gave it none, and a fixed base adds a world link.",
-  dl_placement: "The record of the place step: the pose that puts the MV-SAM3D mesh in view 0's camera frame, the " +
-    "scale and pose fitted to the SAM 3 masks, and the metric scale. Its check gives each view's mask IoU and how " +
-    "close view 0's DA3 points lie to the mesh.",
-  dl_summary: "VoMP's summary of the aligned mesh: the voxel counts, the median and the 5th to 95th percentile of " +
-    "Young's modulus, Poisson ratio and density, and the mass, center of mass and inertia of the rigid body. For an " +
-    "articulated object it adds each link's numbers and the links that VoMP could not voxelize.",
-  dl_lidar: "The record of the lidar stage: the metric scale, each view's scale, point count and status, how the " +
-    "views were combined, the LiDAR source, and the link to the camera (for a rosbag the TF chain or the uploaded " +
-    "calibration; a Stray capture's depth is already aligned with the color camera). When no scale was found, ok " +
-    "is false and reason says why.",
-  dl_selection: "The view selection: every candidate frame with its quality and status, such as picked or excluded, " +
-    "the picks in run order with view 0 first, the cameras seen from above, the warnings and the metric scale that " +
-    "select applied (null without LiDAR). ok is false when the selection failed, and the warnings say why.",
-  dl_parts_json: "The record of the parts stage: each part's name, parent, guessed joint, share of the surface and " +
-    "box, then the parts that were not split off, with the reason. It also gives the seams between parts that touch, " +
-    "with up to 4 fitted lines that may be hinge axes.",
-  dl_mjcf: "The record of the MuJoCo model: its inputs, versions, counts and start height. For an object with joints " +
-    "it also lists the links with their masses, the joints, the base, the welded parts and the pairs that do not " +
-    "collide. The model itself (the XML and its meshes) comes only in results.zip.",
-  part_masks: "SAM 3 ran on each view used with each part's name as the prompt, the base included, and every mask " +
-    "with a score of at least 0.4 is shown. The face vote starts from all of them, then drops the masks that lie " +
-    "outside the object, cover the whole object, are the union of two or more others, or repeat a mask with a higher " +
-    "score.",
-};
-
-// The info button of an item: a small "i" after its label, and its note (INFO[key]) that shows on hover (a mouse or a
-// pen) and on keyboard focus. A click, a tap, Enter or Space toggles it: it shows and stays open, or it hides when it
-// showed. Escape, a click elsewhere and focus that moves on close it. One note shows at a time. The note is fixed to
-// the window, so it moves no layout and is not clipped by its figure; it stays TIP_EDGE px inside the window's edges.
-// row: for a facts row, a function that gives its dd; the note goes under that value or above the row's label, from
-// the value's left edge, so the value and the column of info buttons stay in view. Other notes go under or above
-// their button.
-const TIP_EDGE = 12, TIP_GAP = 6, TIP_DELAY = 150;  // px from the window's edge, px from the button, ms to reach the note
-let tipN = 0, tip = null, tipTimer = null;  // the notes' ids; the open note {t, pin, hover, focus}; the hover's close
-function info(key, label, row) {
-  const text = INFO[key];
-  if (!text) return null;
-  const id = "note-" + ++tipN, t = { row: row || null, down: null };
-  const hover = (e) => !e || e.pointerType !== "touch";  // a tap is a click, not a hover
-  t.note = h("span", { class: "infonote", id, role: "tooltip", hidden: true }, text);
-  t.btn = h("button", { type: "button", class: "infobtn", "aria-label": "About " + label, "aria-describedby": id,
-    onpointerdown: () => { t.down = !!tip && tip.t === t; },  // shown before the press, which may focus the button
-    onclick: (e) => tipClick(t, e), onfocus: () => tipOn(t, "focus"), onblur: () => tipOff(t, "focus") }, "i");
-  t.wrap = h("span", { class: "info", onpointerenter: (e) => { if (hover(e)) tipOn(t, "hover"); },
-    onpointerleave: (e) => { if (hover(e)) tipOff(t, "hover"); } }, t.btn, t.note);
-  return t.wrap;
+// model-viewer comes from a module script: a CDN on the tunnel page, the site's own copy on the public site. When that
+// script does not load, a viewer would say "loading" for ever, so it waits for the element at most MV_WAIT_MS.
+const MV_WAIT_MS = 10000;
+function mvDefined() {  // true once <model-viewer> is defined; false when it is not after MV_WAIT_MS
+  const ce = window.customElements;
+  if (!ce) return Promise.resolve(false);
+  if (ce.get("model-viewer")) return Promise.resolve(true);
+  return Promise.race([ce.whenDefined("model-viewer").then(() => true),
+    new Promise((r) => setTimeout(() => r(false), MV_WAIT_MS))]);
 }
-function tipWait(fn) {  // fn after TIP_DELAY ms (the hover's close); tipWait() cancels it
-  if (tipTimer !== null) clearTimeout(tipTimer);
-  tipTimer = fn ? setTimeout(() => { tipTimer = null; fn(); }, TIP_DELAY) : null;
-}
-function tipOn(t, why) {  // why: "hover", "focus" or "pin" (a click)
-  tipWait();
-  if (!tip || tip.t !== t) {
-    tipClose();
-    tip = { t, pin: false, hover: false, focus: false };
-    t.note.hidden = false;
-    t.wrap.classList.toggle("on", true);
-  }
-  tip[why] = true;
-  tipPlace();
-}
-function tipOff(t, why) {
-  if (!tip || tip.t !== t) return;
-  tip[why] = false;
-  if (why === "focus") tip.pin = false;  // the focus moved on: a note kept open by a click closes too
-  if (tip.pin || tip.hover || tip.focus) return;
-  if (why !== "hover") tipClose();
-  else tipWait(() => { if (tip && tip.t === t && !tip.pin && !tip.hover && !tip.focus) tipClose(); });  // time to reach the note
-}
-// A click of a pointer (detail 1 or more) goes by the note as it was at pointerdown, before the press focused the
-// button (a tap in Chrome shows the note by focus first); a click of a key (detail 0) by the note as it is.
-function tipClick(t, e) {
-  const shown = e && e.detail > 0 && t.down !== null ? t.down : !!tip && tip.t === t;
-  t.down = null;
-  if (shown) tipClose();
-  else tipOn(t, "pin");
-}
-function tipClose() {
-  tipWait();
-  if (!tip) return;
-  tip.t.note.hidden = true;
-  tip.t.wrap.classList.toggle("on", false);
-  tip = null;
-}
-function tipPlace() {  // under its value or button, or above when only that fits; inside the window, below the header
-  if (!tip) return;
-  const { btn, note, wrap } = tip.t, row = tip.t.row && tip.t.row();
-  if (btn.isConnected === false) { tipClose(); return; }
-  const vw = document.documentElement.clientWidth || window.innerWidth, vh = window.innerHeight;
-  const head = $("header") ? $("header").getBoundingClientRect().bottom : 0, b = btn.getBoundingClientRect();
-  if (b.bottom <= head || b.top >= vh) { tipClose(); return; }  // the button went under the sticky header or off the window
-  note.style.left = note.style.top = "0px";  // measured at the corner, at its own width
-  const n = note.getBoundingClientRect(), r = row ? row.getBoundingClientRect() : b;
-  const label = row && wrap.parentElement ? wrap.parentElement.getBoundingClientRect() : b;  // a row's dt
-  const x = row ? r.left : b.left + b.width / 2 - n.width / 2;
-  const left = Math.max(TIP_EDGE, Math.min(x, vw - TIP_EDGE - n.width));
-  const above = Math.min(r.top, label.top, b.top) - TIP_GAP - n.height, below = Math.max(r.bottom, b.bottom) + TIP_GAP;
-  const top = below + n.height > vh - TIP_EDGE && above >= Math.max(TIP_EDGE, head + TIP_GAP) ? above : below;
-  note.style.left = Math.round(left) + "px";
-  note.style.top = Math.round(top) + "px";
-}
-function tipKey(e) {
-  if (e.key === "Escape" && tip) tipClose();
-}
-function tipOutside(e) {  // a click or a tap anywhere but the open note and its button
-  if (tip && !(e.target && tip.t.wrap.contains(e.target))) tipClose();
-}
-document.addEventListener("keydown", tipKey);
-document.addEventListener("pointerdown", tipOutside, true);
-window.addEventListener("scroll", tipPlace, { capture: true, passive: true });  // any box that scrolls moves the button
-window.addEventListener("resize", tipPlace);
-
 async function renderResults(job) {
-  tipClose();  // its button is about to go
   const has = (p) => job.files.includes(p), json = async (p) => has(p) ? (await T.fetch(file(p))).json() : null;
   const cm = (x) => (100 * x).toFixed(0);
-  const viewer = (p, title, key) => {
-    const name = h("span", {}, title), cap = h("figcaption", {}, name, info(key, title)), fig = h("figure", {}, cap);
+  // A viewer: until its mesh shows, the box says "Loading the mesh" (model-viewer's poster slot, which it hides then)
+  // and the caption "loading" where the size goes. The caption says it to a screen reader, so the box's text is hidden.
+  // When the mesh does not load, or model-viewer itself does not, the caption is the title and a line offers the file.
+  const viewer = (p, title) => {
+    const cap = h("figcaption", {}, title + ": loading"), fig = h("figure", {}, cap), name = p.split("/").pop();
+    const failed = () => {
+      cap.textContent = title;
+      fig.replaceChildren(cap, h("p", { class: "msg" }, `Could not show ${name}: `,
+        h("a", { href: file(p, name), download: name }, "download it"), "."));
+    };
     fig.append(h("model-viewer", { src: file(p), "camera-controls": true, "environment-image": "neutral", "shadow-intensity": "1",
       "interaction-prompt": "none", alt: title,
       onload: (e) => {  // the size of the model, in the GLB's meters
         const d = e.target.getDimensions && e.target.getDimensions();
-        if (d) name.textContent = `${title}: ${cm(d.x)} x ${cm(d.y)} x ${cm(d.z)} cm`;
+        cap.textContent = d ? `${title}: ${cm(d.x)} x ${cm(d.y)} x ${cm(d.z)} cm` : title;
       },
-      onerror: () => fig.replaceChildren(cap, h("p", { class: "msg" }, `Could not show ${p.split("/").pop()}: `,
-        h("a", { href: file(p, p.split("/").pop()), download: p.split("/").pop() }, "download it"), ".")) }));
+      onerror: failed }, h("p", { slot: "poster", class: "mvload", "aria-hidden": "true" }, "Loading the mesh")));
+    mvDefined().then((ok) => { if (!ok) failed(); });
     return fig;
   };
   const off = agentOf(job.agent) === "none", a = job.agent_result, art = job.articulated === true;
   const ran = a && RAN[a.agent];  // results from before the Opus agent do not name theirs
   const rigged = !!a && a.mode === "articulation";  // the agent set the joints of the split parts
-  const by = ran ? ", by " + ran : "";
-  const notRefined = art ? "no joints (agent turned off), so physics welds the parts into one body" : "not refined (agent turned off)";
-  const refined = has("refined.glb") ? viewer("refined.glb", !rigged ? (ran ? "Refined by " + ran : "Refined by the agent")
-    : a.joints_delivered > 0 ? "Parts with joints" + by : "Agent result without joints" + by, rigged ? "view_rigged" : "view_refined")
-    : null;
-  const split = has("run/parts.glb") ? viewer("run/parts.glb", "Parts (split, before rigging)", "view_parts") : null;
+  const by = (title) => ran ? `${title} (${ran})` : title;
+  const notRefined = art ? "off (parts welded into one body)" : "off";
+  const refined = has("refined.glb") ? viewer("refined.glb", !rigged ? by("Refined")
+    : by(a.joints_delivered > 0 ? "Parts with joints" : "Agent result, no joints")) : null;
+  const split = has("run/parts.glb") ? viewer("run/parts.glb", "Split parts") : null;
   $("#viewers").classList.toggle("single", !refined && !split);
   $("#resultsbody").classList.toggle("onefig", !refined && !split);  // a wide screen puts the facts beside it
   // With the agent off there is no agent viewer; the Agent row of the facts says so.
-  fill($("#viewers"), viewer("run/posed.glb", "Stage A (MV-SAM3D, posed)", "view_posed"), split, refined);
+  fill($("#viewers"), viewer("run/posed.glb", "Posed mesh"), split, refined);
   const [place, phys, mj, parts, pr, lid] = await Promise.all([json("run/placement.json"), json("physics/summary.json"),
     art ? json("physics/mjcf/mjcf.json") : null, art ? json("run/parts.json") : null,
     art && has("run/parts.json") ? api(`/api/jobs/${V.id}/parts`).catch(() => null) : null, json("pool/lidar.json")]);
-  // [label, value, the key of its note in INFO]
+  // [label, value]: what each one means is in help.html.
   const rows = [], num = (x, d = 3) => x == null ? "?" : Number(x).toPrecision(d);
-  if (place) rows.push(["Metric scale", metricScale(place, lid, job), "metric_scale"]);
-  if (place) rows.push(["Stage A mean mask IoU", num(place.check && place.check.mean_mask_iou), "mask_iou"]);
+  // A position in m, to the mm. Rounding first turns float noise such as -1.51e-18 into 0.000, not -0.000.
+  const mm = (x) => x == null ? "?" : (Math.round(1000 * x) / 1000).toFixed(3);
+  if (place) rows.push(["Metric scale", metricScale(place, lid, job)]);
+  if (place) rows.push(["Mask IoU", num(place.check && place.check.mean_mask_iou)]);
   const lost = parts ? (parts.parts || []).filter((x) => x.status !== "found") : [];  // not_found, dropped_small, unconfirmed
-  if (lost.length) rows.push(["Parts not split off", lost.map((x) => `${x.prompt} (${x.why || x.status.replace("_", " ")})`).join("; "), "parts_lost"]);
-  if (job.stages.agent.status === "skipped") rows.push(["Agent", off ? notRefined : "skipped: " + job.stages.agent.note, "agent"]);
+  if (lost.length) rows.push(["Parts not split off", lost.map((x) => `${x.prompt} (${x.why || x.status.replace("_", " ")})`).join("; ")]);
+  if (job.stages.agent.status === "skipped") rows.push(["Agent", off ? notRefined : "skipped: " + job.stages.agent.note]);
   else if (a) {
-    if (a.model) rows.push(["Agent", `${ran || a.agent} (${a.model})`, "agent"]);
-    rows.push(["Agent verdict", `${rigged && VERDICT[a.verdict] || a.verdict} (${a.source})`, "agent_verdict"],
-      ["Agent reason", a.reason || "", "agent_reason"]);
-    for (const l of a.limitations || []) rows.push(["Limitation", l, "limitation"]);
-    if (rigged) rows.push(["Joints", a.joints_delivered != null ? String(a.joints_delivered) : "?", "joints"]);
-    if (rigged && a.counts && a.counts.joints != null) rows.push(["Joint changes by the agent", String(a.counts.joints), "joint_changes"]);
+    if (a.model) rows.push(["Agent", `${ran || a.agent} (${a.model})`]);
+    rows.push(["Agent verdict", `${rigged && VERDICT[a.verdict] || a.verdict} (${a.source})`], ["Agent reason", a.reason || ""]);
+    for (const l of a.limitations || []) rows.push(["Limitation", l]);
+    if (rigged) rows.push(["Joints", a.joints_delivered != null ? String(a.joints_delivered) : "?"]);
+    if (rigged && a.counts && a.counts.joints != null) rows.push(["Joint changes", String(a.counts.joints)]);
     if (a.tokens) {
       const t = a.tokens;
       rows.push(["Agent tokens", `${count(t.input_tokens)} input, ${count(t.output_tokens)} output, ` +
         `${count(t.cache_read_input_tokens)} cache read, ${count(t.cache_creation_input_tokens)} cache write` +
-        (a.turns != null ? ` in ${a.turns} turns` : ""), "agent_tokens"],
-        ["Agent cost (estimate)", a.cost_usd != null ? "about $" + Number(a.cost_usd).toFixed(2) : "?", "agent_cost"]);
+        (a.turns != null ? ` in ${a.turns} turns` : "")],
+        ["Agent cost (estimate)", a.cost_usd != null ? "about $" + Number(a.cost_usd).toFixed(2) : "?"]);
     }
   }
   if (mj && mj.links) {  // the MJCF of an object with joints: a body per link
     const names = Object.keys(mj.links), deg = (x) => (x * 180 / Math.PI).toFixed(0), cmr = (x) => (100 * x).toFixed(1);
-    rows.push(["Links", `${names.length}: ${names.join(", ")}`, "links"],
-      ["Base", `${mj.root}, ${mj.fixed_base ? "fixed to the world" : "free to move"}`, "base"]);
+    rows.push(["Links", `${names.length}: ${names.join(", ")}`],
+      ["Base", `${mj.root}, ${mj.fixed_base ? "fixed to the world" : "free to move"}`]);
     for (const j of mj.joints || []) rows.push([`Joint of ${j.child}`, j.type === "revolute"
-      ? `turns on ${j.parent}, ${deg(j.range[0])} to ${deg(j.range[1])} deg` : j.type === "prismatic"
-        ? `slides on ${j.parent}, ${cmr(j.range[0])} to ${cmr(j.range[1])} cm` : `fixed to ${j.parent}`, "joint"]);
-    for (const [k, to] of Object.entries(mj.welded || {})) rows.push([`Joint of ${k}`, `none, so it is welded to ${to}`, "joint_welded"]);
-  } else if (mj && art) rows.push(["Links", "1: the parts have no joints, so physics welds them into one body", "links_welded"]);
+      ? `turns on ${j.parent}, ${deg(j.range[0])}° to ${deg(j.range[1])}°` : j.type === "prismatic"
+        ? `slides on ${j.parent}, ${cmr(j.range[0])} to ${cmr(j.range[1])} cm` : `fixed to ${j.parent}`]);
+    for (const [k, to] of Object.entries(mj.welded || {})) rows.push([`Joint of ${k}`, `none (welded to ${to})`]);
+  } else if (mj && art) rows.push(["Links", "1 (no joints, one rigid body)"]);
   if (phys) {
     const whole = mj && mj.links ? mj.inertial : null;  // every link, also one that VoMP could not voxelize
     const rb = whole || phys.rigid_body || {}, md = phys.median || {}, skipped = Object.keys(phys.links_skipped || {});
-    rows.push(["Mass", num(rb.mass) + " kg", "mass"], ["Center of mass", (rb.com || []).map((x) => num(x)).join(", ") + " m", "com"]);
+    rows.push(["Mass", num(rb.mass) + " kg"], ["Center of mass", (rb.com || []).map(mm).join(", ") + " m"]);
     if (whole) rows.push(["Link masses", Object.entries(mj.links).map(([k, l]) => `${k} ${num(l.inertial.mass)} kg` +
-      (l.source === "hull" ? " (from its collision hulls)" : "")).join(", "), "link_masses"]);
-    else if (skipped.length) rows.push(["Mass note", `VoMP could not voxelize ${skipped.join(", ")}, so the mass covers only ` +
-      `${(phys.rigid_body_covers || []).join(", ")}.`, "mass_note"]);
-    rows.push(["Young's modulus (median)", num(md.youngs_modulus_pa) + " Pa", "youngs"],
-      ["Poisson ratio (median)", num(md.poisson_ratio), "poisson"], ["Density (median)", num(md.density_kg_m3) + " kg/m3", "density"]);
+      (l.source === "hull" ? " (from hulls)" : "")).join(", ")]);
+    else if (skipped.length) rows.push(["Mass note", `Leaves out ${skipped.join(", ")} (no VoMP result)`]);
+    rows.push(["Young's modulus (median)", num(md.youngs_modulus_pa) + " Pa"], ["Poisson ratio (median)", num(md.poisson_ratio)],
+      ["Density (median)", num(md.density_kg_m3) + " kg/m³"]);
   }
-  // The label and its info button in one dt, then the value; the note goes by the value (the dd, made after the note).
-  $("#facts2").replaceChildren(h("dl", {}, ...rows.flatMap(([k, v, key]) => {
-    let dd = null;
-    const dt = h("dt", {}, k, info(key, k, () => dd));
-    return [dt, dd = h("dd", {}, v)];
-  })));
+  $("#facts2").replaceChildren(h("dl", {}, ...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])));
   const checks = (pr && pr.checks) || [];  // run/parts/sam3/check/<view>.jpg
-  fill($("#partchecks"), checks.length ? h("details", { class: "sub" }, h("summary", {}, `Part masks in the views (${checks.length})`),
-    h("p", { class: "hint" }, "Each part's SAM 3 masks in its own color. Open one to see it larger.",
-      info("part_masks", "Part masks in the views")),
+  fill($("#partchecks"), checks.length ? h("details", { class: "sub" }, h("summary", {}, `Part masks (${checks.length})`),
+    h("p", { class: "hint" }, "One color per part."),
     h("div", { class: "checks" }, ...checks.map((c) => h("a", { href: file(c), target: "_blank", rel: "noopener" },
       h("img", { src: file(c), loading: "lazy", alt: "part masks in view " + /(\d+)\.jpg$/.exec(c)[1] }))))) : null);
 }
@@ -1636,63 +1486,48 @@ function metricScale(place, rec, job) {
   const facts = [src.kind === "stray" ? "iPhone LiDAR depth" : src.topic || (job.lidar && job.lidar.topic) || null,
     same && c.views_used != null ? `${c.views_used} views` : null, same && c.spread_rel != null ? "spread " + pct(c.spread_rel) : null];
   const shown = facts.filter(Boolean);
-  return `x${m.toFixed(3)} from LiDAR` + (shown.length ? ` (${shown.join(", ")})` : "");
+  return `×${m.toFixed(3)} from LiDAR` + (shown.length ? ` (${shown.join(", ")})` : "");
 }
 
 // ---- 5a. the Downloads tab: the job's files by group ----
 
-// The groups in order, each with its files as [path in the job folder, the name it downloads as, the key of its note
-// in INFO]. They are server.OUTPUTS, which server.ALLOW serves; the tab lists those that exist (job.files). The MJCF
-// and USD models, the URDF's meshes and the agent's result are not served alone: they come only in results.zip.
+// The groups in order, each with its files as [path in the job folder, the name it downloads as]. They are
+// server.OUTPUTS, which server.ALLOW serves; the tab lists those that exist (job.files). The MJCF and USD models, the
+// URDF's meshes and the agent's result are not served alone: they come only in results.zip (help.html says what it holds).
 const DOWNLOADS = [
-  ["Everything", [["results.zip", "results.zip", "dl_zip"]]],
-  ["Meshes", [["run/posed.glb", "posed.glb", "dl_posed"], ["run/parts.glb", "parts.glb", "dl_parts"],
-    ["refined.glb", "refined.glb", "dl_refined"], ["physics/aligned.glb", "aligned.glb", "dl_aligned"]]],
-  ["Simulation", [["physics/urdf/model.urdf", "model.urdf", "dl_urdf"]]],
-  ["Records", [["run/placement.json", "placement.json", "dl_placement"], ["physics/summary.json", "summary.json", "dl_summary"],
-    ["pool/lidar.json", "lidar.json", "dl_lidar"], ["selection.json", "selection.json", "dl_selection"],
-    ["run/parts.json", "parts.json", "dl_parts_json"], ["physics/mjcf/mjcf.json", "mjcf.json", "dl_mjcf"]]]];
-// What the Simulation group says above its one file.
-const SIM_TEXT = "The URDF's meshes come only in results.zip, in urdf/meshes, so model.urdf does not load alone.";
+  ["Everything", [["results.zip", "results.zip"]]],
+  ["Meshes", [["run/posed.glb", "posed.glb"], ["run/parts.glb", "parts.glb"], ["refined.glb", "refined.glb"],
+    ["physics/aligned.glb", "aligned.glb"]]],
+  ["Simulation", [["physics/urdf/model.urdf", "model.urdf"]]],
+  ["Records", [["run/placement.json", "placement.json"], ["physics/summary.json", "summary.json"], ["pool/lidar.json", "lidar.json"],
+    ["selection.json", "selection.json"], ["run/parts.json", "parts.json"], ["physics/mjcf/mjcf.json", "mjcf.json"]]]];
+// What the Simulation group says above its one file: model.urdf does not load alone.
+const SIM_TEXT = "Needs the meshes in results.zip.";
 // A file's size: "512 B", "3.4 KB", "35 KB", "1.2 MB", "100 MB", "2.50 GB" (1 KB is 1000 bytes, as in size()).
 const fileSize = (b) => b < 1e3 ? b + " B" : b < 999.5e3 ? (b / 1e3).toFixed(b < 9.95e3 ? 1 : 0) + " KB" : size(b);
-// agent_result.reason when the agent's result held the API key (server.get_job): jobs.package left it out of the zip.
-const KEYED_RESULT = "left out: the agent's result held the API key";
-// What results.zip holds (jobs.package): the URDF (a job from before the URDF stage has none), the LiDAR record, the
-// agent's result and the split parts only when the job has them. The MJCF and USD models are not served alone.
-function zipText(job, has) {
-  const a = job.agent_result;
-  const models = has("physics/urdf/model.urdf") ? "the MuJoCo (MJCF), USD and URDF models" : "the MuJoCo (MJCF) and USD models";
-  const parts = [models + " with their meshes", "the GLB meshes", "the physics summary",
-    "the placement", "the view selection", has("pool/lidar.json") ? "the LiDAR scale (lidar.json)" : null,
-    a && a.reason !== KEYED_RESULT ? "the agent's result" : null,
-    has("run/parts.glb") ? "the split parts (parts.glb, parts.json)" : null].filter(Boolean);
-  return `results.zip holds ${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}. ` +
-    "The MJCF and USD models come only in it.";
-}
 // What the tab says above its files when results.zip is not one of them: before a build ends (FILES_PARTIAL), or
 // after a build that stopped (FILES_STOPPED). A done job has results.zip (package is the last stage).
 const filesNote = (status) => ["failed", "cancelled"].includes(status) ? FILES_STOPPED : status === "done" ? null : FILES_PARTIAL;
 // The files of the job that exist, by group: each a download link (named <job id>_<file>, so files of two jobs do not
-// clash), its size (job.sizes) and its info button. While a build runs the tab lists none, since the build replaces
-// them as it goes (jobs.DERIVED); it says one sentence then, and when there is no file yet.
+// clash) and its size (job.sizes). While a build runs the tab lists none, since the build replaces them as it goes
+// (jobs.DERIVED); it says one sentence then, and when there is no file yet.
 function renderDownloads(job) {
-  tipClose();  // the button of an open note is about to go
   const files = ACTIVE.includes(job.status) ? [] : job.files || [], sizes = job.sizes || {};
   const has = (p) => files.includes(p);
   const groups = DOWNLOADS.map(([title, rows]) => [title, rows.filter(([p]) => has(p))]).filter(([, rows]) => rows.length);
-  const row = ([p, name, key]) => h("li", { class: "dlrow" },
+  const row = ([p, name]) => h("li", { class: "dlrow" },
     h("a", { href: file(p, `${job.id}_${name}`), download: `${job.id}_${name}`, class: p === "results.zip" ? "dl primary" : "dl" }, name),
-    typeof sizes[p] === "number" ? h("span", { class: "dlsize" }, fileSize(sizes[p])) : null, info(key, name));
+    typeof sizes[p] === "number" ? h("span", { class: "dlsize" }, fileSize(sizes[p])) : null);
   const note = groups.length && !has("results.zip") ? filesNote(job.status) : null;
   fill($("#downloadsbody"), note ? h("p", { class: "dlnote" }, note) : null, groups.map(([title, rows]) => {
-    const id = "dl-" + title.toLowerCase(), text = title === "Everything" ? zipText(job, has) : title === "Simulation" ? SIM_TEXT : null;
+    const id = "dl-" + title.toLowerCase(), text = title === "Simulation" ? SIM_TEXT : null;
     return h("div", { class: "dlgroup" }, h("h3", { id }, title), text ? h("p", { class: "hint" }, text) : null,
       h("ul", { class: "dlist", "aria-labelledby": id }, rows.map(row)));
   }));
   $("#downloadsbody").hidden = !groups.length;
   $("#downloadsnone").hidden = groups.length > 0;
-  $("#downloadsnone").textContent = ["queued", "running"].includes(job.status) ? FILES_BUSY : FILES_LATER;
+  $("#downloadsnone").textContent = ["queued", "running"].includes(job.status) ? FILES_BUSY
+    : ["failed", "cancelled"].includes(job.status) ? FILES_NONE_STOPPED : FILES_LATER;
 }
 
 // ---- 5b. the input: its preview video and the views the build used ----
@@ -1700,8 +1535,8 @@ function renderDownloads(job) {
 // job.preview (server.preview_of): the record of frames/preview.mp4 (video.Preview) with "seek", where each view is in
 // it; {error} when the frames stage could not write it; {missing} when the file is gone since; or null for a job read
 // before the app made previews.
-const NO_PREVIEW = "This job has no preview video, because its input was read before the app made previews.";
-const MISSING_PREVIEW = "The preview video of this job is missing on the server.";
+const NO_PREVIEW = "No preview video.";
+const MISSING_PREVIEW = "Preview video missing.";
 // The input's name and kind: "table.MOV (video)", "run.bag (rosbag, camera topic /cam/image_rect)".
 function inputLabel(job) {
   const src = job.source || {}, kind = job.kind || src.kind || "video";
@@ -1735,11 +1570,8 @@ async function renderInput(job) {
       playsinline: true, muted: true, width: p.width, height: p.height, style: `--ar: ${p.width} / ${p.height}`,
       "aria-label": "Preview of " + job.video.name }) : null;
     if (video) video.muted = true;  // the attribute only sets the default
-    const fps = p && p.fps ? `, ${Number(Number(p.fps).toFixed(1))} fps` : "";
-    const why = !job.preview ? NO_PREVIEW : job.preview.missing ? MISSING_PREVIEW
-      : `The app could not make a preview video: ${job.preview.error}`;
-    fill($("#inputvideo"), video ? h("figure", { class: "inputfig" }, video, h("figcaption", {}, inputLabel(job),
-      h("span", { class: "hint" }, ` Preview at ${p.width}x${p.height}${fps}.`)))
+    const why = !job.preview ? NO_PREVIEW : job.preview.missing ? MISSING_PREVIEW : `No preview video: ${job.preview.error}`;
+    fill($("#inputvideo"), video ? h("figure", { class: "inputfig" }, video, h("figcaption", {}, inputLabel(job)))
       : [h("p", {}, inputLabel(job)), h("p", { class: "hint" }, why)]);
   }
   V.inputPlaced = job.files.includes("run/placement.json");  // place drew run/overlay_<i>.png for every view first
@@ -1794,14 +1626,16 @@ async function renderInput(job) {
 function inputHead() {  // the strip's heading and hint, with the mesh fit toggle once place has run
   const I = V.input;
   fill(I.head, h("h4", {}, `Views used (${I.picks.length})`), I.placed ? h("button", { type: "button", class: "small secondary",
-    "aria-pressed": String(V.overlay === true), onclick: (e) => toggleOverlay(e.currentTarget) }, "Show the mesh fit") : null);
-  fill(I.hint, (I.video ? "Click a view to see its frame in the video. " : "") + "★ marks view 0." +
-    (I.placed ? " The mesh fit shows the posed mesh in red and the outline of the SAM 3 mask in green." : ""));
+    "aria-pressed": String(V.overlay === true), onclick: (e) => toggleOverlay(e.currentTarget) }, "Mesh fit") : null);
+  inputHint();
 }
+// The strip's hint: view 0's mark, and the overlay's colors while the mesh fit shows.
+const inputHint = () => fill(V.input.hint, "★ view 0" + (V.input.placed && V.overlay === true ? ". Red: mesh. Green: mask outline." : ""));
 function toggleOverlay(btn) {  // each view's photo, or place's overlay of the posed mesh on it
   V.overlay = V.overlay !== true;
   btn.setAttribute("aria-pressed", String(V.overlay));
   V.input.imgs.forEach((img, i) => img.setAttribute("src", viewSrc(i)));
+  inputHint();
 }
 function seekInput(i) {  // the preview at view i's frame, paused: it never starts playing by itself
   const v = V.input && V.input.video, pk = V.input && V.input.picks[i], p = V.input && V.input.preview;
@@ -1811,8 +1645,8 @@ function seekInput(i) {  // the preview at view i's frame, paused: it never star
   v.currentTime = spot.at + 0.001;  // 1 ms in, so that a browser that rounds the time shows this frame, not the one before
   V.input.figs.forEach((f, k) => f.classList.toggle("at", k === i));
   V.input.btns.forEach((b, k) => b.setAttribute("aria-current", String(k === i)));  // the view that the video shows
-  say($("#inputmsg"), `The video shows view ${i} at ${fmt(spot.at)}` + (spot.frame == null ? "." : spot.frame === pk.frame
-    ? `: frame ${spot.frame}.` : `: frame ${spot.frame}, since the preview has no frame ${pk.frame}.`), true);
+  // The frame that the video shows: the preview keeps only some frames, so it can be the kept one before the view's.
+  say($("#inputmsg"), `View ${i}` + (spot.frame == null ? "" : `, frame ${spot.frame}`) + `, at ${fmt(spot.at)}`, true);
   v.scrollIntoView({ block: "nearest" });
 }
 
