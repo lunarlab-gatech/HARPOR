@@ -973,6 +973,7 @@ def test_main_writes_the_login_file(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("SLURMD_NODENAME", "atl1-1-02-003-19-2")
     monkeypatch.setattr(jobs, "default_key_dir", lambda: tmp_path / "keys")
     info = tmp_path / "home" / ".config" / "gator" / "webapp.json"
+    info.parent.mkdir(parents=True, mode=0o755)  # an existing folder is used as it is, whatever its mode
     ran = []  # (port, webapp.json, its mode) while the server runs
     monkeypatch.setattr(uvicorn.Server, "run", lambda self, sockets: ran.append(
         (sockets[0].getsockname()[1], json.loads(info.read_text()), oct(info.stat().st_mode & 0o777))))
@@ -1412,6 +1413,43 @@ def test_key_later_builds_without_the_key(client, tmp_path):
     assert not any(opus.encode() in p.read_bytes() for p in all_files(tmp_path))
 
 
+# Bodies the page never sends, as a public user could relay them: the hostile test below, and the contract test
+# (test_webapp_contract.py), which sends them through the public site too. n: the job's frame count.
+def hostile_start(n, key):
+    user = {"articulated": True, "parts_mode": "user"}
+    return [{"mode": ["auto"]}, {"mode": None}, {"prompt": 7}, {"prompt": ["box"]}, {"prompt": "x" * 100000},
+            {"prompt": "!!!"}, {"n_views": True}, {"n_views": "4"}, {"n_views": 4.0}, {"n_views": 10**30},
+            {"mode": "manual", "picks": [True, False]}, {"mode": "manual", "picks": "1,2"}, {"picks": {"0": 1}},
+            {"mode": "manual", "picks": list(range(100000))}, {"mode": "manual", "picks": [1] * 100000},
+            {"mode": "manual", "picks": [0.0, 1.0]}, {"mode": "manual", "picks": [-1, 2]},
+            {"view0": True}, {"view0": "3"}, {"view0": n}, {"view0": 10**6}, {"auto_continue": 1},
+            {"auto_continue": "false"}, {"agent": 1}, {"agent": []}, {"agent": {"name": "opus"}}, {"agent": None},
+            {"agent": "gpt"}, {"key_later": 1}, {"key_later": "yes"}, {"articulated": 1}, {"articulated": "yes"},
+            {**user, "parts_mode": ["user"]}, {**user, "parts": "lid"}, {**user, "parts": [7]},
+            {**user, "parts": [{"name": 7}]}, {**user, "parts": [{"name": "body"}] * 10000},
+            {**user, "parts": [{"name": "body"}, {"name": "lid", "parent": "body", "count": True}]},
+            {"lidar": True}, {"lidar": []}, {"lidar": "on"}, {"lidar": {"topic": 3}},
+            {"agent": "astra", "api_key": 7}, {"agent": "astra", "api_key": ["sk-x"]},
+            {"agent": "astra", "api_key": {"k": key}}, {"agent": "astra", "api_key": True},
+            {"agent": "astra", "api_key": "sk-" + "a" * 600}, {"agent": "astra", "api_key": "sk-a\nb"},
+            {"turntable": 1}, {"turntable": "yes"}, {"turntable": None}]
+
+
+def hostile_overrides(name):
+    """name: a pool view of the job."""
+    return [{"locked": name}, {"locked": [[name]]}, {"locked": [7]}, {"excluded": ["f99999"]},
+            {"locked": ["../" + name]}, {"locked": [name] * 100000}, {"excluded": [name, name]},
+            {"locked": [name], "excluded": [name]}, {"instance": ["1"]}, {"instance": {name: 1}},
+            {"instance": {name: True}}, {"instance": {name: "1,"}}, {"instance": {name: "9999"}},
+            {"instance": {name: "999"}}, {"instance": {"f99999": "1"}}, {"view0": 0}, {"view0": True},
+            {"view0": "f99999"}, {"view0": [name]}, {"agent": "gpt"}, {"agent": 1}, {"agent": "astra", "api_key": 7}]
+
+
+HOSTILE_CONTINUE = [{"from": 1}, {"from": True}, {"from": ["frames"]}, {"from": {"stage": "agent"}}, {"from": "nope"},
+                    {"from": "../agent"}, {"agent": []}, {"agent": "gpt"}, {"key_later": "yes"},
+                    {"agent": "astra", "api_key": 7}]
+
+
 def test_hostile_bodies_get_a_reason_never_a_crash(client, tmp_path):
     """Requests the page never sends, as a public user could relay them: bodies that are not JSON objects or
     nest too deeply, wrong types, true for 1, huge lists, names outside the pool, odd headers. Each gets a
@@ -1434,37 +1472,16 @@ def test_hostile_bodies_get_a_reason_never_a_crash(client, tmp_path):
 
     start = {"mode": "auto", "prompt": "box", "n_views": 4, "agent": "none"}
     n = len(c.get(f"/api/jobs/{job_id}/frames").json()["times"])
-    user = {"articulated": True, "parts_mode": "user"}
-    for wrong in [{"mode": ["auto"]}, {"mode": None}, {"prompt": 7}, {"prompt": ["box"]}, {"prompt": "x" * 100000},
-                  {"prompt": "!!!"}, {"n_views": True}, {"n_views": "4"}, {"n_views": 4.0}, {"n_views": 10**30},
-                  {"mode": "manual", "picks": [True, False]}, {"mode": "manual", "picks": "1,2"}, {"picks": {"0": 1}},
-                  {"mode": "manual", "picks": list(range(100000))}, {"mode": "manual", "picks": [1] * 100000},
-                  {"mode": "manual", "picks": [0.0, 1.0]}, {"mode": "manual", "picks": [-1, 2]},
-                  {"view0": True}, {"view0": "3"}, {"view0": n}, {"auto_continue": 1}, {"auto_continue": "false"},
-                  {"agent": 1}, {"agent": []}, {"agent": {"name": "opus"}}, {"agent": None}, {"key_later": 1},
-                  {"articulated": 1}, {"articulated": "yes"}, {**user, "parts_mode": ["user"]}, {**user, "parts": "lid"},
-                  {**user, "parts": [7]}, {**user, "parts": [{"name": 7}]}, {**user, "parts": [{"name": "body"}] * 10000},
-                  {**user, "parts": [{"name": "body"}, {"name": "lid", "parent": "body", "count": True}]},
-                  {"lidar": True}, {"lidar": []}, {"lidar": "on"}, {"lidar": {"topic": 3}},
-                  {"agent": "astra", "api_key": 7}, {"agent": "astra", "api_key": ["sk-x"]},
-                  {"agent": "astra", "api_key": {"k": KEY}}, {"agent": "astra", "api_key": True},
-                  {"agent": "astra", "api_key": "sk-" + "a" * 600}, {"agent": "astra", "api_key": "sk-a\nb"},
-                  {"turntable": 1}, {"turntable": "yes"}, {"turntable": None}]:
+    for wrong in hostile_start(n, KEY):
         refused("start", {**start, **wrong})
     assert jobs.load(J)["status"] == "ready"
 
     assert c.post(f"/api/jobs/{job_id}/start", json={**start, "auto_continue": False}).status_code == 200
     assert wait(c, job_id, "review", "failed")["status"] == "review"
     name = sorted(c.get(f"/api/jobs/{job_id}/selection").json()["sam3"])[0]
-    for wrong in [{"locked": name}, {"locked": [[name]]}, {"locked": [7]}, {"excluded": ["f99999"]},
-                  {"locked": ["../" + name]}, {"locked": [name] * 100000}, {"excluded": [name, name]},
-                  {"locked": [name], "excluded": [name]}, {"instance": ["1"]}, {"instance": {name: 1}},
-                  {"instance": {name: True}}, {"instance": {name: "1,"}}, {"instance": {name: "9999"}},
-                  {"instance": {name: "999"}}, {"instance": {"f99999": "1"}}, {"view0": 0}, {"view0": True},
-                  {"view0": "f99999"}, {"view0": [name]}, {"agent": "gpt"}, {"agent": 1}, {"agent": "astra", "api_key": 7}]:
+    for wrong in hostile_overrides(name):
         refused("overrides", wrong)
-    for wrong in [{"from": 1}, {"from": True}, {"from": ["frames"]}, {"from": {"stage": "agent"}}, {"from": "nope"},
-                  {"from": "../agent"}, {"agent": []}, {"key_later": "yes"}, {"agent": "astra", "api_key": 7}]:
+    for wrong in HOSTILE_CONTINUE:
         refused("continue", wrong)
     refused("topic", {"topic": ["/cam"]}, status=409)  # a video has no topic
     refused("parts", {"parts": [{"name": "body"}] * 10000}, status=409)  # the job does not wait for a list
@@ -1629,7 +1646,7 @@ def test_app_js_start_form_follows_the_agent():
                for s in out["sent"])
 
 
-def test_app_js_view0_retry_and_delete():
+def test_app_js_view0_and_delete():
     times = [round(0.1 * i, 1) for i in range(50)]
     meta = {"times": times, "rel": [2.0 if i == 26 else 1.0 for i in range(50)], "candidates": [], "thumbs": [],
             "thumb_size": [32, 18], "video": {"n_frames": 50, "duration_s": 5.0, "fps": 10, "width": 64, "height": 36,
@@ -1644,27 +1661,12 @@ def test_app_js_view0_retry_and_delete():
             await loadFrames();
             view0.push(V.view0);
           }
-          const stages = (o) => ["frames", ...BUILD].map((name) => ({ name, status: o[name] || "pending" }));
-          const retry = [{ frames: "failed" }, { frames: "pending" }, { frames: "done", extract: "done", masks: "failed" },
-            { frames: "done" }].map((o) => retryFrom({ stages: stages(o) }));
-          // Stopped at the part list: back to the list until it is confirmed, then from parts. A job without
-          // LiDAR has its lidar stage skipped; a failed lidar stage is retried from lidar.
-          const atList = { frames: "done", extract: "done", masks: "done", prep: "done", da3: "done", lidar: "skipped",
-            select: "done", sam3d: "done", place: "done", propose: "done", parts: "failed" };
-          const st = { articulated: true, parts_mode: "vlm_edit", stages: stages(atList) };
-          V = { job: { parts: { mode: "vlm_edit", confirmed: false } } };
-          retry.push(retryFrom(st));
-          V = { job: { parts: { mode: "vlm_edit", confirmed: true } } };
-          retry.push(retryFrom(st), retryFrom({ ...st, parts_mode: "vlm" }));
-          retry.push(retryFrom({ stages: stages({ frames: "done", extract: "done", masks: "done", prep: "done", da3: "done",
-            lidar: "failed" }) }));
           texts.length = 0;
           await showList();
-          console.log(JSON.stringify({ view0, retry, deletes: texts.filter((t) => t === "Delete").length }));
+          console.log(JSON.stringify({ view0, deletes: texts.filter((t) => t === "Delete").length }));
         })()
         """)
     assert out["view0"] == [25, 25, 45, None, None]  # the pool name of a snapped pick is that pick (25 -> 26)
-    assert out["retry"] == ["frames", "frames", "masks", None, "propose", "parts", "parts", "lidar"]
     assert out["deletes"] == 1  # none for the job that is still uploading
 
 

@@ -31,11 +31,8 @@ sliced to them, so the mvsam3d sam3d and place steps run on it as on any run fol
 scale it also copies each pick's LiDAR points, J/lidar/cloud/<name>.glb (lidar.py), to
 J/run/lidar/<i>.glb, for the Inputs tab.
 
-A job with LiDAR (job.json "lidar") has J/pool/lidar.json from the lidar stage (lidar_scale.py).
-select stops first, before it removes anything, unless that record is ok; build_run then multiplies
-DA3's depth, pointmaps and camera translations by its scale s, so every later stage works in meters.
-The pool stays raw and build_run rebuilds J/run from it, so s is applied once however often select
-runs. run/prep.json and selection.json record metric_scale (null without LiDAR).
+A job with LiDAR (job.json "lidar"): select stops before it removes anything unless J/pool/lidar.json
+is ok, and build_run applies its scale s (build_plan.md note 12, Where the scale enters).
 
 selection.json "ring" places every camera center on the best-fit plane of the camera centers, seen
 from above (u right, v up; flip v for SVG), with the object center as "center".
@@ -43,12 +40,12 @@ from above (u right, v up; flip v for SVG), with the object center as "center".
 
 import argparse
 import json
-import os
 import shutil
 from pathlib import Path
 
 import numpy as np
 
+from gator.fileio import replace, write_json
 from gator.stage_a import lidar_scale
 from gator.webapp import steps
 
@@ -243,16 +240,7 @@ def build_run(pool_dir, names, run_dir, metric=None, clouds=None):
         {"source": "webapp pool", "metric_scale": None if metric is None else float(metric),
          "views": [{"name": str(i), "pool_name": n, "frame": frame_of(n)} for i, n in enumerate(names)]},
         indent=1))
-    tmp = run_dir / ".tmp_da3_output.npz"
-    with open(tmp, "wb") as f:
-        np.savez(f, **arrays)
-    os.replace(tmp, run_dir / "da3_output.npz")  # last: with selection.json, the stage's done marker
-
-
-def write_json(path, data):
-    tmp = path.with_name(".tmp_" + path.name)
-    tmp.write_text(json.dumps(data, indent=1))
-    os.replace(tmp, path)
+    replace(run_dir / "da3_output.npz", np.savez, **arrays)  # last: with selection.json, the stage's done marker
 
 
 def metric_scale(job_dir, job):
@@ -415,7 +403,7 @@ def select(job_dir):
     sel = record(out, status, picks, anchor)
     if sel["min_spacing_deg"] is not None and sel["min_spacing_deg"] < MIN_SPACING_DEG:
         sel["warnings"].append(f"two picks are only {sel['min_spacing_deg']:.0f} deg apart")
-    write_json(job_dir / "selection.json", sel)
+    write_json(job_dir / "selection.json", sel, indent=1)
     for i, p in enumerate(sel["picks"]):
         print(f"view {i}: {p['name']} at {p['time_s']} s, q {p['q']:.2f}")
     print(f"{mode}: {len(picks)} views, coverage radius {sel['coverage_deg']} deg, "
@@ -464,7 +452,7 @@ def record(out, status, picks=(), anchor=None):
 
 def fail(job_dir, out, status, msg):
     out["warnings"].append(msg)
-    write_json(Path(job_dir) / "selection.json", record(out, status))
+    write_json(Path(job_dir) / "selection.json", record(out, status), indent=1)
     print(msg)
     raise SystemExit(2)
 

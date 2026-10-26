@@ -30,7 +30,8 @@ from pathlib import Path
 
 import numpy as np
 
-from gator.stage_a.sam3_masks import Segmenter, replace, slug
+from gator.fileio import replace
+from gator.stage_a.sam3_masks import Segmenter, check_image, slug
 
 COLORS = [(230, 25, 75), (60, 180, 75), (0, 130, 200), (245, 130, 48), (145, 30, 180), (70, 240, 240),
           (240, 50, 230), (210, 245, 60), (250, 190, 212), (0, 128, 128), (170, 110, 40), (255, 225, 25)]
@@ -54,31 +55,9 @@ def part_prompts(proposal):
 def overlay_parts(image, found, max_side=1600):
     """The photo with every instance tinted and outlined in its part's colour and labelled.
     found: [(label, colour, scores, boxes, masks)], one entry per part."""
-    from PIL import Image, ImageDraw, ImageFont
-    from scipy.ndimage import binary_erosion
-
-    from gator.stage_a.place import resize_mask
-
-    H, W = image.shape[:2]
-    k = min(1.0, max_side / max(H, W))
-    size = (round(W * k), round(H * k))
-    ov = np.asarray(Image.fromarray(image).resize(size, Image.LANCZOS)).astype(float)
-    for _, color, _, _, masks in found:
-        for m in masks:
-            m = resize_mask(m, size)
-            ov[m] = 0.65 * ov[m] + 0.35 * np.array(color)
-            ov[m & ~binary_erosion(m, iterations=2)] = color
-    out = Image.fromarray(ov.astype(np.uint8))
-    draw = ImageDraw.Draw(out)
-    px = max(12, size[0] // 60)
-    font = ImageFont.load_default(size=px)
-    for label, color, scores, boxes, _ in found:
-        for i, (s, b) in enumerate(zip(scores, boxes)):
-            draw.text((b[0] * k, max(0.0, b[1] * k - px)), f"{label} {i}: {s:.2f}", fill=color, font=font,
-                      stroke_width=2, stroke_fill=(0, 0, 0))
-    if not any(len(f[4]) for f in found):
-        draw.text((px, px), "no part instance", fill=(255, 40, 40), font=font, stroke_width=2, stroke_fill=(0, 0, 0))
-    return out
+    items = [(m, color, 0.35, f"{label} {i}: {sc:.2f}", b) for label, color, scores, boxes, masks in found
+             for i, (sc, b, m) in enumerate(zip(scores, boxes, masks))]
+    return check_image(image, items, max_side, 60, "no part instance")
 
 
 def run(images_dir, parts, out, threshold=0.4, mask_threshold=0.5, segmenter=None):

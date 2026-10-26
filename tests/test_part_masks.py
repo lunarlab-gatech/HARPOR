@@ -6,6 +6,7 @@ from PIL import Image
 
 from gator.stage_a import part_masks as PM
 from gator.stage_a.sam3d import load_mask
+from test_sam3_masks import FakeSegmenter
 
 H, W = 90, 120
 
@@ -14,30 +15,6 @@ def rect(r0, r1, c0, c1):
     m = np.zeros((H, W), bool)
     m[r0:r1, c0:c1] = True
     return m
-
-
-class FakeSegmenter:
-    """Stands in for SAM 3: found[name][prompt] is a list of (score, mask), in any order."""
-
-    info = {"model": "fake", "device": "cpu"}
-
-    def __init__(self, found):
-        self.found, self.calls = found, []
-
-    def __call__(self, image, prompts, threshold=0.5, mask_threshold=0.5):
-        name = next(n for n, im in self.images.items() if np.array_equal(im, image))
-        self.calls.append((name, list(prompts)))
-        out = {}
-        for p in prompts:
-            inst = sorted((sm for sm in self.found.get(name, {}).get(p, []) if sm[0] > threshold), key=lambda sm: -sm[0])
-            masks = np.array([m for _, m in inst], bool).reshape(-1, H, W)
-            boxes = np.array([[m.nonzero()[1].min(), m.nonzero()[0].min(), m.nonzero()[1].max() + 1,
-                               m.nonzero()[0].max() + 1] for m in masks], float).reshape(-1, 4)
-            out[p] = (np.array([s for s, _ in inst], float), boxes, masks)
-        return out
-
-    def peak_gib(self):
-        return None
 
 
 def photos(tmp_path, names=("10", "2", "1", "0"), found=None):

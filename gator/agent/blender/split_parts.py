@@ -4,27 +4,12 @@ blender -b --factory-startup --python-exit-code 1 --python split_parts.py -- POS
 
 FACES.npz is the face vote of gator.parts.vote: part (one id per face of POSED.glb as trimesh loads
 it), names (id -> part name, the base first) and centroids (every face's centroid in W). The stock glTF
-importer maps glTF to W, so Blender world coordinates are W. Steps:
-1. Import POSED.glb, apply every mesh object's transform to its mesh and join them, so one mesh holds
-   the whole object in W.
-2. Give every polygon its part: by index when the polygon centers equal the centroids in order, else
-   by the nearest centroid (mathutils.kdtree). A polygon farther than 1e-4 of the diagonal from every
-   centroid goes to the base. Custom normals are cleared, or the caps would get copies of their
-   neighbours', and the faces are shaded smooth.
-3. Weld coincident vertices (texture seams split them; UVs are per corner, so they stay) and mark the
-   edges between faces of different parts, also as sharp.
-4. Per part: a copy of the mesh without the other parts' faces. Every hole bounded by marked edges is
-   filled (fill(): edgeloop_fill, then holes_fill, then a fan from the loop's centre), turned to face the
-   same way as its neighbours and fanned from its centre (bmesh.ops.poke). Caps
-   take material slot 0, flat shading and the mean UV of the corners around them, so they show one
-   colour of the texture. The object and its mesh take the part's name.
-5. Export the part objects with the exporter call of export_glb.py (export_extras=True), then re-import
-   the GLB and check that its mesh objects carry the part names.
+importer maps glTF to W, so Blender world coordinates are W. The steps (parts, weld, cut and cap, export
+and check): build_plan.md note 11, step 4.
 Writes REPORT.json (the face mapping, faces, cap faces, holes and open seam edges per part, the names
 found again, warnings) before it fails on a name mismatch, so the report is there either way.
 Only bpy, bmesh, mathutils and numpy: the SIF's Blender has no trimesh.
 """
-# Checked on ICE with Blender 5.2.2 (2026-10-20) on the chair's MV-SAM3D mesh; the unit tests use the fake Blender.
 
 import json
 import sys

@@ -38,6 +38,8 @@ from pathlib import Path
 
 import numpy as np
 
+from gator.fileio import write_json
+
 SPLIT_TIMEOUT_S = 600.0
 
 
@@ -73,12 +75,10 @@ def vote(job):
 
 def split_command(job, sif):
     """Blender in the agent's SIF in a container that sees only J/run (at its host path) and the
-    Blender scripts, read-only (controller.blender_command does the same for the work folder)."""
-    from gator.agent import controller, tools
+    Blender scripts, read-only (controller.sif_blender)."""
+    from gator.agent import controller
 
-    run = _run_dir(job).resolve()
-    return [*controller.CONTAINER, *controller._bind(run, run),
-            *controller._bind(tools.BLENDER_SCRIPTS, tools.BLENDER_SCRIPTS, ro=True), str(sif), "blender"]
+    return controller.sif_blender(sif, rw=[_run_dir(job).resolve()])
 
 
 def split(job, sif=None, blender=None, timeout=SPLIT_TIMEOUT_S):
@@ -92,10 +92,8 @@ def split(job, sif=None, blender=None, timeout=SPLIT_TIMEOUT_S):
     blender = shlex.split(blender) if isinstance(blender, str) else blender or split_command(job, sif)
     for f in (R / "parts.glb", R / "parts.json", R / "parts" / "split_report.json"):
         f.unlink(missing_ok=True)
-    cmd = [*blender, "-b", "--factory-startup", "--python-exit-code", "1",
-           "--python", str(tools.BLENDER_SCRIPTS / "split_parts.py"), "--",
-           str(R / "posed.glb"), str(R / "parts" / "faces.npz"), str(R / "parts.glb"),
-           str(R / "parts" / "split_report.json")]
+    cmd = tools.blender_argv(blender, "split_parts.py", R / "posed.glb", R / "parts" / "faces.npz", R / "parts.glb",
+                             R / "parts" / "split_report.json")
     t = time.time()
     with open(R / "parts" / "split.log", "w") as log:
         try:
@@ -216,7 +214,7 @@ def finish(job):
            "model": proposal.get("model"), "parts": parts, "seams": seams,
            "split": {k: split_rec.get(k) for k in ("mapping", "unmatched", "welded_vertices", "custom_normals_cleared")},
            "warnings": [*proposal.get("warnings", []), *vote_rec.get("warnings", []), *split_rec.get("warnings", [])]}
-    tools.write_json_atomic(R / "parts.json", doc)
+    write_json(R / "parts.json", doc)
     print(f"parts.json: {len(names)} parts ({', '.join(names)}), {len(seams)} seams")
     for p in parts:
         if p["status"] == "found" and p["parent"]:

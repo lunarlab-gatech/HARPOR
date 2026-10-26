@@ -24,6 +24,7 @@ import base64
 import copy
 import hashlib
 import json
+import os
 import re
 import secrets
 import threading
@@ -34,11 +35,13 @@ from pathlib import Path
 
 import anyio
 import httpx
+from supabase_cases import IDS, INPUT, OWNER, SHA, USERS, WORKERS, names, names_in
+from supabase_cases import MACHINE as MACHINE_OF  # user -> the machine of the case's job by default
+from supabase_cases import load as load_cases  # noqa: F401 (the worker tests read the table through it)
 
 URL = "https://harpor-test.supabase.co"
 SECRET = "sb_secret_" + "fakefakefakefake" * 2  # refused: a test's stand-in for the project's secret key
 PUBLISHABLE = "sb_publishable_" + "fakefakefakefake"
-CASES = Path(__file__).with_name("supabase_cases.json")
 UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 NAME = re.compile(r"^(?!.*\.\.)[A-Za-z0-9_-][A-Za-z0-9_.-]{0,199}$")  # jobs.input_name: no two dots in a row
 MACHINE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}$")
@@ -1323,42 +1326,32 @@ class FakeSession:
         pass
 
 
-# ---- the shared case table ----
+# ---- sealed keys, as the page makes them ----
 
-IDS = {"b": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "c": "cccccccc-cccc-cccc-cccc-cccccccccccc",
-       "d": "dddddddd-dddd-dddd-dddd-dddddddddddd",
-       "mc": "c1c1c1c1-0000-0000-0000-000000000001", "md": "d1d1d1d1-0000-0000-0000-000000000001",
-       "wc": "c2c2c2c2-0000-0000-0000-000000000001", "wd": "d2d2d2d2-0000-0000-0000-000000000001",
-       "job": "e0e0e0e0-0000-0000-0000-000000000001"}
-USERS = ("b", "c", "d")
-OWNER = {"mc": "c", "md": "d"}  # machine -> its user
-MACHINE_OF = {"c": "mc", "d": "md"}  # user -> the machine of the case's job by default
-WORKERS = {"wc": "wc", "wd": "wd"}
-SHA = "0123456789abcdef" + "0" * 48
-INPUT = {"video": "case.mp4", "rosbag": "case.bag", "stray": "case.zip"}
+def seal(public_b64, key, aad):
+    """What the page does (supa.js seal()): {"epk", "iv", "ct"} in base64, key sealed under aad to a worker's public
+    key."""
+    from cryptography.hazmat.primitives.asymmetric import ec
 
+    from gator.webapp.keybox import aes, b64, peer, point, unb64
 
-def load_cases(path=CASES):
-    return json.loads(Path(path).read_text())["cases"]
+    eph = ec.generate_private_key(ec.SECP256R1())
+    epk, iv = point(eph), os.urandom(12)
+    shared = eph.exchange(ec.ECDH(), peer(unb64(public_b64, "public key"), "worker's public key"))
+    return {"epk": b64(epk), "iv": b64(iv), "ct": b64(aes(shared, epk, aad).encrypt(iv, key.encode(), aad))}
 
 
-def names(text):
-    """<b> <c> <d> and <job> in a name become ids."""
-    for u in USERS:
-        text = text.replace(f"<{u}>", IDS[u])
-    return text.replace("<job>", IDS["job"])
+def sealed(worker, key, job, user, agent, ref=None):
+    """relay()'s p_sealed for key sealed to a workers row ({"id", "public_key"}), as supa.js seal() makes it:
+    {ref, worker_id, agent, epk, iv, ct}."""
+    from gator.webapp.keybox import aad
+
+    ref = ref or str(uuid.uuid4())
+    return {"ref": ref, "worker_id": worker["id"], "agent": agent,
+            **seal(worker["public_key"], key, aad(job, user, agent, worker["id"], ref))}
 
 
-def names_in(v):
-    """names() in every string of an expected answer."""
-    if isinstance(v, str):
-        return names(v)
-    if isinstance(v, list):
-        return [names_in(x) for x in v]
-    if isinstance(v, dict):
-        return {k: names_in(x) for k, x in v.items()}
-    return v
-
+# ---- the shared case table (its ids, names() and names_in() are supabase_cases.py's) ----
 
 def case_base():
     """A fake with the rows that every case starts from (the table's "_format")."""

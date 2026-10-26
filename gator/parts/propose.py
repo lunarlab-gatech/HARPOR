@@ -34,14 +34,16 @@ import json
 import time
 from pathlib import Path
 
+from gator.agent.tools import CLAUDE_MODEL, CODEX_MODEL, FALLBACK_BETA, env_values
+from gator.fileio import write_json
 from gator.parts.joints import WORLD
 from gator.stage_a.sam3_masks import slug
+from gator.webapp.steps import KEY_VAR
 
 JOINTS = ("revolute", "prismatic", "fixed", "unknown")
 MAX_PARTS, MAX_COUNT, MAX_NAME, MAX_HINT = 12, 8, 40, 120
-KEY_VAR = {"astra": "OPENAI_API_KEY", "opus": "ANTHROPIC_API_KEY"}  # the key file's line, per agent
 OPENAI_URL = "https://api.openai.com/v1/responses"
-OPUS_BETAS = ["server-side-fallback-2026-07-01"]
+OPUS_BETAS = [FALLBACK_BETA]
 EFFORT = "high"
 MAX_TOKENS = 16000
 IMAGE_SIDE = 1024
@@ -215,8 +217,6 @@ def ask_opus(key, prompt, image, client=None):
     """Claude Opus 5.5's answer text. client: an anthropic.Anthropic or a stand-in (tests)."""
     import anthropic
 
-    from gator.agent.controller import CLAUDE_MODEL
-
     client = client or anthropic.Anthropic(api_key=key, max_retries=2, timeout=TIMEOUT_S)
     content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                             "data": base64.standard_b64encode(image).decode("ascii")}},
@@ -242,8 +242,6 @@ def ask_astra(key, prompt, image):
     """GPT-6-Astra's answer text, from POST /v1/responses with the photo as a data URL."""
     import urllib.error
     import urllib.request
-
-    from gator.agent.controller import CODEX_MODEL
 
     url = "data:image/jpeg;base64," + base64.standard_b64encode(image).decode("ascii")
     body = {"model": CODEX_MODEL, "reasoning": {"effort": EFFORT}, "max_output_tokens": MAX_TOKENS,
@@ -272,7 +270,6 @@ def ask_astra(key, prompt, image):
 def propose_vlm(noun, image, agent, key, client=None, keys=()):
     """The proposal of the job's VLM for the photo at image. agent: astra or opus. Every answer is
     scrubbed of key and keys (the other keys of the key file) before anything reads it."""
-    from gator.agent.controller import CLAUDE_MODEL, CODEX_MODEL
     from gator.webapp.agent_step import scrub
 
     if agent not in KEY_VAR:
@@ -312,17 +309,7 @@ def propose_user(job):
 
 def read_key(key_file, agent):
     """The value of the key file's line for the agent's provider (KEY_VAR), without quotes, else ''."""
-    for line in Path(key_file).read_text().splitlines():
-        if line.startswith(KEY_VAR[agent] + "="):
-            key = line.split("=", 1)[1].strip()
-            return key[1:-1] if len(key) > 1 and key[0] == key[-1] and key[0] in "'\"" else key
-    return ""
-
-
-def write(path, proposal):
-    from gator.agent.tools import write_json_atomic
-
-    write_json_atomic(path, proposal)
+    return next(iter(env_values(key_file, (KEY_VAR[agent],))), "")
 
 
 def run(job_dir, key_file=None, agent=None, client=None):
@@ -355,7 +342,7 @@ def run(job_dir, key_file=None, agent=None, client=None):
     except SystemExit as e:
         raise SystemExit(scrub(str(e.code), keys)) from None
     proposal = scrub({**proposal, "mode": mode}, keys)
-    write(out, proposal)
+    write_json(out, proposal)
     print(f"proposal ({proposal['source']}{', ' + proposal['model'] if proposal.get('model') else ''}): "
           f"base {proposal['base']!r}, {len(proposal['parts']) - 1} moving parts -> {out}")
     for p in proposal["parts"][1:]:
@@ -377,5 +364,5 @@ def confirm(job_dir, parts):
                                                                "noun": job["prompt"], "warnings": [], "seconds": 0.0}
     parts = validate(parts, job["prompt"])
     proposal.update(base=parts[0]["name"], parts=parts, edited=parts != proposal.get("parts"), confirmed=True)
-    write(f, proposal)
+    write_json(f, proposal)
     return proposal

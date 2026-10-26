@@ -31,7 +31,7 @@ class FakeSegmenter:
         out = {}
         for p in prompts:
             inst = sorted((sm for sm in self.found.get(name, {}).get(p, []) if sm[0] > threshold), key=lambda sm: -sm[0])
-            masks = np.array([m for _, m in inst], bool).reshape(-1, H, W)
+            masks = np.array([m for _, m in inst], bool).reshape(-1, *image.shape[:2])
             boxes = np.array([[m.nonzero()[1].min(), m.nonzero()[0].min(), m.nonzero()[1].max() + 1,
                                m.nonzero()[0].max() + 1] for m in masks], float).reshape(-1, 4)
             out[p] = (np.array([s for s, _ in inst], float), boxes, masks)

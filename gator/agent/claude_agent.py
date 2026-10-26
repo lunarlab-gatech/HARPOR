@@ -4,7 +4,7 @@ The controller starts it as the session's agent process, from the gator_clone ro
 interpreter:
 
     python -m gator.agent.claude_agent ROOT --sif SIF --sock-dir DIR --key-file FILE
-           [--effort high] [--fast] [--model claude-opus-5-5] [--image-side 2576] [--system PATH]
+           [--effort high] [--model claude-opus-5-5] [--image-side 2576] [--system PATH]
            [--shell host]
 
 The key comes from FILE (a line ANTHROPIC_API_KEY=...) into memory only. It goes to the anthropic
@@ -19,17 +19,14 @@ unchanged. The model has three tools:
                                runs on the host, so paths are confined to ROOT/work and no symlink is
                                followed out of it
   view_image                   a PNG or JPEG under ROOT/work, downscaled to at most --image-side px
-                               on the long side (default 2576, the limit of Opus 5.5). A PNG goes
-                               lossless while its base64 fits 2.5 MB, a larger image as JPEG. Every
-                               image stays in the history and goes with every later request, which
-                               the API limits to 32 MB, so a session shows at most 100 images and
-                               24 MB of them
+                               on the long side (default 2576, the limit of Opus 5.5), within the size
+                               caps MAX_IMAGE_B64 and IMAGE_BUDGET_BYTES
 
 Each request is streamed with client.beta.messages.stream: adaptive thinking with summaries, the
 effort given (default high; the model's own default is medium), server-side refusal fallback
-("default"), one cache breakpoint on the system prompt plus automatic caching of the conversation, and
-optionally fast mode. The history is append-only: response.content goes back unchanged as the
-assistant turn, and system and tools never change. The one exception is the API's rule for a
+("default"), and one cache breakpoint on the system prompt plus automatic caching of the
+conversation. The history is append-only: response.content goes back unchanged as the assistant
+turn, and system and tools never change. The one exception is the API's rule for a
 fallback mid-output: before the last fallback block, only text and fallback blocks are sent back.
 A turn whose stream breaks off after it opened (an error event, a dropped connection, no stop
 reason), which the SDK's retries do not cover, is sent again, as is one whose tool input the SDK
@@ -70,11 +67,9 @@ from gator.agent import tools
 
 AGENT_DIR = Path(__file__).resolve().parent
 SYSTEM_FILE = AGENT_DIR / "claude" / "SYSTEM.md"
-MODEL = "claude-opus-5-5"
-EFFORTS = ("low", "medium", "high", "xhigh", "max")
+MODEL, EFFORTS = tools.CLAUDE_MODEL, tools.EFFORTS
 MAX_TOKENS = 64000
-BETAS = ["server-side-fallback-2026-07-01"]
-FAST_BETA = "fast-mode-2026-02-01"
+BETAS = [tools.FALLBACK_BETA]
 MAX_RETRIES = 4  # the SDK's own retries of connection errors, 408, 409, 429 and 5xx
 JSON_RETRIES = 2  # re-issues of a turn whose eager tool input the SDK could not parse
 # Re-issues of a turn whose stream broke off after it opened (the SDK retries only the request itself),
@@ -102,10 +97,9 @@ TOKENS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_cre
 # USD per million tokens of the models that can serve a turn: Claude Opus 5.5 and the refusal fallbacks
 # that "default" picks (Claude Opus 5, Claude Opus 4.8). cache_creation_input_tokens is the 5-minute
 # write (1.25x input), cache_creation_1h the 1-hour write (2x input). A model not listed is priced as
-# the dearest one. Fast mode doubles all.
+# the dearest one.
 PRICES = {
-    "claude-opus-5-5": {"input_tokens": 4.0, "output_tokens": 20.0, "cache_read_input_tokens": 0.20,
-                        "cache_creation_input_tokens": 5.0, "cache_creation_1h": 8.0},
+    tools.CLAUDE_MODEL: tools.OPUS_PRICES,
     "claude-opus-5": {"input_tokens": 5.0, "output_tokens": 25.0, "cache_read_input_tokens": 0.50,
                       "cache_creation_input_tokens": 6.25, "cache_creation_1h": 10.0},
     "claude-opus-4-8": {"input_tokens": 5.0, "output_tokens": 25.0, "cache_read_input_tokens": 0.50,
@@ -153,10 +147,6 @@ def tool_list(side=MAX_IMAGE_SIDE):
             view_image]
 
 
-TOOLS = tool_list()  # at the default side
-VIEW_IMAGE = TOOLS[2]
-
-
 class ToolError(Exception):
     """A tool call that failed; the message goes back to the model as an is_error result."""
 
@@ -188,16 +178,9 @@ def redact(text, secret):
 def read_key(key_file):
     """The value of the ANTHROPIC_API_KEY= line in key_file, or None (also when the file cannot be read)."""
     try:
-        text = Path(key_file).read_text()
+        return next(iter(tools.env_values(key_file, ("ANTHROPIC_API_KEY",))), None) or None
     except OSError:
         return None
-    for line in text.splitlines():
-        if line.startswith("ANTHROPIC_API_KEY="):
-            key = line.split("=", 1)[1].strip()
-            if len(key) > 1 and key[0] == key[-1] and key[0] in "'\"":
-                key = key[1:-1]
-            return key or None
-    return None
 
 
 class Log:
@@ -745,17 +728,14 @@ def view_image(files, inp, side=MAX_IMAGE_SIDE):
 # ----------------------------------------------------------------------------------------------- loop
 
 
-def request_params(model, effort, fast, system, image_side=MAX_IMAGE_SIDE):
+def request_params(model, effort, system, image_side=MAX_IMAGE_SIDE):
     """Everything of a request but messages. Built once per session, so tools and system stay
     byte-stable and the cache and the thinking blocks stay valid."""
-    p = {"model": model, "max_tokens": MAX_TOKENS,
-         "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-         "tools": tool_list(image_side), "thinking": {"type": "adaptive", "display": "summarized"},
-         "output_config": {"effort": effort}, "cache_control": {"type": "ephemeral"},
-         "betas": [*BETAS, *([FAST_BETA] if fast else [])], "fallbacks": "default"}
-    if fast:
-        p["speed"] = "fast"
-    return p
+    return {"model": model, "max_tokens": MAX_TOKENS,
+            "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            "tools": tool_list(image_side), "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": effort}, "cache_control": {"type": "ephemeral"}, "betas": list(BETAS),
+            "fallbacks": "default"}
 
 
 def stream_turn(client, params, log, turn):
@@ -815,17 +795,16 @@ def _attempt_cost(u, model):
     return (sum(t[k] * p[k] for k in TOKENS) + long * (p["cache_creation_1h"] - p["cache_creation_input_tokens"])) / 1e6
 
 
-def billed(msg, model, fast):
+def billed(msg, model):
     """(tokens, cost_usd, iterations) of one response. The top-level usage covers only the attempt that
     produced the message; with a refusal fallback usage.iterations lists every attempt (the declined
     one bills at normal rates, the fallback at its model's). Each attempt is priced by its model, else
-    the model asked for; without iterations the usage is priced by msg.model. usage.speed (else fast)
-    tells whether fast mode doubled the price. iterations: the attempts for the log, [] without them."""
+    the model asked for; without iterations the usage is priced by msg.model. iterations: the attempts
+    for the log, [] without them."""
     its = getattr(msg.usage, "iterations", None) or []
     parts = [(e, getattr(e, "model", None) or model) for e in its] or [(msg.usage, msg.model or model)]
     tokens = {k: sum(_tokens(u)[k] for u, _ in parts) for k in TOKENS}
-    speed = getattr(msg.usage, "speed", None) or ("fast" if fast else "standard")
-    cost = sum(_attempt_cost(u, m) for u, m in parts) * (2 if speed == "fast" else 1)
+    cost = sum(_attempt_cost(u, m) for u, m in parts)
     return tokens, cost, [{"type": e.type, "model": m, **_tokens(e)} for e, m in parts if its]
 
 
@@ -888,7 +867,7 @@ def _interrupt(signum, frame):
     raise Interrupted(signum)
 
 
-def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", fast=False, model=MODEL, shell="container",
+def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", model=MODEL, shell="container",
         image_side=MAX_IMAGE_SIDE, system=SYSTEM_FILE, client=None, command_timeout=COMMAND_TIMEOUT_S, out=None):
     """Run the session in root (prepared by controller.prepare_session). Returns the exit code.
 
@@ -930,9 +909,9 @@ def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", fast=Fal
                     return end("no_key", EXIT["api_error"], message=f"no ANTHROPIC_API_KEY= line in {key_file}")
                 client = anthropic.Anthropic(api_key=key, max_retries=MAX_RETRIES)
             system_text = Path(system).read_text(encoding="utf-8")
-            params = request_params(model, effort, fast, system_text, image_side)
+            params = request_params(model, effort, system_text, image_side)
             messages = [{"role": "user", "content": (root / "session" / "prompt.txt").read_text(encoding="utf-8")}]
-            log.write("start", model=model, effort=effort, fast=fast, betas=params["betas"], shell=shell,
+            log.write("start", model=model, effort=effort, betas=params["betas"], shell=shell,
                       max_tokens=MAX_TOKENS, image_side=image_side, system=str(Path(system).resolve()),
                       system_sha256=hashlib.sha256(system_text.encode("utf-8")).hexdigest())
             turn = pauses = 0
@@ -941,7 +920,7 @@ def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", fast=Fal
                 msg, seconds, failed = stream_turn(client, {**params, "messages": list(messages)}, log, turn)
                 responses, reissued = responses + 1, reissued + failed
                 usage = _tokens(msg.usage)
-                tokens, turn_cost, iterations = billed(msg, model, fast)
+                tokens, turn_cost, iterations = billed(msg, model)
                 cost += turn_cost
                 for k in TOKENS:
                     totals[k] += tokens[k]
@@ -1047,7 +1026,6 @@ def main(argv=None, client=None):
     ap.add_argument("--sock-dir", required=True, help="the folder of the tool server's socket")
     ap.add_argument("--key-file", required=True, help="a file with the line ANTHROPIC_API_KEY=...")
     ap.add_argument("--effort", choices=EFFORTS, default="high")
-    ap.add_argument("--fast", action="store_true", help=f"fast mode (beta {FAST_BETA}, twice the price)")
     ap.add_argument("--model", default=MODEL)
     ap.add_argument("--image-side", type=_pixels, default=MAX_IMAGE_SIDE, metavar="N",
                     help=f"view_image downscales to at most N px on the long side (default {MAX_IMAGE_SIDE})")
@@ -1058,7 +1036,7 @@ def main(argv=None, client=None):
     a = ap.parse_args(argv)
     if a.shell == "container" and not a.sif:
         ap.error("--sif is required unless --shell host")
-    return run(a.root, a.sif, a.sock_dir, a.key_file, effort=a.effort, fast=a.fast, model=a.model, shell=a.shell,
+    return run(a.root, a.sif, a.sock_dir, a.key_file, effort=a.effort, model=a.model, shell=a.shell,
                image_side=a.image_side, system=a.system, client=client)
 
 

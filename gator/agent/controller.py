@@ -19,10 +19,9 @@ Session layout:
   root/control/       host only: events.jsonl (what the helpers did, with GLB hashes; the deliverable
                       and the deadline come from it), budget.json, manifest.json, agent.json,
                       candidate.log, previews.log
-  root/work/          mounted as /work: AGENTS.md (codex only), input/, original/ and candidate.blend
-                      (not from scratch), exports/, reviews/, checkpoints/, run_budget.json, finish.json;
-                      in articulation also input/parts.json, set_joint/, joints.json and
-                      reviews_articulation/
+  root/work/          mounted as /work: AGENTS.md (codex only), input/, original/, candidate.blend,
+                      exports/, reviews/, checkpoints/, run_budget.json, finish.json; in articulation
+                      also input/parts.json, set_joint/, joints.json and reviews_articulation/
   root/session/       prompt.txt and stderr.log; for codex the CLI's event log codex.jsonl and
                       codex_home/ for CODEX_HOME, mounted as /session in its container; for claude
                       the agent's log claude.jsonl, its stdout claude_stdout.log and system.md, a copy
@@ -53,6 +52,7 @@ import numpy as np
 import trimesh
 
 from gator import frames as F
+from gator.fileio import write_json
 from gator.agent import prompts, tools
 from gator.agent.server import ToolServer
 from gator.parts import joints as joint_spec
@@ -62,14 +62,12 @@ AGENT_DIR = Path(__file__).resolve().parent
 REPO = AGENT_DIR.parents[1]  # claude_agent runs from here, as `python -m gator.agent.claude_agent`
 CODEX_ENV = {"CODEX_HOME": "/session/codex_home"}
 HELPER_ENV = {"GATOR_SOCKET": "/opt/gator/sock/tools.sock", "PREPEND_PATH": "/opt/gator/bin"}
-CODEX_MODEL, CLAUDE_MODEL = "gpt-6-astra", "claude-opus-5-5"
+CODEX_MODEL, CLAUDE_MODEL, EFFORTS = tools.CODEX_MODEL, tools.CLAUDE_MODEL, tools.EFFORTS
 CLAUDE_EFFORT = "xhigh"  # the effort of the Astra comparison runs; Opus 5.5's own default is medium, so it is always sent
-EFFORTS = ("low", "medium", "high", "xhigh", "max")
 LOGS = {"codex": "codex.jsonl", "claude": "claude.jsonl"}  # each agent's event log, in root/session
-# USD per million tokens of Claude Opus 5.5; cache writes (5 min) are 1.25 x input. claude_agent prices
-# each response itself (claude_agent.PRICES, by the model that ran it); these price a log line without that.
-PRICES = {"input_tokens": 4.0, "output_tokens": 20.0, "cache_read_input_tokens": 0.20,
-          "cache_creation_input_tokens": 5.0}
+# USD per million tokens of Claude Opus 5.5 (tools.OPUS_PRICES without the 1-hour cache write). claude_agent
+# prices each response itself (claude_agent.PRICES, by the model that ran it); these price a log line without that.
+PRICES = {k: v for k, v in tools.OPUS_PRICES.items() if k != "cache_creation_1h"}
 CONTAINER = ["apptainer", "exec", "--nv", "--containall", "--no-mount", "/scratch", "--no-mount", "/storage"]
 # Shell commands that reach the network. Nothing in the container blocks them, so result.json lists
 # the ones that ran.
@@ -79,7 +77,7 @@ NETWORK = re.compile(
     r"|submodule)\b)|urllib\.request|urlopen\(|urlretrieve\(|requests\.(?:get|post)\(|http\.client", re.M)
 CODEX_EXIT = {0: "success", 1: "error_or_interrupted", 130: "cancelled", 143: "terminated"}
 CLAUDE_EXIT = {0: "ended", 2: "refusal", 3: "api_error", 130: "interrupted"}
-KEY_LINES = ("OPENAI_API_KEY=", "ANTHROPIC_API_KEY=")
+KEY_NAMES = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
 # Codex exec reads its key only from CODEX_API_KEY. The key file holds OPENAI_API_KEY, so a shell in the
 # container copies it and then runs codex; the controller never reads the key for this.
 CODEX_KEY_WRAPPER = ["sh", "-c", 'export CODEX_API_KEY="$OPENAI_API_KEY"; unset OPENAI_API_KEY; exec "$@"', "codex"]
@@ -89,7 +87,7 @@ def codex_command():
     """The codex exec command of note 5, as the paper ran GPT-6-Astra: highest reasoning effort, no
     Codex sandbox or approvals inside our container. The prompt comes on stdin ("-")."""
     return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "--strict-config",
-            "-C", "/work", "-m", "gpt-6-astra", "-c", 'model_reasoning_effort="xhigh"', "--json",
+            "-C", "/work", "-m", CODEX_MODEL, "-c", 'model_reasoning_effort="xhigh"', "--json",
             "-o", "/session/last_message.txt", "-"]
 
 
@@ -129,7 +127,7 @@ def shell_command(root, sif, sock_dir):
             *_env_flags(HELPER_ENV), "--pwd", "/work", str(sif), "bash", "--noprofile", "--norc"]
 
 
-def claude_command(root, sif, sock_dir, key_file, effort=CLAUDE_EFFORT, fast=False, image_side=None, system=None):
+def claude_command(root, sif, sock_dir, key_file, effort=CLAUDE_EFFORT, image_side=None, system=None):
     """The claude agent (note 5): gator.agent.claude_agent with the controller's own interpreter, on
     the host. It reads the key from key_file into its memory and starts its shell with shell_command.
     image_side and system go to --image-side and --system when given; else claude_agent's defaults
@@ -137,8 +135,17 @@ def claude_command(root, sif, sock_dir, key_file, effort=CLAUDE_EFFORT, fast=Fal
     repository and not from the work folder."""
     return [sys.executable, "-m", "gator.agent.claude_agent", os.path.abspath(root), "--sif", os.path.abspath(sif),
             "--sock-dir", str(sock_dir), "--key-file", os.path.abspath(key_file), "--effort", effort,
-            *(["--fast"] if fast else []), *(["--image-side", str(image_side)] if image_side is not None else []),
+            *(["--image-side", str(image_side)] if image_side is not None else []),
             *(["--system", os.path.abspath(system)] if system is not None else [])]
+
+
+def sif_blender(sif, rw=(), ro=(), aliases=()):
+    """Blender in the agent's SIF, in a container that sees only the paths rw (read-write) and ro
+    (read-only), each at its host path, and the Blender scripts (read-only). aliases: (host path,
+    container path) pairs, bound read-write."""
+    binds = [*(_bind(p, p) for p in rw), *(_bind(src, dst) for src, dst in aliases),
+             *(_bind(p, p, ro=True) for p in ro), _bind(tools.BLENDER_SCRIPTS, tools.BLENDER_SCRIPTS, ro=True)]
+    return [*CONTAINER, *(a for b in binds for a in b), str(sif), "blender"]
 
 
 def blender_command(root, sif):
@@ -146,8 +153,7 @@ def blender_command(root, sif):
     Blender scripts. The work folder is at its host path, so helper arguments need no mapping, and at
     /work, so paths the agent saved in the .blend still resolve."""
     work = (Path(root) / "work").resolve()
-    return [*CONTAINER, *_bind(work, work), *_bind(work, "/work"),
-            *_bind(tools.BLENDER_SCRIPTS, tools.BLENDER_SCRIPTS, ro=True), str(sif), "blender"]
+    return sif_blender(sif, rw=[work], aliases=[(work, "/work")])
 
 
 def cli_exit(returncode, agent="codex"):
@@ -162,39 +168,29 @@ def cli_exit(returncode, agent="codex"):
 
 
 def agent_info(root):
-    """control/agent.json: agent, model, effort, fast, and image_side and system when prepare_session
-    got them. Sessions prepared before it ran Codex."""
+    """control/agent.json: agent, model, effort, and image_side and system when prepare_session got
+    them. Sessions prepared before it ran Codex."""
     path = Path(root) / "control" / "agent.json"
     if path.is_file():
         return json.loads(path.read_text())
-    return {"agent": "codex", "model": CODEX_MODEL, "effort": "xhigh", "fast": False}
+    return {"agent": "codex", "model": CODEX_MODEL, "effort": "xhigh"}
 
 
-def codex_config(base_url=None):
-    """config.toml for CODEX_HOME. base_url sends requests over HTTP to a proxy such as
-    pilot/logproxy.py, through a custom provider, because the built-in provider uses WebSocket and
-    ignores OPENAI_BASE_URL."""
-    text = (AGENT_DIR / "codex" / "config.toml").read_text()
-    if not base_url:
-        return text
-    head, sep, tables = text.partition("\n[")
-    return (head + f'\nmodel_provider = "proxied"\n' + sep + tables +
-            f'\n[model_providers.proxied]\nname = "OpenAI through the logging proxy"\nbase_url = "{base_url}"\n'
-            'wire_api = "responses"\nrequires_openai_auth = true\nsupports_websockets = false\n')
+def codex_config():
+    """config.toml for CODEX_HOME."""
+    return (AGENT_DIR / "codex" / "config.toml").read_text()
 
 
-def agent_record(agent, effort=None, fast=False, codex_base_url=None, image_side=None, system=None):
-    """control/agent.json (agent, model, effort, fast; for claude also image_side and the absolute
-    system path when given) for prepare_session, or ValueError for a setting the agent does not take."""
+def agent_record(agent, effort=None, image_side=None, system=None):
+    """control/agent.json (agent, model, effort; for claude also image_side and the absolute system
+    path when given) for prepare_session, or ValueError for a setting the agent does not take."""
     if agent == "codex":
-        if effort not in (None, "xhigh") or fast or image_side is not None or system is not None:
-            raise ValueError("effort, fast, image_side and system are settings of the claude agent; Codex runs at "
+        if effort not in (None, "xhigh") or image_side is not None or system is not None:
+            raise ValueError("effort, image_side and system are settings of the claude agent; Codex runs at "
                              "xhigh (codex/config.toml)")
-        return {"agent": "codex", "model": CODEX_MODEL, "effort": "xhigh", "fast": False}
+        return {"agent": "codex", "model": CODEX_MODEL, "effort": "xhigh"}
     if agent != "claude":
         raise ValueError(f"agent is codex or claude, not {agent!r}")
-    if codex_base_url:
-        raise ValueError("codex_base_url is a setting of the codex agent")
     effort = CLAUDE_EFFORT if effort is None else effort
     if effort not in EFFORTS:
         raise ValueError(f"effort is one of {', '.join(EFFORTS)}, not {effort!r}")
@@ -202,15 +198,15 @@ def agent_record(agent, effort=None, fast=False, codex_base_url=None, image_side
         raise ValueError(f"image_side is a positive number of pixels, not {image_side!r}")
     if system is not None and not Path(system).is_file():
         raise ValueError(f"system {system} is not a file")
-    return {"agent": "claude", "model": CLAUDE_MODEL, "effort": effort, "fast": bool(fast),
+    return {"agent": "claude", "model": CLAUDE_MODEL, "effort": effort,
             **({"image_side": image_side} if image_side is not None else {}),
             **({"system": os.path.abspath(system)} if system is not None else {})}
 
 
 def prepare_session(root, mode, prompt, views, *, source, metric, depth_scale=1.0, confidence=None,
-                    original=None, previews=(), codex_base_url=None, agent="codex", effort=None, fast=False,
-                    image_side=None, system=None, parts=None):
-    """Write the session folder for mode 'refinement', 'from_scratch' or 'articulation'.
+                    original=None, previews=(), agent="codex", effort=None, image_side=None, system=None,
+                    parts=None):
+    """Write the session folder for mode 'refinement' or 'articulation'.
 
     Articulation (build_plan.md note 11) works like refinement on the split parts.glb as the original,
     and parts (run/parts.json of the parts stage) goes to work/input/parts.json, which the manifest names.
@@ -218,8 +214,8 @@ def prepare_session(root, mode, prompt, views, *, source, metric, depth_scale=1.
     (OpenCV world-to-camera in W), width, height, image and mask files, and optional depth (.npy,
     optical-axis z) and confidence (.npy) files. previews: PNGs of the original; without them,
     run_session renders them before the clock starts. agent: "codex" (GPT-6-Astra through the Codex
-    CLI, at the xhigh effort of codex/config.toml; codex_base_url: see codex_config) or "claude"
-    (Claude Opus 5.5 through claude_agent at effort, default xhigh, in fast mode if fast).
+    CLI, at the xhigh effort of codex/config.toml) or "claude" (Claude Opus 5.5 through claude_agent
+    at effort, default xhigh).
     image_side (the long side in px that view_image downscales to) and system (the system prompt
     file) are claude settings; given, they go to control/agent.json and claude_agent's command,
     else claude_agent's defaults hold (2576 px, gator/agent/claude/SYSTEM.md).
@@ -228,18 +224,18 @@ def prepare_session(root, mode, prompt, views, *, source, metric, depth_scale=1.
         raise ValueError(f"mode is one of {', '.join(tools.VERDICTS)}, not {mode!r}")
     if (parts is not None) != (mode == "articulation"):
         raise ValueError("parts (run/parts.json) goes with the articulation mode, and only with it")
-    record = agent_record(agent, effort, fast, codex_base_url, image_side, system)
+    record = agent_record(agent, effort, image_side, system)
     prompt = prompts.load(mode) if prompt is None else prompt
     root, work = Path(root), Path(root) / "work"
     for d in ("input", "exports", "reviews", "checkpoints"):
         (work / d).mkdir(parents=True, exist_ok=True)
     (root / "control").mkdir(exist_ok=True)
     (root / "control" / "events.jsonl").touch()
-    tools.write_json_atomic(root / "control" / "agent.json", record)
+    write_json(root / "control" / "agent.json", record)
     (root / "session").mkdir(exist_ok=True)
     if agent == "codex":
         (root / "session" / "codex_home").mkdir(exist_ok=True)
-        (root / "session" / "codex_home" / "config.toml").write_text(codex_config(codex_base_url))
+        (root / "session" / "codex_home" / "config.toml").write_text(codex_config())
         shutil.copyfile(AGENT_DIR / "codex" / "AGENTS.md", work / "AGENTS.md")
     else:  # claude_agent sends this file as the system prompt; the copy is the record
         shutil.copyfile(record.get("system", AGENT_DIR / "claude" / "SYSTEM.md"), root / "session" / "system.md")
@@ -271,14 +267,13 @@ def prepare_session(root, mode, prompt, views, *, source, metric, depth_scale=1.
     if parts is not None:
         shutil.copyfile(parts, work / "input" / "parts.json")
         m["parts"] = "input/parts.json"
-    tools.write_json_atomic(work / "input" / "manifest.json", m)
-    tools.write_json_atomic(root / "control" / "manifest.json", m)
-    if mode != "from_scratch":
-        shutil.copyfile(original, root / "original.glb")
-        (work / "original" / "previews").mkdir(parents=True)
-        shutil.copyfile(original, work / "original" / "original.glb")
-        for p in previews:
-            shutil.copyfile(p, work / "original" / "previews" / Path(p).name)
+    write_json(work / "input" / "manifest.json", m)
+    write_json(root / "control" / "manifest.json", m)
+    shutil.copyfile(original, root / "original.glb")
+    (work / "original" / "previews").mkdir(parents=True)
+    shutil.copyfile(original, work / "original" / "original.glb")
+    for p in previews:
+        shutil.copyfile(p, work / "original" / "previews" / Path(p).name)
     return work
 
 
@@ -427,7 +422,7 @@ def joint_count(glb):
 
 def select_deliverable(root, mode):
     """Fallback order: finish GLB, newest valid checkpoint, newest valid export, then the unchanged
-    original (refinement and articulation) or no asset (from scratch). Returns (pick, rejected).
+    original. Returns (pick, rejected).
 
     Candidates come from the helpers' host-side events, and each GLB must still have the sha256 logged
     there. Files that the agent wrote into work/ by other means are never delivered.
@@ -469,20 +464,8 @@ def select_deliverable(root, mode):
         if valid({**e, "sha256": e.get("glb_sha256")}, "export"):
             return dict(source="export", glb=work / e["glb"], verdict="needs_review", limitations=[],
                         reason="uninspected export recovered; the session ended without finish"), rejected
-    if mode != "from_scratch":
-        return dict(source="fallback_original", glb=root / "original.glb", verdict="fallback_original",
-                    reason="no valid agent output; the unchanged original is returned", limitations=[]), rejected
-    return dict(source=None, glb=None, verdict="invalid", reason="no valid agent output", limitations=[]), rejected
-
-
-def _jsonl(path):
-    """The JSON objects of a JSONL file. Other lines, and a missing file, give nothing."""
-    with contextlib.suppress(OSError):
-        for line in Path(path).read_text(errors="replace").splitlines():
-            with contextlib.suppress(ValueError):
-                e = json.loads(line)
-                if isinstance(e, dict):
-                    yield e
+    return dict(source="fallback_original", glb=root / "original.glb", verdict="fallback_original",
+                reason="no valid agent output; the unchanged original is returned", limitations=[]), rejected
 
 
 def _claude_bash_calls(e):
@@ -503,7 +486,7 @@ def shell_commands(log):
     items (logged when they start and when they complete), or the bash calls that claude_agent ran
     from its response lines."""
     cmds, seen = [], set()
-    for e in _jsonl(log):
+    for e in tools.read_jsonl(log):
         with contextlib.suppress(AttributeError, TypeError):
             if e.get("type") == "response":
                 calls = _claude_bash_calls(e)
@@ -526,14 +509,13 @@ def network_commands(log, limit=5):
     return [c[:200] for c in shell_commands(log) if NETWORK.search(c)][:limit]
 
 
-def claude_usage(log, fast=False):
+def claude_usage(log):
     """turns, tokens (the four usage totals), cost_usd and end_reason of a claude_agent log, from its
     "end" line. Without one (the agent was killed first) they are summed over its response lines:
     their billed tokens (every attempt of a turn with a refusal fallback, else usage) and their own
-    cost_usd (each attempt at its model's prices), or for a line without one its tokens at PRICES
-    (twice that in fast mode)."""
+    cost_usd (each attempt at its model's prices), or for a line without one its tokens at PRICES."""
     totals, turns, cost = dict.fromkeys(PRICES, 0), 0, 0.0
-    for e in _jsonl(log):
+    for e in tools.read_jsonl(log):
         if e.get("type") == "end":
             return {"turns": e.get("turns"), "tokens": e.get("totals"), "cost_usd": e.get("cost_usd"),
                     "end_reason": e.get("reason")}
@@ -545,45 +527,33 @@ def claude_usage(log, fast=False):
                 totals[k] += tokens[k]
             line_cost = e.get("cost_usd")
             cost += line_cost if type(line_cost) in (int, float) and math.isfinite(line_cost) else \
-                sum(tokens[k] * PRICES[k] for k in PRICES) / 1e6 * (2 if fast else 1)
+                sum(tokens[k] * PRICES[k] for k in PRICES) / 1e6
     return {"turns": turns, "tokens": totals, "cost_usd": round(cost, 4), "end_reason": None}
 
 
 def make_previews(root, blender, timeout=300):
-    """Refinement and articulation: render the original under every input camera and 6 orbit views into
-    work/original/previews, before the clock starts. Prompt 1 asks the agent to inspect them.
-    Returns True if the sheet was written."""
+    """Render the original under every input camera and 6 orbit views into work/original/previews,
+    before the clock starts. Prompt 1 asks the agent to inspect them. Returns True if the sheet was
+    written."""
     root = Path(root).resolve()
     out = root / "work" / "original" / "previews"
     m = json.loads((root / "control" / "manifest.json").read_text())
     args = out / "args.json"  # the helpers' Blender container sees only the work folder
-    tools.write_json_atomic(args, {"root": str(root / "work"), "out": str(out), "clay": False, "views": m["views"],
-                                   "candidate": None, "original": str(out.parent / "original.glb"), "detail": []})
-    cmd = [*blender, "-b", "--factory-startup", "--python-exit-code", "1", "--python",
-           str(tools.BLENDER_SCRIPTS / "review.py"), "--", str(args)]
+    write_json(args, {"root": str(root / "work"), "out": str(out), "clay": False, "views": m["views"],
+                      "candidate": None, "original": str(out.parent / "original.glb"), "detail": []})
     with open(root / "control" / "previews.log", "w") as log:
-        try:
-            ok = tools._run(cmd, log, timeout) == 0
-        except (subprocess.TimeoutExpired, OSError) as e:
-            log.write(f"{e}\n")
-            ok = False
+        ok = tools.run_ok(tools.blender_argv(blender, "review.py", args), log, timeout)
     args.unlink()
     return ok and (out / "sheet.png").is_file()
 
 
 def build_candidate(root, blender, timeout=300):
-    """Refinement and articulation: write work/candidate.blend from the original with the stock glTF
-    importer, before the clock starts. Returns True if the file was written."""
+    """Write work/candidate.blend from the original with the stock glTF importer, before the clock
+    starts. Returns True if the file was written."""
     work, control = Path(root).resolve() / "work", Path(root).resolve() / "control"
-    cmd = [*blender, "-b", "--factory-startup", "--python-exit-code", "1", "--python",
-           str(tools.BLENDER_SCRIPTS / "make_candidate.py"), "--", str(work / "original" / "original.glb"),
-           str(work / "candidate.blend")]
+    cmd = tools.blender_argv(blender, "make_candidate.py", work / "original" / "original.glb", work / "candidate.blend")
     with open(control / "candidate.log", "w") as log:
-        try:
-            ok = tools._run(cmd, log, timeout) == 0
-        except (subprocess.TimeoutExpired, OSError) as e:
-            log.write(f"{e}\n")
-            ok = False
+        ok = tools.run_ok(cmd, log, timeout)
     return ok and (work / "candidate.blend").is_file()
 
 
@@ -599,11 +569,10 @@ def run_session(root, cmd, env=None, *, blender, sock_dir, **watchdog):
     mode = json.loads((root / "control" / "manifest.json").read_text())["mode"]
     info = agent_info(root)
     log = root / "session" / LOGS[info["agent"]]
-    candidate = previews = None
-    if mode != "from_scratch":
-        candidate = build_candidate(root, blender)
-        if not any((work / "original" / "previews").glob("*.png")):
-            previews = make_previews(root, blender)
+    previews = None
+    candidate = build_candidate(root, blender)
+    if not any((work / "original" / "previews").glob("*.png")):
+        previews = make_previews(root, blender)
     server = ToolServer(Path(sock_dir) / "tools.sock", work, root / "control", blender).start()
     try:
         run = run_agent(root, cmd, env, **watchdog)
@@ -628,8 +597,8 @@ def run_session(root, cmd, env=None, *, blender, sock_dir, **watchdog):
     if mode == "articulation":  # counts.joints counts set_joint changes; this is what the deliverable holds
         result["joints_delivered"] = joint_count(glb)
     if info["agent"] == "claude":
-        result.update(claude_usage(log, info.get("fast")))
-    tools.write_json_atomic(root / "result.json", result)
+        result.update(claude_usage(log))
+    write_json(root / "result.json", result)
     return result
 
 
@@ -643,8 +612,8 @@ def run_container_session(root, sif, key_file, agent=None, extra_env=None, **wat
     sock_dir = tempfile.mkdtemp(prefix="gator-")  # short path: Unix socket paths are limited to 107 bytes
     try:
         if info["agent"] == "claude":
-            cmd = agent or claude_command(root, sif, sock_dir, key_file, info["effort"], info["fast"],
-                                          info.get("image_side"), info.get("system"))
+            cmd = agent or claude_command(root, sif, sock_dir, key_file, info["effort"], info.get("image_side"),
+                                          info.get("system"))
             env = {**os.environ, **extra_env} if extra_env else None
         else:
             cmd, env = apptainer_command(root, sif, key_file, sock_dir, agent, extra_env), None
@@ -652,7 +621,7 @@ def run_container_session(root, sif, key_file, agent=None, extra_env=None, **wat
     finally:
         shutil.rmtree(sock_dir, ignore_errors=True)
     result["key_found_in"] = find_key(root, key_file)
-    tools.write_json_atomic(Path(root) / "result.json", result)
+    write_json(Path(root) / "result.json", result)
     return result
 
 
@@ -660,19 +629,7 @@ def read_keys(key_file):
     """Every API key of an env file: the values of its OPENAI_API_KEY= and ANTHROPIC_API_KEY= lines, in
     file order, without quotes around them (as a shell and claude_agent read them). A file can hold
     both, and the Codex container gets all of them through --env-file."""
-    keys = []
-    for line in Path(key_file).read_text().splitlines():
-        if line.startswith(KEY_LINES):
-            key = line.split("=", 1)[1].strip()
-            key = key[1:-1] if len(key) > 1 and key[0] == key[-1] and key[0] in "'\"" else key
-            if key and key not in keys:
-                keys.append(key)
-    return keys
-
-
-def read_key(key_file):
-    """The first key of read_keys, else ''."""
-    return next(iter(read_keys(key_file)), "")
+    return list(dict.fromkeys(k for k in tools.env_values(key_file, KEY_NAMES) if k))
 
 
 def find_key(root, key_file, chunk=50 << 20):

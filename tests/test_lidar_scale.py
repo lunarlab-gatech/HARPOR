@@ -55,44 +55,6 @@ def test_apply_scale_scales_depth_points_and_translations_only(tmp_path):
             L.apply_scale(raw, bad)
 
 
-def test_scale_run_copies_the_inputs_and_scales_the_cameras(tmp_path):
-    run = make_run(tmp_path, n=3)
-    L.scale_run(run, 2.0, tmp_path / "s2")
-    out = tmp_path / "s2"
-    assert sorted(p.name for p in (out / "input" / "images").iterdir()) == ["0.png", "1.png", "2.png"]
-    assert (out / "masks" / "2.png").is_file() and (out / "prep.json").is_file()
-    with np.load(out / "da3_output.npz") as da:
-        assert all(str(f).startswith(str(out)) for f in da["image_files"]) and float(da["metric_scale"]) == 2.0
-    a, b = M.cameras(run), M.cameras(out)
-    for ca, cb in zip(a, b):  # the same views and K; every camera's translation from view 0 doubles
-        assert ca["name"] == cb["name"] and np.allclose(ca["K"], cb["K"])
-        Ta, Tb = np.array(ca["w2c"]), np.array(cb["w2c"])
-        assert np.allclose(Ta[:3, :3], Tb[:3, :3], atol=1e-5) and np.allclose(2 * Ta[:3, 3], Tb[:3, 3], atol=1e-4)
-    with pytest.raises(SystemExit, match="exists"):
-        L.scale_run(run, 2.0, out)
-
-
-def placement(t, scale, extent, center, iou, q=(1.0, 0.0, 0.0, 0.0)):
-    pose = {"rotation_wxyz": list(q), "translation": list(t), "scale": [scale] * 3}
-    return {"pose": pose, "pose_mvsam3d": pose, "posed_extent_W": list(extent), "posed_center_W": list(center),
-            "scale_fit": {"applied": False, "scale": 1.0}, "pose_fit": {"applied": False}, "check": {"mean_mask_iou": iou}}
-
-
-def test_compare_runs_reports_the_ratios(tmp_path):
-    for name, k, iou, q in (("a", 1.0, 0.80, (1.0, 0.0, 0.0, 0.0)), ("b", 2.0, 0.81, (np.cos(0.005), np.sin(0.005), 0.0, 0.0))):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "placement.json").write_text(json.dumps(
-            placement([0.1 * k, -0.2 * k, 1.5 * k], 0.4 * k, [0.5 * k, 0.6 * k, 0.4 * k], [0.1 * k, 0.0, 1.5 * k], iou, q)))
-    rec = L.compare_runs(tmp_path / "a", tmp_path / "b", 2.0)
-    assert np.isclose(rec["mvsam3d"]["translation_ratio"], 2.0) and np.isclose(rec["mvsam3d"]["scale_ratio"], 2.0)
-    assert np.allclose(rec["placed"]["extent_ratio"], 2.0) and np.isclose(rec["placed"]["center_ratio"], 2.0)
-    assert np.isclose(rec["mvsam3d"]["rotation_deg"], np.degrees(0.01), atol=1e-6)
-    assert all(rec["within_2pct"].values())
-    rec = L.compare_runs(tmp_path / "a", tmp_path / "b", 1.9)  # 5% off: the ratios fail, the rotation and IoU pass
-    assert rec["within_2pct"] == {"translation": False, "scale": False, "extent": False, "rotation_2deg": True,
-                                  "iou_0.02": True}
-
-
 # The estimate. The sphere scene of test_webapp_views: DA3 grid 64x48 with K. The source frames are
 # 220x150; prep center-cropped them to CROP (160x120) and resized that to 128x96 (the pool images and
 # masks), and DA3 worked at 64x48, so the source camera K_SRC is K through the crop.

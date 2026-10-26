@@ -1,12 +1,12 @@
-"""The personal worker's link to Supabase (gator/webapp/supa.py): private files, the client with the publishable key
-and the user's access token, Storage, the sign-in, the token renewal and the Store."""
+"""The personal worker's link to Supabase (gator/webapp/supa.py): the client with the publishable key and the
+user's access token, Storage, the sign-in, the token renewal and the Store. The private files are in
+test_fileio.py."""
 
 import base64
 import functools
 import hashlib
 import json
 import logging
-import os
 import re
 import threading
 import time
@@ -84,33 +84,6 @@ async def bearer():
 
 def client(transport, **kw):
     return supa.Supa(URL, PUB, bearer, transport=transport, **kw)
-
-
-# ---- private files ----
-
-def test_write_private_makes_a_0600_file_in_a_0700_folder(tmp_path):
-    d = tmp_path / "cfg" / "gator"
-    f = d / "harpor_session.json"
-    supa.write_private(f, b'{"a": 1}')
-    assert oct(os.stat(d).st_mode & 0o777) == "0o700" and oct(os.stat(f).st_mode & 0o777) == "0o600"
-    assert supa.read_private(f) == b'{"a": 1}'
-    inode = os.stat(f).st_ino
-    supa.write_private(f, b'{"a": 2}')
-    assert supa.read_private(f) == b'{"a": 2}' and os.stat(f).st_ino != inode  # a new file, put in place at once
-    assert sorted(p.name for p in d.iterdir()) == ["harpor_session.json"]  # no temp file left
-    target = tmp_path / "elsewhere.json"
-    target.write_text("keep")
-    f.unlink()
-    f.symlink_to(target)
-    supa.write_private(f, b"new")  # the link is replaced, never written through
-    assert target.read_text() == "keep" and not f.is_symlink() and supa.read_private(f) == b"new"
-    os.chmod(d, 0o755)
-    with pytest.raises(SystemExit, match="chmod 700"):
-        supa.write_private(f, b"x")
-    os.chmod(d, 0o700)
-    os.mkfifo(d / "fifo")
-    with pytest.raises(SystemExit, match="chmod 600"):  # refused at once, without blocking on the FIFO
-        supa.read_private(d / "fifo")
 
 
 # ---- Supa: headers, calls, retries, errors ----
@@ -712,7 +685,7 @@ def test_store_calls():
     assert c[6] == ("GET", "/settings", {"select": "*", "id": "eq.1"}, None)
     assert c[7] == ("GET", "/access", {"select": "*", "user_id": f"eq.{USER}"}, None)
     cols = supa.JOB_COLUMNS
-    assert c[8] == ("GET", "/jobs", {"select": cols, "id": f"eq.{JOB}"}, None) and "compute" not in cols
+    assert c[8] == ("GET", "/jobs", {"select": cols, "id": f"eq.{JOB}"}, None)
     assert c[9] == ("GET", "/jobs", {"select": cols, "machine_id": f"eq.{MACHINE}"}, None)
     assert c[10] == ("POST", "/rpc/own_job_create", {}, {"p_worker": "w-2", "p_name": "clip.mp4", "p_kind": "video",
                                                          "p_bytes": 123})

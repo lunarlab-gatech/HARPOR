@@ -17,21 +17,11 @@ from gator.parts import stage as S
 from gator.parts import vote as V
 from gator.physics.align import read_glb, write_glb
 from gator.stage_a import part_masks
+from test_parts_vote import CENTER, look_at
 
 FAKE_BLENDER = [sys.executable, "-m", "gator.agent.fake_agent", "--blender"]
 W, H = 200, 150
 K = np.array([[220.0, 0, 99.5], [0, 220.0, 74.5], [0, 0, 1]])
-CENTER = np.array([0.0, 0.0, 2.0])
-
-
-def look_at(eye):
-    z = (CENTER - eye) / np.linalg.norm(CENTER - eye)
-    x = np.cross([0.0, 1.0, 0.0], z)
-    x /= np.linalg.norm(x)
-    T = np.eye(4)
-    T[:3, :3] = np.stack([x, np.cross(z, x), z])
-    T[:3, 3] = -T[:3, :3] @ eye
-    return T
 
 
 class LidSegmenter:

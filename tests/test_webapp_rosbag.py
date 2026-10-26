@@ -248,11 +248,7 @@ def bag(request, tmp_path_factory):
     return p if form == "dir" else p / f"b.{kind}"
 
 
-def test_is_bag(tmp_path):
-    assert all(R.is_bag(p) for p in ("a.bag", "B.BAG", "c.mcap", "d.Db3"))
-    assert not any(R.is_bag(p) for p in ("v.mp4", "v.MOV", tmp_path))
-    (tmp_path / "metadata.yaml").write_text("rosbag2_bagfile_information: {}")
-    assert R.is_bag(tmp_path)
+def test_info_topic():
     assert R.info_topic("/cam_b/image_rect/compressed") == "/cam_b/camera_info"
     assert R.info_topic("/a/b/image_raw") == "/a/b/camera_info" and R.info_topic("cam/image") == "/cam/camera_info"
 

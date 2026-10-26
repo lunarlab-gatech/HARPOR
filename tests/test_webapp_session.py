@@ -1,7 +1,7 @@
-"""The personal worker's session and commands (gator/webapp/session.py, addendum 6.3 and 7): login against the fake
-Supabase's Auth through a real loopback on 127.0.0.1, the 0600 session file and its lock, the token renewal that
-saves first, status, logout, add, local keys, the server's real --worker start, and a real --worker server process
-that copies a job made with `worker add` to the fake site."""
+"""The personal worker's session and commands (gator/webapp/session.py): login against the fake Supabase's Auth
+through a real loopback on 127.0.0.1, the 0600 session file and its lock, the token renewal that saves first,
+status, logout, add, local keys, the server's real --worker start, and a real --worker server process that copies
+a job made with `worker add` to the fake site."""
 
 import json
 import os
@@ -206,9 +206,8 @@ def test_session_holds_the_lock_and_saves_each_new_token_first(fake, home, monke
     s = session.Session(transport=fake.transport)  # free again after close()
     fake.refresh_tokens.clear()  # Supabase no longer takes the token
     try:
-        with pytest.raises(session.SignedOut, match="run python -m gator.webapp.worker login"):
+        with pytest.raises(supa.SignedOut, match="run python -m gator.webapp.worker login"):
             anyio.run(s.bearer)
-        assert session.SignedOut is supa.SignedOut
     finally:
         s.close()
 
@@ -393,7 +392,8 @@ def test_a_personal_worker_process_copies_a_job_added_with_worker_add(fake, home
     file: the worker renews the token (and saves it), binds the machine, a file added with `worker add` becomes a
     job on the site, and SIGTERM stops the worker and releases the session."""
     pytest.importorskip("av")
-    from test_webapp_worker import FakeHTTP, write_video
+    from test_webapp_server import write_video
+    from test_webapp_worker import FakeHTTP
 
     c = fake.add_user("c@example.org", approved=True)
     bridge = FakeHTTP(fake)

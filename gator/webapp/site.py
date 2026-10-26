@@ -73,7 +73,7 @@ MODEL_VIEWER_STYLE = "'sha256-PXtZZkJMMyc18o/DN1ZEFOJ2qEGq95IQbVaJFMOXOb0='"
 SECRET = re.compile(rb"sb_secret_[A-Za-z0-9_-]{8}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.")
 # site.json's url: the Supabase API (https://<ref>.supabase.co, or the CLI's local stack on 127.0.0.1).
 URL = re.compile(r"https://[a-z0-9]{8,40}\.supabase\.co|http://(127\.0\.0\.1|localhost):\d{2,5}")
-KEYS = {"url", "publishableKey", "contact", "_comment"}
+KEYS = {"url", "publishableKey", "contact", "_comment"}  # _comment: a note for people, which build ignores
 MODEL_VIEWER = ('<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.4.0/'
                 'model-viewer.min.js"></script>')
 SCRIPTS = ("static/vendor/supabase-2.118.0.js", "static/config.js", "static/supa.js", "static/app.js")
@@ -311,7 +311,7 @@ def check_config(cfg):
     if not isinstance(cfg, dict):
         raise SiteError("site.json is not a JSON object")
     extra = sorted(set(cfg) - KEYS)
-    if extra:  # redirectTo and host are gone: supa.js takes the sign-in address from the page itself
+    if extra:
         allowed = ", ".join(sorted(KEYS - {"_comment"}))
         raise SiteError(f"site.json has unknown keys: {', '.join(extra)}; it takes {allowed}")
     if not isinstance(cfg.get("url"), str) or not URL.fullmatch(cfg["url"]):

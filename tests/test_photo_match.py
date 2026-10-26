@@ -164,7 +164,7 @@ def test_latest_review_is_by_number_and_no_review_exits(tmp_path):
         P.pick_review(empty, SHA_A)
 
 
-def test_scratch_session_without_result_and_clay_review(tmp_path):
+def test_session_without_result_or_original_render_and_clay_review(tmp_path):
     root = session(tmp_path / "s", {f"r001-{SHA_A[:12]}": {"candidate": good_render()}}, result=False, clay=True)
     s = P.score_session(root)
     assert "original" not in s["mean"] and "delta" not in s and "delta" not in s["views"][0]

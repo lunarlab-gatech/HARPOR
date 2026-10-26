@@ -31,12 +31,13 @@ Photos are read as stored, without the EXIF rotation, like every other step.
 
 import argparse
 import json
-import os
 import re
 import time
 from pathlib import Path
 
 import numpy as np
+
+from gator.fileio import replace
 
 MODEL = "facebook/sam3"
 
@@ -128,14 +129,6 @@ def outputs(folder, names):
     return [f for f in files if f.exists()]
 
 
-def replace(path, save, *args, **kw):
-    """save(tmp, ...) under a temporary name, then rename it to path, so a run that stops halfway
-    leaves the old file whole."""
-    tmp = path.with_name(".tmp_" + path.name)
-    save(tmp, *args, **kw)
-    os.replace(tmp, path)
-
-
 def earlier_picks(folder):
     """{name: indices} of the photos whose mask an earlier run took from --pick."""
     f = folder / "sam3.json"
@@ -143,9 +136,10 @@ def earlier_picks(folder):
     return {v["name"]: v["picked"] for v in views if v["pick"] == "user"}
 
 
-def overlay(image, scores, boxes, masks, picked, max_side=1600):
-    """The photo with every instance outlined and numbered. The picked ones, which form the mask, are
-    tinted green and drawn last; the others are outlined in red."""
+def check_image(image, items, max_side, font_div, empty):
+    """The photo scaled to a long side of at most max_side, with items drawn in order: each (mask, colour, tint,
+    text, box) is tinted by tint (0 or None: not tinted), outlined in its colour and labelled with text above its
+    box; then the labels. empty is written when there are no items."""
     from PIL import Image, ImageDraw, ImageFont
     from scipy.ndimage import binary_erosion
 
@@ -155,23 +149,30 @@ def overlay(image, scores, boxes, masks, picked, max_side=1600):
     k = min(1.0, max_side / max(H, W))
     size = (round(W * k), round(H * k))
     ov = np.asarray(Image.fromarray(image).resize(size, Image.LANCZOS)).astype(float)
-    green, red = (0, 255, 0), (255, 40, 40)
-    order = [i for i in range(len(masks)) if i not in picked] + list(picked)
-    for i in order:
-        m = resize_mask(masks[i], size)
-        if i in picked:
-            ov[m] = 0.6 * ov[m] + 0.4 * np.array(green)
-        ov[m & ~binary_erosion(m, iterations=2)] = green if i in picked else red
+    for mask, color, tint, _, _ in items:
+        m = resize_mask(mask, size)
+        if tint:
+            ov[m] = (1 - tint) * ov[m] + tint * np.array(color)
+        ov[m & ~binary_erosion(m, iterations=2)] = color
     out = Image.fromarray(ov.astype(np.uint8))
     draw = ImageDraw.Draw(out)
-    px = max(12, size[0] // 50)
+    px = max(12, size[0] // font_div)
     font = ImageFont.load_default(size=px)
-    for i in order:
-        draw.text((boxes[i][0] * k, max(0.0, boxes[i][1] * k - px)), f"{i}: {scores[i]:.2f}",
-                  fill=green if i in picked else red, font=font, stroke_width=2, stroke_fill=(0, 0, 0))
-    if not len(masks):
-        draw.text((px, px), "no instance", fill=(255, 40, 40), font=font, stroke_width=2, stroke_fill=(0, 0, 0))
+    for _, color, _, text, box in items:
+        draw.text((box[0] * k, max(0.0, box[1] * k - px)), text, fill=color, font=font, stroke_width=2,
+                  stroke_fill=(0, 0, 0))
+    if not items:
+        draw.text((px, px), empty, fill=(255, 40, 40), font=font, stroke_width=2, stroke_fill=(0, 0, 0))
     return out
+
+
+def overlay(image, scores, boxes, masks, picked, max_side=1600):
+    """The photo with every instance outlined and numbered. The picked ones, which form the mask, are
+    tinted green and drawn last; the others are outlined in red."""
+    green, red = (0, 255, 0), (255, 40, 40)
+    order = [i for i in range(len(masks)) if i not in picked] + list(picked)
+    return check_image(image, [(masks[i], green if i in picked else red, 0.4 if i in picked else None,
+                                f"{i}: {scores[i]:.2f}", boxes[i]) for i in order], max_side, 50, "no instance")
 
 
 def run(scene, prompts, picks=None, threshold=0.5, mask_threshold=0.5, overwrite=False, segmenter=None):

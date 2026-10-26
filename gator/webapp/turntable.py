@@ -33,6 +33,8 @@ from pathlib import Path
 
 import numpy as np
 
+from gator.fileio import read_json, write_json
+
 FRAMES, FPS, SIDE, SAMPLES = 240, 30, 720, 32  # 8 s, one turn; H.264 needs even sides
 ELEVATION_DEG = 20  # the camera's angle above the horizontal
 CRF = "23"  # sharper than the preview's 28; the codec and preset are video.py's
@@ -41,20 +43,13 @@ RENDER_TIMEOUT_S = 1200.0
 UPRIGHT_TO_W = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, -1.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]])
 
 
-def _json(path):
-    try:
-        return json.loads(Path(path).read_text())
-    except (OSError, ValueError):
-        return None
-
-
 def source(job_dir):
     """(the GLB that physics used, the 4x4 matrix that turns it upright into turntable.py's W, the rule that chose
     the GLB): physics/up.json "glb" and "glb_rule", and UPRIGHT_TO_W @ physics/aligned.json "T_s_from_w". SystemExit
     with the reason when align has not run, or when the GLB is gone, a symlink or outside the job folder. The GLB
     never holds the API key: steps.next_glb gives the agent's GLB only through steps.agent_glb, which refuses those."""
     J = Path(job_dir)
-    up, aligned = _json(J / "physics" / "up.json"), _json(J / "physics" / "aligned.json")
+    up, aligned = read_json(J / "physics" / "up.json"), read_json(J / "physics" / "aligned.json")
     T = np.asarray(aligned.get("T_s_from_w") if isinstance(aligned, dict) else None, dtype=object)
     if not isinstance(up, dict) or T.shape != (4, 4):
         raise SystemExit("no physics/up.json or physics/aligned.json: run align first")
@@ -68,12 +63,10 @@ def source(job_dir):
 
 def blender_command(job_dir, glb, sif):
     """Blender in the agent's SIF, in a container that sees only J/turntable (read-write), the GLB and the Blender
-    scripts (read-only), each at its host path (as gator.parts.stage.split_command)."""
-    from gator.agent import controller, tools
+    scripts (read-only), each at its host path (controller.sif_blender)."""
+    from gator.agent import controller
 
-    out = (Path(job_dir) / "turntable").resolve()
-    return [*controller.CONTAINER, *controller._bind(out, out), *controller._bind(glb, glb, ro=True),
-            *controller._bind(tools.BLENDER_SCRIPTS, tools.BLENDER_SCRIPTS, ro=True), str(sif), "blender"]
+    return controller.sif_blender(sif, rw=[(Path(job_dir) / "turntable").resolve()], ro=[glb])
 
 
 def _count(frames, stop, every=2.0):
@@ -91,7 +84,6 @@ def render(job_dir, sif=None, blender=None, timeout=RENDER_TIMEOUT_S):
     stands for Blender (a list or a shell string), else blender_command(J, the GLB, sif). SystemExit with the reason
     when Blender fails, passes the timeout or writes fewer than FRAMES frames."""
     from gator.agent import tools
-    from gator.webapp.video import write_json
 
     J = Path(job_dir).resolve()
     if blender is None and sif is None:
@@ -104,8 +96,7 @@ def render(job_dir, sif=None, blender=None, timeout=RENDER_TIMEOUT_S):
     args = {"assets": [{"path": str(glb), "matrix": matrix.tolist()}], "frames_dir": str(out / "frames"),
             "frames": FRAMES, "fps": FPS, "panel": SIDE, "samples": SAMPLES, "elevation": ELEVATION_DEG}
     (out / "args.json").write_text(json.dumps(args, indent=1))
-    cmd = [*blender, "-b", "--factory-startup", "--python-exit-code", "1",
-           "--python", str(tools.BLENDER_SCRIPTS / "turntable.py"), "--", str(out / "args.json")]
+    cmd = tools.blender_argv(blender, "turntable.py", out / "args.json")
     stop = threading.Event()
     counter = threading.Thread(target=_count, args=(out / "frames", stop), daemon=True)
     counter.start()
@@ -127,7 +118,7 @@ def render(job_dir, sif=None, blender=None, timeout=RENDER_TIMEOUT_S):
         raise SystemExit(f"Blender wrote {n} of {FRAMES} frames; see turntable/blender.log")
     rec = {"glb": glb.relative_to(J).as_posix(), "glb_rule": rule, "matrix": matrix.tolist(), "frames": FRAMES,
            "side": SIDE, "fps": FPS, "elevation_deg": ELEVATION_DEG, "render_s": round(time.time() - t, 1)}
-    write_json(out / "render.json", rec)
+    write_json(out / "render.json", rec, indent=1)
     # The rule stays in render.json: an agent-off rule ("turned off: ...") would read as if the video were off.
     print(f"360 video of {rec['glb']}, the GLB that physics used: {FRAMES} frames at {SIDE} px in "
           f"{rec['render_s']:.0f} s", flush=True)
@@ -157,7 +148,7 @@ def encode(job_dir):
     from gator.webapp import video
 
     out = Path(job_dir) / "turntable"
-    rec, names = _json(out / "render.json"), sorted((out / "frames").glob("*.png"))
+    rec, names = read_json(out / "render.json"), sorted((out / "frames").glob("*.png"))
     if not isinstance(rec, dict) or not names:
         raise SystemExit("no frames to encode: the render step did not finish")
     t, tmp, mp4 = time.time(), out / ".tmp_turntable.mp4", out / "turntable.mp4"
@@ -181,7 +172,7 @@ def encode(job_dir):
     os.replace(tmp, mp4)
     shutil.rmtree(out / "frames")
     done = {**rec, **facts, "bytes": mp4.stat().st_size, "encode_s": round(time.time() - t, 1)}
-    video.write_json(out / "turntable.json", done)
+    write_json(out / "turntable.json", done, indent=1)
     print("PROGRESS 1", flush=True)
     size = f"{done['bytes'] / 1e6:.1f} MB" if done["bytes"] >= 1e6 else f"{done['bytes'] / 1e3:.0f} KB"
     print(f"360 video: {done['frames']} frames, {w}x{h}, {done['seconds']:.1f} s, {size}", flush=True)

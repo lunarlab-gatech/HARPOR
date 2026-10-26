@@ -30,12 +30,6 @@ def mass_properties(centers, rho, h):
     }
 
 
-def scaled_mass_properties(centers, rho, h, s):
-    """The same voxels after a per-axis scale s about the origin (for a known true size)."""
-    s = np.broadcast_to(np.asarray(s, float), (3,))
-    return mass_properties(np.asarray(centers, float) * s, rho, np.asarray(h, float) * s)
-
-
 def combine(bodies):
     """One rigid body from several (dicts of mass_properties, or with fullinertia only): the masses add,
     the COM is mass-weighted, and each inertia moves to the common COM (parallel axis theorem)."""

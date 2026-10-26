@@ -227,16 +227,16 @@ def test_request_parameters(root):
     assert call["tools"] == [
         {"type": "bash_20250124", "name": "bash"},
         {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool", "max_characters": 30000},
-        {"name": "view_image", "description": A.VIEW_IMAGE["description"], "eager_input_streaming": True,
+        {"name": "view_image", "description": A.tool_list()[2]["description"], "eager_input_streaming": True,
          "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
                           "additionalProperties": False}}]
     assert call["tools"] == json.loads(json.dumps(A.tool_list(2576)))
-    desc = A.VIEW_IMAGE["description"]
+    desc = A.tool_list()[2]["description"]
     for fact in ("larger than 2576 px on the long side", "lossless when it fits 2.5 MB as base64 (about 1.9 MB of file)",
                  "as JPEG", "at most 100 images and 24 MB of them"):
         assert fact in desc
     start = of(lines, "start")[0]
-    assert (start["model"], start["effort"], start["fast"]) == ("claude-opus-5-5", "high", False)
+    assert (start["model"], start["effort"]) == ("claude-opus-5-5", "high")
     assert (start["image_side"], start["system"]) == (2576, str(A.SYSTEM_FILE))
     assert start["system_sha256"] == hashlib.sha256(A.SYSTEM_FILE.read_bytes()).hexdigest()
 
@@ -254,12 +254,9 @@ def test_image_limits_fit_the_request_limit():
     assert A.b64_size(1_875_000) == A.MAX_IMAGE_B64 < A.b64_size(1_875_001)
 
 
-def test_fast_mode_and_effort(root):
-    code, client, lines, _ = run(root, [msg(text("hi"), stop="end_turn")], effort="max", fast=True)
-    call = client.calls[0]
-    assert call["betas"] == ["server-side-fallback-2026-07-01", "fast-mode-2026-02-01"] and call["speed"] == "fast"
-    assert call["output_config"] == {"effort": "max"}
-    assert of(lines, "end")[0]["cost_usd"] == round(2 * (100 * 4 + 50 * 20 + 1000 * 0.2 + 200 * 5) / 1e6, 4)
+def test_effort(root):
+    code, client, lines, _ = run(root, [msg(text("hi"), stop="end_turn")], effort="max")
+    assert client.calls[0]["output_config"] == {"effort": "max"}
     with pytest.raises(ValueError):
         A.run(root, client=FakeClient([]), effort="disabled")
 
@@ -267,7 +264,7 @@ def test_fast_mode_and_effort(root):
 def test_system_prompt_is_the_work_folder_manual():
     s = A.SYSTEM_FILE.read_text(encoding="utf-8")
     for fact in ("no network", "300 s", "run_budget.json", "view_image", "export_glb", "review", "checkpoint",
-                 "finish", "--python-exit-code", "reconstruction_complete", "str_replace_based_edit_tool"):
+                 "finish", "--python-exit-code", "articulated", "str_replace_based_edit_tool"):
         assert fact in s
     assert len(s) > 3000  # above the 512-token minimum for a cache entry
     assert "An image larger than 2576 px on its long side is shown downscaled." in s and "1568" not in s
@@ -361,8 +358,7 @@ def iteration(kind, model, i, o, read=0, write=0):
 def test_cost_counts_every_attempt_at_its_models_prices(root):
     """With a refusal fallback the top-level usage covers only the fallback's attempt; usage.iterations
     lists the declined attempt too, which bills at Opus 5.5's prices, and the fallback at Opus 5's. A
-    sticky-routed turn without iterations is priced by msg.model; 1-hour cache writes at 2x input;
-    usage.speed says whether fast mode ran."""
+    sticky-routed turn without iterations is priced by msg.model; 1-hour cache writes at 2x input."""
     fell_back = msg(fallback(), text("Continuing."), bash("echo hi", "toolu_1"), model="claude-opus-5", usage={
         "input_tokens": 100, "output_tokens": 40, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 0,
         "iterations": [iteration("message", None, 100, 500, read=1000),
@@ -370,11 +366,11 @@ def test_cost_counts_every_attempt_at_its_models_prices(root):
     sticky = msg(bash("echo again", "toolu_2"), model="claude-opus-5", usage={
         "input_tokens": 10, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 300,
         "cache_creation": {"ephemeral_5m_input_tokens": 100, "ephemeral_1h_input_tokens": 200}})
-    fast = msg(text("done"), stop="end_turn", usage={"input_tokens": 1, "output_tokens": 2, "speed": "fast"})
-    code, client, lines, out = run(root, [fell_back, sticky, fast])
+    last = msg(text("done"), stop="end_turn", usage={"input_tokens": 1, "output_tokens": 2})
+    code, client, lines, out = run(root, [fell_back, sticky, last])
     want = [(100 * 4 + 500 * 20 + 1000 * 0.2 + 100 * 5 + 40 * 25 + 1000 * 0.5) / 1e6,
             (10 * 5 + 20 * 25 + 100 * 6.25 + 200 * 10) / 1e6,
-            2 * (1 * 4 + 2 * 20) / 1e6]
+            (1 * 4 + 2 * 20) / 1e6]
     responses = of(lines, "response")
     assert code == 0 and [r["cost_usd"] for r in responses] == [round(c, 6) for c in want]
     assert responses[0]["iterations"] == [iteration("message", A.MODEL, 100, 500, read=1000),
@@ -537,16 +533,10 @@ def test_cli_needs_sif_without_host_shell(root, key_file):
     assert e.value.code == 2
 
 
-def v1_manual(tmp_path):
-    """The manual as it was before harness v2: 1568 px and the deadline sentences that went."""
-    s = A.SYSTEM_FILE.read_text(encoding="utf-8")
-    old = s.replace("larger than 2576 px", "larger than 1568 px").replace(
-        "Read the file again after an export.\n", "Read the file again after an export. The session ends at the\n"
-        "  deadline. Your thinking time counts against it too.\n")
-    assert old.count("1568 px") == 1 and "thinking time" in old
-    f = tmp_path / "opus_dig" / "system_v1.md"
-    f.parent.mkdir()
-    f.write_text(old, encoding="utf-8")
+def temp_manual(tmp_path):
+    """A small system prompt file of its own, with a character outside ASCII."""
+    f = tmp_path / "manual.md"
+    f.write_text("A manual of its own: an image larger than 1568 px is shown downscaled. é\n", encoding="utf-8")
     return f
 
 
@@ -563,17 +553,16 @@ def test_cli_defaults_are_2576_px_and_the_manual(root, key_file):
     code, client, lines = cli(root, key_file, [msg(use("view_image", {"path": "sheet.png"}, "toolu_1")),
                                                msg(text("seen"), stop="end_turn")])
     assert code == 0 and client.calls[0]["system"][0]["text"] == A.SYSTEM_FILE.read_text(encoding="utf-8")
-    assert client.calls[0]["tools"] == json.loads(json.dumps(A.TOOLS))
+    assert client.calls[0]["tools"] == json.loads(json.dumps(A.tool_list()))
     assert results(client.calls[1])["toolu_1"]["content"][1]["text"] == "/work/sheet.png 3000x1500, shown at 2576x1288"
     start = of(lines, "start")[0]
     assert (start["image_side"], start["system"]) == (2576, str(A.SYSTEM_FILE))
 
 
-def test_cli_baseline_options_give_the_old_side_and_manual(root, key_file, tmp_path):
-    """--image-side 1568 --system system_v1.md, the baseline repeat run: the old manual goes byte for
-    byte, view_image downscales to 1568 px and its description says so; the rest of the request is
-    that of a default session."""
-    manual = v1_manual(tmp_path)
+def test_cli_image_side_and_system_options(root, key_file, tmp_path):
+    """--image-side 1568 --system FILE: the file goes byte for byte, view_image downscales to 1568 px
+    and its description says so; the rest of the request is that of a default session."""
+    manual = temp_manual(tmp_path)
     png(root / "work" / "sheet.png", (3000, 1500))
 
     def script():
@@ -587,7 +576,7 @@ def test_cli_baseline_options_give_the_old_side_and_manual(root, key_file, tmp_p
     assert first["tools"] == json.loads(json.dumps(A.tool_list(1568)))
     desc = first["tools"][2]["description"]
     assert "larger than 1568 px on the long side" in desc and "2576" not in desc
-    assert desc == A.VIEW_IMAGE["description"].replace("2576 px", "1568 px")
+    assert desc == A.tool_list()[2]["description"].replace("2576 px", "1568 px")
     img, label = results(client.calls[1])["toolu_1"]["content"]
     assert label["text"] == "/work/sheet.png 3000x1500, shown at 1568x784"
     assert Image.open(io.BytesIO(base64.b64decode(img["source"]["data"]))).size == (1568, 784)
@@ -1166,7 +1155,7 @@ def test_real_sdk_session_over_mock_transport(root, key_file):
     assert first["stream"] is True and first["model"] == "claude-opus-5-5" and first["max_tokens"] == 64000
     assert first["fallbacks"] == "default" and first["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert first["output_config"] == {"effort": "high"} and first["cache_control"] == {"type": "ephemeral"}
-    assert first["tools"] == json.loads(json.dumps(A.TOOLS)) and "tool_choice" not in first and "speed" not in first
+    assert first["tools"] == json.loads(json.dumps(A.tool_list())) and "tool_choice" not in first and "speed" not in first
     assert first["messages"] == [{"role": "user", "content": PROMPT}]
     assert second == third  # the re-issued turn is the same request
     assistant, user = second["messages"][1:]

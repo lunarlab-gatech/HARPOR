@@ -142,13 +142,13 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 
+from gator.fileio import read_json, write_json
 from gator.webapp import jobs, steps
 
 STATIC = Path(__file__).resolve().parent / "static"
 COOKIE = "gator_webapp"
 MAX_UPLOAD = 20 << 30
 FREE_FACTOR = {"stray": 2.2}  # free space an upload needs, times its size (+ 2 GB); 1.2 for the other kinds
-ACTIVE = ("analyzing", "queued", "running")
 # Path segments are words, so no "..", absolute path or backslash ever matches.
 ALLOW = re.compile(r"frames/thumbs/\d+\.jpg|frames/topic_previews/\d+\.jpg|frames/topics\.json|frames/preview\.mp4"
                    r"|pool/lidar\.json|lidar/check/f\d{5,9}\.jpg|lidar/cloud/f\d{5,9}\.glb"
@@ -290,12 +290,6 @@ def lidar_of(job):
         return job.get("lidar")
 
 
-def read_json(path):
-    with suppress(OSError, ValueError):
-        return json.loads(Path(path).read_text())
-    return None
-
-
 def resolve(J, rel):
     """The file that rel names in job folder J, if ALLOW has it and it stays inside J, else None. The pool's LiDAR
     points (lidar/cloud/) only while the scale has failed (pool_clouds)."""
@@ -410,7 +404,7 @@ def tick(J, cursor, last):
     now = state(J, job)
     if now != last:
         out.append(sse("state", now))
-    ended = not out and not moved and job["status"] not in ACTIVE
+    ended = not out and not moved and job["status"] not in jobs.ACTIVE
     if ended:
         out.append(sse("end", {"status": job["status"]}))
     return out, cursor, now, ended
@@ -489,7 +483,7 @@ def make_app(cfg, token, key_dir=None):
 
     def idle(J):
         job = jobs.load(J)
-        if job["status"] in ACTIVE:
+        if job["status"] in jobs.ACTIVE:
             raise Bad(409, f"the job is {job['status']}")
         return job
 
@@ -971,14 +965,11 @@ class TokenGate:
 
 
 def write_info(info):
-    """~/.config/gator/webapp.json (0600), replaced atomically, for start_ice.sh."""
+    """~/.config/gator/webapp.json (0600), replaced atomically, for start_ice.sh. The folder is made with
+    mode 0700 when it is missing; an existing folder is used as it is."""
     d = Path("~/.config/gator").expanduser()
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = d / ".webapp.json.tmp"
-    tmp.unlink(missing_ok=True)
-    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
-        json.dump(info, f, indent=1)
-    os.replace(tmp, d / "webapp.json")
+    write_json(d / "webapp.json", info, private=True, indent=1)
     return d / "webapp.json"
 
 

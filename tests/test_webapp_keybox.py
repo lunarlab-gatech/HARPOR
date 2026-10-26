@@ -1,12 +1,12 @@
 import base64
 import hashlib
-import importlib.metadata
 import json
 import shutil
 import subprocess
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
+from fake_supabase import seal, sealed
 
 from gator.webapp import keybox
 
@@ -80,11 +80,11 @@ def test_round_trip_and_the_public_key_form():
     box = keybox.KeyBox()
     raw = base64.b64decode(box.public_b64)
     assert len(box.public_b64) == 88 and len(raw) == 65 and raw[0] == 4  # the workers row's check: 88 characters
-    s = keybox.seal(box.public_b64, KEY, keybox.aad(JOB, USER, "opus", WORKER, REF))
+    s = seal(box.public_b64, KEY, keybox.aad(JOB, USER, "opus", WORKER, REF))
     assert [len(s["epk"]), len(s["iv"])] == [88, 16] and 24 <= len(s["ct"]) <= 704  # job_secrets' checks
     assert box.open(s["epk"], s["iv"], s["ct"], keybox.aad(JOB, USER, "opus", WORKER, REF)) == KEY
     longest = "sk-" + "a" * 509
-    s = keybox.seal(box.public_b64, longest, keybox.aad(JOB, USER, "astra", WORKER, REF))
+    s = seal(box.public_b64, longest, keybox.aad(JOB, USER, "astra", WORKER, REF))
     assert len(s["ct"]) == 704
     assert box.open(s["epk"], s["iv"], s["ct"], keybox.aad(JOB, USER, "astra", WORKER, REF)) == longest
     assert box.public_b64[:12] in repr(box) and "_key" not in repr(box)
@@ -92,7 +92,7 @@ def test_round_trip_and_the_public_key_form():
 
 def test_a_changed_aad_or_ciphertext_does_not_open():
     box = keybox.KeyBox()
-    s = keybox.seal(box.public_b64, KEY, keybox.aad(JOB, USER, "opus", WORKER, REF))
+    s = seal(box.public_b64, KEY, keybox.aad(JOB, USER, "opus", WORKER, REF))
     other = "00000000-0000-4000-8000-0000000000ff"
     for aad in (keybox.aad(other, USER, "opus", WORKER, REF), keybox.aad(JOB, other, "opus", WORKER, REF),
                 keybox.aad(JOB, USER, "astra", WORKER, REF), keybox.aad(JOB, USER, "opus", other, REF),
@@ -106,7 +106,7 @@ def test_a_changed_aad_or_ciphertext_does_not_open():
     iv = bytearray(base64.b64decode(s["iv"]))
     iv[0] ^= 1
     for epk, iv_, ct_ in ((s["epk"], s["iv"], keybox.b64(ct)), (s["epk"], keybox.b64(iv), s["ct"]),
-                          (keybox.seal(box.public_b64, KEY, aad)["epk"], s["iv"], s["ct"])):
+                          (seal(box.public_b64, KEY, aad)["epk"], s["iv"], s["ct"])):
         with pytest.raises(keybox.Invalid, match="does not open"):
             box.open(epk, iv_, ct_, aad)
     with pytest.raises(keybox.Invalid, match="does not open"):  # a new worker start cannot open it
@@ -116,7 +116,7 @@ def test_a_changed_aad_or_ciphertext_does_not_open():
 def test_malformed_parts_are_refused_with_fixed_messages():
     box = keybox.KeyBox()
     aad = keybox.aad(JOB, USER, "opus", WORKER, REF)
-    s = keybox.seal(box.public_b64, KEY, aad)
+    s = seal(box.public_b64, KEY, aad)
     epk = base64.b64decode(s["epk"])
     bad = [({**s, "epk": "not base64!"}, "epk is not base64"), ({**s, "iv": None}, "iv is not base64"),
            ({**s, "epk": keybox.b64(epk[:64])}, "malformed"), ({**s, "iv": keybox.b64(bytes(16))}, "malformed"),
@@ -126,7 +126,7 @@ def test_malformed_parts_are_refused_with_fixed_messages():
     for parts, why in bad:
         with pytest.raises(keybox.Invalid, match=why):
             box.open(parts["epk"], parts["iv"], parts["ct"], aad)
-    s = keybox.seal(box.public_b64, "sk-ant-été", aad)  # the page encodes UTF-8; keys are ASCII
+    s = seal(box.public_b64, "sk-ant-été", aad)  # the page encodes UTF-8; keys are ASCII
     with pytest.raises(keybox.Invalid, match="not ASCII"):
         box.open(s["epk"], s["iv"], s["ct"], aad)
 
@@ -144,10 +144,10 @@ def test_aad_form_and_its_checks():
 
 def test_sealed_matches_what_relay_takes():
     box = keybox.KeyBox()
-    s = keybox.sealed({"id": WORKER, "public_key": box.public_b64}, KEY, JOB, USER, "opus")
+    s = sealed({"id": WORKER, "public_key": box.public_b64}, KEY, JOB, USER, "opus")
     assert set(s) == {"ref", "worker_id", "agent", "epk", "iv", "ct"} and s["worker_id"] == WORKER
     assert box.open(s["epk"], s["iv"], s["ct"], keybox.aad(JOB, USER, "opus", WORKER, s["ref"])) == KEY
-    assert keybox.sealed({"id": WORKER, "public_key": box.public_b64}, KEY, JOB, USER, "opus", ref=REF)["ref"] == REF
+    assert sealed({"id": WORKER, "public_key": box.public_b64}, KEY, JOB, USER, "opus", ref=REF)["ref"] == REF
 
 
 def test_a_key_that_node_sealed_once_still_opens():
@@ -174,9 +174,6 @@ def test_node_seals_and_python_opens(tmp_path):
 def test_python_seals_and_node_opens(tmp_path):
     p = node(tmp_path, op="pair")
     aad = keybox.aad(JOB, USER, "astra", WORKER, REF)
-    s = keybox.seal(p["public_key"], "sk-fake-1234", aad)
+    s = seal(p["public_key"], "sk-fake-1234", aad)
     assert node(tmp_path, op="open", jwk=p["jwk"], sealed=s, aad=aad.decode()) == "sk-fake-1234"
 
-
-def test_cryptography_is_the_pinned_version():
-    assert keybox.PIN == f"cryptography=={importlib.metadata.version('cryptography')}"

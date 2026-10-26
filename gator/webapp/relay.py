@@ -1,7 +1,7 @@
 """What the personal worker (worker.py) needs to relay a request from the public site to server.py and to
 publish a job's state back: the route table, the agent that server.py will run, the rewrite and scrub of
 everything that leaves the machine, the files that the site mirrors, lean review files, the key scan,
-and the live state and retry stage that the page would compute (plan.md 5.4 to 5.6).
+and the live state and retry stage that the page would compute.
 
 No I/O here but reading job files. The worker sends each request through httpx.ASGITransport to the
 unchanged FastAPI app, so server.py stays the one place for request checks, and its answer goes back as
@@ -34,7 +34,6 @@ from urllib.parse import urlencode
 
 from gator.webapp import jobs, server, steps
 
-PUBLIC_AGENTS = ("astra", "opus")  # the public site runs these; "none" stays in the tunnel
 KEY_ROUTES = ("start", "overrides", "parts", "continue")  # the routes whose body may carry an API key
 # route -> (method, path after /api/jobs/<local>, body): json, text (the calibration file) or none
 ROUTES = {"topic": ("POST", "/topic", "json"), "calibration_put": ("PUT", "/calibration", "text"),
@@ -141,7 +140,7 @@ def effective_agent(route, body, job):
 
 def agent_refusal(agent, access):
     """Refuse(403) when the account may not use agent (access.agents, which never holds "none"), else None."""
-    allowed = [a for a in (access or {}).get("agents") or [] if a in PUBLIC_AGENTS]
+    allowed = [a for a in (access or {}).get("agents") or [] if a in steps.PROVIDER]  # "none" stays in the tunnel
     if agent in allowed:
         return None
     return Refuse(403, f"this account may use the agents {', '.join(allowed)}")
@@ -273,7 +272,7 @@ def coarse(state):
 def stopped_at(view):
     """When the job last stopped (its newest stage end, else None), for retention; None while it is active
     or before anything ran."""
-    if view.get("status") in server.ACTIVE + ("uploaded",):
+    if view.get("status") in jobs.ACTIVE + ("uploaded",):
         return None
     ends = [s["ended"] for s in view.get("progress") or [] if isinstance(s.get("ended"), (int, float))]
     return datetime.fromtimestamp(max(ends), timezone.utc).isoformat() if ends else None

@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from gator.fileio import write_json
 from gator.webapp import agent_step, jobs, steps
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,23 +59,6 @@ def wait(J, *statuses, timeout=90):
             return job
         time.sleep(0.1)
     raise AssertionError(f"job is {job['status']}, not {statuses}: {job['error']} {job['stages']}")
-
-
-def write_video(path, n=64, size=(192, 128)):
-    import av
-
-    rng = np.random.default_rng(0)
-    bg = (rng.random((size[1] // 4, size[0] // 4, 3)) * 180 + 30).astype(np.uint8).repeat(4, 0).repeat(4, 1)
-    with av.open(str(path), "w", format="mp4") as c:
-        s = c.add_stream("libx264", rate=24, options={"crf": "12"})
-        s.width, s.height, s.pix_fmt = size[0], size[1], "yuv420p"
-        for i in range(n):
-            a = bg.copy()
-            a[40:80, 10 + 2 * i:50 + 2 * i] = 240
-            for p in s.encode(av.VideoFrame.from_ndarray(a, format="rgb24")):
-                c.mux(p)
-        for p in s.encode():
-            c.mux(p)
 
 
 def ready_job(cfg, prompt="box", **fields):
@@ -256,7 +240,6 @@ def test_config_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("WEBAPP_FAKE", "1")
     cfg = steps.config_from_env()
     assert cfg.G == tmp_path and cfg.runs == tmp_path / "webapp_runs" and cfg.fake
-    assert cfg.sif == tmp_path / "sif" / "gator-agent.sif" and cfg.python("web") == tmp_path / "envs/web/bin/python"
     monkeypatch.setenv("WEBAPP_RUNS", str(tmp_path / "r"))
     monkeypatch.delenv("WEBAPP_FAKE")
     assert steps.config_from_env().runs == tmp_path / "r" and not steps.config_from_env().fake
@@ -548,7 +531,7 @@ def test_next_glb(tmp_path):
     assert steps.next_glb(J) == posed
     assert result() == glb
     assert result(verdict="fallback_original", glb="original.glb") == posed
-    assert result(source=None, verdict="invalid", glb=None) == posed
+    assert result(source=None, verdict="needs_review", glb=None) == posed
     assert result(key_found_in=["work/exports/002.glb"]) == posed
     assert result(glb="work/exports/../../../../escape.glb") == posed
     glb.unlink()
@@ -563,7 +546,7 @@ def test_next_glb(tmp_path):
     (J / "run").mkdir()
     (J / "run" / "parts.glb").write_bytes(b"glTF")
     assert result(verdict="fallback_original", glb="original.glb") == J / "run" / "parts.glb"
-    assert result(source=None, verdict="invalid", glb=None) == J / "run" / "parts.glb"
+    assert result(source=None, verdict="needs_review", glb=None) == J / "run" / "parts.glb"
     (J / "agent" / "result.json").unlink()  # the agent stage was skipped
     assert steps.next_glb(J) == J / "run" / "parts.glb" and steps.agent_glb(J) is None
     assert result(verdict="articulated") == glb == steps.agent_glb(J)
@@ -1344,7 +1327,7 @@ def test_runner_json_keeps_a_second_server_off_the_runs_folder(make_runner, monk
     f = cfg.runs / jobs.RUNNER_FILE
     info = json.loads(f.read_text())
     assert (info["pid"], info["host"], info["slurm_job"]) == (os.getpid(), socket.gethostname(), "1234567")
-    assert stat.S_IMODE(f.stat().st_mode) == 0o600 and not list(cfg.runs.glob(".runner.*.tmp"))
+    assert stat.S_IMODE(f.stat().st_mode) == 0o600 and not list(cfg.runs.glob("..runner.json.*"))
     later, _ = make_runner()
     assert json.loads(f.read_text())["id"] != info["id"]
     runner.shutdown(timeout=5)
@@ -1553,7 +1536,7 @@ def test_agent_step_runs_a_fresh_refinement_session(tmp_path, monkeypatch):
         r = C.run_session(root, [sys.executable, "-c", "pass"], blender=FAKE_BLENDER,
                           sock_dir=tempfile.mkdtemp(prefix="gator-"))
         r["key_found_in"] = C.find_key(root, key_file)
-        C.tools.write_json_atomic(Path(root) / "result.json", r)
+        write_json(Path(root) / "result.json", r)
         return r
 
     monkeypatch.setattr(C, "run_container_session", container)
@@ -1593,7 +1576,7 @@ def test_agent_step_runs_an_articulation_session(tmp_path, monkeypatch, capsys):
         r = C.run_session(root, [sys.executable, "-c", "pass"], blender=FAKE_BLENDER,
                           sock_dir=tempfile.mkdtemp(prefix="gator-"), budget_s=budget_s)
         r["key_found_in"] = C.find_key(root, key_file)
-        C.tools.write_json_atomic(Path(root) / "result.json", r)
+        write_json(Path(root) / "result.json", r)
         return r
 
     monkeypatch.setattr(C, "run_container_session", container)
@@ -1628,16 +1611,16 @@ def test_agent_step_runs_a_claude_session_for_opus(tmp_path, monkeypatch, capsys
         r = C.run_session(root, [sys.executable, "-c", script, str(Path(root) / "session" / "claude.jsonl")],
                           blender=FAKE_BLENDER, sock_dir=tempfile.mkdtemp(prefix="gator-"))
         r["key_found_in"] = C.find_key(root, key_file)
-        C.tools.write_json_atomic(Path(root) / "result.json", r)
+        write_json(Path(root) / "result.json", r)
         return r
 
     monkeypatch.setattr(C, "run_container_session", container)
     r = agent_step.run(J, "/sif/agent.sif", J / "key.env", "opus")
     root = J / "agent" / "s"
-    assert C.agent_info(root) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh", "fast": False}
+    assert C.agent_info(root) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh"}
     assert (root / "session" / "system.md").is_file() and not (root / "work" / "AGENTS.md").exists()
     assert (r["agent"], r["model"], r["cli_exit"], r["turns"], r["cost_usd"]) == ("claude", "claude-opus-5-5", "ended", 3, 0.42)
-    assert r["tokens"] == end["totals"] and r["key_found_in"] == [] and agent_step.read_key(J / "key.env") == OPUS_KEY
+    assert r["tokens"] == end["totals"] and r["key_found_in"] == [] and C.read_keys(J / "key.env") == [OPUS_KEY]
     out = capsys.readouterr().out
     assert "model: claude-opus-5-5, effort xhigh" in out and "3 turns" in out and "about $0.42" in out
     with pytest.raises(SystemExit):
@@ -1674,9 +1657,9 @@ def test_agent_step_scrubs_the_key_from_the_result(tmp_path, monkeypatch, capsys
              "cli_exit": "success", "timings": {"wall_s": 3.0}, "reason": f"done; the key is {KEY}",
              "limitations": [f"saw {KEY} in /proc"], "rejected": [{"from": "export", "glb": "a.glb", "why": f"bad {KEY}"}],
              "network_commands": [f"curl -H 'Authorization: Bearer {KEY}' https://api.openai.com/v1/models"]}
-        C.tools.write_json_atomic(Path(root) / "result.json", r)
+        write_json(Path(root) / "result.json", r)
         r["key_found_in"] = C.find_key(root, key_file)
-        C.tools.write_json_atomic(Path(root) / "result.json", r)
+        write_json(Path(root) / "result.json", r)
         return r
 
     monkeypatch.setattr(C, "run_container_session", container)
@@ -1708,10 +1691,10 @@ def test_agent_step_scrubs_every_key_of_a_shared_env_file(tmp_path, monkeypatch,
         r = {"mode": "refinement", "source": "finish", "verdict": "complete", "glb": None, "exit": "finished",
              "cli_exit": "success", "timings": {"wall_s": 3.0}, "reason": f"keys {KEY} and {OPUS_KEY}",
              "limitations": [], "rejected": [], "network_commands": []}
-        C.tools.write_json_atomic(Path(root) / "result.json", r)
+        write_json(Path(root) / "result.json", r)
         (Path(root) / "work" / "leak.txt").write_text(KEY)
         r["key_found_in"] = C.find_key(root, key_file)
-        C.tools.write_json_atomic(Path(root) / "result.json", r)
+        write_json(Path(root) / "result.json", r)
         return r
 
     monkeypatch.setattr(C, "run_container_session", container)
@@ -1756,6 +1739,8 @@ def test_agent_step_sigterm_stops_the_agent(tmp_path):
 def test_fake_build_end_to_end(make_runner, tmp_path):
     for m in ("av", "trimesh", "gator.webapp.video", "gator.webapp.views", "gator.webapp.physics_auto"):
         pytest.importorskip(m)
+    from test_webapp_server import write_video
+
     runner, cfg = make_runner()
     job_id, upload = jobs.create_job(cfg.runs, "phone clip.mov")
     J = cfg.runs / job_id
@@ -1826,6 +1811,7 @@ def test_fake_articulated_build_end_to_end(make_runner, tmp_path, mode, agent):
     from gator.parts import joints as joint_spec
     from gator.parts.stage import mesh_nodes
     from gator.physics.align import read_glb
+    from test_webapp_server import write_video
 
     runner, cfg = make_runner()
     key = {"astra": KEY, "opus": OPUS_KEY, "none": None}[agent]

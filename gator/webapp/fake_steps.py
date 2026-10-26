@@ -48,6 +48,8 @@ from pathlib import Path
 
 import numpy as np
 
+from gator.fileio import write_json
+
 BOX_LO, BOX_HI = np.array([-0.15, -0.2, -0.1]), np.array([0.15, 0.0, 0.1])  # world: y down, floor at y = 0
 TARGET = np.array([0.0, -0.1, 0.0])
 RADIUS, HEIGHT, SWEEP = 1.0, 0.5, 1.5 * np.pi
@@ -150,7 +152,7 @@ def run_scale(run, name):
 def check_key_file(key_file, which):
     """SystemExit unless the key file is mode 0600 and starts with the line of the agent's provider.
     The key is never read into a message."""
-    from gator.webapp.jobs import KEY_VAR
+    from gator.webapp.steps import KEY_VAR
 
     f, var = Path(key_file or ""), KEY_VAR[which]
     if not key_file or not f.is_file() or stat.S_IMODE(f.stat().st_mode) != 0o600:
@@ -301,7 +303,7 @@ def place(J):
 def propose(J, key_file=None, which="astra"):
     """The VLM modes: FAKE_PARTS as the VLM's proposal, after the key file check. The user's list: the real
     stage (gator.parts.propose.run), which needs no key."""
-    from gator.agent.controller import CLAUDE_MODEL, CODEX_MODEL
+    from gator.agent.tools import CLAUDE_MODEL, CODEX_MODEL
     from gator.parts import propose as P
     from gator.webapp import steps
 
@@ -319,7 +321,7 @@ def propose(J, key_file=None, which="astra"):
     proposal = {"source": "vlm", "agent": which, "model": CLAUDE_MODEL if which == "opus" else CODEX_MODEL,
                 "noun": job["prompt"], "base": parts[0]["name"], "parts": parts, "warnings": [], "seconds": 2 * DELAY,
                 "attempts": 1, "answer": "fake VLM: a body and a lid", "mode": mode, "fake": True}
-    P.write(J / "run" / "proposal.json", proposal)
+    write_json(J / "run" / "proposal.json", proposal)
     print(f"proposal (fake {proposal['model']}): base {parts[0]['name']!r}, {len(parts) - 1} moving parts")
 
 
@@ -469,7 +471,7 @@ def parts(J):
            "split": {k: split[k] for k in ("mapping", "unmatched", "welded_vertices", "custom_normals_cleared")},
            "warnings": [*proposal.get("warnings", []), *([f"{why}; not found: {', '.join(p['name'] for p in lost)}"]
                                                          if lost else [])], "fake": True}
-    tools.write_json_atomic(R / "parts.json", doc)
+    write_json(R / "parts.json", doc)
     print(f"parts.json (fake): {len(names)} parts ({', '.join(names)}), {len(seams)} seams")
     for s in seams:
         print(f"  seam {s['parts'][0]}|{s['parts'][1]}: {s['edges']} edges, {s['length']:.3f} long, {len(s['lines'])} lines")
@@ -544,7 +546,7 @@ def agent(J, key_file, which="astra"):
                   "cache_creation_input_tokens": 52000}
         result.update(turns=12, tokens=tokens, end_reason="interrupted",
                       cost_usd=round(sum(tokens[k] * controller.PRICES[k] for k in tokens) / 1e6, 4))
-    tools.write_json_atomic(root / "result.json", result)
+    write_json(root / "result.json", result)
     shutil.copyfile(root / "result.json", J / "agent" / "result.json")
     print(f"agent (fake {info['model']}): finish {result['verdict']}, GLB {result['glb']}"
           + (f", {n} joints" if articulation else ""))

@@ -37,8 +37,9 @@ from pathlib import Path
 
 import numpy as np
 
+from gator.stage_a.place import P3D_TO_CV
+
 DA3_MODEL = "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
-P3D_TO_CV = np.array([-1.0, -1.0, 1.0])
 
 
 def natural(names):

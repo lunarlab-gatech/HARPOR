@@ -3,10 +3,8 @@
 Runs in envs/web (rosbags 0.11.8, pure Python, with numpy and pillow). video.py calls it for a job
 whose job.json has "source": {"kind": "rosbag", "topic": T}. rosbags reads a ROS1 .bag, a ROS2 bag
 folder (metadata.yaml next to the .db3 or .mcap files) and a single ROS2 .mcap or .db3 file, without
-ROS. Message types come from the bag's own definitions (ROS1 message definitions, MCAP schemas). A
-bag without them (a Humble-era .db3) is read with typestore(): ROS2 Humble plus the Livox CustomMsg
-and CustomPoint of livox_ros_driver, livox_ros_driver2 and livox_interfaces (LIVOX_MSGS). A bag that
-defines some types but not all gets the missing ones from typestore() too.
+ROS. The message types (typestore), the LiDAR decoders, TF and the intrinsics (camera_model): build_plan.md
+note 12, Rosbag source 1-6.
 
 image_topics lists the topics of sensor_msgs/msg/Image and sensor_msgs/msg/CompressedImage in one pass
 over the bag. Depth and float images (16UC1, 32FC1, 16SC1, 64FC1, compressedDepth), encodings that
@@ -29,33 +27,6 @@ bgra8, mono8, mono16 (scaled to 8 bit by each frame's max) and bayer_rggb8, baye
 bayer_grbg8 (each 2x2 cell gives one RGB value for its 4 pixels), with row padding (step) and
 is_bigendian. Bag images carry no rotation. probe(stamps_out=) also gives every frame's header stamp
 and log time in ns (index i = message i, the order of frames()).
-
-LiDAR. The topics pass also lists the topics of sensor_msgs/msg/PointCloud2 and of the Livox
-CustomMsg (livox_ros_driver2, livox_ros_driver, livox_interfaces) under "lidar", from the first
-message of each: type, frame_id, points (kept by the decoder), fields, point_time (per-point times
-found), count and rate_hz. Only the first message is decoded. rate_hz comes from the log times of
-the first 11 messages, which are read but not kept. A PointCloud2 without float x, y and z fields, a
-topic without messages or one whose first message cannot be decoded goes under "lidar_skipped" with
-the reason. LiDAR and TF problems never fail the listing. decode_pointcloud2 reads any field layout
-(offsets, point_step, row_step, height, is_bigendian) and keeps the finite, nonzero points. Per-point
-times come only from a "t" field (uint32, ns after the stamp), a "time" field (float32, s after the
-stamp) or a "timestamp" field (float64, absolute s or ns), and only when every time is within 0.2 s
-of the stamp. decode_livox keeps the points whose tag has (tag & 0x30) 0x00 or 0x10 and drops zero
-points; a point's time is timebase + offset_time, or header stamp + offset_time when timebase is on
-another clock. scans() reads only the messages within given log-time windows and skips empty scans.
-
-TF. transforms() reads every /tf_static message and /tf within log-time windows (the topics pass:
-the bag's first 5 s) as edges (parent, child, T_parent_child, static, t_ns). Namespaced TF topics
-(/robot/tf) count too. tf_chain() finds the path between two frames, both ways along the edges; a
-path of static edges wins. A camera topic's entry gets its header frame_id, camera_axes ("optical"
-when the frame name has "optical", "body" (x forward, y left, z up) for another name, None without
-one) and tf_links {LiDAR topic: "static", "dynamic" or None}. The result gains "tf": one entry per
-link. camera_to_lidar() gives T_cam_lidar in the camera's optical axes.
-
-camera_model() gives the intrinsics of a topic's images from its camera_info: P (with its R) for a
-"rect" topic, K for an all-zero D, else K, D and the distortion model (plumb_bob,
-rational_polynomial, equidistant), fitted to the camera_info's roi and binning and to the images'
-size, as lidar_scale.project() takes them.
 """
 
 import functools
@@ -70,7 +41,6 @@ import numpy as np
 
 from gator.stage_a import lidar_scale
 
-SUFFIXES = (".bag", ".mcap", ".db3")
 TYPES = {"sensor_msgs/msg/Image": "Image", "sensor_msgs/msg/CompressedImage": "CompressedImage"}
 INFO = "sensor_msgs/msg/CameraInfo"
 DEPTH = ("16UC1", "32FC1", "16SC1", "64FC1")
@@ -86,7 +56,7 @@ TF_LISTING_S = 5  # the topics pass reads /tf from the bag's first 5 s
 RATE_MESSAGES = 11  # the topics pass times a LiDAR topic's rate by the log times of its first 11 messages
 POINT_TIME_S = 0.2  # per-point times further than this from the stamp are not used
 MIN_FOCAL = 0.1  # camera_model: fx or fy below this share of the image's long side is a placeholder
-ASPECT_TOL = 0.01  # camera_model: a camera_info for another size is scaled when the aspect ratios agree this well
+ASPECT_TOL = 0.01  # intrinsics for another image size are scaled when the aspect ratios agree this well
 POINT_TYPES = {1: "i1", 2: "u1", 3: "i2", 4: "u2", 5: "i4", 6: "u4", 7: "f4", 8: "f8"}  # PointField datatype
 POINT_TIMES = (("t", 6, "offset_ns"), ("time", 7, "offset_s"), ("timestamp", 8, "absolute"))  # name, datatype, meaning
 LIVOX_TAGS = (0x00, 0x10)  # kept values of tag & 0x30
@@ -110,12 +80,6 @@ CustomPoint[] points
 """
 LIVOX_MSGS = {f"{pkg}/msg/{name}": text for pkg in LIVOX_PACKAGES
               for name, text in (("CustomPoint", LIVOX_POINT), ("CustomMsg", LIVOX_CUSTOM))}  # .msg texts
-
-
-def is_bag(path):
-    """True for a .bag, .mcap or .db3 file (any case) and for a ROS2 bag folder."""
-    p = Path(path)
-    return p.suffix.lower() in SUFFIXES or (p.is_dir() and (p / "metadata.yaml").is_file())
 
 
 @functools.cache
@@ -352,7 +316,7 @@ def preview(r, msgs, side):
 def image_topics(path, previews=None, side=320, progress=None):
     """{"topics": [...], "skipped": [...], "lidar": [...], "lidar_skipped": [...], "tf": [...]} of the
     bag (topics.json in video.py without "preview"), from one pass over the camera topics, the first
-    message of each LiDAR topic and the TF of the bag's first 5 s (see the module docstring). Topics
+    message of each LiDAR topic and the TF of the bag's first 5 s (build_plan.md note 12, Rosbag source 2). Topics
     are sorted rectified first, then by message count, highest first; LiDAR topics by message count.
     previews: a dict that gets {topic: the middle message (else the first or the last that decodes) as
     RGB uint8 with long side `side`, never enlarged}. progress: called with the share of the bag read,

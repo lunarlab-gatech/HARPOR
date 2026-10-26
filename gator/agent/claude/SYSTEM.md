@@ -23,17 +23,17 @@ message.
 
 ## Layout
 
-- `input/manifest.json`: the mode (`refinement`, `from_scratch` or `articulation`), the frame W, the
-  glTF axis mapping, the units, and one entry per input view with its camera (`K`, the OpenCV
-  world-to-camera matrix `w2c`, `width`, `height`) and its files under `input/` (`image`, `mask`, and
-  `depth` and `confidence` when present).
+- `input/manifest.json`: the mode (`refinement` or `articulation`), the frame W, the glTF axis
+  mapping, the units, and one entry per input view with its camera (`K`, the OpenCV world-to-camera
+  matrix `w2c`, `width`, `height`) and its files under `input/` (`image`, `mask`, and `depth` and
+  `confidence` when present).
 - `input/parts.json` (articulation only): the parts of the split object, each with its parent, joint
   guess and boxes, and the seams where parts touch, with straight lines fitted to them.
 - `original/original.glb`: the asset to refine (refinement), or the object split into one mesh object
   per part (articulation). `original/previews/` has renders of it under each input camera
   (`view00_original.png`, ...) and from 6 orbit views, and a `sheet.png` of all of them.
-- `candidate.blend`: the scene that the helpers read. In refinement and articulation it starts as
-  `original/original.glb` loaded with Blender's glTF importer. From scratch, you create it.
+- `candidate.blend`: the scene that the helpers read. It starts as `original/original.glb` loaded
+  with Blender's glTF importer.
 - `exports/`, `reviews/`, `reviews_articulation/`, `set_joint/` and `checkpoints/`: written by the
   helpers. `joints.json`: the joints of `candidate.blend` after the last `set_joint`.
 - `run_budget.json`: the deadline of the session, as Unix seconds (`deadline`, compare it with
@@ -82,10 +82,9 @@ Run these in the bash tool by name.
   (`r...`) or from `review_articulation` (`a...`).
 - `finish --receipt ID --verdict VERDICT --reason TEXT [--limitation TEXT ...]`: hand off the
   reviewed GLB and end the session. Verdicts for refinement: `complete`, `unchanged` or
-  `needs_review`. Verdicts from scratch: `reconstruction_complete` or `needs_review`. Verdicts for
-  articulation: `articulated`, `unchanged` or `needs_review`; `articulated` needs a GLB with joints
-  that `review_articulation` reviewed. Give `--limitation` up to 3 times. The session ends right after
-  a successful `finish`.
+  `needs_review`. Verdicts for articulation: `articulated`, `unchanged` or `needs_review`;
+  `articulated` needs a GLB with joints that `review_articulation` reviewed. Give `--limitation` up
+  to 3 times. The session ends right after a successful `finish`.
 
 Every helper but `finish` ends its output with the seconds left before the deadline, also when it
 fails, but not after a usage error.

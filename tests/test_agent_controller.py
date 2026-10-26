@@ -10,7 +10,6 @@ import re
 import shlex
 import signal
 import socket
-import stat
 import sys
 import tempfile
 import threading
@@ -89,9 +88,9 @@ SESSIONS = {
     "finish_refine": ("refinement", LONG, [{"do": "read_prompt"}, edit(1.2), REVIEW,
                                            finish("complete", "seam on the back", "thin lid")]),
     "finish_unchanged": ("refinement", LONG, [edit(ORIGINAL_SIZE), REVIEW, finish("unchanged")]),
-    "finish_scratch": ("from_scratch", LONG, [edit(0.8), REVIEW, finish("needs_review", "a", "b", "c", "d"),
-                                              finish("needs_review", "a", "b", "c")]),
-    "finish_bad_verdict": ("from_scratch", LONG, [edit(0.9), REVIEW, finish("complete")]),
+    "finish_limitations": ("refinement", LONG, [edit(0.8), REVIEW, finish("needs_review", "a", "b", "c", "d"),
+                                                finish("needs_review", "a", "b", "c")]),
+    "finish_bad_verdict": ("refinement", LONG, [edit(0.9), REVIEW, finish("articulated")]),
     "finish_then_hang": ("refinement", LONG, [edit(1.2), REVIEW, finish("complete"), SLEEP]),
     "checkpoint_fallback": ("refinement", LONG, [edit(1.5), REVIEW, checkpoint("spout still missing"),
                                                  edit(2.5), EXPORT, CRASH]),
@@ -101,8 +100,8 @@ SESSIONS = {
                                                  {"do": "glb", "path": "exports/002.glb", "kind": "garbage"}, CRASH]),
     "original_fallback": ("refinement", LONG, [{"do": "glb", "path": "original/original.glb", "kind": "garbage"},
                                                CRASH]),
-    "scratch_invalid": ("from_scratch", LONG, [edit(1.0, "garbage"), EXPORT, CRASH]),
-    "deadline_sigint": ("from_scratch", 1.0, [SLEEP]),
+    "invalid_export": ("refinement", LONG, [edit(1.0, "garbage"), EXPORT, CRASH]),
+    "deadline_sigint": ("refinement", 1.0, [SLEEP]),
     "deadline_kill": ("refinement", 1.0, [{"do": "ignore_sigint"}, SLEEP]),
     "budget_tamper": ("refinement", 1.0, [{"do": "write", "path": "run_budget.json",
                                            "text": '{"deadline": 99999999999}'}, SLEEP]),
@@ -116,9 +115,9 @@ SESSIONS = {
                                              {"do": "write", "path": "exports/001.glb", "text": "tampered"}]),
     "unchanged_after_original_edit": ("refinement", LONG, [{"do": "glb", "path": "original/original.glb", "size": 2.0},
                                                            edit(ORIGINAL_SIZE), REVIEW, finish("unchanged")]),
-    "forged_event": ("from_scratch", 1.0, [{"do": "write", "path": ".gator/events.jsonl",
-                                            "text": '{"event": "export_done", "export": 1, "seconds": 100}\n'},
-                                           {"do": "sleep", "seconds": 5}]),
+    "forged_event": ("refinement", 1.0, [{"do": "write", "path": ".gator/events.jsonl",
+                                          "text": '{"event": "export_done", "export": 1, "seconds": 100}\n'},
+                                         {"do": "sleep", "seconds": 5}]),
     "stop_during_export": ("refinement", LONG, [edit(1.0, seconds=3.0), {"do": "tool_nowait", "args": ["export_glb"]},
                                                 CRASH]),
     "articulation_finish": ("articulation", LONG, [{"do": "read_prompt"}, edit(PARTS_SIZE, "parts"), EXPORT,
@@ -156,8 +155,7 @@ def prepare(root, mode, **agent):
         write_glb(original, "good", ORIGINAL_SIZE)
     (root / "in" / "front.png").write_bytes(b"preview")
     return C.prepare_session(root / "s", mode, PROMPT, make_views(root / "in"), source="sensor depth", metric=True,
-                             original=original if mode != "from_scratch" else None, previews=[root / "in" / "front.png"],
-                             parts=parts, **agent)
+                             original=original, previews=[root / "in" / "front.png"], parts=parts, **agent)
 
 
 def run_scripted(root, mode, budget_s, script):
@@ -190,7 +188,7 @@ def agent_log(root):
 
 def test_finish_refinement(runs):
     root, r = runs["finish_refine"]
-    assert r["candidate_built"] is True and runs["finish_scratch"][1]["candidate_built"] is None
+    assert r["candidate_built"] is True
     assert r["previews_built"] is None  # previews were supplied
     assert (r["source"], r["verdict"], r["exit"]) == ("finish", "complete", "exited")
     assert r["reason"] == "fixed the handle" and r["limitations"] == ["seam on the back", "thin lid"]
@@ -222,16 +220,15 @@ def test_events_written_in_work_do_not_move_the_deadline(runs):
     assert T.read_events(root / "control") == []
 
 
-def test_finish_from_scratch_rejects_fourth_limitation(runs):
-    root, r = runs["finish_scratch"]
+def test_finish_rejects_fourth_limitation(runs):
+    root, r = runs["finish_limitations"]
     assert (r["source"], r["verdict"], r["limitations"]) == ("finish", "needs_review", ["a", "b", "c"])
     assert "4 limitations given; at most 3" in agent_log(root)
-    assert not (root / "original.glb").exists() and not (root / "work" / "original").exists()
 
 
-def test_refinement_verdict_rejected_in_from_scratch(runs):
+def test_articulation_verdict_rejected_in_refinement(runs):
     root, r = runs["finish_bad_verdict"]
-    assert "unknown verdict 'complete' for from_scratch" in agent_log(root)
+    assert "unknown verdict 'articulated' for refinement" in agent_log(root)
     assert not (root / "work" / "finish.json").exists()
     assert (r["source"], r["verdict"]) == ("export", "needs_review") and edge(root / r["glb"]) == 0.9
 
@@ -274,15 +271,15 @@ def test_original_fallback_uses_controller_copy(runs):
     assert edge(root / r["glb"]) == ORIGINAL_SIZE
 
 
-def test_from_scratch_without_valid_output_is_invalid(runs):
-    root, r = runs["scratch_invalid"]
-    assert (r["source"], r["verdict"], r["glb"], r["sha256"]) == (None, "invalid", None, None)
-    assert len(r["rejected"]) == 1
+def test_invalid_export_is_rejected_for_the_original(runs):
+    root, r = runs["invalid_export"]
+    assert (r["source"], r["verdict"], r["glb"]) == ("fallback_original", "fallback_original", "original.glb")
+    assert [x["from"] for x in r["rejected"]] == ["export"]
 
 
 def test_deadline_sigint(runs):
     root, r = runs["deadline_sigint"]
-    assert (r["exit"], r["returncode"], r["verdict"]) == ("deadline_sigint", -signal.SIGINT, "invalid")
+    assert (r["exit"], r["returncode"], r["verdict"]) == ("deadline_sigint", -signal.SIGINT, "fallback_original")
     assert 1.0 <= r["timings"]["wall_s"] < 2.5 and r["timings"]["excluded_s"] == 0.0
 
 
@@ -447,10 +444,15 @@ def test_deadline_ignores_malformed_events():
 def test_read_events_skips_undecodable_lines(tmp_path):
     (tmp_path / "events.jsonl").write_bytes(b'\xff\xfe\n{"event": "review"}\n[1]\n')
     assert T.read_events(tmp_path) == [{"event": "review"}]
+    assert T.read_events(tmp_path / "none") == [] and list(T.read_jsonl(tmp_path / "none.jsonl")) == []
+    (tmp_path / "bad" / "events.jsonl").mkdir(parents=True)  # there, but not readable as a file
+    with pytest.raises(OSError):
+        T.read_events(tmp_path / "bad")
+    assert list(T.read_jsonl(tmp_path / "bad" / "events.jsonl")) == []
 
 
 def test_watchdog_error_still_kills_agent(tmp_path, monkeypatch):
-    work = prepare(tmp_path, "from_scratch")
+    work = prepare(tmp_path, "refinement")
     pid_file = tmp_path / "pid"
     cmd = [sys.executable, "-c", f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(30)"]
 
@@ -499,12 +501,6 @@ def test_check_glb_malformed_json_and_posed_vertices(tmp_path):
     for key, value in [("translation", [float("nan"), 0.0, 0.0]), ("scale", [float("inf"), 1.0, 1.0])]:
         glb_json(tmp_path / "good.glb", tmp_path / f"{key}.glb", move(key, value))
         assert C.check_glb(tmp_path / f"{key}.glb") == "non-finite vertices"
-
-
-def test_atomic_json_has_plain_file_permissions(tmp_path):
-    T.write_json_atomic(tmp_path / "a.json", {"x": 1})
-    (tmp_path / "plain.json").write_text("{}")
-    assert stat.S_IMODE((tmp_path / "a.json").stat().st_mode) == stat.S_IMODE((tmp_path / "plain.json").stat().st_mode)
 
 
 def test_export_launch_failure_is_logged_and_not_excluded(tmp_path):
@@ -708,13 +704,13 @@ def test_find_key_reports_files_but_not_the_key(tmp_path):
     assert C.find_key(root, tmp_path / "key.env") == ["session/codex.jsonl"]
 
 
-def test_paper_prompts_load_with_recorded_changes(tmp_path):
-    for mode in ("refinement", "from_scratch"):
-        text, orig = PR.load(mode), PR.original(mode)
-        assert "work/run_budget.json" not in text.replace("/work/run_budget.json", "")
-        assert len(text) - len(orig) == len(PR.CHANGES[mode])  # each change adds one "/"
-    C.prepare_session(tmp_path / "s", "from_scratch", None, [], source="s", metric=False)
-    assert (tmp_path / "s" / "session" / "prompt.txt").read_text(encoding="utf-8") == PR.load("from_scratch")
+def test_paper_prompt_loads_with_recorded_changes(tmp_path):
+    text, orig = PR.load("refinement"), PR.original("refinement")
+    assert "work/run_budget.json" not in text.replace("/work/run_budget.json", "")
+    assert len(text) - len(orig) == len(PR.CHANGES["refinement"])  # each change adds one "/"
+    write_glb(tmp_path / "original.glb")
+    C.prepare_session(tmp_path / "s", "refinement", None, [], source="s", metric=False, original=tmp_path / "original.glb")
+    assert (tmp_path / "s" / "session" / "prompt.txt").read_text(encoding="utf-8") == PR.load("refinement")
 
 
 def test_review_passes_the_detail_rig(tmp_path, monkeypatch):
@@ -1103,7 +1099,7 @@ def test_articulation_prompt_and_session_layout(tmp_path):
     with pytest.raises(ValueError, match="parts"):
         C.prepare_session(tmp_path / "y", "refinement", None, [], source="s", metric=True,
                           original=work / "original" / "original.glb", parts=tmp_path / "in" / "parts.json")
-    with pytest.raises(ValueError, match="mode is one of refinement, from_scratch, articulation"):
+    with pytest.raises(ValueError, match="mode is one of refinement, articulation"):
         C.prepare_session(tmp_path / "z", "rigging", None, [], source="s", metric=True)
 
 
@@ -1117,10 +1113,9 @@ def test_codex_session_layout_and_command(tmp_path):
     agents = (root / "work" / "AGENTS.md").read_text()
     assert "view_image" in agents and "read_file" not in agents and "{" not in agents.split("## Helper commands")[0]
     assert 'model_reasoning_effort="xhigh"' in C.codex_command()
-    conf = tomllib.loads(C.codex_config("http://127.0.0.1:1/v1"))
+    conf = tomllib.loads(C.codex_config())
     assert conf["model"] == "gpt-6-astra" and conf["model_reasoning_effort"] == "xhigh" and conf["web_search"] == "disabled"
-    assert conf["model_provider"] == "proxied" and conf["model_providers"]["proxied"]["supports_websockets"] is False
-    assert conf["shell_environment_policy"]["ignore_default_excludes"] is False and "model_provider" not in tomllib.loads(C.codex_config())
+    assert conf["shell_environment_policy"]["ignore_default_excludes"] is False
 
 
 def test_shell_commands_counted_once(tmp_path):
@@ -1236,7 +1231,7 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     """A whole claude session through run_container_session: the real claude_agent CLI with a scripted
     client and a host shell, the helpers over the socket, the deliverable, the log readers, and the
     key in no file but its own (outside the session folder)."""
-    from gator.agent import loop_trace, session_report
+    from gator.agent import loop_trace
 
     monkeypatch.setenv("PYTHONPATH", str(REPO))
     root = prepare(tmp_path, "refinement", agent="claude").parent
@@ -1280,14 +1275,14 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     assert "larger than 2576 px on the long side" in reqs[0]["view_image"]
 
     log = root / "session" / "claude.jsonl"
-    results = {e["tool_use_id"]: e for e in C._jsonl(log) if e.get("type") == "tool_result"}
+    results = {e["tool_use_id"]: e for e in T.read_jsonl(log) if e.get("type") == "tool_result"}
     assert results["toolu_1"]["is_error"] is False and "receipt" in results["toolu_1"]["output"]
     assert results["toolu_2"]["is_error"] is True and "not a PNG or JPEG" in results["toolu_2"]["output"]
     assert C.shell_commands(log)[1].startswith("finish --receipt")
     assert (root / "session" / "claude_stdout.log").read_text().startswith("turn 1: tool_use")
     assert (root / "session" / "system.md").read_bytes() == (C.AGENT_DIR / "claude" / "SYSTEM.md").read_bytes()
     assert all(q["system"][0]["text"] == (C.AGENT_DIR / "claude" / "SYSTEM.md").read_text(encoding="utf-8") for q in reqs)
-    start = next(e for e in C._jsonl(log) if e.get("type") == "start")
+    start = next(e for e in T.read_jsonl(log) if e.get("type") == "start")
     assert (start["image_side"], start["system"]) == (2576, str(C.AGENT_DIR / "claude" / "SYSTEM.md"))
 
     capsys.readouterr()
@@ -1296,14 +1291,10 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     assert "== agent (claude), in order" in trace and "views: /work/original/previews/front.png [" in trace
     assert "runs: finish --receipt" in trace and "ended: finished after 2 turns" in trace
     assert "finish complete: fixed the handle" in trace and "claude-opus-5-5: 2 turns" in trace
-    session_report.main(str(tmp_path))
-    report = capsys.readouterr().out
-    assert "requests 2 (2 answered)" in report and "CMD finish --receipt" in report and "VIEW /work/original" in report
-    assert "TOOL ERROR view_image" in report and "end: finished after 2 turns" in report
 
 
 def test_claude_session_with_every_tool(tmp_path, monkeypatch):
-    """A claude session at effort low in fast mode, with the baseline's image side (1568 px) and its own
+    """A claude session at effort low, with the baseline's image side (1568 px) and its own
     manual, through prepare_session and run_container_session: the shell keeps its directory and
     variables across turns, the text editor views a file and edits another, view_image shows a PNG
     that a command made, and finish ends the session. Every request repeats the one before it and
@@ -1312,8 +1303,7 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     manual = tmp_path / "opus_dig" / "system_v1.md"
     manual.parent.mkdir()
     manual.write_text("The old manual: an image larger than 1568 px is shown downscaled. é\n" * 80, encoding="utf-8")
-    root = prepare(tmp_path, "refinement", agent="claude", effort="low", fast=True, image_side=1568,
-                   system=manual).parent
+    root = prepare(tmp_path, "refinement", agent="claude", effort="low", image_side=1568, system=manual).parent
     key_file = tmp_path / "anthropic.env"
     key_file.write_text(f"ANTHROPIC_API_KEY={ANTHROPIC_KEY}\n")
     (tmp_path / "stand_in.py").write_text(STAND_IN)
@@ -1352,22 +1342,22 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "blender_command", lambda root, sif: FAKE_BLENDER)
     r = C.run_container_session(root, "/sif/agent.sif", key_file, **{**FAST, "finish_wait_s": 10.0})
 
-    assert built[0][-7:] == ["--effort", "low", "--fast", "--image-side", "1568", "--system", str(manual)]
-    assert C.agent_info(root) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "low", "fast": True,
-                                  "image_side": 1568, "system": str(manual)}
+    assert built[0][-6:] == ["--effort", "low", "--image-side", "1568", "--system", str(manual)]
+    assert C.agent_info(root) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "low", "image_side": 1568,
+                                  "system": str(manual)}
     assert (root / "session" / "system.md").read_bytes() == manual.read_bytes()
     assert (r["agent"], r["model"], r["effort"], r["source"], r["verdict"]) == ("claude", "claude-opus-5-5", "low", "finish", "complete")
     assert r["glb"] == "work/exports/001.glb" and edge(root / r["glb"]) == 1.2 and r["counts"]["reviews"] == 1
     assert (r["exit"], r["returncode"], r["cli_exit"], r["end_reason"], r["turns"]) == ("exited", 0, "ended", "finished", 3)
     tokens = {k: sum(s["usage"][k] for s in script) for k in C.PRICES}
-    assert r["tokens"] == tokens  # fast mode doubles the price
-    assert r["cost_usd"] == pytest.approx(2 * sum(tokens[k] * C.PRICES[k] for k in tokens) / 1e6, abs=1e-4)
+    assert r["tokens"] == tokens
+    assert r["cost_usd"] == pytest.approx(sum(tokens[k] * C.PRICES[k] for k in tokens) / 1e6, abs=1e-4)
     assert (root / "work" / "edit.py").read_text() == "size = 1.2\n"
 
     reqs = [json.loads(line) for line in (tmp_path / "requests.jsonl").read_text().splitlines()]
     assert [q["messages"] for q in reqs] == [1, 3, 5]
-    assert all(q["output_config"] == {"effort": "low"} and q["speed"] == "fast" and q["cache_control"] == {"type": "ephemeral"}
-               and q["betas"] == ["server-side-fallback-2026-07-01", "fast-mode-2026-02-01"] for q in reqs)
+    assert all(q["output_config"] == {"effort": "low"} and q["speed"] is None and q["cache_control"] == {"type": "ephemeral"}
+               and q["betas"] == ["server-side-fallback-2026-07-01"] for q in reqs)
     assert all(q["system"] == [{"type": "text", "text": manual.read_text(encoding="utf-8"),
                                 "cache_control": {"type": "ephemeral"}}] for q in reqs)
     assert all("larger than 1568 px on the long side" in q["view_image"] for q in reqs)
@@ -1388,9 +1378,9 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     assert out["t7"]["content"] == "ANTHROPIC_API_KEY=[redacted]\n"
 
     log = root / "session" / "claude.jsonl"
-    results = {e["tool_use_id"]: e for e in C._jsonl(log) if e.get("type") == "tool_result"}
+    results = {e["tool_use_id"]: e for e in T.read_jsonl(log) if e.get("type") == "tool_result"}
     assert (results["t8"]["is_error"], results["t8"]["output"]) == (False, "[image 3000x1500]")
-    start = next(e for e in C._jsonl(log) if e.get("type") == "start")
+    start = next(e for e in T.read_jsonl(log) if e.get("type") == "start")
     assert (start["image_side"], start["system"]) == (1568, str(manual))
     assert results["t9"]["output"].startswith("finished: complete, exports/001.glb")
     assert r["key_found_in"] == [] and r["network_commands"] == []
@@ -1398,30 +1388,29 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
 
 
 def test_claude_session_layout_and_agent_record(tmp_path):
-    work = prepare(tmp_path, "from_scratch", agent="claude", effort="max", fast=True)
+    work = prepare(tmp_path, "refinement", agent="claude", effort="max")
     root = work.parent
     assert json.loads((root / "control" / "agent.json").read_text()) == {
-        "agent": "claude", "model": "claude-opus-5-5", "effort": "max", "fast": True}
+        "agent": "claude", "model": "claude-opus-5-5", "effort": "max"}
     assert not (work / "AGENTS.md").exists() and not (root / "session" / "codex_home").exists()
     assert (root / "session" / "system.md").read_text() == (C.AGENT_DIR / "claude" / "SYSTEM.md").read_text()
     assert (root / "session" / "prompt.txt").read_text(encoding="utf-8") == PROMPT
     assert C.agent_info(root)["effort"] == "max"
-    codex = prepare(tmp_path / "codex", "from_scratch").parent
-    assert C.agent_info(codex) == {"agent": "codex", "model": "gpt-6-astra", "effort": "xhigh", "fast": False}
+    codex = prepare(tmp_path / "codex", "refinement").parent
+    assert C.agent_info(codex) == {"agent": "codex", "model": "gpt-6-astra", "effort": "xhigh"}
     (codex / "control" / "agent.json").unlink()  # a session from before the choice
     assert C.agent_info(codex)["agent"] == "codex"
     manual = tmp_path / "system_v1.md"
     manual.write_text("old manual\n")
     for bad, why in [({"agent": "gpt"}, "agent is codex or claude"), ({"agent": "claude", "effort": "extreme"}, "effort is one of"),
-                     ({"effort": "high"}, "settings of the claude agent"), ({"fast": True}, "settings of the claude agent"),
+                     ({"effort": "high"}, "settings of the claude agent"),
                      ({"image_side": 1568}, "settings of the claude agent"), ({"system": manual}, "settings of the claude agent"),
                      *[({"agent": "claude", "image_side": side}, "image_side is a positive number of pixels")
                        for side in (0, -1, 1.5, True, "1568")],
                      ({"agent": "claude", "system": tmp_path / "missing.md"}, "is not a file"),
-                     ({"agent": "claude", "system": tmp_path}, "is not a file"),
-                     ({"agent": "claude", "codex_base_url": "http://127.0.0.1:1/v1"}, "setting of the codex agent")]:
+                     ({"agent": "claude", "system": tmp_path}, "is not a file")]:
         with pytest.raises(ValueError, match=why):
-            C.prepare_session(tmp_path / "bad", "from_scratch", "p", [], source="s", metric=False, **bad)
+            C.prepare_session(tmp_path / "bad", "refinement", "p", [], source="s", metric=False, **bad)
         assert not (tmp_path / "bad").exists()
 
 
@@ -1432,16 +1421,19 @@ def test_claude_image_side_and_system_go_to_the_record(tmp_path, monkeypatch):
     (tmp_path / "runs" / "opus_dig").mkdir(parents=True)
     (tmp_path / "runs" / "opus_dig" / "system_v1.md").write_text("old manual, 1568 px\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    work = C.prepare_session(tmp_path / "s", "from_scratch", "p", [], source="s", metric=False, agent="claude",
-                             image_side=1568, system="runs/opus_dig/system_v1.md")
+    original = tmp_path / "original.glb"
+    write_glb(original)
+    work = C.prepare_session(tmp_path / "s", "refinement", "p", [], source="s", metric=False, original=original,
+                             agent="claude", image_side=1568, system="runs/opus_dig/system_v1.md")
     root, manual = work.parent, str(tmp_path / "runs" / "opus_dig" / "system_v1.md")
     assert json.loads((root / "control" / "agent.json").read_text()) == {
-        "agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh", "fast": False, "image_side": 1568, "system": manual}
+        "agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh", "image_side": 1568, "system": manual}
     assert (root / "session" / "system.md").read_text(encoding="utf-8") == "old manual, 1568 px\n"
     assert C.agent_record("claude", image_side=2576) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh",
-                                                         "fast": False, "image_side": 2576}
-    plain = C.prepare_session(tmp_path / "p", "from_scratch", "p", [], source="s", metric=False, agent="claude").parent
-    assert C.agent_info(plain) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh", "fast": False}
+                                                         "image_side": 2576}
+    plain = C.prepare_session(tmp_path / "p", "refinement", "p", [], source="s", metric=False, original=original,
+                              agent="claude").parent
+    assert C.agent_info(plain) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh"}
     assert (plain / "session" / "system.md").read_bytes() == (C.AGENT_DIR / "claude" / "SYSTEM.md").read_bytes()
     built = []
     monkeypatch.setattr(C, "run_session", lambda root, cmd, env, **kw: built.append(cmd) or {})
@@ -1469,19 +1461,20 @@ def test_claude_shell_and_agent_commands(tmp_path):
     cmd = C.claude_command("s", "agent.sif", "/tmp/gator-x", "key.env")
     assert cmd == [sys.executable, "-m", "gator.agent.claude_agent", os.path.abspath("s"), "--sif", os.path.abspath("agent.sif"),
                    "--sock-dir", "/tmp/gator-x", "--key-file", os.path.abspath("key.env"), "--effort", "xhigh"]
-    assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "low", fast=True)[-3:] == ["--effort", "low", "--fast"]
-    assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "low", True, 1568, "v1.md")[-7:] == \
-        ["--effort", "low", "--fast", "--image-side", "1568", "--system", os.path.abspath("v1.md")]
+    assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "low")[-2:] == ["--effort", "low"]
+    assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "low", 1568, "v1.md")[-6:] == \
+        ["--effort", "low", "--image-side", "1568", "--system", os.path.abspath("v1.md")]
     assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", image_side=2576)[-4:] == \
         ["--effort", "xhigh", "--image-side", "2576"]
     assert [C.cli_exit(c, "claude") for c in (0, 2, 3, 130, 1, -signal.SIGKILL)] == \
         ["ended", "refusal", "api_error", "interrupted", "exit 1", "signal SIGKILL"]
 
 
-def test_claude_agent_override_runs_from_the_repo(tmp_path):
+def test_claude_agent_override_runs_from_the_repo(tmp_path, monkeypatch):
     """agent= replaces claude_agent's whole host command: it runs from the repository with no stdin, its
     stdout goes to claude_stdout.log, and extra_env reaches it. Without an end line the usage is summed."""
-    root = prepare(tmp_path, "from_scratch", agent="claude").parent
+    root = prepare(tmp_path, "refinement", agent="claude").parent
+    monkeypatch.setattr(C, "blender_command", lambda root, sif: FAKE_BLENDER)
     (tmp_path / "key.env").write_text(f"ANTHROPIC_API_KEY={ANTHROPIC_KEY}\n")
     script = ("import json, os, sys, time\n"
               "print('cwd', os.getcwd(), 'stdin', repr(sys.stdin.read()), 'seen', os.environ['SEEN'])\n"
@@ -1492,7 +1485,7 @@ def test_claude_agent_override_runs_from_the_repo(tmp_path):
               "sys.exit(2)\n")
     r = C.run_container_session(root, "/sif/agent.sif", tmp_path / "key.env", extra_env={"SEEN": "yes"},
                                 agent=[sys.executable, "-c", script, str(root / "session" / "claude.jsonl")], **FAST)
-    assert (r["exit"], r["returncode"], r["cli_exit"], r["verdict"]) == ("exited", 2, "refusal", "invalid")
+    assert (r["exit"], r["returncode"], r["cli_exit"], r["verdict"]) == ("exited", 2, "refusal", "fallback_original")
     assert (root / "session" / "claude_stdout.log").read_text() == f"cwd {C.REPO} stdin '' seen yes\n"
     assert (r["turns"], r["end_reason"], r["network_commands"]) == (1, None, ["curl -O https://x/y.png"])
     assert r["tokens"] == usage(1000, 100, read=2000) and r["cost_usd"] == pytest.approx(0.0064)
@@ -1502,7 +1495,7 @@ def test_claude_usage_prefers_the_end_line(tmp_path):
     log = tmp_path / "claude.jsonl"
     response = {"type": "response", "usage": usage(1_000_000, 0)}
     log.write_text(json.dumps(response) + "\nnot json\n[1]\n" + json.dumps({**response, "usage": "bad"}) + "\n")
-    assert C.claude_usage(log)["cost_usd"] == 4.0 and C.claude_usage(log, fast=True)["cost_usd"] == 8.0
+    assert C.claude_usage(log)["cost_usd"] == 4.0
     end = {"type": "end", "reason": "end_turn", "turns": 7, "totals": usage(5, 6, 7, 8), "cost_usd": 1.5}
     with open(log, "a") as f:
         f.write(json.dumps(end) + "\n")
@@ -1532,9 +1525,10 @@ def test_find_key_reads_anthropic_keys(tmp_path):
     (root / "work" / "other.txt").write_text("sk-ant-something-else")
     assert C.find_key(root, tmp_path / "key.env") == ["work/env.txt"]
     (tmp_path / "quoted.env").write_text(f'ANTHROPIC_API_KEY="{ANTHROPIC_KEY}"\n')  # the shell and claude_agent unquote it
-    assert C.read_key(tmp_path / "quoted.env") == ANTHROPIC_KEY and C.find_key(root, tmp_path / "quoted.env") == ["work/env.txt"]
+    assert C.read_keys(tmp_path / "quoted.env") == [ANTHROPIC_KEY]
+    assert C.find_key(root, tmp_path / "quoted.env") == ["work/env.txt"]
     (tmp_path / "none.env").write_text("OTHER=1\n")
-    assert C.read_key(tmp_path / "none.env") == "" and C.find_key(root, tmp_path / "none.env") == []
+    assert C.read_keys(tmp_path / "none.env") == [] and C.find_key(root, tmp_path / "none.env") == []
 
 
 def test_find_key_checks_every_key_of_a_shared_env_file(tmp_path):
@@ -1549,7 +1543,7 @@ def test_find_key_checks_every_key_of_a_shared_env_file(tmp_path):
     for order in ((ANTHROPIC_KEY, openai_key), (openai_key, ANTHROPIC_KEY)):
         lines = {ANTHROPIC_KEY: f"ANTHROPIC_API_KEY={ANTHROPIC_KEY}", openai_key: f'OPENAI_API_KEY="{openai_key}"'}
         (tmp_path / "both.env").write_text("".join(lines[k] + "\n" for k in order))
-        assert C.read_keys(tmp_path / "both.env") == list(order) and C.read_key(tmp_path / "both.env") == order[0]
+        assert C.read_keys(tmp_path / "both.env") == list(order)
         assert C.find_key(root, tmp_path / "both.env") == ["work/anthropic.txt", "work/openai.txt"]
 
 

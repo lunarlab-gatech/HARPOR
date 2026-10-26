@@ -489,26 +489,19 @@ def test_vendor_folder_holds_only_checked_files():
 
 
 def test_config_checks(tmp_path):
-    """site.json takes public values only, in their forms; redirectTo and host are gone (supa.js takes the sign-in
-    address from the page), and so are storageUrl, planFileLimit and workerSignKey (the site takes no uploads and has
-    no shared worker). The example file names every key and is refused until it is filled in."""
+    """site.json takes public values only, in their forms, and refuses unknown keys."""
     good = site.check_config(dict(CFG))
     assert good["url"] == CFG["url"]
     for bad, why in [({"redirectTo": "https://x/"}, "unknown keys: redirectTo"), ({"host": "cloudflare"}, "unknown keys"),
                      ({"url": "https://x.example.com"}, "url is"), ({"url": "https://abcdefghijklmnop.supabase.co/rest"}, "url is"),
                      ({"url": "https://abcdefghijklmnop.storage.supabase.co"}, "url is"),
-                     ({"storageUrl": "https://abcdefghijklmnop.storage.supabase.co"}, "unknown keys: storageUrl"),
-                     ({"planFileLimit": 52428800}, "unknown keys: planFileLimit"),
-                     ({"workerSignKey": None}, "unknown keys: workerSignKey"),
                      ({"publishableKey": "sb_publishable_<from the dashboard>"}, "publishableKey"),
                      ({"contact": ""}, "contact"), ({"contact": "x" * 201}, "contact")]:
         with pytest.raises(site.SiteError, match=why):
             site.check_config({**CFG, **bad})
     assert site.check_config({**CFG, "contact": "room 101"})["contact"] == "room 101"
-    example = json.loads((site.HERE / "site.example.json").read_text())
-    assert set(example) == site.KEYS
-    with pytest.raises(site.SiteError):
-        site.check_config(example)
+    assert site.check_config({**CFG, "_comment": "a note"})["_comment"] == "a note"
+    assert "_comment" not in site.config_js({**CFG, "_comment": "a note"})
     with pytest.raises(site.SiteError, match="run python -m gator.webapp.site init"):
         site.load_config(tmp_path / "none.json")
 
@@ -560,9 +553,6 @@ def test_command_line(tmp_path):
     assert r.returncode == 1 and r.stderr.startswith("error: ") and "sb_secret_0123456789abcdef" not in r.stderr
     assert run("build", "--config", str(tmp_path / "missing.json")).returncode == 1
     assert run("bogus").returncode == 2
-    for gone in ("--storage-url", "--plan-file-limit"):  # the site takes no uploads
-        assert run("init", "--url", CFG["url"], "--key", CFG["publishableKey"], gone, "1", "--config",
-                   str(tmp_path / "y.json")).returncode == 2
 
 
 def test_command_line_with_demos(tmp_path, demo_dir):

@@ -1,9 +1,6 @@
 # GATOR research notes
 
-This file holds the research findings and sources behind `build_plan.md`. Read `build_plan.md`
-first. Where the two files disagree, the plan wins.
-
-Sections: 1. the paper, 2. Stage A: MV-SAM3D, 3. Stage B: the agent harness, 4. estimators, datasets, baselines and metrics, 5. deferred: the full GATOR generator.
+Sources behind `build_plan.md`; where the two files disagree, `build_plan.md` wins.
 
 Tags: "(unconfirmed)" means no primary source confirmed the claim. "(our inference)" and "(our
 design)" mark our own reasoning or choices. "(estimate)" marks a number we computed.
@@ -12,7 +9,7 @@ design)" mark our own reasoning or choices. "(estimate)" marks a number we compu
 
 ### 1.1 Source and numbering
 
-The paper is "GATOR: Generative and Agentic 3D Object Reconstruction From Casual Images" (arXiv 2610.11215v1). The project page is https://research.nvidia.com/labs/lpr/gator/. The GitHub repository kasvii/GATOR is not this project. It belongs to an unrelated 2023 human-mesh paper.
+The paper is "GATOR: Generative and Agentic 3D Object Reconstruction From Casual Images" (arXiv 2610.11215v1, HTML https://arxiv.org/html/2610.11215v1, PDF https://arxiv.org/pdf/2610.11215v1). The project page is https://research.nvidia.com/labs/lpr/gator/. The GitHub repository kasvii/GATOR is not this project. It belongs to an unrelated 2023 human-mesh paper.
 
 Page references such as (p.5) are PDF pages. Table and figure numbers follow the PDF. The equations come from the MathML of the arXiv HTML, because the PDF text layer drops glyphs inside equations. Section 5.1 writes out Eq. 3 (5.1.2), Eq. 6 (5.1.6) and Eq. 4 (5.1.10). The metric code in section 4.5 implements Eq. 7 and Eq. 8. Section 1.3 gives Eq. 1, Eq. 2 and Eq. 5.
 
@@ -106,7 +103,7 @@ Epoch items are scene-object instances. Share is each source's fraction of the e
 
 ### 1.6 Benchmarks, baselines and metrics
 
-Section 4 gives our benchmark setup, data sources, baselines, metric code and rebuild recipes.
+Section 4 gives the data sources, the baselines and the metric implementations.
 
 #### Benchmarks (Sec. 4.1 on p.6, B.2 on pp.23–24, D.1 to D.4 on pp.25–29)
 
@@ -375,18 +372,7 @@ Build plan note 4 lists the main pins. Their sources are `MV/environments/defaul
 | nvdiffrast | Not listed. Needed only for texture baking (section 2.4). | from code |
 | diff_gaussian_rasterization | Not listed. Optional import. Needed by the default Gaussian render backend used in texture baking. | `MV/sam3d_objects/model/backbone/tdfy_dit/renderers/gaussian_render.py#L23-L34` |
 
-Install steps from `S3/doc/setup.md`, run inside the MV-SAM3D clone:
-
-```bash
-mamba env create -f environments/default.yml
-mamba activate sam3d-objects
-export PIP_EXTRA_INDEX_URL="https://pypi.ngc.nvidia.com https://download.pytorch.org/whl/cu121"
-pip install -e '.[dev]'
-pip install -e '.[p3d]'
-export PIP_FIND_LINKS="https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.1_cu121.html"
-pip install -e '.[inference]'
-./patching/hydra
-```
+The install steps of `S3/doc/setup.md` work inside the MV-SAM3D clone. Build plan note 4 has the recipe that worked on ICE.
 
 - `patching/hydra` downloads a patched `hydra/core/utils.py` from GitHub (`S3/patching/hydra`).
 - A build off a GPU node may make pytorch3d raise "Not compiled with GPU support" (`S3/doc/setup.md`).
@@ -397,7 +383,6 @@ pip install -e '.[inference]'
 - `scripts/run_da3.py` imports from `src/` of the sibling clone `../Depth-Anything-3`. It raises an error if the folder is missing (`MV/scripts/run_da3.py#L30-L45`).
 - The DA3 install is `pip install xformers torch>=2 torchvision`, then `pip install -e .` (`DA3/README.md#L88-L93`). DA3 requires `numpy<2` and Python 3.9 to 3.13 (`DA3/pyproject.toml`).
 - DA3's optional `[gs]` extra pins gsplat `0b4dddf`, which differs from SAM 3D's `2323de5` (`DA3/pyproject.toml`). run_da3.py does not use the Gaussian head, so the extra is not needed.
-- Whether DA3 and SAM 3D install cleanly into one env is (unconfirmed).
 
 #### Checkpoints and runtime downloads
 
@@ -409,14 +394,7 @@ pip install -e '.[inference]'
 | DINOv2 | `torch.hub.load(..., source="github")` | Not gated. The code default is `dinov2_vitb14`, but user logs show the shipped config loads `dinov2_vitl14_reg`. It downloads the hub code from GitHub and `dinov2_vitl14_reg4_pretrain.pth` from dl.fbaipublicfiles.com at runtime. | `MV/sam3d_objects/model/backbone/dit/embedder/dino.py#L14-L35`, logs in https://github.com/facebookresearch/sam-3d-objects/issues/15 and https://github.com/facebookresearch/sam-3d-objects/issues/70 |
 | SAM 3 | HF `facebook/sam3` (section 4.1) | Used only by `preprocessing/build_mvsam3d_dataset.py`. Paths are hard-coded to `/mnt/workspace/users/lbc/sam3`. Use `--sam3_checkpoint` or bring our own masks (we make ours with build plan note 3). | `MV/preprocessing/sam3_segmenter.py#L23-L31`, https://huggingface.co/facebook/sam3 |
 
-SAM 3D download, from `S3/doc/setup.md`:
-
-```bash
-pip install 'huggingface-hub[cli]<1.0'
-hf download --repo-type model --local-dir checkpoints/hf-download --max-workers 1 facebook/sam-3d-objects
-mv checkpoints/hf-download/checkpoints checkpoints/hf
-rm -rf checkpoints/hf-download
-```
+The weights download is in build plan note 4, step 3.
 
 - The HF repo `facebook/sam-3d-objects` was last modified on 2026-06-12, after the S3 HEAD commit (https://huggingface.co/api/models/facebook/sam-3d-objects). Whether `pipeline.yaml` changed then is (unconfirmed), because the file is gated.
 - MV-SAM3D loads `checkpoints/{model_tag}/pipeline.yaml` relative to the working directory. The default tag is `hf` (`MV/run_inference_weighted.py#L2588`).
@@ -428,17 +406,19 @@ rm -rf checkpoints/hf-download
 - Without `--model_path`, the script first tries local paths, including the raw HF cache folder `models--depth-anything--DA3NESTED-GIANT-LARGE` (`MV/scripts/run_da3.py#L137-L152`). Whether `from_pretrained` loads that folder is (unconfirmed).
 - DA3 resizes the long side to `process_res` (504) and rounds each side to a multiple of 14. All arrays are at that size, not the input size (`DA3/src/depth_anything_3/utils/io/input_processor.py#L316-L377`).
 
-Arrays saved in `da3_output.npz` (`MV/scripts/run_da3.py#L234`):
+Arrays saved in `da3_output.npz` (`MV/scripts/run_da3.py#L234`). `gator/stage_a/mvsam3d.py` writes the same layout. "Required for" names what MV-SAM3D reads each key for:
 
-| Key | Shape | Content |
-|---|---|---|
-| `depth` | (N, H, W) | DA3 depth. Meters for the Nested model (`DA3/README.md#L235`). |
-| `pointmaps` | (N, H, W, 3) | Depth back-projected with `intrinsics`, in each view's own OpenCV camera frame (x right, y down, z forward). A script comment says "PyTorch3D coords", but the code computes OpenCV coordinates. |
-| `pointmaps_sam3d` | (N, 3, H, W) | Same data, channel-first. This is the only key MV-SAM3D requires (`MV/run_inference_weighted.py#L2652-L2660`). |
-| `extrinsics` | (N, 3, 4) | OpenCV world-to-camera in DA3's own world frame (`DA3/README.md#L117`). |
-| `intrinsics` | (N, 3, 3) | At the processed resolution. |
-| `image_files` | (N,) | Input paths. Views are matched to inference images by file stem. |
-| `process_res` | scalar | 504 by default. |
+| Key | Shape | Content | Required for |
+|---|---|---|---|
+| `depth` | (N, H, W) | DA3 depth. Meters for the Nested model (`DA3/README.md#L235`). | pose optimization |
+| `pointmaps` | (N, H, W, 3) | Depth back-projected with `intrinsics`, in each view's own OpenCV camera frame (x right, y down, z forward). A script comment says "PyTorch3D coords", but the code computes OpenCV coordinates. | - |
+| `pointmaps_sam3d` | (N, 3, H, W) | Same data, channel-first. This is the only key MV-SAM3D requires (`MV/run_inference_weighted.py#L2652-L2660`). Any H and W work, because of the nearest resize below. | every run with `--da3_output` |
+| `extrinsics` | (N, 3, 4) | OpenCV world-to-camera in DA3's own world frame (`DA3/README.md#L117`). | visibility weighting, pose optimization, merge |
+| `intrinsics` | (N, 3, 3) | At the processed resolution. | pose optimization |
+| `image_files` | (N,) | Input paths. Views are matched to inference images by file stem. | view matching; without it, matching falls back to index order |
+| `process_res` | scalar | 504 by default. | - |
+
+- Avoid `Inf` in invalid pixels. A SAM 3D issue shows that `Inf` in pointmaps produces a NaN scale (https://github.com/facebookresearch/sam-3d-objects/issues/174). The pipeline marks clipped points as NaN itself (`MV/sam3d_objects/pipeline/inference_pipeline_pointmap.py#L214-L238`), so NaN is likely safe for invalid pixels (unconfirmed).
 
 - Unless `--no_vis` is set, DA3 also writes `scene.glb`. This is a point cloud in glTF axes. Its metadata key `hf_alignment` is a 4x4 matrix built from the first camera and the point-cloud center (`DA3/src/depth_anything_3/utils/export/glb.py#L136-L159`). `--merge_da3_glb` and `--run_pose_optimization` need `scene.glb`, so do not pass `--no_vis` with either flag.
 - `hf_alignment` must survive the GLB write and reload. In our local test with trimesh 5.1.1, it came back as a nested list. The trimesh version in the SAM 3D env is not pinned, so this is (unconfirmed) for that env. If it is missing, the merge code falls back to the extrinsics without centering and logs a warning (`MV/run_inference_weighted.py#L128-L171`). Pose optimization raises an error instead (`MV/sam3d_objects/pose_align/pose_optimization.py#L123-L126`).
@@ -509,7 +489,7 @@ Sources: `MV/run_inference_weighted.py#L3160-L3290`, `MV/sam3d_objects/model/bac
 - Texture baking renders Gaussians with the default backend `inria`, which needs `diff_gaussian_rasterization` (`MV/sam3d_objects/model/backbone/tdfy_dit/utils/render_utils.py#L77`). The graphdeco-inria version lacks the `kernel_size` argument this code passes. A user reports the mip-splatting fork works. A SAM 3D contributor suggests switching the default backend to `gsplat` instead (https://github.com/facebookresearch/sam-3d-objects/issues/29).
 - The `Inference` wrapper forces `rendering_engine = "pytorch3d"` (`MV/notebook/inference.py#L88`, also `MV/run_inference_weighted.py#L2598`). With pytorch3d, mesh post-processing skips hole filling (`postprocessing_utils.py#L619`). A user reports that pytorch3d baking gives a washed-out texture and nvdiffrast fixes it. This is a user report, not an official statement (https://github.com/facebookresearch/sam-3d-objects/issues/75).
 - SAM 3D Objects behaves the same. Its `Inference` wrapper also passes `with_texture_baking=False` and `use_vertex_color=True`, so its default GLB has vertex colors (`S3/notebook/inference.py#L114-L117`). A SAM 3D user confirms that `with_texture_baking=True` is what produces a texture map (https://github.com/facebookresearch/sam-3d-objects/issues/146).
-- The edit in build plan note 4 is untested here (unconfirmed). Optional extras are `with_mesh_postprocess=True`, a compatible `diff_gaussian_rasterization` in place of the `gsplat` backend, and the `nvdiffrast` rendering engine.
+- The edit in build plan note 4 works: the textured GLB looks right (build plan note 4). Optional extras are `with_mesh_postprocess=True`, a compatible `diff_gaussian_rasterization` in place of the `gsplat` backend, and the `nvdiffrast` rendering engine.
 - The mesh frame does not change. `to_glb` applies the same Z-up to Y-up rotation with or without baking (`postprocessing_utils.py#L671`).
 
 ### 2.5 Frames and units
@@ -549,10 +529,9 @@ x_cv = x_p3d * np.array([-1.0, -1.0, 1.0])                      # OpenCV camera 
 
 #### VRAM and runtime
 
-- The 32 GB minimum in build plan note 4 comes from `S3/doc/setup.md`.
 - The MV-SAM3D paper ran on one A100 80 GB (https://arxiv.org/html/2603.11633v2).
-- A user reports out-of-memory on 48 GB with visibility weighting. There is no reply (https://github.com/devinli123/MV-SAM3D/issues/7). An L40S has 48 GB (https://www.nvidia.com/en-us/data-center/l40s/). Memory use of the default entropy mode on 48 GB is (unconfirmed).
-- Runtime per object is not reported in the repo, the paper or the issues (unconfirmed). The author has tested up to about 20 views (https://github.com/devinli123/MV-SAM3D/issues/3).
+- A user reports out-of-memory on 48 GB with visibility weighting. There is no reply (https://github.com/devinli123/MV-SAM3D/issues/7). An L40S has 48 GB (https://www.nvidia.com/en-us/data-center/l40s/). On our L40S, the default entropy mode with 8 views peaked at 18.7 GiB allocated (build plan note 4b).
+- Runtime per object is not reported in the repo, the paper or the issues. On our L40S, 8 views took 294 s (build plan note 4b). The author has tested up to about 20 views (https://github.com/devinli123/MV-SAM3D/issues/3).
 - The paper used 2 and 5 views on GSO. Its own scenes hold 2 to 8 objects, and each scene was captured from 15 viewpoints (https://arxiv.org/html/2603.11633v2).
 
 #### Shipped example
@@ -569,382 +548,16 @@ x_cv = x_p3d * np.array([-1.0, -1.0, 1.0])                      # OpenCV camera 
 - One user cannot reproduce the paper's GSO30 numbers, and a second user sees worse quality on clean single-object images (https://github.com/devinli123/MV-SAM3D/issues/18, open, no author reply).
 - The author says weighting helps with uneven views and symmetric objects (https://github.com/devinli123/MV-SAM3D/issues/12).
 
-### 2.7 Replacing Depth Anything 3 with our own cameras
-
-#### Option A: write our own npz
-
-| Key | Required for | Content |
-|---|---|---|
-| `pointmaps_sam3d` | every run with `--da3_output` | (N, 3, H, W) float32. Back-project our depth with our K into each view's own OpenCV camera frame (x right, y down, z forward), in meters. Keep the image aspect ratio. Any H and W work, because of the nearest resize. |
-| `image_files` | view matching | Paths whose stems match the image names. Without it, matching falls back to index order. |
-| `extrinsics` | visibility weighting, pose optimization, merge | (N, 3, 4) OpenCV world-to-camera in our world frame |
-| `intrinsics`, `depth` | pose optimization | (N, 3, 3) at the pointmap resolution, and (N, H, W) |
-| `scene.glb` with `hf_alignment` | `--merge_da3_glb`, `--run_pose_optimization` | Not needed for Stage A if we skip both flags |
-
-- Avoid `Inf` in invalid pixels. A SAM 3D issue shows `Inf` in pointmaps produces a NaN scale (https://github.com/facebookresearch/sam-3d-objects/issues/174). The pipeline marks clipped points as NaN itself (`MV/sam3d_objects/pipeline/inference_pipeline_pointmap.py#L214-L238`). So NaN is likely safe for invalid pixels (unconfirmed).
-- The pose then lands in the OpenCV frame of our view 0, in our metric units. Our world pose is `inv(E0)` times that.
-
-#### Option B: keep DA3, condition it on our cameras
-
-- `DepthAnything3.inference()` accepts `extrinsics` (N, 4, 4) and `intrinsics` (N, 3, 3) (`DA3/src/depth_anything_3/api.py#L133-L188`). DA3 rescales the intrinsics to the processed size (`DA3/src/depth_anything_3/utils/io/input_processor.py#L262`).
-- With `align_to_input_ext_scale=True` (the default), DA3 returns our extrinsics unchanged and divides its depth by the fitted scale, so depth is in our units (`DA3/src/depth_anything_3/api.py#L341-L364`).
-- The Nested model supports pose-conditioned input ("Pose Cond." column, `DA3/README.md#L216`).
-- `run_da3.py` does not expose these arguments. It needs a small edit to pass our cameras.
-
 ## 3. Stage B: the agent harness
 
-Our code no longer supports Gemini (build plan Decisions). Sections 3.1 to 3.3 keep the Gemini findings for reference.
-
-### 3.1 Gemini 4 Argon
-
-**Sources** (short names used below)
-
-- Model page: https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
-- Cloud model page: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-argon
-- Cloud guide: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon
-- Gemini 4 guide: https://ai.google.dev/gemini-api/docs/latest-model
-- Thinking guide: https://ai.google.dev/gemini-api/docs/thinking
-- API reference: https://ai.google.dev/api/generate-content
-- Interactions API page: https://ai.google.dev/gemini-api/docs/interactions
-- Pricing: https://ai.google.dev/gemini-api/docs/pricing
-- Image guide: https://ai.google.dev/gemini-api/docs/image-understanding
-- Safety settings: https://ai.google.dev/gemini-api/docs/safety-settings
-- Safety post: https://blog.google/innovation-and-ai/technology/safety-security/gemini-4-model-safety-security/
-- Launch post: https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-argon/
-- Model card: https://deepmind.google/models/model-cards/gemini-4-argon/
-
-**Model ID, surfaces and release**
-
-| Model ID | Surface | Status |
-|---|---|---|
-| `gemini-4-argon` | Gemini API and AI Studio | Stable and GA. No preview ID, no dated snapshot and no `-latest` alias are listed, so there is no version to pin. |
-| `gemini-4-argon` | Google Cloud, "Gemini Enterprise Agent Platform" | GA. The regions are `global`, `us` and `eu`. |
-| `gemini-4-argon-cyber-permissive` | Google Cloud | GA, but only behind an allowlist (Fairwind Program). We do not need it. |
-
-Sources: https://ai.google.dev/gemini-api/docs/models, model page, Cloud model page
-
-- Vertex AI now appears under the name "Gemini Enterprise Agent Platform". `https://cloud.google.com/vertex-ai` redirects to the Agent Platform product page (https://cloud.google.com/products/gemini-enterprise-agent-platform).
-- Google announced Argon on 2026-09-30. At that point it went only to "trusted cyber defenders" through the Fairwind Program (https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-argon/).
-- Argon became GA on 2026-10-13 on the Gemini API (https://ai.google.dev/gemini-api/docs/changelog) and on Cloud (Cloud model page). The developer post says to use the paid tier of the Gemini API (https://blog.google/innovation-and-ai/technology/developers-tools/build-with-gemini-4-argon/, launch post).
-- Inputs are text, image, video, audio and PDF. Output is text only (model page).
-- The model card gives a knowledge cutoff of March 2026. It lists the Gemini App, Gemini API, Google AI Studio, Gemini for business, Google Antigravity and Google AI Mode as channels. It does not name Gemini CLI or Vertex AI.
-
-**API surfaces**
-- On the Gemini API, Google says all new models launch on the Interactions API. The docs call `generateContent` legacy, but they also say it "remains fully supported" (Interactions API page). All Argon code examples use the Interactions API (https://ai.google.dev/gemini-api/docs/migrate-to-interactions). Whether every Argon feature works through `generateContent` is unconfirmed.
-- On Cloud, the GenerateContent API and the OpenAI-compatible Chat Completions API are supported. The Interactions API is in preview there (Cloud model page).
-- The Gemini API has an OpenAI-compatible endpoint at `https://generativelanguage.googleapis.com/v1beta/openai/`. It maps `reasoning_effort` to Argon's `thinking_level` like this: `minimal` and `low` go to `low`, `medium` goes to `medium`, and `high` goes to `high`. The table has no `xhigh` row. The page says this support is still in beta (https://ai.google.dev/gemini-api/docs/openai). The Cloud guide says the OpenAI compatibility layer cannot fetch long-decode completions.
-
-**Reasoning controls**
-- The parameter is `thinking_level`. On the Interactions API, it goes in `generation_config.thinking_level` (Gemini 4 guide). On `generateContent`, it is `generationConfig.thinkingConfig.thinkingLevel` (API reference, Cloud guide).
-- The allowed values are `low`, `medium` (the default) and `high` (thinking guide). The API reference enum has `MINIMAL`, `LOW`, `MEDIUM` and `HIGH`, and no value above `HIGH` (API reference). So the paper's extra-high effort maps to `high` (our inference).
-- On Cloud, setting `thinking_budget` or `MINIMAL` returns HTTP 400 (Cloud guide). The Gemini API docs list only the three levels. They do not say what `thinking_budget` does there (unconfirmed).
-- `max_output_tokens` is a hard cap on thinking plus output. If the model reaches it while still reasoning, the status is "incomplete" and the thinking tokens are still billed (thinking guide).
-- Argon ignores `temperature`, `top_p` and `top_k` (Gemini 4 guide). On Cloud, `frequency_penalty`, `presence_penalty` and `candidate_count` return HTTP 400 (Cloud guide).
-- In stateless mode, thought signatures must be sent back unchanged. In stateful mode (`store=true` plus `previous_interaction_id`), the server handles them (thinking guide).
-
-**Context, output and latency**
-- Input, thinking and output share one window of 1,048,576 tokens (model page).
-- A synchronous request can return at most 65,536 output tokens, which is also the default. Setting `max_output_tokens` above 65,536 with `background=False` returns HTTP 400 (thinking guide).
-- Long decode goes up to 1,048,576 tokens minus the input. On the Interactions API, it needs `background=true`, which in turn needs `store=true`. Background runs can last up to 24 hours. On `generateContent`, the client continues the request itself. The long decode page lists a run time of 20 minutes for this method, and 64K tokens per stream or 32K per non-streaming request. The page does not recommend long decode for agents that make many short tool-calling turns (https://ai.google.dev/gemini-api/docs/long-decode).
-- On Cloud, a synchronous request returns up to 65,536 tokens, and a non-streaming direct HTTP request returns up to 32,768 tokens (Cloud model page). Long decode on Cloud works only on `generateContent` in the v1beta1 API, not on the Interactions API (Cloud guide).
-- Google recommends setting `max_output_tokens` to at least 32,768, because Argon spends more of the limit on thinking. Hard prompts can take several minutes, so Google also recommends HTTP client timeouts of at least 15 minutes (Gemini 4 guide).
-
-**Prices**
-
-USD per 1M tokens on the Gemini API. The first number applies through 2026-11-30, and the second applies from 2026-12-01 (pricing).
-
-| Mode | Input | Output (thinking tokens included) | Cached input |
-|---|---|---|---|
-| Standard | $2.00, then $4.00 | $10.00, then $20.00 | $0.10, then $0.20 |
-| Batch | $1.00, then $2.00 | $5.00, then $10.00 | $0.05, then $0.10 |
-| Flex | $1.00, then $2.00 | $5.00, then $10.00 | $0.05, then $0.10 |
-| Priority | $3.60, then $7.20 | $18.00, then $36.00 | $0.18, then $0.36 |
-
-- Argon is not on the Google AI Pro plan. The pricing page lists no tiers by prompt size.
-- Only implicit caching works. Explicit caching (`cachedContents`) is not supported. On the Gemini API, implicit caching applies to prompts of at least 4,096 tokens and gives 95% off cached input (Gemini 4 guide). On Cloud, the minimum is 6,144 tokens, and the cache lasts 15 to 20 minutes (Cloud guide).
-- Google Search grounding includes 5,000 free requests per month, shared across Gemini 3 and newer models. After that, the price is $14 per 1,000 requests (pricing).
-- On Cloud, the global endpoint costs $2 for input and $10 for output through 2026-11-30. This price is delivered as 50% credits back on net spend. From 2026-12-01, the price is $4 and $20. Non-global endpoints cost 10% more (https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing).
-
-**Image input**
-- The supported formats are PNG, JPEG, WEBP, HEIC and HEIF (image guide).
-- The Gemini API accepts up to 3,600 image files per request (image guide). Cloud accepts up to 3,000 images per prompt, with at most 100 of them as URIs (Cloud model page).
-- On the Gemini API, the file input methods page allows 100 MB of inline data per request, or 50 MB for PDFs. The image guide says inline image data limits the whole request to 20 MB, so the two pages disagree (https://ai.google.dev/gemini-api/docs/file-input-methods, image guide). The Files API allows 2 GB per file and 20 GB per project, and it keeps uploaded files for 48 hours (https://ai.google.dev/gemini-api/docs/files).
-- On Cloud, the limits are 7 MB per file for inline data and 30 MB per file from Cloud Storage (Cloud model page).
-- `media_resolution` sets the tokens per image for Gemini 4 and Gemini 3 models. It can be set for each image with `resolution` (https://ai.google.dev/gemini-api/docs/media-resolution).
-
-| Setting | Tokens per image |
-|---|---|
-| unspecified (default) | 1,120 |
-| low | 280 |
-| medium | 560 |
-| high | 1,120 |
-| ultra_high (per image only) | 2,240 |
-
-- One image at the default setting costs about $0.0022 at the $2 input price (estimate).
-- The image guide also shows an older rule of 258 tokens per 768x768 tile. The media resolution page is the one that names Gemini 4.
-
-**Tools**
-- The model page lists these as supported: function calling, code execution, structured outputs, search grounding, Maps grounding, URL context, file search and computer use (preview). The Live API and image or audio output are not supported.
-- The structured output guide has an Argon example that uses a JSON schema together with the `google_search` and `url_context` tools. The same section is marked preview and says it covers "Gemini 3 series models", so support for this combination on Argon is unclear (https://ai.google.dev/gemini-api/docs/structured-output).
-- The Cloud guide gives these function calling rules. Each `FunctionResponse` must match the `id`, `name` and order of the `FunctionCall` before it. The history cannot end with a model turn. Prefilled model turns are not supported.
-
-**Rate limits on the Gemini API**
-
-All facts here come from https://ai.google.dev/gemini-api/docs/rate-limits.
-
-- The docs do not publish RPM, TPM or RPD for Argon. They say to view the active limits in AI Studio. The actual numbers for our project are unconfirmed.
-- Limits apply per project, not per API key.
-- Spend caps apply per rolling 10-minute window. Going over returns `429 RESOURCE_EXHAUSTED`.
-
-| Tier | How to qualify | Billing cap | Spend cap per 10 min | Batch enqueued tokens for Argon |
-|---|---|---|---|---|
-| Tier 1 | Link an active billing account | $250 | $10 | 5,000,000 |
-| Tier 2 | $100 paid and 3 days since the first payment | $2,000 | $50 | 500,000,000 |
-| Tier 3 | $1,000 paid and 30 days since the first payment | $20,000 to $100,000+ | $200 | 1,000,000,000 |
-
-- Priority inference gets 0.3x the standard rate limit.
-
-**Training use and data retention**
-
-Gemini API, paid tier:
-- Google does not use prompts or responses to improve its products (https://ai.google.dev/gemini-api/terms, pricing).
-- For abuse monitoring, Google keeps prompts, context and outputs for 55 days (https://ai.google.dev/gemini-api/docs/usage-policies).
-- The Interactions API stores interactions by default (`store=true`) for 55 days. On the AI Studio Logs page, this can be shortened to 7, 14 or 28 days. Setting `store=false` turns storage off, but then background execution and `previous_interaction_id` stop working (Interactions API page).
-
-Google Cloud:
-- Google does not train on customer data without permission (https://docs.cloud.google.com/gemini-enterprise-agent-platform/resources/zero-data-retention).
-- Cached data is kept for up to 24 hours. Customers can turn caching off and request an exception from abuse logging to get zero data retention. On Cloud, the Interactions API also defaults to `store=true`, so zero data retention needs `store=false` (same source).
-- For Google models that are not "Google Frontier Models", prompts are logged only after a classifier flags them, and the logs are kept for up to 90 days (https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/abuse-monitoring). The Frontier Models list names only the Cyber Permissive variant. By our reading, standard Argon falls under the 90-day rule (unconfirmed).
-
-**Safety filters that could block a coding agent**
-- There are four adjustable filters: harassment, hate speech, sexually explicit and dangerous. The docs say the filters are off by default "for Gemini 2.5 and 3 models". They do not mention Gemini 4, so the default for Argon on the Gemini API is unconfirmed (safety settings).
-- The Interactions API does not accept custom safety settings. Only `generateContent` does (Interactions API page).
-- On Cloud, the content filter page says `OFF` is the default "for gemini-3.5-flash and subsequent models". It does not name Argon (https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/configure-safety-filters).
-- Child-safety protections are always on and cannot be adjusted (safety settings).
-- Google's safety post describes three fixed layers for Argon. Smaller models screen incoming requests. Activation probes watch for knowledge about cyberattacks or biological threats. A monitor can cut off the agent in the middle of a response. The post does not say whether these layers apply to API traffic (unconfirmed).
-- Standard Argon has cyber guardrails. Access without them requires the Fairwind Program (launch post).
-- A misalignment monitor reads the agent's actions and its chain of thought, and it blocks severe boundary violations. Google says it runs the monitor "in our products, on our internal coding agents", during training and during evaluations. Whether it runs on API traffic is unconfirmed (safety post).
-- In automated tests, Argon had 9.60 percentage points fewer unjustified refusals than Gemini 3.1 Pro (model card).
-- No primary source gives false-positive rates for harmless code such as Blender Python (unconfirmed). On `generateContent`, a blocked request shows `promptFeedback.blockReason`, and a blocked response shows `finishReason: SAFETY` (safety settings).
-
-**Cheaper options**
-- No smaller Gemini 4 model exists yet. Google wrote that it is "looking forward to bringing you the rest of the Gemini 4 family" and gave no date (launch post).
-- Argon itself costs 50% less on Flex or Batch. Flex is in preview and has "variable latency and best-effort availability". It is synchronous, it is set with `service_tier: "flex"`, and Google recommends client timeouts of 10 minutes or more (https://ai.google.dev/gemini-api/docs/flex-inference). Batch is asynchronous, so it cannot drive an interactive editing loop.
-- The strongest cheaper model is Gemini 3.8 Flash (`gemini-3.8-flash`), which Google calls "our most intelligent Flash model" (https://ai.google.dev/gemini-api/docs/models, https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash, pricing).
-  - It costs $0.75 for input and $3.75 for output through 2026-12-31, then $1.50 and $7.50.
-  - It accepts 1,048,576 input tokens and returns up to 65,536 output tokens.
-  - It supports thinking levels `low`, `medium` and `high`. `minimal` returns an error.
-  - It supports function calling, code execution and structured outputs.
-  - It has a free tier, but free-tier data is used to improve Google's products.
-- Gemini 3.6 Flash has the same price as 3.8 Flash. Gemini 3.5 Flash-Lite costs $0.30 for input and $2.50 for output (pricing).
-
-### 3.2 Gemini CLI
-
-Gemini CLI is Google's open-source agent CLI. It has a built-in system prompt, shell and file tools, image reading, JSONL events, a yolo mode, hooks and policies. File paths in backticks below are in https://github.com/google-gemini/gemini-cli at tag v0.64.0, unless a line gives another source.
-
-**Version and model support**
-- v0.64.0, published 2026-10-13, is the latest stable release, and the npm tag `latest` points to it. The preview is 0.65.0-preview.0 (https://github.com/google-gemini/gemini-cli/releases, https://www.npmjs.com/package/@google/gemini-cli). Stable releases come out weekly, so the version must be pinned (`docs/releases.md`).
-- `models.ts` lists Gemini 2.5, 3, 3.1, 3.5 and 3.8 models and Gemma 4. It has no Gemini 4 entry. `gemini-4-argon` and "argon" appear nowhere in the repository (`packages/core/src/config/models.ts`).
-- `resolveModel()` returns an unknown name unchanged. The CLI does not check the name at startup. A wrong name should fail on the first request (unconfirmed).
-- An unknown chat model gets the generic `chat-base` config. That config sets `includeThoughts: true` but no thinking level, so the API default `medium` would apply. The `customAliases` entry in the settings below sets `HIGH` (`packages/core/src/services/modelConfigService.ts`, `packages/core/src/config/defaultModelConfigs.ts`). In our pilot (2026-10-14), every request carried `thinkingLevel: HIGH` with `includeThoughts: true`.
-- The CLI classes a model as legacy when its name does not start with `gemini-3`. Argon therefore gets the legacy system prompt snippets and the `default-legacy` tool declarations. The CLI also skips its thought-signature repair step, which only runs for Gemini 2, Gemini 3 and non-Gemini (custom) model names (`promptProvider.ts`, `modelFamilyService.ts` and `geminiChat.ts`). The CLI is therefore not tuned for Argon. Whether Argon requires thought signatures on function calls in the way Gemini 3 does is unconfirmed.
-- Open, unmerged PR #29737 (opened 2026-10-13) would register `gemini-4-argon` with `thinkingLevel: HIGH` and `multimodalToolUse: true`. It leaves `getToolFamily` and `supportsModernFeatures` unchanged, so Argon would still get the legacy prompt and tools (https://github.com/google-gemini/gemini-cli/pull/29737, issue https://github.com/google-gemini/gemini-cli/issues/29689).
-- For an unknown model, the CLI builds a single-model chain, so it does not silently switch the main chat to another model on errors (`packages/core/src/availability/policyHelpers.ts`).
-- The CLI pins `@google/genai` 1.30.0. In that version, the `ThinkingLevel` enum has only `THINKING_LEVEL_UNSPECIFIED`, `LOW` and `HIGH` (https://github.com/googleapis/js-genai/blob/v1.30.0/src/types.ts).
-- The CLI uses only `generateContent`. `packages/core/src` has no Interactions calls.
-
-**Headless run**
-- Headless mode starts when stdin or stdout is not a TTY, when `-p/--prompt` or a positional query is given, or when `CI=true` or `GITHUB_ACTIONS=true` is set (`packages/core/src/utils/headless.ts`).
-- The CLI reads stdin up to 8 MB. If `-p` is also given, the prompt becomes stdin, a blank line, and then the `-p` text. With no input at all, the CLI exits with code 42 (`packages/cli/src/gemini.tsx`, `packages/cli/src/utils/readStdin.ts`).
-- Headless prompts go through slash-command and `@` processing. Input that starts with `/` runs as a slash command, and `@path` tokens are replaced by file contents (`packages/cli/src/nonInteractiveCli.ts`).
-- `-o/--output-format` takes `text`, `json` or `stream-json`. `json` prints one object with `session_id`, `response`, `stats` and `error`. `stream-json` prints JSONL events: `init`, `message`, `tool_use`, `tool_result`, `error` and `result`. The `result` event carries `total_tokens`, `input_tokens`, `output_tokens`, `cached`, `duration_ms`, `tool_calls` and per-model counts (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/cli/headless.md, `packages/core/src/output/types.ts`).
-- `output_tokens` is the API's `candidatesTokenCount`. Thinking tokens are counted separately from `thoughtsTokenCount` and do not appear in the `stream-json` `result` event. The `json` format's `stats` object keeps a separate `thoughts` count per model (`packages/core/src/output/stream-json-formatter.ts`, `packages/core/src/telemetry/types.ts`, `packages/core/src/telemetry/uiTelemetry.ts`). Google bills thinking tokens as output, so cost needs both counts.
-- Sessions are saved in `~/.gemini/tmp/<project_hash>/chats/` (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/cli/session-management.md).
-
-**Approval modes and folder trust**
-- `--approval-mode` takes `default`, `auto_edit`, `yolo` or `plan`. `--yolo/-y` is deprecated, and the CLI rejects `--yolo` together with `--approval-mode`. `yolo` can only be set on the command line, not through `general.defaultApprovalMode` (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/cli/cli-reference.md, `packages/cli/src/config/config.ts`).
-- In headless mode, any `ask_user` decision becomes `deny`. Without yolo, shell and write calls are refused (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/reference/policy-engine.md).
-- If the folder is not trusted, the CLI forces the approval mode back to `default`. In headless mode it can also exit with `FatalUntrustedWorkspaceError` (code 55). `--skip-trust` or `GEMINI_CLI_TRUST_WORKSPACE=true` trusts the folder for one session (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/cli/trusted-folders.md).
-
-**Built-in sandbox**
-- The sandbox is off by default. `--sandbox/-s` defaults to `false`, and `tools.sandbox` and `security.toolSandboxing` are unset or `false` by default (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/reference/configuration.md).
-- When enabled, the sandbox options are macOS Seatbelt, Docker or Podman, gVisor (`runsc`), LXC and a Windows native sandbox (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/cli/sandbox.md, `packages/cli/src/config/sandboxConfig.ts`).
-- `GEMINI_SANDBOX` overrides the setting, and `false` or `0` turns it off. If the `SANDBOX` variable is set, the CLI assumes it already runs inside a sandbox and starts none (`packages/cli/src/config/sandboxConfig.ts`).
-- With no CLI sandbox inside our container, Blender sees the GPU directly.
-
-**Viewing a rendered PNG**
-- `read_file` reads an image as base64 `inlineData` with its MIME type. The file limit is 20 MB, and the CLI does not downscale images (`packages/core/src/utils/fileUtils.ts`, `packages/core/src/utils/constants.ts`).
-- `read_many_files` includes an image only when the pattern names the file or its extension (`packages/core/src/tools/read-many-files.ts`).
-- How the image reaches the model depends on `supportsMultimodalFunctionResponse()`. By default, this function returns true only for names that start with `gemini-3-`. For `gemini-4-argon`, the image is therefore sent as a separate `inlineData` part next to the `functionResponse` and not inside it (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/utils/generateContentResponseUtilities.ts).
-- Issue #29589 (open) reports that on Vertex AI, `gemini-3.8-flash` rejected that separate-part shape with HTTP 400 "Requests ending with a model turn are not supported". With the same shape, `gemini-3.5-flash` answered with text unrelated to the image (https://github.com/google-gemini/gemini-cli/issues/29589). v0.64.0 includes `ensureTerminalUserTurn()` from PR #29612 (merged 2026-10-07), which targets that 400 error (https://github.com/google-gemini/gemini-cli/pull/29612, `packages/core/src/core/geminiChat.ts`). In our pilot, Argon read three PNGs sent in the separate-part shape correctly. Each image result also triggered a `countTokens` call that returned 400. This is harmless: the CLI then estimates 3,000 tokens per image, which feeds only its pre-send overflow check.
-- Alternative path: set `experimental.dynamicModelConfiguration: true` and add a `modelConfigs.modelDefinitions["gemini-4-argon"]` entry with `features.multimodalToolUse: true`. User entries are merged into the built-in table (`packages/core/src/config/config.ts`, lines 1160 to 1190). The image then goes inside `functionResponse.parts`. Up to v0.63.0, `stripToolCallIdPrefixes()` rebuilt each function response from `name`, `response` and `id` only, which deleted those parts. At v0.64.0 the function spreads all fields (`packages/core/src/core/geminiChat.ts`, around line 1964). The dynamic flag also changes how other model checks work, because they then read the model table. This path is untested for Argon (unconfirmed).
-- A `BeforeModel` hook cannot see the thinking level, because its `llm_request.config` carries only `temperature`, `maxOutputTokens`, `topP` and `topK` (`packages/core/src/hooks/hookTranslator.ts`).
-
-**Tool output limits**
-- `tools.truncateToolOutputThreshold` defaults to 40,000 characters, and 0 or a negative value turns truncation off. Truncated output keeps the first 20% and the last 80% of the allowed characters. The full output goes to a file under `tool-outputs/`, and the model gets that path (`docs/reference/configuration.md`, `packages/core/src/utils/fileUtils.ts`).
-- `read_file` shows at most 2,000 lines and 2,000 characters per line. Text tool output is also capped at 64 KB, even with truncation off (`packages/core/src/utils/constants.ts`, `packages/core/src/scheduler/tool-executor.ts`).
-- `tools.shell.inactivityTimeout` kills a shell command after 300 s without output. A long Blender job should print progress or run with `is_background` (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/tools/shell.md).
-
-**Context file**
-- The default name is `GEMINI.md`. `context.fileName` takes one name or a list. The CLI loads the global file `~/.gemini/GEMINI.md`, then files in the workspace and its parent folders, and then files found just in time when a tool touches a folder (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/cli/gemini-md.md).
-- `context.memoryBoundaryMarkers` defaults to `[".git"]`, and an empty list turns off the parent search. `context.includeDirectoryTree` defaults to `true` and adds the folder tree to the first request (`docs/reference/configuration.md`).
-- `GEMINI_SYSTEM_MD` replaces the whole built-in system prompt (`docs/reference/configuration.md`).
-
-**Settings and the per-session config folder**
-- The settings layers are system defaults, then `~/.gemini/settings.json`, then `.gemini/settings.json` in the project, then `/etc/gemini-cli/settings.json`, then environment variables, then flags. String values can use `$VAR` (`docs/reference/configuration.md`).
-- `GEMINI_CLI_HOME` replaces the home folder for all user-level state. With `GEMINI_CLI_HOME=/session/home`, the CLI uses `/session/home/.gemini/settings.json`, `/session/home/.gemini/policies/` and `/session/home/.gemini/tmp/` (`packages/core/src/utils/paths.ts`, `packages/core/src/config/storage.ts`).
-- The planned `/session/home/.gemini/settings.json` follows. Every key is in the v0.64.0 configuration reference. The version we ran had no hooks and added `"tools": { "shell": { "inactivityTimeout": 600 } }` and `"security": { "auth": { "selectedType": "gemini-api-key" } }`.
-
-```json
-{
-  "model": { "name": "gemini-4-argon", "disableLoopDetection": true },
-  "modelConfigs": {
-    "customAliases": {
-      "gemini-4-argon": {
-        "extends": "chat-base",
-        "modelConfig": {
-          "model": "gemini-4-argon",
-          "generateContentConfig": { "thinkingConfig": { "thinkingLevel": "HIGH" } }
-        }
-      },
-      "chat-compression-default": {
-        "extends": "base",
-        "modelConfig": { "model": "gemini-4-argon" }
-      }
-    }
-  },
-  "context": { "fileName": "AGENTS.md", "memoryBoundaryMarkers": [] },
-  "experimental": { "enableAgents": false },
-  "skills": { "enabled": false },
-  "security": { "environmentVariableRedaction": { "enabled": true } },
-  "privacy": { "usageStatisticsEnabled": false },
-  "general": {
-    "enableAutoUpdate": false,
-    "enableAutoUpdateNotification": false,
-    "checkpointing": { "enabled": false }
-  },
-  "hooks": {
-    "BeforeTool": [
-      { "matcher": "run_shell_command|write_file|replace",
-        "hooks": [ { "type": "command", "command": "/opt/gator/hooks/guard_export", "timeout": 5000 } ] }
-    ],
-    "AfterTool": [
-      { "matcher": "read_file|read_many_files",
-        "hooks": [ { "type": "command", "command": "/opt/gator/hooks/log_view", "timeout": 5000 } ] }
-    ]
-  }
-}
-```
-
-| Need | Key or mechanism | Default |
-|---|---|---|
-| Model | `model.name`, `GEMINI_MODEL` or `-m` | `auto` |
-| Thinking level | `thinkingConfig.thinkingLevel` inside `modelConfigs.customAliases` | none for unknown models |
-| Remove web search and web fetch | A policy `deny` rule on `google_web_search` and `web_fetch` (policy file below). A `deny` rule without an argument pattern removes the tool from the model's tool list. The policy docs call `tools.exclude` deprecated. `tools.core` is an allowlist. | both tools on |
-| Remove subagents | `experimental.enableAgents: false` | `true` |
-| Telemetry | `telemetry.enabled`, `target`, `outfile` and `logPrompts`, or `GEMINI_TELEMETRY_*` | off |
-| Usage statistics sent to Google | `privacy.usageStatisticsEnabled` | `true` |
-| Checkpointing | `general.checkpointing.enabled`. It uses a shadow Git repository in `~/.gemini/history/`. | `false` |
-| Request retries | `general.maxAttempts`, at most 10 | 10 |
-| Loop detection | `model.disableLoopDetection`. The tool-call threshold in the detector is 5 repeated identical calls. | on |
-| Context compression | `model.compressionThreshold` | 0.5 of the window |
-| Secrets in the shell environment | `security.environmentVariableRedaction.enabled` removes variables whose names match KEY, TOKEN, SECRET and similar patterns from the shell environment | `false` |
-
-Sources: https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/reference/configuration.md, https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/reference/policy-engine.md, https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/cli/telemetry.md, https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/cli/checkpointing.md, https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/services/environmentSanitization.ts and `packages/core/src/services/loopDetectionService.ts`.
-
-**Policy file and hooks**
-- A TOML file in `$GEMINI_CLI_HOME/.gemini/policies/` is in the user tier. The user tier always beats the default tier that holds the yolo allow-all rule (priority 998). A `deny` rule with a `denyMessage` returns that message to the model. `commandRegex` is tested against the JSON-encoded `{"command":"...`, so a pattern that matches anywhere must start with `.*`, and a newline is the two characters `\n` (a newline before `px = ...` reads as `npx`) (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/reference/policy-engine.md, https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/policy/policies/yolo.toml).
-
-```toml
-[[rule]]
-toolName = ["google_web_search", "web_fetch"]
-decision = "deny"
-priority = 900
-
-[[rule]]
-toolName = "run_shell_command"
-commandRegex = '.*export_scene\.gltf'
-decision = "deny"
-priority = 900
-denyMessage = "Inline GLB export is not allowed. Use export_glb."
-
-[[rule]]
-toolName = ["write_file", "replace"]
-argsPattern = 'export_scene\.gltf'
-decision = "deny"
-priority = 900
-denyMessage = "Inline GLB export is not allowed. Use export_glb."
-```
-
-- Policy files in the project folder have no effect (issue #18186, https://github.com/google-gemini/gemini-cli/issues/18186).
-- A `BeforeTool` hook gets `tool_name` and `tool_input` as JSON on stdin. Exit code 2 blocks the call and sends stderr to the model as the reason, and the turn continues. Hooks run with a sanitized environment and a 60 s default timeout (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/hooks/reference.md, https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/hooks/index.md).
-- `guard_export` repeats the policy's export block as a `BeforeTool` hook. `log_view` is an `AfterTool` hook that logs `read_file` calls of PNGs to `work/.gator/inspected.jsonl`. The log only records evidence and blocks nothing (our design).
-- The policy rules and hooks are guardrails. A command that builds the operator name at run time would pass both.
-
-**API key and environment variables**
-- `GEMINI_API_KEY` is the key for the Gemini API. In headless mode the CLI uses a cached credential or the key from the environment (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/get-started/authentication.mdx).
-- `GOOGLE_GEMINI_BASE_URL` changes the API base URL. It must use HTTPS unless it points to localhost (`docs/reference/configuration.md`). When it is set, headless auth switches to the `gateway` type. That type still sends `GEMINI_API_KEY` when it is set, and an empty key otherwise (`packages/core/src/core/contentGenerator.ts`). In our runs, headless sessions in that mode exited 41 with "Invalid auth method selected". Setting `security.auth.selectedType` to `gemini-api-key` fixed this, and requests still went to `GOOGLE_GEMINI_BASE_URL`.
-- The default API host is `generativelanguage.googleapis.com` (https://github.com/googleapis/js-genai/blob/v1.30.0/src/_api_client.ts).
-- The CLI loads the first `.env` file it finds in the working folder, then in parent folders up to a `.git` folder or the home folder, then in the home folder. `advanced.ignoreLocalEnv: true` ignores project `.env` files (`docs/reference/configuration.md`).
-- The shell tool sets `GEMINI_CLI=1` in each command's environment (https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/tools/shell.md).
-
-**Exit codes**
-
-| Code | Meaning |
-|---|---|
-| 0 | Success |
-| 1 | General error or API failure |
-| 41 | Auth error |
-| 42 | Input error, for example no prompt |
-| 44 | Sandbox error |
-| 52 | Configuration error |
-| 53 | `model.maxSessionTurns` exceeded |
-| 54 | Tool execution error |
-| 55 | Untrusted workspace |
-| 130 | Cancelled, for example by SIGINT |
-
-Sources: https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/cli/headless.md and https://github.com/google-gemini/gemini-cli/blob/v0.64.0/packages/core/src/utils/errors.ts.
-
-**Known problems in headless runs**
-- Header timeout: the CLI retries when the 60 s wait for response headers runs out. No setting changes this wait. Only a server-side experiment flag can (`getRequestTimeoutMs()` in `packages/core/src/config/config.ts`). Issue #29693 reports that long-thinking requests at `HIGH` were dropped after 60 s and replayed from scratch. This was measured on Vertex AI (https://github.com/google-gemini/gemini-cli/issues/29693, `packages/core/src/utils/fetch.ts`). Each replay uses up part of the 600 s budget. In our pilot with an API key and Argon, the CLI streamed thoughts, the first byte came after 4 to 25 s, and no request was replayed.
-- Helper models: some internal calls use fixed models. For an unknown chat model, context compression uses `chat-compression-default`, which points to `gemini-3-pro-preview`. Loop detection uses `gemini-3-flash-preview`, and its second check uses `gemini-3-pro-preview`. The edit fixer, next-speaker check and web-fetch fallback also use `gemini-3-flash-preview` (`packages/core/src/context/chatCompressionService.ts`, `defaultModelConfigs.ts`). The models page lists `gemini-3-pro-preview` as shut down and still lists `gemini-3-flash-preview` (https://ai.google.dev/gemini-api/docs/models). The settings above turn off loop detection and point compression at Argon.
-- Empty replies: open issue #28784 reports "The model returned an empty response with no text or thoughts" (https://github.com/google-gemini/gemini-cli/issues/28784).
-- Telemetry file: the local telemetry outfile writes `[Circular]` for some metric fields (open issue #29406, https://github.com/google-gemini/gemini-cli/issues/29406). The `result` event and the chat file are safer token sources.
-- Retries: each retry counts against the budget.
-- Untrusted output: the CLI marks every shell output as untrusted. In headless mode it denies a later shell command that contains an absolute path, a `./` or `../` path, or a URL found in earlier output, with the message "Tool execution denied by policy." and no reason (`hasTaintedOrBuildFileRisk` in `tools/shell.ts`, checked in `scheduler.ts`). No setting turns it off. Blender prints `Read blend: "/work/candidate.blend"`, so a second command with that absolute path is denied, while `blender -b candidate.blend ...` runs. `GEMINI_DEBUG_LOG_FILE` shows the reason.
-
-### 3.3 Alternatives
-
-**Antigravity CLI**
-- The repository (https://github.com/google-antigravity/antigravity-cli) holds only a README, a changelog and examples. It has no license file and no source code. The latest release is 1.3.4, from 2026-10-13. Installation runs a remote shell script, and the install docs show no way to pin a version.
-- Argon is listed on the Google AI Ultra and Enterprise plans only. It is in the Antigravity app, the Antigravity CLI and the IDE extensions, but not in the Antigravity IDE. The model picker offers Low, Medium and High for Argon (https://antigravity.google/docs/models).
-- Headless mode supports `-p`, `--output-format json|stream-json`, `--model`, `--effort low|medium|high`, `--dangerously-skip-permissions` and `--print-timeout` (default 5 minutes). Without permissions, shell commands are soft-denied, and the exit code is still 0. An unknown `--model` exits with an error. The example `agy models` output lists `gemini-4-argon-high` and `gemini-4-argon-medium`, without saying which sign-in path it came from (https://antigravity.google/docs/cli/headless). Since 1.2.10, a run that streams part of a response and then fails on a model or agent error exits with code 3 (https://github.com/google-antigravity/antigravity-cli/blob/main/CHANGELOG.md).
-- API-key use needs `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json` plus `GEMINI_API_KEY` (https://antigravity.google/docs/cli/install). The changelog names models added to the API-key catalog, such as Gemini 3.8 Flash. Whether `gemini-4-argon` is in that catalog is unconfirmed.
-- It is the Google harness that the model card names, so it fits the model better on paper. Its prompts and tools cannot be read, and the closed source, plan-gated access and unconfirmed API-key support make runs hard to reproduce and audit.
-
-**Hosted Antigravity agent**
-- The Gemini API offers a managed Antigravity agent (`antigravity-preview-09-2026`) that accepts `agent_config.model: "gemini-4-argon"`. It runs in a Google-hosted Linux sandbox, so it cannot use our L40S box for Blender except through custom functions (https://ai.google.dev/gemini-api/docs/antigravity-agent, https://ai.google.dev/gemini-api/docs/latest-model).
-
-**Google ADK**
-- adk-python v2.12.0 was released on 2026-10-13. It needs Python 3.11 or later and `google-genai>=2.30,<3` (https://github.com/google/adk-python/releases/tag/v2.12.0, `pyproject.toml`).
-- ADK is a framework for building agents, not a ready coding agent. We would write the system prompt and choose the tools ourselves, so it offers no fidelity gain over a custom loop.
-- `ExecuteBashTool` asks for user confirmation on every call. Its default timeout is 30 s. It can filter commands by prefix, and the default allows all commands (https://github.com/google/adk-python/blob/v2.12.0/src/google/adk/tools/bash_tool.py). A headless run would have to answer every confirmation, and the timeout must be raised for Blender.
-- The `read_file` tool in `EnvironmentToolset` returns text only. Images reach the model through `load_artifacts`, which adds the artifact to the next model request but not to the session (`src/google/adk/tools/environment/_read_file_tool.py`, `src/google/adk/tools/load_artifacts_tool.py`). `before_tool_callback` can skip a tool call by returning a response, and `after_tool_callback` can replace a tool result (`src/google/adk/agents/llm_agent.py` at v2.12.0).
-
-**Custom loop on the Gemini API**
-- The `shell` tool has our own timeout and output limit, and `view_image` returns the PNG as image data. The loop runs on `google-genai` 2.30.x. Versions 2.30.0 and 2.30.1 were both released on 2026-10-13, and 2.30.0 raised the default HTTP timeouts (https://github.com/googleapis/python-genai/releases/tag/v2.30.0).
-- The Interactions API documents image blocks inside `function_result` "for Gemini 3 series models". The page does not mention Argon (https://ai.google.dev/gemini-api/docs/function-calling). If that shape fails for Argon, the loop can add the image as a plain user part. That shape is also unconfirmed.
-- Google's Argon migration guide recommends `previous_interaction_id` for function-calling conversations, which leaves thought signatures to the server (https://ai.google.dev/gemini-api/docs/latest-model).
-- We would control the thinking level, timeouts, retries, token logs and the image path. The cost is that the harness, its system prompt and its tool descriptions become ours. This departs from the paper, which used the vendor's agent CLI.
-
-### 3.4 Blender
+### 3.1 Blender
 
 **Version and invocation**
 - The Blender 5.2.2 Linux x64 tarball needs glibc 2.28 or newer (https://www.blender.org/download/). Blender 5.3 is in beta until Nov 4, 2026, and it makes Vulkan the default GPU backend on Linux (https://developer.blender.org/docs/release_notes/5.3/). The study stays on 5.2.2 for every run.
 - The only Linux wheel of `bpy` 5.2.2 is `cp313 manylinux_2_28_x86_64` (https://pypi.org/project/bpy/). The `bpy` module behaves like `blender --background --factory-startup`. It does not accept command-line arguments such as `--cycles-device` and `--threads`. It loads the default scene with a cube, so scripts call `read_factory_settings(use_empty=True)`. Other Python modules can use the GPU in a way that blocks Cycles. The module writes no crash log, cannot be reloaded and edits one .blend at a time (https://docs.blender.org/api/current/info_advanced_blender_as_bpy.html).
 - The agent and the helpers therefore use the full Blender binary (our design). The agent runs `blender -b candidate.blend --python-exit-code 1 --python edit.py` (the exit-code flag must come first, or a failing script exits 0), and each script saves the packed .blend. The .blend file then holds all state, which keeps checkpoints simple.
 - Useful command-line flags are `-b`, `-P/--python`, `--python-expr`, `--python-exit-code`, `-E/--engine`, `-f`, `--factory-startup` and `--gpu-backend {vulkan,metal,opengl}`. After `--`, the flag `--cycles-device {CPU,CUDA,OPTIX,HIP,ONEAPI,METAL}` selects the Cycles device, and `+CPU` adds the CPU (https://docs.blender.org/manual/en/latest/advanced/command_line/arguments.html).
-- Blender startup probably costs a few seconds per call (unconfirmed for 5.2 on our machine). If many small scripts make this cost matter, a persistent Blender worker per GPU would help, like the bpy exec socket of BlenderMCP (https://github.com/ahujasid/blender-mcp) or the per-GPU `BlenderServer` of SceneSmith (https://github.com/nepfaff/scenesmith). We do not depend on BlenderMCP itself, because its `generate_3d`, `search_assets` and `import_asset` tools would break Prompt 2's rule against external assets.
+- On ICE, the Blender run of the part split took 1.0 s, and the Apptainer start brought the step to 10 s (build plan note 11). If many small scripts make this cost matter, a persistent Blender worker per GPU would help, like the bpy exec socket of BlenderMCP (https://github.com/ahujasid/blender-mcp) or the per-GPU `BlenderServer` of SceneSmith (https://github.com/nepfaff/scenesmith). We do not depend on BlenderMCP itself, because its `generate_3d`, `search_assets` and `import_asset` tools would break Prompt 2's rule against external assets.
 
 **glTF import, export and the axis mapping**
 - The Blender 5.2 importer is `bpy.ops.import_scene.gltf(filepath=..., import_pack_images=True, merge_vertices=False, import_shading='NORMALS', guess_original_bind_pose=True, import_scene_as_collection=True, import_merge_material_slots=True, ...)` (https://docs.blender.org/api/current/bpy.ops.import_scene.html).
@@ -953,93 +566,18 @@ Sources: https://github.com/google-gemini/gemini-cli/blob/v0.64.0/docs/cli/headl
 - Because `u` scales positions on import, the scene keeps `scene.unit_settings.scale_length = 1.0`. Nobody exports with `export_yup=False` or converts the cameras a second time. A double or missing axis conversion makes the candidate bounding box equal the original box rotated 90 degrees about X. The reimport check in `export_glb` looks for this signature.
 - Prompt 2 asks the agent to apply the axis conversion exactly once. With the stock importer, this means exporting with `export_yup=True` and adding no manual rotation.
 
-**Headless rendering and OptiX in Docker**
-- Cycles on the GPU (CUDA or OptiX) needs no display and no OpenGL, so it is the safest headless renderer for review images. `NVIDIA_DRIVER_CAPABILITIES=compute` is required for CUDA and OpenCL, and `graphics` is required for OpenGL, EGL and Vulkan. The default is `utility,compute` (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html). Cycles OptiX needs compute capability 5.0 or higher and driver 535 or newer (https://docs.blender.org/manual/en/4.5/render/cycles/gpu_rendering.html).
-- `libnvidia-container` lists `libnvoptix.so` and `libnvidia-rtcore.so` under `graphics_libs` and not under `compute_libs` (https://github.com/NVIDIA/libnvidia-container/blob/master/src/nvc_info.c). With the default `utility,compute`, the OptiX runtime is not mounted. OptiX in Docker therefore needs `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics` or `all`. The CUDA device works with `compute` alone. Apptainer `--nv` binds the OptiX libraries by default through `etc/nvliblist.conf`.
-- EEVEE and Workbench need a GPU context. Since August 2022, Blender on Linux has a headless EGL backend, which falls back to `EGL_MESA_platform_surfaceless` when other backends fail in background mode (https://lists.blender.org/pipermail/bf-blender-cvs/2022-August/176810.html). Whether NVIDIA's EGL works this way inside Docker or Apptainer is unconfirmed. Docker needs `graphics` in the capabilities, and Apptainer needs `libEGL_nvidia` in `nvliblist`. A smoke test is `blender -b -E BLENDER_EEVEE -f 1`, followed by a check that the frame is not black. If Workbench works, it is a fast option for clay views.
-- All reviews render with Cycles and OptiX, a fixed seed, 32 to 64 samples with denoising, and 512 to 768 px per view (our design). The render times are unconfirmed and need measurement.
-- On the command line, `-- --cycles-device OPTIX` is confirmed. Inside a script, the usual code sets `compute_device_type = 'OPTIX'` on `bpy.context.preferences.addons['cycles'].preferences`, calls `get_devices()`, sets `use = True` on each device, and sets `scene.cycles.device = 'GPU'`. This code is unconfirmed.
+**Headless rendering**
+- Cycles with OptiX needs no display, and `apptainer --nv` binds the OptiX libraries through `nvliblist.conf`. `render_common.py` selects the device in the script.
 
 **Matched cameras, lighting and clay renders**
-- For an OpenCV world-to-camera matrix `w2c`, the Blender camera gets `cam.matrix_world = inv(w2c) @ diag(1, -1, -1, 1)`. OpenCV cameras look along +Z with +Y down, and Blender cameras look along -Z with +Y up. Flipping the camera's Y and Z axes maps one to the other. This standard derivation is unconfirmed until we test it on one view against a mask.
+- For an OpenCV world-to-camera matrix `w2c`, the Blender camera gets `cam.matrix_world = inv(w2c) @ diag(1, -1, -1, 1)`. OpenCV cameras look along +Z with +Y down, and Blender cameras look along -Z with +Y up. Flipping the camera's Y and Z axes maps one to the other. `render_common.py` uses this mapping, and the review's mask IoU on the teddy (0.87) matched the placement's (0.865) (build plan note 5).
 - For the intrinsics, BlenderProc's `set_intrinsics_from_K_matrix` computes `pixel_aspect` from fx/fy, `f_mm = fx * sensor_mm / view_fac_px`, `shift_x = (cx - (W - 1)/2) / -view_fac_px` and `shift_y = (cy - (H - 1)/2) / view_fac_px * pixel_aspect_ratio` (https://raw.githubusercontent.com/DLR-RM/BlenderProc/main/blenderproc/python/camera/CameraUtility.py, lines 245 to 295). The `(W - 1)/2` term assumes integer pixel centers, so the K convention must be checked. The render resolution equals the input image size at 100 percent, so overlays line up pixel for pixel with the photos and the masks.
 - Matched lighting uses one fixed world light, a fixed exposure and the `Standard` view transform (our design). The original and the candidate render with the same settings in the same Blender process. The 5.2 default view transform is probably AgX (unconfirmed), so the helper sets the transform explicitly.
 - Clay renders use `view_layer.material_override` with an opaque gray Principled BSDF (alpha 1). Alpha-painted holes then render as solid surface, and only real geometric gaps stay open. Whether `material_override` keeps this name in 5.2 is unconfirmed. The fallback is to assign a temporary clay material to every mesh slot.
 
-### 3.5 Controller and helper design (our design)
+## 4. SAM 3, datasets, baselines and metrics
 
-**Work folder and container layout**
-
-```
-host (ICE node)
-  controller.py          one session per object, owns clocks, logs, validation, publishing
-  <root>/control/        events.jsonl from the host-side tool server; never mounted
-  per object: Apptainer container (--containall, --nv); its network is not limited
-    /work            rw  the only agent-writable folder and the agent CLI's working directory
-      AGENTS.md          helper syntax and folder layout only
-      run_budget.json    written by the controller and export_glb
-      input/             images/, masks/, cameras.json, depth/, manifest.json
-      original/          original.glb, previews/*.png   (refinement only)
-      candidate.blend    built by the controller from original.glb (refinement only)
-      exports/ reviews/ checkpoints/
-    /opt/gator/bin   ro  export_glb, review, checkpoint, finish (on PATH)
-    /session         rw  codex_home/ (CODEX_HOME), prompt.txt, codex.jsonl
-```
-
-- `cameras.json` stores, for each view, the OpenCV world-to-camera matrix, K, width and height. Depth files carry metadata that says whether depth is optical-axis z or ray distance, the units and the confidence.
-- The agent gets the GLB, the photos, the masks, the cameras and depth, and Blender. It never gets reference meshes, held-out views or scores.
-
-**The deadline**
-- The controller writes `run_budget.json` just before the `codex` process starts, and the clock starts with that process. Container startup happens before that. The fields are `budget_s`, `started_at`, `deadline`, `excluded_s`, `exports[]` and `export_timeout_s`. The deadline is stored in Unix seconds and ISO time, so the agent can compare it with `date +%s`. Writes are atomic (a temp file, then `os.replace`).
-- The controller keeps its own copy of the deadline: `t0 + budget_s + sum(export durations, each capped at export_timeout_s)`. It reads export events from `control/events.jsonl`, which the host-side tool server writes and the container cannot reach, and it does not trust edits to `run_budget.json`, which is only a view for the agent. A watchdog checks the clock every 0.5 s. While an `export_started` event has no matching `export_done`, the watchdog pauses, up to the export timeout.
-- At the deadline the controller sends SIGINT to the container's process group and SIGKILL if it is still running a few seconds later, which also stops background Blender processes. When `finish.json` appears, the controller waits about 3 s for the tool result to return and then ends the session.
-- If the `codex` process exits early without `finish`, the controller does not restart it and applies the fallback order. Prompt 1 treats the deadline as a ceiling, so an early exit is allowed.
-
-**Helpers**
-- `export_glb` reads `candidate.blend` in a fresh `blender -b` process and exports once with `export_format='GLB'`, `export_yup=True`, `export_apply=True`, `export_materials='EXPORT'`, `export_image_format='AUTO'`, `export_cameras=False` and `export_lights=False`. It exports only the asset collection, so helper cameras and rigs stay out.
-- A second fresh process reimports the GLB with factory settings. The check compares the world-space bounding box with the .blend bounding box, which catches axis errors. It also counts meshes, materials, images and triangles. The helper prints a short receipt with the GLB path, its sha256, the counts and any warnings.
-- `export_glb` writes `export_started` and `export_done` events with the measured time, adds the time to `excluded_s`, and moves the deadline. The helper kills Blender after 180 s, and only time up to that timeout is excluded. If the `.blend` hash matches the last export, the helper returns the previous GLB and adds no excluded time.
-- `review` snapshots the candidate through `export_glb`, so serialization stays outside the budget. It loads the original and the candidate into one clean scene with the same importer and settings. The render time counts inside the budget.
-- In refinement mode, the review views are every input camera at input resolution, 6 orbit views framed on the union of both bounding boxes, and the optional detail rig. The rig has at most 4 close-up cameras given by a center, a radius and directions, and the original and the candidate share it. With `--clay`, the same views use the opaque gray override. In from-scratch mode, `review` renders every input camera with input, render and overlay panels, and it adds orbit and clay panels.
-- The comparison sheet has one row per view. The columns are the masked input photo crop, the original render, the candidate render, and the silhouette difference against the mask. Each sheet stays at or below 2,048 px on the long side. The helper also writes per-view PNGs, which the agent can open one at a time with `view_image`.
-- `review.json` holds the anchor evidence. It records the bounding box minimum, maximum, center and extent for both assets in the native frame, the center shift relative to the bounding-box diagonal, and the extent ratio per axis. It also records the silhouette IoU against the target mask for each input view, the depth residual on masked pixels when depth exists, and the import and material check results. Prompt 1 says that anchor statistics are evidence and not automatic proof of pose or quality, so the helper prints them without a pass or fail score.
-- The receipt ID combines the review number and the candidate's sha256. `review` prints the receipt ID and the paths of the sheet and `review.json`. A first speed target is 15 to 30 s per review on one L40S with Cycles OptiX (unconfirmed).
-- `checkpoint` checks that the receipt exists and that the GLB hash still matches, and it copies the GLB to `checkpoints/` as a read-only file. `finish` takes a review receipt, a verdict, one reason and up to three limitations, and it writes `finish.json`. It rejects a fourth limitation or an unknown verdict with a clear error. Prompt 2 uses the verdicts `reconstruction_complete` and `needs_review`. For refinement the paper names only `needs_review`, so we add `complete` and `unchanged`.
-
-**Validation, fallback and publishing**
-- The selected GLB must parse as binary glTF 2.0, reimport in a fresh Blender process with at least one mesh, have finite vertices, and have a material on every primitive. Extra checks are embedded textures and a triangle cap such as 2M. The Khronos glTF validator is a reasonable extra tool (unconfirmed choice).
-- Some checks are logged but never gate the result. These are the bounding-box center shift and the extent ratio against the original, the 90-degree X rotation signature of a wrong axis conversion, and the mask IoU under each input camera for from-scratch runs. Suggested flag thresholds are 0.25 of the original diagonal for the center shift and [0.5, 2] for each extent ratio. Prompt 1 allows new parts to expand the bounds, so these values only flag.
-- The `finish` GLB is used only if its hash matches and it is valid. A checkpoint fallback uses the newest valid checkpoint and is labeled `needs_review`. An export fallback uses the newest valid export and is labeled `needs_review` and `uninspected`. If no valid GLB exists, refinement returns the unchanged original with a fallback label, and a from-scratch run records the object as invalid. The paper scores every delivered asset.
-- The controller publishes `results/<run_id>/<object_id>.glb` and `receipt.json`. The receipt holds the verdict, reason, limitations, fallback label, model, reasoning effort, Codex CLI version, Blender version, token usage (output and reasoning tokens), wall time, excluded export time, counts of reviews, checkpoints and exports, review render and queue times, API retry time and exit reason. The web app reads these receipts directly.
-
-**Parity notes**
-- MV-SAM3D gives different starting meshes from the paper's generator. Each agent change should therefore be compared against our own MV-SAM3D numbers without the agent, and not only against the paper's values. The `AGENTS.md` tool manual, the disabled tools and settings, and the container sandbox are not in the paper. They stay fixed across all runs, and the methods section lists them.
-- API queueing, retries and GPU contention all use up part of the 600 s. Each session logs model time, tool time, review render and queue time, and retry time. Review render time counts against the budget, so GPU sharing changes results. The number of sessions per GPU should rise only while the 95th-percentile review time stays within 20% of the single-session time. Safety stops count as interrupted sessions, and the study reports how many occurred.
-- Agent sessions need outbound HTTPS to the OpenAI API, which ICE compute nodes allow.
-
-## 4. Estimators, datasets, baselines and metrics
-
-### 4.1 Estimators
-
-#### Pi3X
-
-- Pi3X is the December 2025 upgrade of π³. It was released on Dec 28, 2025, in the π³ repository. GATOR cites the π³ paper, arXiv 2507.13347, because no separate Pi3X paper seems to exist (unconfirmed). The HF card is not gated. It lists Pi3X at about 1B parameters. No memory or speed figures are published for Pi3X.
-- The `forward()` function in `pi3/models/pi3x.py` returns `points` (B×N×H×W×3, world frame), `local_points` (B×N×H×W×3, camera frame), `rays`, `conf`, `camera_poses` (B×N×4×4 camera-to-world matrices in OpenCV convention) and `metric` (one per batch).
-- Depth is the z value of `local_points`, and there is no separate depth head. `conf` is the raw output of `conf_head`, with no sigmoid applied.
-- `metric` is an exponentiated scale factor from a learned metric token. It multiplies the points, the local points and the pose translations, so the output has approximately metric scale. No accuracy figures are published for it.
-- Pi3X accepts optional priors. Depth is B×N×H×W, with 0 for invalid pixels. Intrinsics are B×N×3×3, and rays can replace them. Poses are B×N×4×4 camera-to-world matrices, and they require rays and at least two valid frames. Priors work only with `use_multimodal=True` and `with_prior=True`. The code normalizes input depth by its mean before it injects the depth.
-- The docstrings disagree with the code in two places. The code converts rays to 2D as (x/z, y/z). The `mask_add_*` tensors have shape (B, N), not (B, N, N).
-- The example defaults are in `example_mm.py` and `pi3/utils/basic.py`. `PIXEL_LIMIT=255000`, and both sides must be multiples of 14, so a square image becomes 504×504. Inference runs under bf16 autocast. The confidence mask is `sigmoid(conf) > 0.1`, and an edge filter uses rtol 0.03. The intrinsics come from `recover_intrinsic_from_rays_d(force_center_principal_point=True)`.
-
-#### VGGT-Omega
-
-- VGGT-Omega (VGGT-Ω) is by Wang et al., arXiv 2605.15195, a CVPR 2026 Oral. HF access is gated, and an automated process reviews the requests. The license is the FAIR Noncommercial Research License v1.
-- The model has one dense depth head and one camera head. It outputs a camera encoding that converts to extrinsics and intrinsics, per-frame depth with confidence, and camera and register tokens. It has no point-map head, so point maps come from unprojecting the depth with the cameras.
-- The paper studies sizes from 200M to 10B parameters, but only 1B checkpoints are released. The README calls `vggt_omega_1b_512.pt` (May 2026) "recommended for in-the-wild applications, no benchmarking." The authors name `vggt_omega_1b_416_reproduce.pt` (Sep 8, 2026) the reference for benchmark comparisons. `vggt_omega_1b_256_text.pt` is the text-aligned checkpoint.
-- `reproduction.md` explains the 416 checkpoint. The authors noticed "a potential risk of data contamination" and retrained on data that they re-checked for overlap with the evaluation benchmarks. They describe the results as "broadly comparable." GATOR appeared on arXiv on Oct 8, 2026, one month after the 416 release, so its runs probably used `1b_512` (unconfirmed).
-- The default preprocessing is `mode="balanced"`. The README gives the peak memory on an A100 at 624×416 with the 1B-512 model. It is 6.02 GB for 1 frame, 6.67 GB for 10, 9.66 GB for 50, 13.37 GB for 100, 20.8 GB for 200 and 43.15 GB for 500.
-
-#### SAM 3
+### 4.1 SAM 3
 
 - SAM 3 accepts short noun phrases, image exemplars, points, boxes or masks as prompts. For images, it outputs instance masks, xyxy boxes, scores and a semantic map. For video, it also outputs object IDs per frame.
 - SAM 3.1 ("Object Multiplex", HF `facebook/sam3.1`, gated) speeds up multi-object video tracking. Its HF license tag shows only "other".
@@ -1052,14 +590,9 @@ host (ICE node)
 - With a text prompt alone, transformers skips the geometry encoder (`has_geometry_prompts` in `Sam3Model.forward`), so the prompt lacks the learned CLS token that Meta's code always appends through a dummy geometric prompt. Issue #49592 (opened 2026-10-14) reports this; the fix, PR #49614, is open and marked breaking. One padding box with label -10 runs the encoder: its mask hides the box, and the CLS token is appended (`modeling_sam3.py#L1301-L1306`, `#L2371-L2428`). On a tiny random model, moving the padding box changes no logit, while dropping the CLS token does. On real photos, the padding box brings the scores close to those of Meta's code (build plan note 3).
 - `transformers.image_utils.load_image` applies the EXIF rotation, and a numpy array passed to the processor is used as it is.
 
-#### VGGT (reference only)
-
-- GATOR does not use VGGT and cites it only in related work (p.3). ReconViaGen and RecGen3D use it internally. VGGT (arXiv 2503.11651, https://github.com/facebookresearch/vggt) outputs OpenCV cameras, depth, a point map and tracks in the first camera's frame. Its training targets are normalized by the average point distance, so the output is not metric.
-- HF `facebook/VGGT-1B` is CC BY-NC 4.0 and is not gated. HF `facebook/VGGT-1B-Commercial` requires an application form. The code license has allowed commercial use since July 2025.
-
 ### 4.2 Evaluation datasets
 
-| Benchmark | Source | License | Access | Files we need | Other files |
+| Benchmark | Source | License | Access | Main files | Other files |
 |---|---|---|---|---|---|
 | Toys4K | https://github.com/rehg-lab/lowshot-shapebias/tree/main/toys4k | none stated, per-asset attribution files | Google Form | `toys4k_blend_files.zip` (size not stated) | OBJ, point-cloud and sample-render zips |
 | LM-O | HF `bop-benchmark/lmo` | CC BY-SA 4.0 | open | `lmo_base.zip` 5.68 kB, `lmo_models.zip` 5.37 MB, `lmo_test_all.zip` 720 MB or `lmo_test_bop19.zip` 118 MB | `lmo_train.zip` 355 MB |
@@ -1069,15 +602,6 @@ host (ICE node)
 
 - Section 1.6 gives the target and view counts and how they were inferred.
 - The per-dataset recall counts in Table 6 add up to the Table 2 counts for every method (83, 112, 114, 120 and 129 of 131). This confirms the split of 8 + 68 + 55 targets. GATOR's 129/131 = 98.47% matches Table 2.
-- No benchmark data is used to choose models or settings. The dev data is a second set of Toys4K objects, a held-out S3 split and YCB-V.
-
-| Benchmark | Cameras and depth | Masks | Text prompt | Reference |
-|---|---|---|---|---|
-| Toys4K | Pi3X | rendered | category name | full mesh |
-| LM-O | sensor depth | dataset | "a 3D object" | CAD |
-| HB | sensor depth | dataset | "a 3D object" | CAD |
-| HANDAL | VGGT-Omega on all frames | dataset visible masks | category name | CAD |
-| ScanNet++ | VGGT-Omega on all frames | SAM 3 from annotations | annotation label | partial scan |
 
 #### Toys4K
 
@@ -1087,38 +611,23 @@ host (ICE node)
 - The TRELLIS v1 loader `dataset_toolkits/datasets/Toys4k.py` does no aesthetic filtering itself. It reads the CSV with SHA-256 checks and expects `toys4k_blend_files.zip` to be downloaded by hand. TRELLIS.2's `data_toolkit` lists Toys4k as a test set but has no `datasets/` module, so it must reuse this v1 module.
 - GATOR takes five objects per category. They were chosen before any method ran, "spanning the range of within-category geometric complexity" (p.23). The paper gives no selection rule.
 - GATOR renders four input views per object in Blender under studio lighting. The viewpoints are casual, with irregular spacing and varied elevation, field of view and roll. The six held-out evaluation views differ from all inputs (p.25).
-- Proposal for object selection: rank each category by a complexity score, which is the log face count plus the number of connected components. Take the objects at the 10, 30, 50, 70 and 90% quantiles.
-- Proposal for the input renders:
-  - Render at 1024² in Cycles with a transparent film. Composite onto white, and use the alpha as the mask. Light the scene with the TRELLIS v1 three-light rig (section 4.5). Seed each object with the sha256 of its asset.
-  - Sample the field of view from U[25°, 60°]. Set the distance to R / sin(FoV/2) × U[1.0, 1.5]. Sample the roll from N(0°, 7°), clipped to ±15°. Jitter the look-at point by N(0, 0.05·D).
-  - Sample the elevation of each view from U[−10°, 60°]. Start the azimuth at a random angle, and space the views by Dirichlet(2,2,2,2) × 360° gaps with a minimum gap of 25°.
-- Proposal for the six evaluation views: use fixed cameras at azimuth 30° + 60°k, with elevation alternating between 15° and 40°, and a 40° field of view. Reject any camera within 15° of an input view.
-- Existing render scripts are starting points:
-  - TRELLIS v1 `render_cond.py` uses Hammersley yaw and pitch, a field of view from 10° to 70°, a radius derived from the field of view, 1024 px and 24 views. TRELLIS.2 `render_cond.py` uses the same field-of-view range with `--cond_resolution 1024` and Cycles.
-  - The Toys4K renderer (`generate.py`, `data_generation_parameters.json`) uses one area light, a 50 mm lens on a 32 mm sensor (about 35.5° field of view), a distance of 2.2 and 300 px images.
 
 #### LM-O (Linemod-Occluded, BOP)
 
 - LM-O annotates eight objects (IDs 1, 5, 6, 8, 9, 10, 11 and 12) in test scene 2 (`000002`). The images are 640×480 (`bop_toolkit_lib/dataset_params.py`).
 - The `test_all` split has 1,214 images and 9,038 instances. The BOP19 subset has 200 images and 1,445 targets, with image IDs from 3 to 1212 (arXiv 2009.07378).
 - The BOP ground truth includes object models, 6D poses, modal masks and RGB-D. The models are scanned meshes with vertex color (unconfirmed). The LM-O test ground truth is public (unconfirmed).
-- Proposal for view selection:
-  - The candidate frames are those where the target has `visib_fract` ≥ 0.5 and is not truncated. If fewer than 8 frames remain, relax the threshold to 0.3. The ground-truth poses are used only to compute object-centric view directions.
-  - Selection s0 starts at the frame with the highest `visib_fract`. It adds frames by farthest-point sampling on view direction until it has 8. Selection s1 starts from a seeded random candidate at least 90° from the s0 start and follows the same rule.
-  - The 2-view, 4-view and 8-view sets are the first 2, 4 and 8 frames. Table 6 would use the first 4 frames of s0 (unconfirmed).
 - GATOR's LM-O camera poses come from "registration with depth and image correspondences" (p.27).
-- Proposal for the cameras: match features with SuperPoint and LightGlue, or with SIFT. Lift the matches with depth, solve RANSAC Kabsch, refine with colored ICP, and run pose-graph optimization into the frame of the first view. Check the result against the ground truth, but never feed the ground truth in.
 
 #### HB (HomebrewedDB, BOP)
 
 - HB has 33 objects in 13 scenes. Val and test both use scenes 1 to 13. The Primesense images are 640×480, and the Kinect 2 images are 1920×1080.
-- RecGen's evaluation uses the Kinect images. The paper does not say which sensor GATOR used, so we run both.
+- RecGen's evaluation uses the Kinect images. The paper does not say which sensor GATOR used.
 - Val has 4,420 images (13 scenes × 340 frames). These are turntable sequences with 2 × 170 frames at 30° and 45° elevation. Test has 13,000 handheld images and 67,542 instances (HB paper, arXiv 1904.03167, p.4). The BOP page says the ground truth is public "only for training and validation images, not for test images." So GATOR's 68 targets most likely come from val.
-- The count of 68 matches all object instances across the 13 scenes. The 67,542 test instances over 1,000 frames per scene give about 67.5 scene-object pairs (unconfirmed inference). After download, sum the unique `obj_id` values per scene in `scene_gt.json`. The total should be 68.
+- The count of 68 matches all object instances across the 13 scenes. The 67,542 test instances over 1,000 frames per scene give about 67.5 scene-object pairs (unconfirmed inference). The unique `obj_id` values per scene in `scene_gt.json`, summed, would confirm it.
 - Scenes 10 and 11 hold the same objects as scene 5, with colored light and painted textures (HB paper p.5 and p.7). So the 68 targets cover at most 33 unique models.
 - Val scene 1 has 3 objects (IDs 20, 28 and 33) in 340 frames. Its `scene_camera.json` holds only `cam_K` and `depth_scale`.
-- GATOR's HB cameras come from the calibration markers (p.27).
-- Proposal: apply the LM-O selection rule to the 340 val frames of each scene. Get the cameras by detecting the ArUco board, or compute T_cam_world = T_cam_obj · T_world_obj⁻¹ from any ground-truth object. The two methods are equivalent, because HB's ground truth was built from the markerboard trajectory (HB paper, section 3.5).
+- GATOR's HB cameras come from the calibration markers (p.27). HB's ground truth was built from the markerboard trajectory (HB paper, section 3.5), so T_cam_world = T_cam_obj · T_world_obj⁻¹ from any ground-truth object gives the same cameras.
 
 #### HANDAL
 
@@ -1126,22 +635,19 @@ host (ICE node)
 - Val is scenes 1 to 10, with 2,208 images. Test is scenes 11 to 71, with 13,261 images and 74,771 instances, which is about 5.6 objects per image. The images are 1920×1440. The ground truth is public for train and val, but not for test. The BOP version has no depth.
 - The original NVlabs release (https://github.com/NVlabs/HANDAL) has 212 objects in 17 categories. Its depth comes from NeRF (Instant-NGP), and its meshes are NeRF meshes, not CAD models. Its license is CC BY-NC-SA 4.0, and its test split has 51 objects, not 55.
 - So GATOR most likely used BOP-HANDAL val (an inference). The paper normalizes by a "CAD diameter" (p.25), its figures show only BOP categories, the project page shows four multi-object HANDAL scenes, and the BOP test ground truth is not public.
-- 55 targets over 10 scenes is 5.5 per scene, which is close to the test density of 5.6 per image. No public `scene_gt` for HANDAL val was found, so the per-scene counts are unconfirmed. After download, count the unique (scene, obj_id) pairs in the val `scene_gt.json`. If the count is not 55, keep the objects that have at least 4 frames at `visib_fract` ≥ τ.
-- Proposal: take candidate frames with `visib_fract` ≥ 0.6, and pick 4 by farthest-point sampling on object-centric view direction. Use `mask_visib` for the masks. Run VGGT-Omega once on all frames of each scene (about 220 frames), then register them to the ground-truth cameras with the camera-only similarity. If BOP gives no `cam_R_w2c`, derive the ground-truth cameras from the static ground-truth object poses.
+- 55 targets over 10 scenes is 5.5 per scene, which is close to the test density of 5.6 per image. No public `scene_gt` for HANDAL val was found, so the per-scene counts are unconfirmed. The unique (scene, obj_id) pairs in the val `scene_gt.json` would confirm them.
 
 #### ScanNet++
 
 - ScanNet++ v2 (Dec 2024) has 1,006 scenes. It includes laser scans, 33 MP DSLR images, iPhone RGB-D, and 360° panoramas for 956 scenes. The DSLR download is 2 MP fisheye (`OPENCV_FISHEYE`), and the iPhone frames are 1920×1440.
 - The ground truth includes laser point clouds, meshes, semantic and instance meshes, COLMAP poses, iPhone depth and anonymization masks. The per-object annotations are in `scans/segments_anno.json`.
-- The download sizes are about 1.5 TB for the default download, 371 GB for DSLR at 2 MP, 9 TB for DSLR with 33 MP, 132 GB for meshes and semantics, 720 GB for point clouds, and 319 GB for panocam (https://scannetpp.mlsg.cit.tum.de/scannetpp/documentation). Downloading only the selected scenes should be possible (unconfirmed).
+- The download sizes are about 1.5 TB for the default download, 371 GB for DSLR at 2 MP, 9 TB for DSLR with 33 MP, 132 GB for meshes and semantics, 720 GB for point clouds, and 319 GB for panocam (https://scannetpp.mlsg.cit.tum.de/scannetpp/documentation). Downloading single scenes should be possible (unconfirmed).
 - Access needs an account, an application, the signed Terms of Use and a personal token for the download script. The form needs handwritten signatures from both the requester and a PI or supervisor. Clause 1 of the terms allows "non-commercial research and educational purposes" and says "Commercial use is strictly prohibited." Clause 4 limits sharing to colleagues who also signed. Clause 7 also binds a for-profit employer.
 - The six DP-Recon scenes are `acd69a1746`, `07ff1c45bb`, `116456116b`, `1b75758486`, `8f82c394d6` and `9859de300f`. They are DP-Recon's scan1 to scan6, in that order (https://github.com/DP-Recon/DP-Recon/issues/9). PhyRecon uses seven scenes with a different numbering, `acd69a1746`, `67d702f2e8`, `49a82360aa`, `07ff1c45bb`, `daffc70503`, `116456116b` and `8d563fc2cc` (https://github.com/PhyRecon/PhyRecon/issues/4). Do not mix the two lists.
 - In GATOR, the six DP-Recon scenes hold 69 objects, and the other 43 scenes add 160 targets (p.7, p.23, p.29). GATOR uses 1 to 10 views per target, "chosen for target visibility and viewpoint diversity". Fig. 12 shows "all ten input views" of one scene (p.32).
 - DP-Recon (arXiv 2503.14830) uses 10 input views per scene and renders instance masks from the ground-truth mesh with the "official rendering engine". It trains at 384×384 (`scannetpp_grid.conf`). Its author says that the original indices of the sparse views are lost. ShapeR and JRM (arXiv 2603.25985) follow DP-Recon's six scenes, and neither publishes the scene IDs or the 69-object list.
 - DP-Recon's code is Apache-2.0 (https://github.com/DP-Recon/DP-Recon). Its preprocessed data is in https://drive.google.com/drive/folders/1VUo6egav6j4aBw_ADRFP4NEE8pgB4alq, which includes `scannetpp.zip` (517 MB). The script `eval/eval_object_recon.py` reads the per-object meshes from `data/scannetpp/GTmesh/scan{id}/obj_{id}.ply`. Counting those files should give the 69 objects (unconfirmed).
 - None of DP-Recon, PhyRecon, ShapeR and JRM says whether the views are DSLR or iPhone frames. PhyRecon describes ScanNet++ as having "higher-quality images and more accurate camera poses", which suggests DSLR (unconfirmed). To check, compare the aspect ratio and intrinsics of the processed images. A 3:2 ratio means DSLR, and a 4:3 ratio means iPhone.
-- Proposal for the six DP-Recon scenes: use DP-Recon's 10 processed frames, matched back to the raw frames. Each target uses the frames where it covers at least 1% of the pixels, measured with instance masks rendered by the ScanNet++ toolbox. SAM 3 is prompted with the box of the rendered instance mask.
-- Proposal for the 43 extra scenes: pick 10 frames per scene by greedy visibility coverage. Choose non-structural targets (not wall, floor, ceiling, door or window) that are visible in at least one frame, until there are 160.
 
 ### 4.3 Training data sources
 
@@ -1192,25 +698,24 @@ RecGen3D (arXiv 2604.01479) is not a baseline. GATOR cites it only in related wo
 
 - On Toys4K, every method gets the same four images and masks. GATOR, Pixal3D and GPT-6-Astra use the Pi3X cameras and depth. ReconViaGen uses its own geometry estimator, and TRELLIS.2 conditions on the images alone.
 
-| Baseline | How the paper ran it | Our path |
-|---|---|---|
-| TRELLIS.2 + MultiDiffusion | 4 views fused, Toys4K only | our port of TRELLIS v1 `run_multi_image(mode='multidiffusion')` (below) |
-| Pixal3D SV and MV | MV checkpoint with the shared cameras, no placement | `master` branch, needs a camera adapter (below) |
-| ReconViaGen | masked RGB with its own geometry estimator, no placement | `Stable-X/trellis-vggt-v0-2` |
-| MV-SAM3D | its depth estimator replaced by the shared pointmaps and cameras | section 2, with our own `da3_output.npz` (section 2.7, option A) |
-| RecGen | internal alignment, best two of four views | `TRI-ML/recgen` Docker image |
-| ShapeR | grayscale images, filtered points and a caption, untextured | `facebookresearch/ShapeR`, needs an input adapter |
-| SimFoundry | best single view, Hunyuan3D-2.1 plus FoundationPose | `NVlabs/SimFoundry`, that path only |
-| GPT-6-Astra from scratch | same agent setup, no starting mesh | our harness with Prompt 2 (section 3.5) |
+| Baseline | How the paper ran it |
+|---|---|
+| TRELLIS.2 + MultiDiffusion | 4 views fused, Toys4K only |
+| Pixal3D SV and MV | MV checkpoint with the shared cameras, no placement |
+| ReconViaGen | masked RGB with its own geometry estimator, no placement |
+| MV-SAM3D | its depth estimator replaced by the shared pointmaps and cameras |
+| RecGen | internal alignment, best two of four views |
+| ShapeR | grayscale images, filtered points and a caption, untextured |
+| SimFoundry | best single view, Hunyuan3D-2.1 plus FoundationPose |
+| GPT-6-Astra from scratch | same agent setup, no starting mesh |
 
 - **Pixal3D**
   - Pixal3D expects square images, one shared field of view, a centered principal point, cameras that look at the object center, and view 0 as a front view at (0, -d, 0) (section 5.2.2).
-  - Our camera adapter warps each photo with a homography to a virtual camera that looks at the anchor. It rotates the world so view 0 matches Pixal3D's front view, and it maps the output back (our design).
 - **TRELLIS.2 with MultiDiffusion**
   - The TRELLIS.2 default `pipeline.json` pulls HF `facebook/dinov3-vitl16-pretrain-lvd1689m` (gated, DINOv3 License) and HF `briaai/RMBG-2.0` (gated, CC BY-NC 4.0). Commercial use of RMBG-2.0 needs a BRIA agreement. So a TRELLIS.2-based path is not commercially clean, although the code is MIT.
   - TRELLIS v1 `run_multi_image` in `trellis/pipelines/trellis_image_to_3d.py` defaults to `stochastic` mode, which uses one image per step in round-robin order. The `multidiffusion` mode must be passed explicitly. In that mode, each step runs the model once per image and averages the predictions. CFG applies inside `cfg_interval` with one negative condition, so each step inside the interval runs N + 1 forward passes.
-  - We port this averaging (`inject_sampler_multi_image`) to the three TRELLIS.2 flows. In the arXiv HTML, a dagger on the TRELLIS.2 row of Table 1 marks MultiDiffusion. GATOR most likely did the same port (unconfirmed).
-  - MultiDiffusion is by Bar-Tal et al., ICML 2023, arXiv 2302.08113. Its code (https://github.com/omerbt/MultiDiffusion) targets Stable Diffusion 2 base through the diffusers `StableDiffusionPanoramaPipeline` and states no license. We need only the averaging rule.
+  - In the arXiv HTML, a dagger on the TRELLIS.2 row of Table 1 marks MultiDiffusion, so GATOR most likely ported this averaging (`inject_sampler_multi_image`) to the three TRELLIS.2 flows (unconfirmed).
+  - MultiDiffusion is by Bar-Tal et al., ICML 2023, arXiv 2302.08113. Its code (https://github.com/omerbt/MultiDiffusion) targets Stable Diffusion 2 base through the diffusers `StableDiffusionPanoramaPipeline` and states no license.
 - **ReconViaGen**
   - ReconViaGen uses TRELLIS v1 as the generator and a LoRA-fine-tuned VGGT as the reconstructor. The reconstruction features condition the generation. The method refines camera poses with VGGT, image matching and PnP-RANSAC.
   - It takes unposed multi-view images, and the demo removes the background with BiRefNet. It outputs a GLB mesh or 3D Gaussians. With 16 images, v0.2 needs under 18 GB without refinement and under 24 GB with refinement.
@@ -1230,7 +735,7 @@ RecGen3D (arXiv 2604.01479) is not a baseline. GATOR cites it only in related wo
 - **SimFoundry**
   - SimFoundry (NVIDIA and partners, v4 of 5 Aug 2026) turns a real video into a sim-ready digital twin plus "digital cousins". Its pipeline has 13 stages, from video processing to USD and OmniGibson export. The policy and data-generation code is "Coming Soon".
   - The pipeline uses SAM3, DINOv3, Depth Anything 3, Hunyuan3D-2, FoundationPose, RMBG-2.0 and Gemini through Vertex AI or the API. It needs about 250 GB of disk. The mesh stage (stage 7) needs about 29 GiB VRAM by default.
-  - The SimFoundry README names Hunyuan3D-2, so GATOR's use of 2.1 is a swap. A standalone script for this path would be our own variant.
+  - The SimFoundry README names Hunyuan3D-2, so GATOR's use of 2.1 is a swap.
   - Hunyuan3D-2.1 (HF `tencent/Hunyuan3D-2.1`, https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1) turns one image into a mesh with PBR texture. It needs 10 GB VRAM for shape, 21 GB for texture and 29 GB for both. Its license is the Tencent Hunyuan 3D 2.1 Community License. The license territory excludes the EU, the UK and South Korea. Products with more than 1M monthly active users on the release date (June 13, 2025) need a separate license.
   - FoundationPose (https://github.com/NVlabs/FoundationPose) estimates 6D pose from a CAD model or reference images, with RGB-D input. Its weights are on Google Drive. The NVIDIA Source Code License allows use for "research or evaluation purposes only".
 
@@ -1245,116 +750,45 @@ RecGen3D (arXiv 2604.01479) is not a baseline. GATOR cites it only in related wo
   - `recgen_eval/poseval6d/evaluation/evaluator.py` computes `addss = chamfer_dist_no_icp / diameter_cm` and `addss_10 = float(addss < 0.10)`. It also computes `addss_05`, `addss_02` and `chamfer_normalized_icp_with_scale`. The diameter is `gt_mesh_metadata['diameter']` in meters, multiplied by 100. The formula 0.5 × (mean + mean) / D equals GATOR's Eq. 7. A failed sample gets "Chamfer = 20 cm, recall 0".
 - ShapeR's `evaluation/eval.py` (https://github.com/facebookresearch/ShapeR/blob/main/evaluation/eval.py) is the closest match to GATOR's C.2.
   - It samples with trimesh `mesh.sample(n_points, return_index=True)`, with `n_points=100000` and face normals. It uses a cKDTree with unsquared distances and computes `chamfer = 0.5*(completeness+accuracy)`. NC uses `np.abs` of the dot product and averages the two directions with weights of 0.5 each.
-  - It rescales both meshes by 2 × max(bounds). We remove this scaling when we reuse the code.
-  - Its F-score uses absolute thresholds in its own coordinates. It reports the value at index 10 of `linspace(1/144, 2, 1000)`, which is about 0.027, and it does no ICP. We reuse its CD and NC logic and replace the F1 threshold with 0.01 D or 0.02 D.
+  - It rescales both meshes by 2 × max(bounds).
+  - Its F-score uses absolute thresholds in its own coordinates. It reports the value at index 10 of `linspace(1/144, 2, 1000)`, which is about 0.027, and it does no ICP.
 - SAM 3D (arXiv 2511.16624v2, App. D.3.2) defines ADD-S with the same formula as GATOR's Eq. 7 and Eq. 8. SAM 3D and TRELLIS.2 ship no evaluation code, and Pixal3D shows no evaluation scripts at the top level.
-- PyTorch3D's `knn_points` returns squared distances, so `chamfer_distance(norm=2)` gives squared L2. Its `iterative_closest_point` and `corresponding_points_alignment` (Umeyama) default to `estimate_scale=False`. Release 0.7.8 states PyTorch 2.1 to 2.4, which is below our torch 2.6.0 pin. Kaolin's `chamfer_distance` defaults to `squared=True` and adds the two direction means without halving. So we do not use PyTorch3D or Kaolin for CD.
-- trimesh `sample_surface` weights faces by area by default and takes a `seed` argument (https://trimesh.org/trimesh.sample.html). We fix the seed so that the results are deterministic. A scipy cKDTree is fast enough for 100k × 100k points.
+- PyTorch3D's `knn_points` returns squared distances, so `chamfer_distance(norm=2)` gives squared L2. Its `iterative_closest_point` and `corresponding_points_alignment` (Umeyama) default to `estimate_scale=False`. Release 0.7.8 states PyTorch 2.1 to 2.4. Kaolin's `chamfer_distance` defaults to `squared=True` and adds the two direction means without halving. So neither gives GATOR's CD as it is.
+- trimesh `sample_surface` weights faces by area by default and takes a `seed` argument (https://trimesh.org/trimesh.sample.html). A scipy cKDTree is fast enough for 100k × 100k points.
 
 #### Diameter D
 
 - The BOP `models_info.json` file holds the CAD diameter, which is "the largest distance between any pair of model vertices". The models are in mm. `calc_pts_diameter` in `bop_toolkit_lib/misc.py` computes it. RecGen reads the ground-truth diameters from files such as `HB/hb_models/models_eval/models_info.json`.
-- The farthest pair of a point set always lies on its convex hull. So for ScanNet++, we compute the exact maximum pairwise distance over all convex-hull vertices of the observed mesh.
-- Do not copy RecGen's `recgen_eval/diameter.py`. It computes the diameter of the predicted mesh, not the reference. It randomly subsamples 5,000 hull vertices, and it falls back to 10,000 random raw vertices if the hull fails. So its result is random and can underestimate the true diameter.
-- Toys4K's "robust surface extent" has no standard definition. The candidates are listed below.
-  - (a) The diagonal of the per-axis 1st to 99th percentile box of the reference's 100k surface samples.
-  - (b) The maximum pairwise distance (the convex-hull diameter) after dropping the 1% of samples farthest from the median. This matches the ScanNet++ definition.
-  - (c) D = 2 × the 99th percentile of ‖p − c‖, where c is the coordinate-wise median of the samples. This choice ignores rotation and outlier fragments.
-- Proposal: use (c) as the main definition and (b) as the alternative, and test how sensitive the scores are to the choice.
-
-#### Core metric code
-
-```python
-pa, fa = trimesh.sample.sample_surface(pred, 100000, seed=seed)
-pb, fb = trimesh.sample.sample_surface(ref, 100000, seed=seed)
-na, nb = pred.face_normals[fa], ref.face_normals[fb]
-da, ia = cKDTree(pb).query(pa, workers=-1)
-db, ib = cKDTree(pa).query(pb, workers=-1)
-CD = (da.mean() + db.mean()) / (2 * D)
-NC = 0.5 * (np.abs((na * nb[ia]).sum(1)).mean() + np.abs((nb * na[ib]).sum(1)).mean())
-P = (da / D < tau).mean()
-R = (db / D < tau).mean()
-F1 = 2 * P * R / (P + R)  # tau = 0.01 on Toys4K, 0.02 on real data
-# ADD-SB is CD on the posed meshes, with no ICP.
-# ADD-SB@0.1 = 100 * mean(ADD-SB < 0.1). A failed output counts as a miss.
-```
-
-- A failed output also scores zero IoU. The valid rate is reported next to every mean.
-- We validate our metric code against RecGen's published HB result with 1 view, ADD-SB 0.049 and ADD-SB@0.1 of 95.0%. The validation runs on RecGen's 538-sample HB split. The tolerances are ±0.004 on ADD-SB, ±2.5 percentage points on ADD-SB@0.1 and ±0.002 on CD_norm (`EVALUATION.md`).
+- The farthest pair of a point set always lies on its convex hull, so the exact diameter needs only the convex-hull vertices.
+- RecGen's `recgen_eval/diameter.py` computes the diameter of the predicted mesh, not the reference. It randomly subsamples 5,000 hull vertices, and it falls back to 10,000 random raw vertices if the hull fails. So its result is random and can underestimate the true diameter.
 
 #### Similarity fits
 
-- Open3D's `TransformationEstimation.cpp` calls `Eigen::umeyama(source_mat, target_mat, with_scaling_)`. Eigen's `Umeyama.h` sets S(m−1) = −1 when det(U) · det(V) < 0, so R = U S Vᵀ is a proper rotation. The scale is c = (1 / src_var) · singularValues.dot(S), which is never negative because the flipped value is the smallest. This matches GATOR's proper similarity. We solve the similarity fit with Open3D `TransformationEstimationPointToPoint(with_scaling=True)`.
-- With estimated cameras, the paper computes one similarity per scene from the cameras alone, and all objects and all methods in that scene share it (p.25, C.1). We apply it to outputs only, at scoring time. It never touches the generator's inputs, because that would leak ground-truth orientation and scale.
+- Open3D's `TransformationEstimation.cpp` calls `Eigen::umeyama(source_mat, target_mat, with_scaling_)`. Eigen's `Umeyama.h` sets S(m−1) = −1 when det(U) · det(V) < 0, so R = U S Vᵀ is a proper rotation. The scale is c = (1 / src_var) · singularValues.dot(S), which is never negative because the flipped value is the smallest. This matches GATOR's proper similarity.
+- evo's `umeyama_alignment(x, y, with_scale)` in `evo/core/geometry.py` applies the same sign fix. Its default is `with_scale=False`.
+- With estimated cameras, the paper computes one similarity per scene from the cameras alone, and all objects and all methods in that scene share it (p.25, C.1).
 - On HB and LM-O, outputs go back to the dataset frame through the inverse of input view 0's pose.
 - On ScanNet++, ICP is fit only from the observed surface to the prediction. CD and F1 stay symmetric, so completed surfaces that the scan missed are penalized. ScanNet++ is scored on geometry only.
-- Proposal for the camera-only registration of estimated cameras: compute the scale and translation with Umeyama on the camera centers. Take the rotation from the chordal mean of R_gt · R_estᵀ over all views. evo's `umeyama_alignment(x, y, with_scale)` in `evo/core/geometry.py` applies the same sign fix. Its default is `with_scale=False`, so we must pass `True`.
-- Proposal for the ICP initialization (unconfirmed):
-  - Methods that predict placement (GATOR, RecGen, MV-SAM3D, ShapeR and SimFoundry) start from the identity in the scene frame, as RecGen does.
-  - Methods in a canonical frame (TRELLIS.2, ReconViaGen and Pixal3D) first get matched centroids, and the prediction is scaled so that its extent equals D. Next, we try the 24 cube rotations, or a grid of about 500 rotations if the up axis is unknown. For each one, we run rigid ICP and then scaled ICP on about 10k subsampled points. We keep the hypothesis with the lowest symmetric CD and refine it on the full 100k points.
 - One-directional scaled ICP tends to shrink the source onto part of the target (unconfirmed). To avoid this, gather correspondences in both directions in each iteration before the Umeyama solve.
 
 #### Silhouette IoU and appearance metrics
 
 - GATOR averages silhouette IoU over the matched cameras of each object, then across objects (C.2). On ScanNet++, IoU projects into all reference views (p.29).
-- The appearance metrics (C.3) reuse the C.2 alignment and do no exposure or color fitting. Predictions keep their native materials. On Toys4K, the shared cameras are the six held-out views. We render at 1024 x 1024 with a white background and studio lighting, and reference CAD models get a rough diffuse material.
-- Pixal3D, which GATOR cites for IoU, computes IoU between the rendered normal maps and the ground-truth normal maps, only over regions where both exist. A pure mask IoU is a reasonable reading of GATOR, but it is not an exact copy. On the tabletop benchmarks, we take the "matched cameras" to be the input cameras (unconfirmed assumption).
-- We render masks with nvdiffrast as `mask = rast[..., 3] > 0`. The triangle ID is offset by one, and the background is 0. nvdiffrast v0.4.0 (https://github.com/NVlabs/nvdiffrast, the tag that TRELLIS.2 `setup.sh` clones) builds at pip install time. It removed the OpenGL backend, so it is CUDA only.
-- The paper does not name its evaluation renderer. We choose Blender (unconfirmed inference). GATOR renders the Toys4K inputs and the agent's comparisons in Blender (p.6, p.22, p.25). Blender's glTF importer handles native PBR materials, and Blender can apply a rough diffuse material to the references.
-- The other Blender LTS line is 4.5.14. Its `bpy` wheel needs Python 3.11 and ships a cp311 manylinux_2_28_x86_64 build. So `pip install bpy==4.5.14` can share a Python 3.11 environment with pybullet, open3d and lpips.
-- TRELLIS v1 `dataset_toolkits/blender_script/render.py` is a usable studio-light template. It has a point light (1000 W), a large top area light (10000 W) and a bottom area light (1000 W). It uses a transparent film, Cycles at 128 samples, and normalization to a unit cube. We composite the alpha onto white.
-- A GPU alternative is TRELLIS.2's `trellis2/renderers/pbr_mesh_renderer.py`. It uses nvdiffrast, split-sum environment-map shading and ACES tonemapping, and its background is black. Whether it has a background-color option is unconfirmed.
-- Proposal for the real-data appearance cameras: place six virtual cameras around the aligned reference at azimuths 0°, 60°, and so on up to 300°. Use an elevation of 20°, with alternate cameras at 45°, and a 40° field of view. Set the distance so that the bounding sphere fills 90% of the frame. Use the TRELLIS v1 three-light rig.
-- The `lpips` package 0.1.4 (https://github.com/richzhang/PerceptualSimilarity) defaults to the `alex` network, which its authors call "best as a forward metric". They recommend `vgg` for backpropagation. Inputs must be in [−1, 1], and the current metric version is 0.1. The 3DGS `metrics.py` uses `net_type='vgg'`. GATOR, TRELLIS, TRELLIS.2 and Pixal3D state no backbone. We report AlexNet LPIPS and also log VGG LPIPS.
-- SSIM uses scikit-image `structural_similarity(gaussian_weights=True, sigma=1.5, use_sample_covariance=False, data_range=1.0, channel_axis=-1)`, which matches Wang et al. PSNR is computed on the full image with the white background (inferred from p.25). We fix the Cycles sample count and seed, so that render noise does not move the scores.
+- The appearance metrics (C.3) reuse the C.2 alignment and do no exposure or color fitting. Predictions keep their native materials. On Toys4K, the shared cameras are the six held-out views.
+- Pixal3D, which GATOR cites for IoU, computes IoU between the rendered normal maps and the ground-truth normal maps, only over regions where both exist. A pure mask IoU is a reasonable reading of GATOR, but it is not an exact copy. On the tabletop benchmarks, the "matched cameras" are probably the input cameras (unconfirmed).
+- nvdiffrast gives a mask as `rast[..., 3] > 0`: the triangle ID is offset by one, and the background is 0. nvdiffrast v0.4.0 (https://github.com/NVlabs/nvdiffrast, the tag that TRELLIS.2 `setup.sh` clones) builds at pip install time. It removed the OpenGL backend, so it is CUDA only.
+- The paper does not name its evaluation renderer. GATOR renders the Toys4K inputs and the agent's comparisons in Blender (p.6, p.22, p.25), so the evaluation renderer is probably Blender too (unconfirmed inference).
+- TRELLIS v1 `dataset_toolkits/blender_script/render.py` has a studio-light rig: a point light (1000 W), a large top area light (10000 W) and a bottom area light (1000 W). It uses a transparent film, Cycles at 128 samples, and normalization to a unit cube.
+- TRELLIS.2's `trellis2/renderers/pbr_mesh_renderer.py` renders on the GPU. It uses nvdiffrast, split-sum environment-map shading and ACES tonemapping, and its background is black. Whether it has a background-color option is unconfirmed.
+- The `lpips` package 0.1.4 (https://github.com/richzhang/PerceptualSimilarity) defaults to the `alex` network, which its authors call "best as a forward metric". They recommend `vgg` for backpropagation. Inputs must be in [−1, 1], and the current metric version is 0.1. The 3DGS `metrics.py` uses `net_type='vgg'`. GATOR, TRELLIS, TRELLIS.2 and Pixal3D state no backbone.
+- scikit-image `structural_similarity(gaussian_weights=True, sigma=1.5, use_sample_covariance=False, data_range=1.0, channel_axis=-1)` matches Wang et al.'s SSIM. The paper's PSNR is computed on the full image with the white background (inferred from p.25).
 
-#### Pooling and package pins
+#### Pooling
 
 - In Table 2, the ADD-SB mean, ADD-SB@0.1, CD, NC and F1 equal the object-weighted means of Table 6. The IoU, PSNR, SSIM and LPIPS columns do not. A HANDAL weight of about 0.87 per object reproduces them for every method. For example, the SimFoundry PSNR is 15.02 with object weights, and a HANDAL weight of 0.87 gives the reported 14.90.
 - The 4-view GATOR row of Table 7 matches the pooled LM-O and HB "w/o agent" rows of Table 6 for ADD-SB (0.0143) and CD (0.0105). It does not match for IoU (0.914 pooled against 0.902) or PSNR (15.98 pooled against 15.86). Recall at 4 views is 76/76 in Table 6 but 149/152 in Table 7. So the second view selection changes the scores and causes 3 failures.
-- Proposed pins for the eval env are torch 2.6.0+cu124 (the same as TRELLIS.2), nvdiffrast v0.4.0, scipy 1.16.3, trimesh 5.1.1, open3d 0.19.0 and scikit-image 0.26.0. numpy 1.26.4 is a conservative pin, and the need for it is unconfirmed.
-- scipy 1.16.3 needs Python 3.11 or later, and scipy 1.18.1 needs Python 3.12 or later. open3d 0.19.0 ships cp38 to cp312 manylinux_2_31 wheels. open3d 0.20.0 (Sep 16, 2026) ships cp310 to cp314 manylinux_2_35 wheels, which also install on Ubuntu 22.04 (glibc 2.35), but 0.19.0 stays the conservative pin.
 
-### 4.6 PyBullet physics test
-
-- D.6 says only "convex collision approximations" and "same assumed mass", so the collision shapes are our choice. We use a convex decomposition for every object (our inference). In Fig. 12, the octagonal ring table has a chair inside it, and other chairs are tucked under its edge. A single hull of that table would overlap them.
-- The PyBullet Quickstart Guide (https://raw.githubusercontent.com/bulletphysics/bullet3/master/docs/pybullet_quickstartguide.pdf) gives these facts:
-  - `createCollisionShape(GEOM_MESH)` "Will create convex hulls for each object (marked as 'o') in the .obj file." `GEOM_FORCE_CONCAVE_TRIMESH` works only for static bodies with mass 0.
-  - `p.vhacd(in, out, log, ...)` has these defaults: concavity 0.0025, resolution 100,000, maxNumVerticesPerCH 64 and depth 20.
-  - The default time step is 1/240 s. `getBasePositionAndOrientation` returns a quaternion in [x, y, z, w] order. The base and the links are centered on the center of mass and aligned with the principal axes.
-- pybullet 3.2.7 ships manylinux2014 wheels for CPython 3.6 to 3.11 and an 80.5 MB sdist. Whether the sdist builds cleanly on Python 3.12 or later is unconfirmed. coacd 1.0.14 is MIT, and it ships cp39-abi3 manylinux_2_17 wheels.
-- Proposal for mass and inertia: compute the center of mass and the principal axes with trimesh. Pass them as `baseInertialFramePosition` and `baseInertialFrameOrientation`. Give every object the same mass.
-- Proposal for measuring tilt: drop each object 1 to 2 cm onto a static plane. Step the simulation until the linear and angular velocities stay below a threshold, or for a fixed time such as 5 s. Compute R_rel = R_final · R_initᵀ, then tilt = arccos(clip(R_rel[2,2], −1, 1)) in degrees. This measure ignores yaw.
-
-### 4.7 Questions for the authors
-
-GATOR's project page shows "Code (Coming Soon)" with no link, and no GATOR repository, weights or benchmark files exist. The first author is Qirui Wu. Qirui Wu and Angel X. Chang are also authors of JRM, which uses the same ScanNet++ protocol, so they are the best contacts for the ScanNet++ lists.
-
-- **Toys4K.** Can you share the 525 object IDs, or the selection rule and seed? What render resolution, view ranges, lighting and background did you use? Which cameras are the six held-out views? How do you define the "robust surface extent" D? Which 10 objects appear in Fig. 6?
-- **LM-O.** Did you use `test_all` (1,214 images) or BOP19 (200 images)? Which frame IDs form the 4-view sets and the two nested selections of Table 7? Is the Table 6 set one of them? How did your camera registration work?
-- **HB.** Did you use `val_primesense` or `val_kinect`? Did you use scenes 1 to 13, including 10 and 11, for 68 instances? Which frame IDs did you use? How did you get board poses from the ArUco markers?
-- **HANDAL.** Did you use BOP-HANDAL val scenes 1 to 10, with 55 instances? Which `visib_fract` threshold and frame IDs did you use? Which VGGT-Omega checkpoint, resolution, mode and frames per scene did you use? Which val scenes are the four on the project page?
-- **ScanNet++.** Can you share the 69 object IDs, the 43 extra scene IDs and the 160 extra target IDs? Did you use DSLR or iPhone frames? What is each target's view list? How did you prompt SAM 3? Which reference views does IoU use?
-- **Metrics.** How did you pool IoU, PSNR, SSIM and LPIPS in Table 2? Which cameras did the appearance metrics use on real data? How did you initialize ICP? Does a failed tabletop reconstruction score zero, as on ScanNet++?
-- **Pi3X.** Which pixel limit and confidence threshold did you use? Did you pass any priors? How did you resize the depth back to the crops?
-- **Baselines, renderer and physics.** Which Pixal3D branch and ReconViaGen version did you run? What rule picked RecGen's "best two views"? How did you adapt ShapeR to non-Aria input? Did you port TRELLIS v1's MultiDiffusion wrapper to TRELLIS.2? Which renderer and LPIPS backbone did you use? Which collision shapes, mass, time step and settling time did the PyBullet test use?
-- **Release.** Will the evaluation splits come out with the code, including object lists, frame IDs, masks, estimated cameras and depth, and baseline outputs?
-
-### 4.8 Web-app findings
-
-**Job flow (our design)**
-- The browser sends photos to a FastAPI server, which streams progress back with server-sent events. A Redis queue feeds the workers on lunarL40S. They are one estimator worker, one generator worker per GPU, a CPU export pool and the agent controller.
-- `POST /jobs` takes images, a prompt and an `agent` flag and returns a job ID. A short mask job runs SAM 3 first, so the user can confirm or click the target. The main GPU job writes a checkpoint after each stage (`masks.npz`, `cams.npz`, `latents.pt`, `mesh.ply`, `placement.json`), and a retry resumes from the last checkpoint. The export job builds the GLB, and the agent job runs if the user asked for it.
-- Each GPU worker keeps its models resident and runs one job at a time, with a 120 s lease, a heartbeat and one retry. The CPU export pool uses about 8 processes. API rate limits and GPU slots limit the agent queue's concurrency.
-- An agent run mounts the inputs read-only. Its lease is 15 min, which covers the 600 s budget, export and slack. If validation fails or the run times out, the app returns the unrefined GLB.
-- Quotas allow one active GPU job per user, and job data is deleted after 24 to 72 h. Uploaded images are evidence and never instructions, as Prompt 2 already says (p21).
-
-**Licenses and data**
-- The app can only be a research demo. Pi3X weights, VGGT-Omega and nvdiffrast are non-commercial, and so are weights trained on their outputs. DINOv3, SAM 3 and Gemma terms pass through to users. Users must be told that their images go to OpenAI through the OpenAI API.
-- A public deployment would need four changes. nvdiffrast must be replaced in placement and in the `to_glb` UV rasterization. Pi3X and VGGT-Omega must be replaced, for example by VGGT-1B-Commercial (https://github.com/facebookresearch/vggt) or by DA3-Base/Metric under Apache-2.0 (https://github.com/ByteDance-Seed/Depth-Anything-3). The licenses that CuMesh and FlexGEMM bundle for xatlas and cubvh need a check. Our trained weights need a data-license review. Blender is GPL (unconfirmed) and runs as a separate process, which is fine in both cases.
-- The first measurements on lunarL40S should cover the per-stage time at N = 4 and N = 10, the real CFG cost, the T5Gemma 2 size, the NAF output resolution, and the `to_glb` time with the patched settings.
-
-### 4.9 Physical properties: VoMP v1.1 and simulator formats
+### 4.6 Physical properties: VoMP v1.1 and simulator formats
 
 Checked on 2026-10-14 against the sources named here. Our use is in build_plan.md note 9.
 
@@ -1378,6 +812,8 @@ Checked on 2026-10-14 against the sources named here. Our use is in build_plan.m
 ## 5. Deferred: the full GATOR generator
 
 ### 5.1 Design
+
+None of this is built. The paths in the headings below are planned homes for the code, and none of them exists in the repo.
 
 #### 5.1.1 Pipeline, training and build order
 
@@ -1404,11 +840,11 @@ The paper does not define the training frame, the anchor, re-alignment or placem
 3. v2: our trained geometry flow.
 4. v3: our trained appearance flow. This is GATOR without the agent.
 
-**Evaluation.** The full generator targets the GATOR rows of Tables 1 to 3, and the "GATOR w/o agent" and GATOR rows of Table 6. The analyses to repeat are the ablation on the 55 HANDAL targets (Table 4), the agent time budget study on 10 Toys4K objects (Fig. 6), the 2, 4 and 8 view study on LM-O and HB (Table 7), and a PyBullet stability test of about 15 objects from one ScanNet++ meeting room (section 4.6).
+**Evaluation.** The full generator targets the GATOR rows of Tables 1 to 3, and the "GATOR w/o agent" and GATOR rows of Table 6. The analyses to repeat are the ablation on the 55 HANDAL targets (Table 4), the agent time budget study on 10 Toys4K objects (Fig. 6), the 2, 4 and 8 view study on LM-O and HB (Table 7), and a PyBullet stability test of about 15 objects from one ScanNet++ meeting room (section 1.8).
 
 #### 5.1.2 Coordinate frames
 
-Frame code lives in `gator/frames.py`, with round-trip unit tests. The world frame W is defined in `build_plan.md` note 2.
+The world frame W is defined in `build_plan.md` note 2.
 
 - Cameras are OpenCV world-to-camera matrices. We re-base every estimator output to view 0.
 - The anchor normalization is q = (x - t_g) / s_g, and x = s_g q + t_g maps back (Eq. 3). Size is metric only if the input depth is metric.
@@ -1420,7 +856,7 @@ Frame code lives in `gator/frames.py`, with round-trip unit tests. The world fra
 
 #### 5.1.3 Inputs and preprocessing (`gator/inference/`)
 
-- Pi3X comes from github.com/yyfz/Pi3 and HF `yyfz233/Pi3X`. Its code is BSD-3, and its weights are CC BY-NC 4.0. `gator/frames.py` inverts its camera-to-world poses (section 4.1).
+- Pi3X comes from github.com/yyfz/Pi3 and HF `yyfz233/Pi3X`. Its code is BSD-3, and its weights are CC BY-NC 4.0. It returns camera-to-world poses in OpenCV convention, so preprocessing inverts them.
 - VGGT-Omega comes from github.com/facebookresearch/vggt-omega and HF `facebook/VGGT-Omega`. It outputs cameras and depth at relative scale. The paper does not say which checkpoint it used, so we run both `vggt_omega_1b_512.pt` and `vggt_omega_1b_416_reproduce.pt`. The second one needs `image_resolution=416`.
 - Every view is cropped around the target with a margin of 1.1. The structure flow uses 384 px crops that keep the scene context. The geometry and appearance flows use 512 px crops with the background masked out.
 - The anchor is the 2nd to 98th percentile box of the depth points inside the masks, times a margin m. The masks are eroded by 5 px first. Depth is valid where it is finite and positive. We pick m from a sweep of 1.0 to 1.5, as the smallest value that clips under 5% of training targets. 5.3.1 explains why the margin is needed.
@@ -1458,7 +894,6 @@ Training target: we cache a 256^3 occupancy per placed object. Each step compute
 - Fit the translation and scale of the structure to the observed points.
 - Recompute the normalization from the occupied bounding box. Max-pool to a 32^3 grid for the 512 flows, as the TRELLIS.2 512 pipeline does. Training targets use the same normalization function.
 - 5.3.2 gives the floater threshold, the fit and the re-voxelization in the new frame.
-- The parked code has a known gap. Its re-alignment box at inference is 0 to 2 voxels larger than the training-target box.
 
 #### 5.1.6 GatorProj, Eq. 2 (`gator/models/projection.py`)
 

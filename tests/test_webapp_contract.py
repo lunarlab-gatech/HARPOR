@@ -1,7 +1,7 @@
-"""The contract between the tunnel and the public site (plan.md step 9, addendum section 12): a request sent the
-way the public page sends it, through the fake Supabase and a worker (RelayClient), gets the answer that the same
-request gets from the server directly (TestClient), after the rewrite. Hostile bodies too: either both give the
-same answer, or relay() refuses the body before any worker sees it and the server refuses it as well.
+"""The contract between the tunnel and the public site: a request sent the way the public page sends it,
+through the fake Supabase and a worker (RelayClient), gets the answer that the same request gets from the server
+directly (TestClient), after the rewrite. Hostile bodies too: either both give the same answer, or relay() refuses
+the body before any worker sees it and the server refuses it as well.
 
 Each request goes to twin jobs, two copies of one job folder on one server: the TestClient asks about one, the
 personal worker serves the other, with the user's session (supa.Store)."""
@@ -17,54 +17,13 @@ pytest.importorskip("cryptography")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import fake_supabase as fs  # noqa: E402
-from gator.webapp import jobs, keybox, relay, server, steps  # noqa: E402
-from test_webapp_worker import TOKEN, Server, machine, own_job, own_worker, write_video  # noqa: E402
+from gator.webapp import jobs, relay  # noqa: E402
+from test_webapp_server import HOSTILE_CONTINUE, hostile_overrides, hostile_start  # noqa: E402
+from test_webapp_worker import TOKEN, Server, machine, own_job, own_worker  # noqa: E402
+from test_webapp_worker import template, video  # noqa: E402, F401 (fixtures)
 
 OPUS = "sk-ant-test-" + secrets.token_hex(16)
 BASE = {"mode": "auto", "prompt": "box", "n_views": 4, "agent": "opus", "key_later": True}
-USER = {"articulated": True, "parts_mode": "user"}
-# Start bodies that the page never sends (test_webapp_server.py's hostile list, with opus in place of the agent
-# "none"). The one intended difference: the tunnel runs the agent "none", and the public site refuses it.
-HOSTILE_START = [
-    {"mode": ["auto"]}, {"mode": None}, {"prompt": 7}, {"prompt": ["box"]}, {"prompt": "x" * 100000}, {"prompt": "!!!"},
-    {"n_views": True}, {"n_views": "4"}, {"n_views": 4.0}, {"n_views": 10**30},
-    {"mode": "manual", "picks": [True, False]}, {"mode": "manual", "picks": "1,2"}, {"picks": {"0": 1}},
-    {"mode": "manual", "picks": list(range(100000))}, {"mode": "manual", "picks": [1] * 100000},
-    {"mode": "manual", "picks": [0.0, 1.0]}, {"mode": "manual", "picks": [-1, 2]}, {"view0": True}, {"view0": "3"},
-    {"view0": 10**6}, {"auto_continue": 1}, {"auto_continue": "false"}, {"agent": 1}, {"agent": []},
-    {"agent": {"name": "opus"}}, {"agent": None}, {"agent": "gpt"}, {"key_later": 1}, {"key_later": "yes"},
-    {"articulated": 1}, {"articulated": "yes"}, {**USER, "parts_mode": ["user"]}, {**USER, "parts": "lid"},
-    {**USER, "parts": [7]}, {**USER, "parts": [{"name": 7}]}, {**USER, "parts": [{"name": "body"}] * 10000},
-    {**USER, "parts": [{"name": "body"}, {"name": "lid", "parent": "body", "count": True}]}, {"lidar": True},
-    {"lidar": []}, {"lidar": "on"}, {"lidar": {"topic": 3}}, {"agent": "astra", "api_key": 7},
-    {"agent": "astra", "api_key": ["sk-x"]}, {"agent": "astra", "api_key": True},
-    {"agent": "astra", "api_key": "sk-" + "a" * 600}, {"agent": "astra", "api_key": "sk-a\nb"}, {"turntable": 1},
-    {"turntable": "yes"}]
-HOSTILE_CONTINUE = [{"from": 1}, {"from": True}, {"from": ["frames"]}, {"from": {"stage": "agent"}}, {"from": "nope"},
-                    {"from": "../agent"}, {"agent": []}, {"agent": "gpt"}, {"key_later": "yes"},
-                    {"agent": "astra", "api_key": 7}]
-
-
-def hostile_overrides(name):
-    return [{"locked": name}, {"locked": [[name]]}, {"locked": [7]}, {"excluded": ["f99999"]},
-            {"locked": ["../" + name]}, {"locked": [name] * 100000}, {"excluded": [name, name]},
-            {"locked": [name], "excluded": [name]}, {"instance": ["1"]}, {"instance": {name: 1}},
-            {"instance": {name: True}}, {"instance": {name: "1,"}}, {"instance": {name: "9999"}}, {"instance": {"f99999": "1"}}, {"view0": True}, {"view0": "f99999"},
-            {"view0": [name]}, {"agent": "gpt"}, {"agent": 1}, {"agent": "astra", "api_key": 7}]
-
-
-@pytest.fixture(scope="module")
-def template(tmp_path_factory):
-    """A job folder of a video that the frames stage analyzed ("ready"), made by a real server."""
-    d = tmp_path_factory.mktemp("template")
-    video = write_video(d / "cup.mp4").read_bytes()
-    cfg = steps.Config(G=d / "G", runs=d / "runs", fake=True)
-    with TestClient(server.make_app(cfg, TOKEN, key_dir=d / "keys")) as c:
-        c.get(f"/?token={TOKEN}")
-        job_id = c.put("/api/upload", params={"name": "cup.mp4"}, content=video).json()["id"]
-        while c.get(f"/api/jobs/{job_id}").json()["status"] != "ready":
-            anyio.run(anyio.sleep, 0.1)
-    return cfg.runs / job_id
 
 
 class RelayClient:
@@ -79,7 +38,7 @@ class RelayClient:
         body, sealed = (dict(body) if isinstance(body, dict) else body), None
         if route in relay.KEY_ROUTES and isinstance(body, dict) and isinstance(body.get("api_key"), str):
             agent = relay.effective_agent(route, body, jobs.load(self.folder)) or "opus"  # the page's agent
-            sealed = keybox.sealed(self.fake.row("workers", id=self.w.store.worker_id), body.pop("api_key"),
+            sealed = fs.sealed(self.fake.row("workers", id=self.w.store.worker_id), body.pop("api_key"),
                                    self.jid, self.user, agent)
         try:
             sent = self.fake.rpc(self.user, "relay", p_job=self.jid, p_route=route, p_query=query or {},
@@ -148,7 +107,10 @@ def test_relayed_requests_get_the_tunnel_answers(tmp_path, template):
     async def main():
         await w.start()
         try:
-            for wrong in HOSTILE_START:
+            # The server's hostile bodies, with opus in place of the agent "none". The one intended difference: the
+            # tunnel runs the agent "none", and the public site refuses it.
+            n = len(tunnel.c.get(f"/api/jobs/{tlocal}/frames").json()["times"])
+            for wrong in hostile_start(n, OPUS):
                 await both("start", {**BASE, **wrong})
             for route, body in (("start", {**BASE, "agent": "none"}), ("start", {**BASE, "agent": False}),
                                 ("continue", {"agent": "none"}), ("overrides", {"agent": False})):

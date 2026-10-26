@@ -68,6 +68,8 @@ from pathlib import Path
 
 import numpy as np
 
+from gator.fileio import write_json
+
 HDR = {18: "HLG", 16: "PQ"}  # AVCOL_TRC_ARIB_STD_B67, AVCOL_TRC_SMPTE2084
 METRIC_WIDTH = 960
 THUMB_SIDE = 320
@@ -165,12 +167,6 @@ def relative(lv, times, window_s=0.5):
     hi = np.searchsorted(times, times + window_s + 1e-9, "right")
     med = np.array([np.median(lv[a:b]) for a, b in zip(lo, hi)])
     return np.divide(lv, med, out=np.zeros_like(lv), where=med > 0)
-
-
-def metrics(gray_frames, times):
-    """Per-frame arrays lv, rel, luma, clip_hi, clip_lo of gray frames (pass them at width 960)."""
-    s = np.array([frame_stats(g) for g in gray_frames], float).reshape(-1, 4)
-    return {"lv": s[:, 0], "rel": relative(s[:, 0], times), "luma": s[:, 1], "clip_hi": s[:, 2], "clip_lo": s[:, 3]}
 
 
 def candidates(times, rel, luma, duration):
@@ -298,12 +294,6 @@ class Preview:
                 "bytes": self.path.stat().st_size}
 
 
-def write_json(path, data):
-    tmp = path.with_name(".tmp_" + path.name)
-    tmp.write_text(json.dumps(data, indent=1))
-    os.replace(tmp, path)
-
-
 def load_job(job_dir):
     f = Path(job_dir) / "job.json"
     if not f.exists():
@@ -369,7 +359,7 @@ def topics(job_dir):
               f"{t['rate_hz']} Hz, rectified {t['rectified']}, camera_info {t['camera_info']}, distortion {t['distortion']}")
     for t in out["skipped"]:
         print(f"skipped {t['topic']} ({t['type']}): {t['why']}")
-    write_json(job_dir / "frames" / "topics.json", out)  # last: the done marker
+    write_json(job_dir / "frames" / "topics.json", out, indent=1)  # last: the done marker
     print(f"{len(out['topics'])} camera image topics in {path.name}")
     print("PROGRESS 1", flush=True)
     return out
@@ -439,8 +429,9 @@ def analyze(job_dir):
             "clip_hi": np.round(s[:, 2], 4).tolist(), "clip_lo": np.round(s[:, 3], 4).tolist(),
             "candidates": cand, "thumbs": thumbs, "thumb_size": list(tsize), "preview": preview_rec}
     if info["kind"] == "rosbag":  # the absolute frame times, for matching LiDAR scans to frames
-        write_json(job_dir / "frames" / "stamps.json", {"topic": info["topic"], "clock": info["clock"], **stamps})
-    write_json(job_dir / "frames" / "meta.json", meta)  # last: the server takes it as the done marker
+        write_json(job_dir / "frames" / "stamps.json", {"topic": info["topic"], "clock": info["clock"], **stamps},
+                   indent=1)
+    write_json(job_dir / "frames" / "meta.json", meta, indent=1)  # last: the server takes it as the done marker
     print(f"{len(cand)} candidates: {cand}")
     print(f"rel sharpness: median {np.median(rel):.2f}, {(rel < 0.6).mean():.0%} of frames below 0.6")
     print("PROGRESS 1", flush=True)
@@ -481,7 +472,7 @@ def extract(job_dir):
     missing = [nm for nm in names.values() if not (out / f"{nm}.png").exists()]
     if missing:
         raise SystemExit(f"the input ended before frames {missing}")
-    write_json(job_dir / "frames" / "pool.json", {"pool": pool, "names": names, "picks": picks})
+    write_json(job_dir / "frames" / "pool.json", {"pool": pool, "names": names, "picks": picks}, indent=1)
     moved = {p: s for p, s in picks.items() if int(p) != s}
     print(f"{len(pool)} frames -> {out}" + (f"; picks snapped {moved}" if moved else ""))
 

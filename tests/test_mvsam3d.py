@@ -76,14 +76,10 @@ def test_cameras_are_relative_to_view_0_at_image_size(tmp_path):
 
 
 def look_at_w2c(eye):
-    eye = np.asarray(eye, dtype=float)
-    z = -eye / np.linalg.norm(eye)
-    x = np.cross([0.0, 1.0, 0.0], z)
-    x /= np.linalg.norm(x)
-    R = np.stack([x, np.cross(z, x), z])
-    T = np.eye(4)
-    T[:3, :3], T[:3, 3] = R, -R @ eye
-    return T
+    """test_parts_vote.look_at toward the origin."""
+    from test_parts_vote import look_at  # it imports trimesh, which the callers need anyway
+
+    return look_at(np.asarray(eye, dtype=float), np.zeros(3))
 
 
 def box_views():

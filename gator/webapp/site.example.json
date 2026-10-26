@@ -1,6 +1,0 @@
-{
-  "_comment": "The public site's config, as gator/webapp/site.json (python -m gator.webapp.site init --url ... --key ... writes it). Public values only: the project URL and its publishable key. site.py refuses a secret key or a JWT. contact is optional: how users reach the site's owner, shown on the privacy page.",
-  "url": "https://<ref>.supabase.co",
-  "publishableKey": "sb_publishable_<from the dashboard>",
-  "contact": null
-}

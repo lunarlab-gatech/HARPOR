@@ -3,17 +3,9 @@
 Runs in envs/web (PyAV, numpy, pillow). video.py calls it for a job whose job.json has "source":
 {"kind": "stray"} (an uploaded .zip), and the lidar stage (lidar.py) reads the depth.
 
-The export (https://github.com/strayrobots/scanner/blob/main/docs/format.md) is a folder with:
-  rgb.mp4             the color video (HEVC), at ARKit's size (1920x1440 on most phones), as the
-                      sensor sees it: landscape, whichever way the phone was held
-  depth/NNNNNN.png    z-depth in millimetres (uint16, 256x192), aligned with the color camera
-  confidence/NNNNNN.png  ARKit's confidence of each depth pixel: 0, 1 or 2
-  odometry.csv        one row per frame: timestamp, frame, x, y, z, qx, qy, qz, qw (the camera-to-world
-                      pose, OpenCV camera axes, in ARKit's gravity-aligned world with +y up), and on
-                      newer versions fx, fy, cx, cy (at the video's size)
-  camera_matrix.csv   the intrinsics of the last frame; imu.csv
-Video frame i, depth/i and the odometry row with frame == i are one moment. The user zips the
-folder, so the zip holds one top folder, and Finder adds __MACOSX junk.
+The export's format: https://github.com/strayrobots/scanner/blob/main/docs/format.md. Its layout, the unpack
+limits, the pairing, the edit-list trap, the turn from gravity and the depth samples: build_plan.md note 12,
+Stray Scanner source.
 
 How Stray writes them (its DatasetEncoder, VideoEncoder and OdometryEncoder): every saved frame gets
 a row of odometry.csv and a frame of rgb.mp4, numbered by one counter. depth/ and confidence/ are
@@ -23,46 +15,19 @@ camera-to-world in OpenCV camera axes. rgb.mp4 has no rotation tag. Its first fr
 tick before the writer's start time, so the mp4's edit list hides it; rgb.mp4 is read without the
 edit list (OPEN), else every frame would be paired with the next frame's depth and pose.
 
-unpack() is strict, since the zip comes from the user. The zip's central directory is checked before
-zipfile reads it: at most DIR_MAX bytes and MAX_ENTRIES entries. Every entry is checked next: no
-absolute path, "..", backslash or drive letter, no symlink. __MACOSX/ and ._* files are skipped.
-Exactly one rgb.mp4 must be in it; its folder is the export's root, and only rgb.mp4, odometry.csv,
-camera_matrix.csv, imu.csv and depth|confidence/NNNNNN.png under that root are extracted. These must
-be stored or deflated (zipfile does not limit the memory of the other methods). The unpacked total
-may be at most min(4 x the zip + 1 GB, 40 GB), and each member's compression ratio at most
-MAX_RATIO. Each member is streamed, counting its real bytes, into a new file (0600) in dest/.tmp,
-which is renamed to dest/export when all are there. dest/.unpacked.json (the zip's bytes and
-mtime_ns, and the members) makes a second call with the same zip return at once.
-
-probe() refuses an export whose rgb.mp4 frames and odometry.csv rows differ in number, whose depth
-images are named past the last frame, or that has depth images for fewer than half of its frames. It
-warns about the frames without a depth or confidence image; those frames get no LiDAR samples.
-
-Upright. The frames are stored as the sensor sees them, so a portrait capture is stored turned by a
-quarter turn. upright_turns() takes the turn from gravity: ARKit's world has +y up, so up in the
-camera is R_wc^T (0, 1, 0), and its (x, y) is the direction of up in the image. The circular mean of
-that direction over the frames picks one number k of counterclockwise quarter turns for the whole
-capture: the k that brings it closest to (0, -1), the top of the image. A warning says so when more
-than 20% of the frames point another way (the phone turned during the capture). A frame whose camera
-looks straight up or down shows no up in the image and does not vote; when no frame votes, k is 0
-and a warning says so. probe() reports rotation 90 k, which frames() applies instead of the
-container's rotation.
-
-depth_samples() gives the LiDAR samples of frame i as the lidar stage takes them: [u, v, z] in pixels of
-the upright frame. Depth pixel (u_d, v_d) is at (u_d + 0.5) W / w_d - 0.5 (and the same for v) in the
-stored frame of size W x H, then turned by k (lidar_scale.rot90_points). The depth is not resampled.
-
-The intrinsics are read only for the LiDAR points of the Inputs tab, never for the scale.
-intrinsics() takes each frame's fx, fy, cx, cy from odometry.csv, else camera_matrix.csv (the last
-frame's, strictly parsed). depth_points() gives the samples and, with K, the same pixels as camera
-points ((u_s - cx) z / fx, (v_s - cy) z / fy, z at the stored pixel u_s, v_s), and every depth pixel
-with a depth as the frame's whole scan. Each counterclockwise quarter turn maps the stored camera
-axes (x, y) to (y, -x), as rot90_points maps the pixels, so the points are in the upright frame's
-optical axes.
+  unpack          the zip, checked as untrusted, into dest/export; dest/.unpacked.json makes a second call
+                  with the same zip return at once
+  probe           the export's facts; refuses an export that cannot be paired frame by frame
+  upright_turns   k, the counterclockwise quarter turns from gravity: the circular mean of up in the image
+                  over the frames, and the k that brings it closest to (0, -1), the top of the image
+  frames          the frames of rgb.mp4, turned upright by k
+  intrinsics      each frame's K, from odometry.csv, else camera_matrix.csv; only the LiDAR points of the
+                  Inputs tab use it, never the scale
+  depth_points    a frame's LiDAR samples [u, v, z] in pixels of the upright frame, and with K their camera
+                  points and the frame's whole scan
 """
 
 import csv
-import json
 import os
 import re
 import shutil
@@ -73,6 +38,8 @@ import zlib
 from pathlib import Path, PurePosixPath
 
 import numpy as np
+
+from gator.fileio import read_json, write_json
 
 FILES = ("rgb.mp4", "odometry.csv", "camera_matrix.csv", "imu.csv")  # extracted from the export's root
 FRAME_FILE = re.compile(r"(depth|confidence)/[0-9]{6}\.png")  # and these under it (ASCII digits only)
@@ -152,8 +119,8 @@ def _entries(f):
 
 
 def members(infos, zip_bytes):
-    """[(ZipInfo, path under the root)] to extract, after every check (see the module docstring).
-    SystemExit with the reason for a zip that is not a Stray Scanner export or not safe."""
+    """[(ZipInfo, path under the root)] to extract, after every check (build_plan.md note 12, Stray Scanner
+    source 2). SystemExit with the reason for a zip that is not a Stray Scanner export or not safe."""
     if len(infos) > MAX_ENTRIES:
         raise SystemExit(_too_many())
     for i in infos:
@@ -217,22 +184,15 @@ def _extract(z, info, out, left):
     return n
 
 
-def _read_json(path):
-    try:
-        return json.loads(Path(path).read_text())
-    except (OSError, ValueError):
-        return None
-
-
 def unpack(zip_path, dest):
-    """The unpacked export's root, dest/export (see the module docstring). Unpacks the zip only when
-    dest/.unpacked.json is for another zip (bytes, mtime_ns) or a member is missing. SystemExit with the
-    reason for a zip that is not a safe Stray Scanner export, or when the disk cannot take it."""
+    """The unpacked export's root, dest/export (build_plan.md note 12, Stray Scanner source 2). Unpacks the
+    zip only when dest/.unpacked.json is for another zip (bytes, mtime_ns) or a member is missing. SystemExit
+    with the reason for a zip that is not a safe Stray Scanner export, or when the disk cannot take it."""
     zip_path, dest = Path(zip_path), Path(dest)
     root, tmp = dest / ROOT, dest / ".tmp"
     try:
         st = zip_path.stat()
-        done = _read_json(dest / ".unpacked.json")
+        done = read_json(dest / ".unpacked.json")
         if isinstance(done, dict) and done.get("bytes") == st.st_size and done.get("mtime_ns") == st.st_mtime_ns \
                 and isinstance(done.get("members"), list) and all((root / m).is_file() for m in done["members"]):
             return root
@@ -251,9 +211,7 @@ def unpack(zip_path, dest):
                     total += _extract(z, info, tmp / rel, cap - total)
         os.replace(tmp, root)
         rec = {"bytes": st.st_size, "mtime_ns": st.st_mtime_ns, "root": ROOT, "members": sorted(rel for _, rel in todo)}
-        part = dest / ".unpacked.json.tmp"
-        part.write_text(json.dumps(rec))
-        os.replace(part, dest / ".unpacked.json")  # last: the done marker
+        write_json(dest / ".unpacked.json", rec, indent=None)  # last: the done marker
         return root
     except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, UnicodeDecodeError) as e:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -486,26 +444,24 @@ def _stored(u_d, v_d, depth_hw, rgb_wh, k):
 
 
 def _camera(u, v, z, K, k):
-    """Stored pixels with depth z to camera points (N, 3) of the upright frame (see the module docstring)."""
+    """Stored pixels with depth z to camera points (N, 3) of the upright frame: ((u - cx) z / fx, (v - cy) z / fy, z),
+    then each counterclockwise quarter turn maps (x, y) to (y, -x), as rot90_points maps the pixels."""
     x, y = (u - K[0, 2]) * z / K[0, 0], (v - K[1, 2]) * z / K[1, 1]
     for _ in range(k % 4):
         x, y = y, -x
     return np.stack([x, y, z], 1).astype(np.float32)
 
 
-def depth_samples(root, i, rgb_wh, k, min_conf=MIN_CONF, z_range=Z_RANGE):
-    """(N, 3) float32 [u, v, z] of frame i's depth image: u, v in pixels of the upright frame of size
-    rgb_wh (pixel centres at integers), z in meters; only the pixels with confidence >= min_conf (0:
-    every pixel, without reading confidence/) and z within z_range. k: the frame's counterclockwise
-    quarter turns. ValueError when the images are not what the format says."""
-    return depth_points(root, i, rgb_wh, k, None, min_conf, z_range)[0]
-
-
 def depth_points(root, i, rgb_wh, k, K, min_conf=MIN_CONF, z_range=Z_RANGE):
-    """(samples, xyz, scan) of frame i's depth image, read once: samples as depth_samples gives them; xyz (N, 3),
-    the samples' pixels as camera points, row for row; scan (M, 3), every depth pixel with a depth (z > 0) at
-    any confidence as camera points. K: the frame's intrinsics at the stored frame's size; without it (None),
-    xyz and scan are None. Camera points are float32, in meters, in the upright frame's optical axes."""
+    """(samples, xyz, scan) of frame i's depth image, read once. samples: (N, 3) float32 [u, v, z], u, v in
+    pixels of the upright frame of size rgb_wh (pixel centres at integers), z in meters; only the pixels with
+    confidence >= min_conf (0: every pixel, without reading confidence/) and z within z_range. Depth pixel
+    (u_d, v_d) is at (u_d + 0.5) W / w_d - 0.5 (and the same for v) in the stored frame of size W x H, then
+    turned by k, the frame's counterclockwise quarter turns; the depth is not resampled. xyz (N, 3): the
+    samples' pixels as camera points, row for row; scan (M, 3): every depth pixel with a depth (z > 0) at any
+    confidence as camera points. K: the frame's intrinsics at the stored frame's size; without it (None), xyz
+    and scan are None. Camera points are float32, in meters, in the upright frame's optical axes. ValueError
+    when the images are not what the format says."""
     from gator.stage_a import lidar_scale
 
     z, conf = _depth(root, i, min_conf)

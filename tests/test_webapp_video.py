@@ -230,13 +230,14 @@ def test_rotated_video_comes_out_upright(tmp_path):
         assert small.shape == ((80, 48, 3) if k % 2 else (29, 48, 3))
 
 
-def test_metrics_find_the_blurred_frame(tmp_path):
+def test_frame_stats_find_the_blurred_frame(tmp_path):
     path = write_video(tmp_path / "v.mp4")
     got = list(V.frames(path))
-    m = V.metrics((V.gray(a) for _, _, a in got), [t for _, t, _ in got])
-    assert m["rel"][BLUR] < 0.6 and np.median(m["rel"]) == pytest.approx(1, abs=0.1)
-    assert m["lv"][BLUR] < 0.5 * np.median(m["lv"])
-    assert 60 < m["luma"].mean() < 160 and m["clip_hi"].max() > 0.03 and m["clip_lo"].max() < 0.05
+    lv, luma, clip_hi, clip_lo = np.array([V.frame_stats(V.gray(a)) for _, _, a in got]).T  # as analyze() does
+    rel = V.relative(lv, [t for _, t, _ in got])
+    assert rel[BLUR] < 0.6 and np.median(rel) == pytest.approx(1, abs=0.1)
+    assert lv[BLUR] < 0.5 * np.median(lv)
+    assert 60 < luma.mean() < 160 and clip_hi.max() > 0.03 and clip_lo.max() < 0.05
     flat = np.full((10, 10), 255.0)
     assert V.frame_stats(flat) == (0.0, 255.0, 1.0, 0.0)
 
@@ -340,7 +341,7 @@ def test_rosbag_job_with_bad_stamps(tmp_path, capsys, monkeypatch):
     bag = write_bag(tmp_path / "b.bag", ("/cam/image_rect",), stamp=lambda i, ns: ns if i < N // 2 else ns - 10**9)
     j = job(tmp_path, bag, source={"kind": "rosbag", "topic": "/cam/image_rect"})
     written, write_json = [], V.write_json
-    monkeypatch.setattr(V, "write_json", lambda path, data: written.append(path.name) or write_json(path, data))
+    monkeypatch.setattr(V, "write_json", lambda path, data, **kw: written.append(path.name) or write_json(path, data, **kw))
     V.main(["analyze", "--job", str(j)])
     assert written == ["stamps.json", "meta.json"]  # meta.json is the done marker
     st = json.loads((j / "frames" / "stamps.json").read_text())

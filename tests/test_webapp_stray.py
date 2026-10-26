@@ -399,9 +399,9 @@ def test_read_odometry(tmp_path):
 @pytest.mark.parametrize("k", [0, 1, 3])
 def test_a_depth_pixel_lands_on_its_rgb_pixel(tmp_path, k):
     """The marked depth pixel and the dot drawn at its colour pixel come out at the same place in the upright
-    frame; and every depth sample of the scene lands where the upright camera sees that depth. depth_points
-    gives the same samples and, with odometry.csv's K, their camera points row for row, in the upright frame's
-    axes: the mark's point projects onto the mark through the upright frame's K."""
+    frame; and every depth sample of the scene lands where the upright camera sees that depth. With
+    odometry.csv's K, depth_points gives the same samples and their camera points row for row, in the upright
+    frame's axes: the mark's point projects onto the mark through the upright frame's K."""
     mark = (100, 60)
     root = export(tmp_path, n=4, portrait=k, mark=mark)
     info = stray.probe(root)
@@ -409,7 +409,7 @@ def test_a_depth_pixel_lands_on_its_rgb_pixel(tmp_path, k):
     only = np.zeros(DEPTH[::-1], np.uint8)  # confidence 2 at the mark only
     only[mark[1], mark[0]] = 2
     Image.fromarray(only).save(root / "confidence" / "000000.png")
-    uvz = stray.depth_samples(root, 0, (W, H), k)
+    uvz = stray.depth_points(root, 0, (W, H), k, None)[0]
     assert uvz.shape == (1, 3) and uvz.dtype == np.float32 and uvz[0, 2] == pytest.approx(MARK_MM / 1000)
     _, _, a = next(stray.frames(root, info, keep={0}))
     u, v = uvz[0, :2]
@@ -432,32 +432,33 @@ def test_a_depth_pixel_lands_on_its_rgb_pixel(tmp_path, k):
     assert pixels(xyz)[0] == pytest.approx((u, v), abs=1e-3) and xyz[0, 2] == pytest.approx(MARK_MM / 1000)
     assert len(scan) == DEPTH[0] * DEPTH[1]  # every pixel with a depth, at any confidence
     samples, xyz, _ = stray.depth_points(root, 3, (W, H), k, K[3])
-    assert np.array_equal(samples, stray.depth_samples(root, 3, (W, H), k)) and len(xyz) == len(samples)
+    assert np.array_equal(samples, stray.depth_points(root, 3, (W, H), k, None)[0]) and len(xyz) == len(samples)
     assert np.allclose(pixels(xyz), samples[:, :2], atol=1e-3) and np.allclose(xyz[:, 2], samples[:, 2])
     assert stray.depth_points(root, 3, (W, H), k, None)[1:] == (None, None)
 
     # Frame 1: every pixel (confidence 2, z within 0.1 to 5 m; the empty view is 4 m) is a sample at the
     # upright pixel where the scene has that depth.
-    uvz = stray.depth_samples(root, 1, (W, H), k)
+    uvz = stray.depth_points(root, 1, (W, H), k, None)[0]
     assert len(uvz) == DEPTH[0] * DEPTH[1]
     assert 0 <= uvz[:, 0].min() and uvz[:, 0].max() <= W - 1 and 0 <= uvz[:, 1].min() and uvz[:, 1].max() <= H - 1
     depth = F.render(W, H, F.SWEEP / 3)[0]
     near = uvz[:, 2] < F.FAR - 0.01
     err = np.abs(depth[lidar_scale.pixel(uvz[near, 1]), lidar_scale.pixel(uvz[near, 0])] / uvz[near, 2] - 1)
     assert np.median(err) < 2e-3 and np.mean(err < 0.01) > 0.97
-    assert len(stray.depth_samples(root, 1, (W, H), k, z_range=(0.1, 3.5))) == (uvz[:, 2] <= 3.5).sum() < len(uvz)
+    within = stray.depth_points(root, 1, (W, H), k, None, z_range=(0.1, 3.5))[0]
+    assert len(within) == (uvz[:, 2] <= 3.5).sum() < len(uvz)
     half = np.full(DEPTH[::-1], 2, np.uint8)
     half[:, :DEPTH[0] // 2] = 1
     Image.fromarray(half).save(root / "confidence" / "000001.png")
-    assert len(stray.depth_samples(root, 1, (W, H), k)) == DEPTH[0] * DEPTH[1] // 2
-    assert len(stray.depth_samples(root, 1, (W, H), k, min_conf=1)) == DEPTH[0] * DEPTH[1]
+    assert len(stray.depth_points(root, 1, (W, H), k, None)[0]) == DEPTH[0] * DEPTH[1] // 2
+    assert len(stray.depth_points(root, 1, (W, H), k, None, min_conf=1)[0]) == DEPTH[0] * DEPTH[1]
     (root / "confidence" / "000001.png").unlink()
     with pytest.raises(ValueError, match="depth/000001.png has no confidence/000001.png"):
-        stray.depth_samples(root, 1, (W, H), k)
-    assert len(stray.depth_samples(root, 1, (W, H), k, min_conf=0)) == DEPTH[0] * DEPTH[1]
+        stray.depth_points(root, 1, (W, H), k, None)
+    assert len(stray.depth_points(root, 1, (W, H), k, None, min_conf=0)[0]) == DEPTH[0] * DEPTH[1]
     Image.fromarray(half).save(root / "depth" / "000002.png")  # 8-bit, not depth
     with pytest.raises(ValueError, match="depth/000002.png is a L image, not 16-bit depth"):
-        stray.depth_samples(root, 2, (W, H), k)
+        stray.depth_points(root, 2, (W, H), k, None)
 
 
 def test_intrinsics_from_odometry_else_camera_matrix(tmp_path):
@@ -543,11 +544,11 @@ def test_depth_images_larger_than_a_phones(tmp_path, monkeypatch):
     big = np.zeros((1000, 1100), np.uint16)
     Image.fromarray(big).save(root / "depth" / "000002.png")
     with pytest.raises(ValueError, match="depth/000002.png is 1100x1000, larger than a phone's depth images"):
-        stray.depth_samples(root, 2, SIZE, 0)
+        stray.depth_points(root, 2, SIZE, 0, None)
     Image.fromarray(big.astype(np.uint8)).save(root / "confidence" / "000001.png")
     with pytest.raises(ValueError, match="confidence/000001.png is 1100x1000, larger than a phone's depth images"):
-        stray.depth_samples(root, 1, SIZE, 0)
-    assert len(stray.depth_samples(root, 1, SIZE, 0, min_conf=0)) == DEPTH[0] * DEPTH[1]
+        stray.depth_points(root, 1, SIZE, 0, None)
+    assert len(stray.depth_points(root, 1, SIZE, 0, None, min_conf=0)[0]) == DEPTH[0] * DEPTH[1]
     monkeypatch.setattr(stray, "MAX_DEPTH_PIXELS", 1000)
     with pytest.raises(SystemExit, match="depth/000000.png is 256x192, larger than a phone's depth images; this "
                                          "export is not supported"):

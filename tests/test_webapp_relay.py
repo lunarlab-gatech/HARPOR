@@ -3,10 +3,6 @@ import io
 import json
 import re
 import secrets
-import shutil
-import subprocess
-import textwrap
-import time
 import zipfile
 from pathlib import Path
 
@@ -19,39 +15,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from gator.webapp import jobs, relay, server, steps  # noqa: E402
+from test_webapp_server import run_app_js, wait, write_video  # noqa: E402
 
 TOKEN = "tok-" + secrets.token_hex(16)
 UUID = "6f1c0d2e-0000-4000-8000-000000000001"
 LOCAL = "20261024-120000-abcdef"
 KEY = "sk-ant-test-" + secrets.token_hex(16)
-
-
-def write_video(path, n=64, size=(192, 128)):
-    import av
-
-    rng = np.random.default_rng(0)
-    bg = (rng.random((size[1] // 4, size[0] // 4, 3)) * 180 + 30).astype(np.uint8).repeat(4, 0).repeat(4, 1)
-    with av.open(str(path), "w", format="mp4") as c:
-        s = c.add_stream("libx264", rate=24, options={"crf": "12"})
-        s.width, s.height, s.pix_fmt = size[0], size[1], "yuv420p"
-        for i in range(n):
-            a = bg.copy()
-            a[40:80, 10 + 2 * i:50 + 2 * i] = 240
-            for p in s.encode(av.VideoFrame.from_ndarray(a, format="rgb24")):
-                c.mux(p)
-        for p in s.encode():
-            c.mux(p)
-    return path
-
-
-def wait(c, job_id, *statuses, timeout=60):
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        job = c.get(f"/api/jobs/{job_id}").json()
-        if job["status"] in statuses:
-            return job
-        time.sleep(0.1)
-    raise AssertionError(f"job is {job['status']}, not {statuses}")
 
 
 @pytest.fixture(scope="module")
@@ -264,20 +233,6 @@ def test_coarse_and_the_row(tmp_path):
 
 # ---- the retry stage: app.js retryFrom in Python ----
 
-NODE_HARNESS = r"""
-const fs = require("fs"), vm = require("vm");
-const el = () => new Proxy(function () {}, {
-  get: (t, k) => k === Symbol.iterator ? [][Symbol.iterator] : k in t ? t[k] : (t[k] = el()),
-  apply: () => el(),
-});
-const location = { hash: "" }, history = { state: null, replaceState() {} };
-const ctx = vm.createContext({ console, document: el(), window: el(), location, history, setInterval() {},
-  EventSource: el(), fetch: async () => ({ ok: true, status: 200, json: async () => [] }) });
-Promise.resolve(vm.runInContext(fs.readFileSync(process.argv[2], "utf8") + "\n" + process.argv[3], ctx))
-  .catch((e) => { console.error(e.stack); process.exitCode = 1; });
-"""
-
-
 def retry_cases():
     names = ["topics", "frames", *jobs.BUILD]
     stages = lambda **o: [{"name": n, "status": o.get(n, "pending")} for n in names]  # noqa: E731
@@ -302,20 +257,14 @@ def test_first_not_done_is_app_js_retry_from():
     py = [relay.first_not_done(st, confirmed, stale) for st, confirmed, stale in cases]
     assert py[:7] == ["frames", "frames", "masks", None, None, "usd", "lidar"]
     assert py[7:11] == ["propose", "parts", "parts", "parts"] and py[11:] == ["sam3d", "prep", "lidar", "prep"]
-    if shutil.which("node") is None:
-        pytest.skip("no node")
-    code = f"""
+    assert run_app_js({"/api/jobs": []}, f"""
         const out = [];
         for (const [st, confirmed, stale] of {json.dumps(cases)}) {{
           V = {{ job: {{ parts: {{ confirmed }} }}, scaleStale: stale }};
           out.push(retryFrom(st));
         }}
         console.log(JSON.stringify(out));
-        """
-    p = subprocess.run(["node", "-e", NODE_HARNESS, "-", str(server.STATIC / "app.js"), textwrap.dedent(code)],
-                       capture_output=True, text=True, timeout=60)
-    assert p.returncode == 0, p.stderr
-    assert json.loads(p.stdout.splitlines()[-1]) == py
+        """) == py
 
 
 def test_app_js_build_stages_are_jobs_build():

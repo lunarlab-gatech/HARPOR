@@ -79,11 +79,14 @@ import time
 import zipfile
 from pathlib import Path
 
+from gator.agent.tools import CLAUDE_MODEL as OPUS
+from gator.fileio import write_json
 from gator.webapp import steps
 
 ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 KEY = re.compile(r"[A-Za-z0-9_-]{1,512}")  # one line, since it goes into an env file
 STAGE = {"status": "pending", "started": None, "ended": None, "returncode": None, "note": None}
+ACTIVE = ("analyzing", "queued", "running")  # a job in these statuses is busy
 BUILD = steps.NAMES[steps.NAMES.index("extract"):]
 VIDEOS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")
 BAGS = (".bag", ".mcap", ".db3")
@@ -104,9 +107,7 @@ NO_KEY_LATER = {a: f"The job needs the {p} API key now; paste it and press Build
 RUNNER_FILE = ".runner.json"  # in the runs folder: the server whose Runner runs its jobs (Runner._claim)
 # squeue states of a Slurm job whose server may still run (holder_alive)
 SLURM_ALIVE = ("RUNNING", "COMPLETING", "CONFIGURING", "SUSPENDED", "STOPPED", "SIGNALING")
-KEY_VAR = {"astra": "OPENAI_API_KEY", "opus": "ANTHROPIC_API_KEY"}  # the key file's line, per agent
 PARTS = {"mode": "vlm", "list": [], "confirmed": False}  # job.json "parts" of a new job
-OPUS = "claude-opus-5-5"
 _LOCK = threading.RLock()  # job.json read-modify-write, for the runner's threads and the server
 
 
@@ -136,7 +137,7 @@ def create_job(runs_dir, filename):
     for d in ("video", "logs"):
         (J / d).mkdir(mode=0o700)
     path = J / "video" / name
-    save(J, {"id": job_id, "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    save(J, {"id": job_id, "created": stamp(),
              "video": {"name": name, "path": str(path.resolve()), "bytes": None},
              "source": {"kind": k, "topic": None}, "agent": "astra", "status": "uploaded",
              "mode": "auto", "prompt": None, "slug": None, "n_views": 6, "picks": [], "view0": None,
@@ -148,15 +149,16 @@ def create_job(runs_dir, filename):
     return job_id, path
 
 
-def load(job_dir):
-    return json.loads((Path(job_dir) / "job.json").read_text())
+def stamp():
+    """Now, in job.json's "created" format (local time). A session's mirror_since takes it too, so the two compare."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+load = steps.job
 
 
 def save(job_dir, job):
-    fd, tmp = tempfile.mkstemp(dir=job_dir, prefix=".job.", suffix=".tmp")
-    with os.fdopen(fd, "w") as f:
-        json.dump(job, f, indent=1)
-    os.replace(tmp, Path(job_dir) / "job.json")
+    write_json(Path(job_dir) / "job.json", job, private=True, indent=1)
 
 
 def update(job_dir, **fields):
@@ -707,7 +709,7 @@ class Runner:
         kill_after_s later); the job ends as "cancelled". Returns at once."""
         J = self.job_dir(job_id)
         with self._cv:
-            if load(J)["status"] not in ("analyzing", "queued", "running", "review"):
+            if load(J)["status"] not in ACTIVE + ("review",):
                 return
             self._cancelled[job_id] = time.time()
             self._keys.pop(job_id, None)
@@ -754,11 +756,8 @@ class Runner:
                              f"or delete {f} if it is gone")
         self._id = secrets.token_hex(8)
         info = {"pid": os.getpid(), "host": socket.gethostname(), "slurm_job": os.environ.get("SLURM_JOB_ID"),
-                "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "id": self._id}
-        fd, tmp = tempfile.mkstemp(dir=self.runs, prefix=".runner.", suffix=".tmp")  # 0600
-        with os.fdopen(fd, "w") as out:
-            json.dump(info, out, indent=1)
-        os.replace(tmp, f)
+                "started": stamp(), "id": self._id}
+        write_json(f, info, private=True, indent=1)
 
     def _key_later(self, job_id, later):
         """Remember whether the newest build or resume of the job left its key for later (NO_KEY_LATER)."""
@@ -767,7 +766,7 @@ class Runner:
     def _idle(self, job_id, job):
         if job_id in self._uploads:
             raise ValueError(f"job {job_id} is still uploading")
-        if job["status"] in ("analyzing", "queued", "running") or job_id in self._procs:
+        if job["status"] in ACTIVE or job_id in self._procs:
             raise ValueError(f"job {job_id} is {job['status']}")
 
     def _check_part_list(self, J, job, i):
@@ -803,7 +802,7 @@ class Runner:
         path.unlink(missing_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
-            f.write(f"{KEY_VAR[agent]}={key}\n")
+            f.write(f"{steps.KEY_VAR[agent]}={key}\n")
         return path
 
     def _recover(self):
@@ -812,7 +811,7 @@ class Runner:
             with contextlib.suppress(OSError, ValueError, KeyError):
                 job = load(f.parent)
                 fields = {"key_ok": False}
-                if job["status"] in ("analyzing", "queued", "running"):
+                if job["status"] in ACTIVE:
                     for name, st in job["stages"].items():
                         if st["status"] == "running":  # it ended about when its log last changed
                             log = f.parent / "logs" / f"{name}.log"

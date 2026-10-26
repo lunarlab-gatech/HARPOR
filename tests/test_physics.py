@@ -7,7 +7,7 @@ from scipy.spatial.transform import Rotation
 from gator import frames
 from gator.physics.align import (gltf_matrix, make_opaque, read_glb, up_frame, up_from_normals, up_near, wrap_scene,
                                  write_glb)
-from gator.physics.mass import mass_properties, scaled_mass_properties
+from gator.physics.mass import mass_properties
 
 
 def box_mesh(size):
@@ -121,7 +121,8 @@ def test_mass_properties_of_a_uniform_box():
     a, b, d, M = 0.4, 0.6, 0.2, 24.0
     assert np.isclose(r["mass"], M) and np.allclose(r["com"], [1.2, 2.3, 3.1])
     assert np.allclose(r["inertia"], np.diag([M / 12 * (b * b + d * d), M / 12 * (a * a + d * d), M / 12 * (a * a + b * b)]))
-    s = scaled_mass_properties(c - r["com"], np.full(len(c), 500.0), h, [2, 1, 1])
+    k = np.array([2.0, 1.0, 1.0])  # the same voxels stretched 2x along x: a per-axis voxel edge
+    s = mass_properties((c - r["com"]) * k, np.full(len(c), 500.0), h * k)
     assert np.isclose(s["mass"], 2 * M) and np.isclose(s["inertia"][2][2], 2 * M / 12 * (0.8 ** 2 + b * b))
 
 
@@ -144,11 +145,7 @@ def test_mjcf_round_trip_through_mujoco(tmp_path):
     rb = {"mass": 12.0, "com": [0.01, -0.02, 0.25], "fullinertia": [0.9, 1.5, 2.0, 0.05, -0.02, 0.01]}
     (tmp_path / "summary.json").write_text(json.dumps({"config": "test", "rigid_body": rb}))
 
-    def hull(V, F, threshold):
-        h = trimesh.Trimesh(V, F).convex_hull
-        return [(h.vertices, h.faces)]
-
-    report = build(tmp_path / "box.glb", tmp_path / "summary.json", tmp_path / "mjcf", "box", decompose=hull)
+    report = build(tmp_path / "box.glb", tmp_path / "summary.json", tmp_path / "mjcf", "box", decompose=hull_parts)
     c = check(tmp_path / "mjcf", "box")
     assert np.isclose(c["mass"], 12.0) and np.allclose(c["com"], rb["com"])
     assert np.allclose(c["fullinertia"], rb["fullinertia"], atol=1e-9) and c["ntex"] == 2
@@ -194,11 +191,7 @@ def test_usd_round_trip(tmp_path):
     rb = {"mass": 12.0, "com": [0.01, -0.02, 0.25], "fullinertia": [0.9, 1.5, 2.0, 0.05, -0.02, 0.01]}
     (tmp_path / "summary.json").write_text(json.dumps({"rigid_body": rb}))
 
-    def hull(V, F, threshold):
-        h = trimesh.Trimesh(V, F).convex_hull
-        return [(h.vertices, h.faces)]
-
-    build_mjcf(tmp_path / "box.glb", tmp_path / "summary.json", tmp_path / "mjcf", "box", decompose=hull)
+    build_mjcf(tmp_path / "box.glb", tmp_path / "summary.json", tmp_path / "mjcf", "box", decompose=hull_parts)
     build(tmp_path / "box.glb", tmp_path / "summary.json", tmp_path / "mjcf", tmp_path / "usd", "box")
     c = check(tmp_path / "usd", "box")
     assert c["rigid_body"] and c["scene_reference_is_rigid_body"] and c["colliders"] == 1
@@ -226,24 +219,35 @@ def test_usd_round_trip(tmp_path):
     assert mrs.GetInput("sourceColorSpace").Get() == "raw" and tuple(mrs.GetInput("scale").Get()) == (1, 1, 0.5, 1)
 
 
-def test_combine_mjcf_places_objects_apart(tmp_path):
+STACK = {"table": [1.0, 1.0, 0.75], "pan": [0.5, 0.3, 0.08], "cup": [0.1, 0.1, 0.07]}  # sizes, bottom to top
+
+
+def box_objects(tmp_path, sizes, com=None, usd=False):
+    """A box per name of sizes {name: [x, y, z]}, bottom at z = 0: tmp_path/<name>.glb and <name>.json (1 kg, its
+    COM at com, else at the box's centre), built into tmp_path/root/<name>/mjcf, and usd/ when usd is true."""
     trimesh = pytest.importorskip("trimesh")
-    mujoco = pytest.importorskip("mujoco")
+    from gator.physics.mjcf import build as build_mjcf
 
-    from gator.physics.combine_mjcf import combine
-    from gator.physics.mjcf import build
-
-    def hull(V, F, threshold):
-        h = trimesh.Trimesh(V, F).convex_hull
-        return [(h.vertices, h.faces)]
-
-    for name, size in (("big", [1.0, 0.8, 0.5]), ("small", [0.2, 0.1, 0.05])):
+    for name, size in sizes.items():
         box = trimesh.creation.box(size)
         box.apply_translation([0, 0, size[2] / 2])
         trimesh.Scene(trimesh.Trimesh(frames.w_to_gltf(box.vertices), box.faces)).export(tmp_path / f"{name}.glb")
-        (tmp_path / f"{name}.json").write_text(json.dumps({"rigid_body": {"mass": 1.0, "com": [0, 0, 0.1],
-                                                                          "fullinertia": [0.1, 0.1, 0.1, 0, 0, 0]}}))
-        build(tmp_path / f"{name}.glb", tmp_path / f"{name}.json", tmp_path / "root" / name / "mjcf", name, decompose=hull)
+        rb = {"mass": 1.0, "com": com or [0, 0, size[2] / 2], "fullinertia": [0.1, 0.1, 0.1, 0, 0, 0]}
+        (tmp_path / f"{name}.json").write_text(json.dumps({"rigid_body": rb}))
+        d = tmp_path / "root" / name
+        build_mjcf(tmp_path / f"{name}.glb", tmp_path / f"{name}.json", d / "mjcf", name, decompose=hull_parts)
+        if usd:
+            from gator.physics.usd import build as build_usd
+
+            build_usd(tmp_path / f"{name}.glb", tmp_path / f"{name}.json", d / "mjcf", d / "usd", name)
+
+
+def test_combine_mjcf_places_objects_apart(tmp_path):
+    mujoco = pytest.importorskip("mujoco")
+
+    from gator.physics.combine_mjcf import combine
+
+    box_objects(tmp_path, {"big": [1.0, 0.8, 0.5], "small": [0.2, 0.1, 0.05]}, com=[0, 0, 0.1])
     layout = combine(tmp_path / "root", tmp_path / "root" / "all.xml", front="small", gap=0.3)
     m = mujoco.MjModel.from_xml_path(str(tmp_path / "root" / "all.xml"))
     assert m.nbody == 3 and np.isclose(m.body("big").mass, 1.0) and m.nmesh == 4
@@ -251,23 +255,11 @@ def test_combine_mjcf_places_objects_apart(tmp_path):
 
 
 def test_stack_mode_starts_a_falling_column_with_no_contacts(tmp_path):
-    trimesh = pytest.importorskip("trimesh")
     mujoco = pytest.importorskip("mujoco")
 
     from gator.physics.combine_mjcf import stack
-    from gator.physics.mjcf import build
 
-    def hull(V, F, threshold):
-        h = trimesh.Trimesh(V, F).convex_hull
-        return [(h.vertices, h.faces)]
-
-    for name, size in (("table", [1.0, 1.0, 0.75]), ("pan", [0.5, 0.3, 0.08]), ("cup", [0.1, 0.1, 0.07])):
-        box = trimesh.creation.box(size)
-        box.apply_translation([0, 0, size[2] / 2])
-        trimesh.Scene(trimesh.Trimesh(frames.w_to_gltf(box.vertices), box.faces)).export(tmp_path / f"{name}.glb")
-        (tmp_path / f"{name}.json").write_text(json.dumps({"rigid_body": {"mass": 1.0, "com": [0, 0, size[2] / 2],
-                                                                          "fullinertia": [0.1, 0.1, 0.1, 0, 0, 0]}}))
-        build(tmp_path / f"{name}.glb", tmp_path / f"{name}.json", tmp_path / "root" / name / "mjcf", name, decompose=hull)
+    box_objects(tmp_path, STACK)
     stack(tmp_path / "root", tmp_path / "root" / "stack.xml", "table", ["pan", "cup"], clearance=0.04, tilt=8)
     m = mujoco.MjModel.from_xml_path(str(tmp_path / "root" / "stack.xml"))
     d = mujoco.MjData(m)
@@ -286,29 +278,14 @@ def test_stack_mode_starts_a_falling_column_with_no_contacts(tmp_path):
 
 
 def test_usd_scene_matches_the_mujoco_stack(tmp_path):
-    trimesh = pytest.importorskip("trimesh")
     mujoco = pytest.importorskip("mujoco")
     pytest.importorskip("pxr")
     from pxr import Usd, UsdGeom, UsdPhysics
 
     from gator.physics.combine_mjcf import stack
-    from gator.physics.mjcf import build as build_mjcf
-    from gator.physics.usd import build as build_usd
     from gator.physics.usd_scene import build
 
-    def hull(V, F, threshold):
-        h = trimesh.Trimesh(V, F).convex_hull
-        return [(h.vertices, h.faces)]
-
-    for name, size in (("table", [1.0, 1.0, 0.75]), ("pan", [0.5, 0.3, 0.08]), ("cup", [0.1, 0.1, 0.07])):
-        box = trimesh.creation.box(size)
-        box.apply_translation([0, 0, size[2] / 2])
-        trimesh.Scene(trimesh.Trimesh(frames.w_to_gltf(box.vertices), box.faces)).export(tmp_path / f"{name}.glb")
-        (tmp_path / f"{name}.json").write_text(json.dumps({"rigid_body": {"mass": 1.0, "com": [0, 0, size[2] / 2],
-                                                                          "fullinertia": [0.1, 0.1, 0.1, 0, 0, 0]}}))
-        d = tmp_path / "root" / name
-        build_mjcf(tmp_path / f"{name}.glb", tmp_path / f"{name}.json", d / "mjcf", name, decompose=hull)
-        build_usd(tmp_path / f"{name}.glb", tmp_path / f"{name}.json", d / "mjcf", d / "usd", name)
+    box_objects(tmp_path, STACK, usd=True)
     stack(tmp_path / "root", tmp_path / "root" / "stack.xml", "table", ["pan", "cup"])
     rep = build(tmp_path / "root" / "stack.xml", tmp_path / "root" / "stack.usda")
     assert rep["timesteps_per_second"] == 1000

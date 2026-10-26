@@ -1,115 +1,51 @@
-# GATOR build plan
-
-Read the Overview first. It explains the whole project, and the sections after it give build detail.
+# HARPOR build plan
 
 ## Overview (read this first)
 
 ### What we are building
 
-GATOR is a method from NVIDIA and SFU (arXiv 2610.11215v1, October 2026). It turns one or more
-casual photos of an object into a complete textured mesh, placed in the frame of the photos.
-Stage A is a pose-aware generative model. Stage B is an LLM agent that repairs the mesh in Blender
-for up to ten minutes. The authors released no code.
+HARPOR (High-fidelity Articulated sim-Ready Object Reconstruction) turns one phone video, rosbag or
+Stray Scanner capture of one object into a textured GLB and MJCF, USD and URDF models. It follows the
+two stages of GATOR (arXiv 2610.11215v1): Stage A generates a posed mesh from several views (here
+MV-SAM3D; GATOR's own generator is deferred, `research.md` section 5), and Stage B is an LLM agent
+that repairs the mesh in Blender. VoMP then predicts the materials for physics. The web app runs
+every stage on PACE ICE or on a user's own GPU machine (note 10, Flow).
 
-Our first goal is a simplified version that works end to end. Stage A is single-view SAM 3D
-Objects: one photo and its mask give a textured mesh and its pose in that photo's camera.
-MV-SAM3D, which fuses several views, replaces it after the first end-to-end run. Stage B keeps
-the paper's agentic refinement strategy with the paper's agent, GPT-6-Astra through the Codex CLI
-at extra-high reasoning effort. Everything runs on PACE ICE. The full GATOR generator is
-deferred. Its design is kept in `research.md` section 5.
+### Decisions
 
-### How one reconstruction runs
-
-1. **Inputs.** The user gives one or more photos of the object and a mask of the object in each
-   photo. Masks come from the dataset or from SAM 3. The photo that sorts first is view 0.
-2. **Stage A, SAM 3D Objects.** SAM 3D runs on view 0 and its mask. Its MoGe depth model gives a
-   pointmap of the photo. The output is a canonical mesh with a baked texture and the object's
-   pose relative to view 0's camera (note 4).
-3. **Posed GLB.** We apply the pose, write the mesh in the frame of view 0, and save the pose in
-   `placement.json`. With one view, the agent gets one camera, whose K comes from the pointmap.
-4. **Stage B, agent.** A controller prepares a work folder with the GLB, the photos, previews and
-   a camera manifest. GPT-6-Astra, run through the Codex CLI at extra-high reasoning effort, writes
-   Blender scripts that repair missing parts, broken topology and bad textures. After each edit, a
-   review tool renders the original and the edited mesh from the same cameras, and the agent keeps
-   or reverts the edit. The controller enforces 600 s per object (900 s when the agent sets the
-   joints of an articulated object, note 11), validates the final GLB and falls back to an earlier
-   version if it is invalid.
-
-### How we measure it
-
-First we check that the posed mesh overlays the input photo, and we compare renders before and
-after the agent on a few objects. Then we score a small set of HANDAL and LM-O objects with the
-paper's metrics (note 6). The paper has no single-view SAM 3D rows, so its MV-SAM3D rows are a
-loose reference for our Stage A, and its GATOR rows are the target for the whole pipeline.
-
-### Decisions so far
-
-- **Stage A:** single-view SAM 3D Objects first (2026-10-14), MV-SAM3D after the first
-  end-to-end run. No custom generator (2026-10-13).
-- **Masks:** SAM 3 makes the masks from a text prompt (2026-10-15), through Hugging Face
-  transformers rather than Meta's `sam3` package (note 3). Hand-made masks still work.
-- **Web app:** a local web app, HARPOR (High-fidelity Articulated sim-Ready Object Reconstruction),
-  runs the whole pipeline from a phone video (2026-10-15, note 10). It runs inside the user's ICE
-  job and is opened on the Mac through the `cm-ice` SSH socket. One object per job, one build at a
-  time, and the user brings their own key for the agent they pick.
-- **Agent:** GPT-6-Astra through the Codex CLI, the paper's setup, is the default agent. Claude
-  Opus 5.5 through our own Messages API loop is the alternative (2026-10-17, user decision; note
-  5); the user picks per session or per web-app job. Gemini 4 Argon through the Gemini CLI came
-  first, but on 2026-10-14 two Argon sessions on the teddy ran out of time before a first export
-  (API turns of 30 to 76 s), and Astra finished a refinement in 475 s. Gemini support was removed
-  on 2026-10-15 (user decision).
-- **Compute:** PACE ICE only (2026-10-14), in an Interactive Desktop or VS Code session on an
-  L40S node. The user runs every command. Environments live natively in `~/scratch`
-  (micromamba), and Apptainer replaces Docker. lunarL40S is not used, because its GPUs are shared
-  and another user's job could cause an out-of-memory failure.
+- **Stage A:** MV-SAM3D with Depth Anything 3 cameras and depth (note 4b).
+- **Masks:** SAM 3 from a text prompt, through Hugging Face transformers rather than Meta's `sam3`
+  package (note 3).
+- **Agent:** GPT-6-Astra through the Codex CLI (the paper's setup) by default, or Claude Opus 5.5
+  through our own Messages API loop (note 5). The user picks one per job and brings its key.
+- **Web app:** one object per job, in the user's ICE job through the SSH tunnel, or on the user's own
+  GPU machine through a personal worker (note 10, `docs/public_site.md`).
+- **Environments:** micromamba envs and venvs, and Apptainer for the agent and Blender (note 7).
 - **Licenses:** SAM 3D Objects, MV-SAM3D and SAM 3 use the SAM License, and the Depth Anything 3 model we
   use is CC BY-NC 4.0. So this version is research-only.
-- **Articulated objects:** an optional per-job toggle (2026-10-20, user decision; note 11). The job's
-  VLM, or the user, lists the moving parts. A SAM 3 face vote splits the one MV-SAM3D mesh into parts.
-  The agent sets the joints within a 900 s budget. Physics exports the links and joints to MJCF, USD
-  and URDF.
-- **Metric scale:** an optional LiDAR input per job sets the metric scale (2026-10-21, user decision;
-  note 12). The LiDAR data comes from one of two sources. The first is a LiDAR topic in the job's
-  rosbag, with its transform from the bag's TF or from an uploaded calibration file. The second is
-  the depth of an iPhone capture that Stray Scanner exported. Shape supervision from LiDAR comes
-  later.
+- **Articulated objects:** an optional toggle per job; the agent sets the joints of the mesh split
+  into parts (note 11).
+- **Metric scale:** an optional LiDAR per job, from a rosbag topic or a Stray Scanner capture, sets the
+  scale only (note 12).
 
 ### Status
 
-As of 2026-10-21:
-- Stage A runs on ICE (2026-10-14): the SAM 3D env, the weights and the smoke test (kids-room
-  teddy, mask 14) all work. The first run took 4m26s including the MoGe and DINOv2 downloads and
-  the nvdiffrast build; SAM 3D itself took 150 s at a 25.6 GB peak. The textured GLB looks right.
-- `gator/frames.py`, the metrics and the agent controller exist with passing tests. The
-  controller runs the Codex CLI in Apptainer, with the helpers served from the host (note 5).
-  GPT-6-Astra refined the teddy in 475 s.
-- SAM 3 masks (2026-10-15): `gator/stage_a/sam3_masks.py` makes masks from a text prompt in
-  `envs/sam3seg` on ICE (note 3).
-- Web app (2026-10-16): `gator/webapp/` runs the whole pipeline from a phone video or a rosbag
-  (note 10). It ran end to end on ICE on `table.MOV`, with the agent turned off. The rosbag path is
-  covered by `tests/test_webapp_rosbag.py` and `tests/test_webapp_server.py`; no end-to-end rosbag
-  run is recorded here.
-- Claude Opus 5.5 runs as the alternative agent (2026-10-17, `gator/agent/claude_agent.py`, note 5).
-- `gator/stage_a/sam3d.py` runs single-view SAM 3D with a baked texture, and
-  `gator/stage_a/place.py` writes the posed GLB, `placement.json` and an overlay (note 2).
-- The generator modules from the full plan (`gator/inference/anchor.py`, `realign.py` and
-  `gator/models/`) are parked for the deferred generator.
-- Physical properties (2026-10-14 to 15): VoMP v1.1 runs on ICE on the agent's GLB after a gravity
-  alignment. The table, the chair and five tabletop objects have per-voxel E, nu and rho plus a
-  rigid-body mass from the agent's GLB, and the plate has them from its Stage A mesh (note 9).
-- Articulated objects (2026-10-20, note 11): `gator/parts/`, the agent's articulation mode and the
-  link export are built and tested. On ICE, the user's office chair went through the stages from
-  the command line: two parts (the chair base, and the seat and backrest), a swivel joint set by
-  Opus 5.5 in 208 s, and MJCF, USD and URDF models with two links. No articulated job has run
-  through the web app on ICE yet.
-- Metric scale from LiDAR (2026-10-21, note 12): `gator/stage_a/lidar_scale.py`, the `lidar` stage,
-  the Stray Scanner input and the UI are built and tested, and the UI was checked in fake mode. On ICE,
-  the phase 0 check found MV-SAM3D exactly scale-equivariant. The code is not on ICE `$G/gator_clone`
-  yet. No real rosbag with a LiDAR and no real Stray capture has run yet.
+What works (the notes hold the runs and numbers):
+- The web app runs the whole pipeline from a video on ICE (note 10). The public site and the personal
+  workers are built and pass their tests (`docs/public_site.md`).
+- Stage A: SAM 3 masks, Depth Anything 3 and MV-SAM3D with the pose fitted to the masks (notes 3
+  and 4b).
+- Stage B: GPT-6-Astra and Claude Opus 5.5 refine meshes under the controller's deadline (note 5).
+- Physics: VoMP v1.1 materials and MJCF, USD and URDF models (note 9).
+- Articulated objects: the office chair went through the stages from the command line (note 11).
+- Metric scale: MV-SAM3D is scale-equivariant, and the `lidar` stage works in fake mode (note 12).
 
-Known gaps in existing code:
-
-- `camera_similarity` can return a negative scale when the cameras disagree with the rotations.
+Not verified yet:
+- No rosbag job is recorded end to end.
+- No articulated job has run through the web app (note 11).
+- No real rosbag with a LiDAR and no real Stray capture has run (note 12).
+- The 360 video has not run on ICE (note 10).
+- No real job has run through the public site (`docs/public_site.md`, step 9 and Live checks).
 
 ### Files
 
@@ -118,39 +54,24 @@ Known gaps in existing code:
 | `LICENSE` | MIT, for HARPOR's own code. Third-party models and the vendored web libraries keep their own licenses (the Licenses bullet above, and `gator/webapp/static/vendor/licenses/`) |
 | `docs/build_plan.md` | This file: overview, design and build notes |
 | `docs/public_site.md` | The public HARPOR site on Supabase: personal workers on users' own GPU machines, the owner's setup and the live checks |
-| `docs/research.md` | Research findings with sources: the paper and every results table, MV-SAM3D and SAM 3D, the agent harness, datasets, baselines and metrics, and the deferred generator design |
-| `paper/gator_2610.11215v1.pdf` | The paper. Its text layer is garbled, so read the rendered pages or the arXiv HTML (https://arxiv.org/html/2610.11215v1). `research.md` section 1 maps PDF table numbers to HTML numbers. |
+| `docs/research.md` | Research findings with sources: the paper and every results table, MV-SAM3D and SAM 3D, Blender, SAM 3, datasets, baselines and metrics, VoMP and the simulators, and the deferred generator design |
 
 ## Component diagram
 
 ```mermaid
 flowchart TB
-  subgraph IN["Inputs"]
-    photos["Casual photos<br/>view 0 sorts first"]
-    masks["Object masks<br/>dataset or SAM 3"]
+  subgraph WEB["Web app (note 10): the local UI through the ICE tunnel, or the public site through a personal worker"]
+    input["Upload: phone video, rosbag or Stray Scanner capture"]
+    analyze["topics (a bag), frames, extract, masks (SAM 3), prep, da3 (Depth Anything 3)"]
+    lidar["lidar: metric scale (optional, note 12)"]
+    select["select: the views, then the review"]
+    stageA["sam3d (MV-SAM3D) and place (notes 2 and 4b)"]
+    parts["propose and parts (articulated only, note 11)"]
+    agent["agent: GPT-6-Astra or Claude Opus 5.5 in Blender (note 5)"]
+    physics["align, vomp, mjcf, usd, urdf (note 9)"]
+    package["turntable (optional 360 video), then package: results.zip"]
   end
-  subgraph A["Stage A: SAM 3D Objects"]
-    sam["SAM 3D on view 0<br/>MoGe pointmap, baked texture"]
-    conv["Pose to view 0 frame<br/>posed GLB + placement.json"]
-  end
-  subgraph B["Stage B: agent"]
-    ctrl["Controller<br/>work folder, 600 s deadline<br/>(900 s for joints),<br/>validation, fallback"]
-    agent["Codex CLI + gpt-6-astra (xhigh)<br/>one Apptainer container per object"]
-    tools["Helper tools<br/>export_glb, review, checkpoint, finish"]
-    blender["Blender"]
-    final["Final GLB"]
-  end
-  subgraph USE["Consumers"]
-    evalb["Evaluation<br/>overlays, metrics"]
-    web["Web app (later)"]
-  end
-
-  photos --> sam & ctrl
-  masks --> sam & ctrl
-  sam --> conv --> ctrl
-  ctrl <--> agent <--> tools <--> blender
-  ctrl --> final
-  conv & final --> evalb & web
+  input --> analyze --> lidar --> select --> stageA --> parts --> agent --> physics --> package
 ```
 
 ## Dependencies
@@ -160,31 +81,22 @@ flowchart TB
 | SAM 3D Objects | github.com/facebookresearch/sam-3d-objects (`f91db41`), HF `facebook/sam-3d-objects` | SAM License, gated (access granted) | Stage A |
 | MoGe | HF `Ruicheng/moge-vitl`, loaded by SAM 3D | MIT | pointmap of the photo |
 | nvdiffrast | github.com/NVlabs/nvdiffrast `v0.3.3` | NVIDIA source code license | texture baking |
-| MV-SAM3D | github.com/devinli123/MV-SAM3D (HEAD `abb04b5`) | SAM License | Stage A later |
-| Depth Anything 3 | github.com/ByteDance-Seed/Depth-Anything-3, HF `depth-anything/DA3NESTED-GIANT-LARGE-1.1` | code Apache-2.0, weights CC BY-NC 4.0 | cameras and depth for MV-SAM3D, later |
+| MV-SAM3D | github.com/devinli123/MV-SAM3D (HEAD `abb04b5`) | SAM License | Stage A |
+| Depth Anything 3 | github.com/ByteDance-Seed/Depth-Anything-3, HF `depth-anything/DA3NESTED-GIANT-LARGE-1.1` | code Apache-2.0, weights CC BY-NC 4.0 | cameras and depth for MV-SAM3D |
 | SAM 3 | HF `facebook/sam3` through transformers 5.20.0 (`Sam3Model`) | SAM License, gated (access granted) | masks from a text prompt, when the dataset has none (note 3), and the part masks (note 11) |
 | GPT-6-Astra | OpenAI API, model `gpt-6-astra` | API key | the default agent, and the VLM that lists the parts (note 11) |
 | Codex CLI 0.162.1 | npm `@openai/codex@0.162.1` | Apache-2.0 | runs GPT-6-Astra |
-| Claude Opus 5.5 | Anthropic API, model `claude-opus-5-5` ($4 / $20 per MTok, cache reads $0.20) | API key | the alternative agent, and the VLM that lists the parts (note 11) |
+| Claude Opus 5.5 | Anthropic API, model `claude-opus-5-5` | API key | the alternative agent, and the VLM that lists the parts (note 11) |
 | anthropic 1.15.0 | pip, in `envs/sam3d` and `envs/web` | MIT | runs Claude Opus 5.5 (`gator/agent/claude_agent.py`), the part list of `propose` (note 11) and the web app's key check |
 | Blender 5.2.2 LTS | blender.org | GPL | agent workspace and review renders |
-| trimesh, scipy | pip | open source | GLB handling and metrics |
+| trimesh, scipy | pip | open source | GLB handling, the part vote and the photo-match scores |
 | PyAV 19.0.1, rosbags 0.11.8 (with ruamel.yaml 0.19.1), FastAPI 0.143.2, uvicorn 0.54.0 | pip | BSD (the PyAV wheel bundles FFmpeg, LGPL), Apache-2.0, MIT, BSD | the web app: video and rosbag decoding, the calibration file (note 12), the server (note 10) |
 | Stray Scanner | iPhone app | free, open source | the iPhone LiDAR capture for the metric scale (note 12) |
-| model-viewer 4.4.0 | Google CDN, loaded by the browser | Apache-2.0 | the web app's GLB viewers |
+| model-viewer 4.4.0 | Google CDN locally, vendored copy on the public site (`site.py`) | Apache-2.0 | the web app's GLB viewers |
 
 `research.md` sections 2 to 4 give the details and sources.
 
 ## Notes
-
-### 1. Why single-view SAM 3D first
-
-- SAM 3D Objects already works with baked textures (note 4), so the agent stage can be built on
-  real meshes now.
-- MV-SAM3D is a copy of the SAM 3D code with multi-view fusion added. Its pose has the same form
-  and comes from view 0 only, so notes 2 and 3 carry over when we switch.
-- With one view, the hidden sides are generated, and the pose comes from MoGe's pointmap, which is
-  not guaranteed to be metric. MV-SAM3D facts are in `research.md` section 2.
 
 ### 2. Coordinate frames (`gator/frames.py`)
 
@@ -194,13 +106,9 @@ flowchart TB
   GLB rotation (`v = V @ A.T` with A = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]), apply scale, rotation
   (quaternion w, x, y, z) and translation as PyTorch3D row vectors, then multiply by (-1, -1, 1).
   `research.md` section 2.5 has the code. It mirrors MV-SAM3D's `merge_glb_with_da3_aligned`.
-- `gator/stage_a/place.py` applies this pose, writes `posed.glb` and `placement.json`, and checks
-  the result against SAM 3D's own camera: K is fitted to `pointmap.npy`, which shares SAM 3D's
-  camera. On the ICE teddy smoke test (2026-10-14), the posed silhouette matches the mask with IoU
-  0.86. The masked pointmap lies a median 1.7% of the mesh diagonal from the surface, and 54% of it
-  lies within 2%. The fitted K has fx = 7659 px for the 6720 px wide photo, a principal point at the
-  image center, and 6.9 px RMS. The convention holds. The pose is relative to SAM 3D's camera, so
-  the check uses that camera and not the photo's true K.
+- The convention was checked on the ICE teddy smoke test (2026-10-14) under SAM 3D's own camera, with
+  K fitted to `pointmap.npy`: the posed silhouette matches the mask with IoU 0.86, and the masked
+  pointmap lies a median 1.7% of the mesh diagonal from the surface (54% within 2%).
 - The agent's GLB uses the paper's Prompt 2 convention: (x, y, z)_W = (x, -z, y)_glTF, which is
   also Blender's stock glTF import. So we write `frames.w_to_gltf(x_W)` as the GLB vertices.
 - The pose is baked into the vertices. `placement.json` stores the SAM 3D pose and the frame. For
@@ -277,9 +185,9 @@ L40S session. The GPU is needed only for step 4, but SAM 3D's setup guide expect
 GPU node.
 
 1. **Copy the code.** From the laptop, on the GT network or VPN:
-   `rsync -a --exclude __pycache__ ~/lunar_lab_research/gator_clone/ ali497@login-ice.pace.gatech.edu:scratch/gator/gator_clone/`
-2. **Environment** (about 1 h). This is the recipe that worked on lunarL40S on 2026-10-13, with
-   the build for both L40S (8.9) and H100/H200 (9.0):
+   `rsync -a --exclude .git --filter=':- .gitignore' ~/lunar_lab_research/HARPOR/ ali497@login-ice.pace.gatech.edu:scratch/gator/gator_clone/`
+   (the filter skips what `.gitignore` names: caches, `results/`, `site/` and the media files).
+2. **Environment** (about 1 h). The recipe builds for both L40S (8.9) and H100/H200 (9.0):
 
    ```bash
    module purge   # PACE's default modules break the conda C++ compiler (see below)
@@ -345,6 +253,8 @@ What the run needs and why:
 - The first run downloads MoGe and DINOv2 into the caches.
 - Outputs: `canonical.glb` (unit box, y up, 1024 px texture), `splat.ply`, `pose.json` and
   `pointmap.npy`. Peak GPU memory was 25 GB on lunarL40S.
+- On ICE (2026-10-14), the first run took 4m26s, including the MoGe and DINOv2 downloads and the
+  nvdiffrast build. SAM 3D itself took 150 s at a 25.6 GB peak, and the textured GLB looks right.
 
 ### 4b. Stage A, multi-view: MV-SAM3D on ICE (`gator/stage_a/mvsam3d.py`)
 
@@ -360,9 +270,6 @@ Setup (`runs/mvsam3d_setup/cmd.sh`, about 10 min):
   dependencies could replace torch in `envs/sam3d`. It runs as its own step.
 - The DA3 weights are 6.76 GB in the HF hub cache. The files under `snapshots/` are symlinks, so
   `du` on that folder shows 35 KB.
-- On ICE, `~/.config/pip/pip.conf` (written by NVIDIA PyIndex) adds `pypi.ngc.nvidia.com`, which
-  does not resolve, and pip retries it on every package. The installs set
-  `PIP_CONFIG_FILE=/dev/null`. The user's file is left as it is.
 
 The run has four steps, each in its own process, writing into one folder (see the module
 docstring). `runs/mvsam3d_example/cmd.sh` runs them on MV-SAM3D's example: 8 photos of a stuffed
@@ -407,8 +314,7 @@ Results on the example (2026-10-14, ICE L40S):
   pose as `pose`, which reproduces `posed.glb` through `canonical_glb_to_w`. `scale_fit` records
   `applied`, the `scale` used (1.0 when not applied), the `candidate_scale` and its
   `candidate_mean_iou`, `at_limit`, and a `warning` when the mesh overlaps no mask or the scale
-  stops at a limit. A review (3 subagents) found the edge, tie and key-error cases, now covered
-  by tests. silhouette() fills boundary pixels, so the fit runs about 0.5% small. On the example
+  stops at a limit. silhouette() fills boundary pixels, so the fit runs about 0.5% small. On the example
   the fit chose 0.895.
   Mean IoU at 512 px went from 0.753 to 0.888 (each view 0.875 to 0.900). The view-0 check also
   improved, although it is not part of the fit: the median distance from DA3's points to the mesh
@@ -437,13 +343,13 @@ video `table.MOV` at 1920 x 1080 (prep: 1024 x 576), SAM 3 web-demo masks.
   rotation (degrees); steps 0.05, 0.05 and 5, halving while at or above 0.003, 0.003 and 0.3;
   bounds 0.5 to 2 times, 0.25 diagonals and 20 degrees per axis; at most 400 evaluations. It runs
   twice, first with the rotation held at 0 and then with it free, and keeps the rotation only if
-  it gains 0.005 mean IoU, because a one-pass search traded a missing shift for a false rotation
-  (found by a 3-agent review). The whole fit is applied only if it gains `min_gain` (0.005).
+  it gains 0.005 mean IoU, because a one-pass search traded a missing shift for a false rotation.
+  The whole fit is applied only if it gains `min_gain` (0.005).
   `placement.json` gets `pose_fit` with the applied `scale`, `shift_W` and `rotation_deg` (1 and
   zeros when not applied), the `candidate_*` values, the IoUs, `evaluations` and `at_bound`.
   `similar_pose` writes the pose that reproduces `posed.glb`. `place` now takes 2 to 4 min. With
   only three 160 x 120 masks of a box, the true pose scores about 0.965 and poses a few degrees or
-  percent off score as well, so the tests check the fit to that precision; 160 tests pass.
+  percent off score as well, so the tests check the fit to that precision.
 - `table_mv` with the pose fit: mean IoU 0.278 to 0.753 (0.73 to 0.80 per view); scale 0.877 on
   top of the scale fit's 0.905, shift 0.12 diagonals, rotation (-8.4, 3.8, 0.9) degrees. The view-1
   depth check, which is not part of the fit, went from a 4.1% to a 0.49% median gap and from 24% to
@@ -485,9 +391,7 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
   the shell above copies it from `OPENAI_API_KEY`; by default Codex passes key variables to the
   agent's commands and turns on live web search without a sandbox, so the config sets
   `ignore_default_excludes = false` and `web_search = "disabled"`; gpt-6-astra defaults to low
-  effort, so `xhigh` is set explicitly (the paper's "extra-high"); the built-in provider uses
-  WebSocket and ignores `OPENAI_BASE_URL`, so `codex_base_url` adds a custom HTTP provider for the
-  logging proxy (`gator/agent/pilot/logproxy.py`).
+  effort, so `xhigh` is set explicitly (the paper's "extra-high").
 - `result.json` records the CLI exit code by name in `cli_exit`. Codex exits 1 on SIGINT, so a stop
   after `finish` shows as `error_or_interrupted`.
 - The helpers (`export_glb`, `review`, `checkpoint`, `finish`) run on the host, not in the agent's
@@ -525,25 +429,16 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
   contain the key in `key_found_in`, and those files must not be shared. A host proxy that adds
   the key is not an option, because other users on a shared node could reach its port. Use a
   separate key with a low spend cap for agent runs.
-- An independent review of the port (three reviewers, each checked by a verifier, 2026-10-14)
-  confirmed 11 of 12 findings, among them symlink following in the helpers, stacked export events,
-  no cap on excluded time, trust in agent-written files for the deliverable, a crash on dangling
-  links, the missing `/work` bind for the helpers' Blender and the key exposure. All are fixed or
-  handled as above, with tests.
-- Launcher check (2026-10-14, `runs/agent_port_check/`, a scripted agent instead of the CLI, on
-  the teddy): `/storage` and `/scratch` are missing inside, the helper folder is read-only, and no
+- Launcher check (2026-10-14, `runs/agent_port_check/`, a scripted agent instead of the CLI, on the
+  teddy): `/storage` and `/scratch` are missing inside, the helper folder is read-only, and no
   events file is reachable. `export_glb` took 5.5 s and moved the deadline by that much, and a
   second call returned the cached export. `review` took 21 s and gave mask IoU 0.87 (`place.py`:
   0.865). The controller ended the session 3 s after `finish`, and a background process that the
-  agent had started with `setsid` was gone. After the review fixes, the rerun gave the same GLB
-  byte for byte, with `candidate.blend` built by the controller and a hidden 50 m cube that the
-  agent added left out of the export.
-- The prompts are in `gator/agent/prompts/`: `refinement_prompt.md` (Prompt 1) and
-  `scratch_prompt.md` (Prompt 2), copied byte for byte from the data links in the arXiv HTML (the
-  paper is CC BY 4.0; the attribution is in the folder's README). `prompts.load(mode)` applies the
-  recorded `CHANGES`, and `prepare_session` uses it when no prompt is given. The only changes are
-  paths: the CLI runs inside the work folder, so `work/run_budget.json` and `work/candidate.blend`
-  become `/work/...`.
+  agent had started with `setsid` was gone. A rerun gave the same GLB byte for byte, with
+  `candidate.blend` built by the controller and a hidden 50 m cube that the agent added left out of
+  the export.
+- The prompts are in `gator/agent/prompts/`, whose README gives the source, the license and the
+  recorded edits. `prepare_session` uses `prompts.load(mode)` when no prompt is given.
 - What the prompts expect from the helpers is now there. In refinement, the controller renders
   previews of the original (every input camera and 6 orbit views) into `original/previews/`
   before the clock starts. `review --detail X Y Z R DX DY DZ` adds up to 4 shared close-up
@@ -612,28 +507,19 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
   glass 0.907 / complete at 215 s (transparent glass, hammered surface relief);
   plate 0.497 / not run (just under the 0.5 guard; the cup hides much of it in both photos).
   No downloads in any run. Videos: `runs/videos/<object>_astra_progression.mp4`.
-- Blender bug (fixed 2026-10-14): `--python-exit-code` applies only to scripts that follow it, so
-  every helper call (export, review, previews, candidate build) and the `AGENTS.md` example put it
-  too late, and a failing Blender script exited 0. The flag now comes before `--python`, and the
-  fake Blender in the tests fails if it does not.
 - Videos: `gator/agent/blender/turntable.py` renders a 360-degree turntable of one or more GLBs in
   frame W, each asset with its own camera so all panels show the same view, joined with Blender's
-  sequencer (6 s, 30 fps, H.264). Optional keys (2026-10-25): an asset's `matrix` (4x4, row-major) maps
+  sequencer (6 s, 30 fps, H.264). Optional keys: an asset's `matrix` (4x4, row-major) maps
   the GLB's Blender world into W first, `label` may be left out, `elevation` lifts the cameras (degrees
   above the horizontal), and `frames_dir` (one asset) writes PNG frames instead of a video. The web
   app's 360 video uses them (note 10). `python3 gator/agent/loop_trace.py RUN_DIR --turntable-args
   ARGS.json` prints a session's loop in order and writes turntable arguments for the original and
   every export. Videos so far are in `runs/videos/`.
-- `python3 gator/agent/session_report.py RUN_DIR` prints a session's commands, errors, model time
-  and tokens.
 
 #### Agent setup and pilot checks on ICE
 
 Files: `containers/gator-agent.def` (Ubuntu 24.04, Node.js 24.21.0, Codex CLI 0.162.1, Blender
-5.2.2 and Blender's X and GL libraries), `gator/agent/codex/config.toml` and
-`gator/agent/pilot/logproxy.py`. `logproxy.py` forwards the CLI's requests to the OpenAI API and
-logs, per request, the model, the reasoning settings, the number of image parts, the time to first
-byte and a body hash. It logs no headers and no key.
+5.2.2 and Blender's X and GL libraries) and `gator/agent/codex/config.toml`.
 ICE allows unprivileged `--fakeroot` builds (tested 2026-10-14). The ICE `apptainer.conf` binds
 `/scratch` and `/storage` into every container, so the agent runs with `--containall` and both
 `--no-mount` flags, which keeps the rest of scratch (including other projects' data) out of its
@@ -660,7 +546,7 @@ reach.
 3. **API key.** You create `~/.config/gator/openai.env` with one line, `OPENAI_API_KEY=...`, and
    `chmod 600` it. Apptainer reads it with `--env-file`, so the value must not contain spaces or
    quotes.
-4. **Pilot checks** (`runs/pilot_codex/`, 2026-10-14, through `logproxy.py`): every request carried
+4. **Pilot checks** (`runs/pilot_codex/`, 2026-10-14): every request carried
    `reasoning.effort: xhigh`; the agent read three PNGs with known words through `view_image`; a
    math question (answer 18424) took 20 s, with the first byte after 1.9 s; image turns took 2 to
    5 s.
@@ -670,15 +556,14 @@ reach.
 **Claude Opus 5.5** (`gator/agent/claude_agent.py`, 2026-10-17):
 - The loop uses the `anthropic` SDK 1.15.0. It runs on the host as the session's agent process,
   with the controller's interpreter, under the same watchdog, tool server, deadline, deliverable
-  check and fallback as Codex. `prepare_session` writes `control/agent.json` (agent, model,
-  effort, fast), and `run_container_session` starts the agent it names.
+  check and fallback as Codex. `prepare_session` writes `control/agent.json` (agent, model
+  and effort), and `run_container_session` starts the agent it names.
 - Requests: `claude-opus-5-5`, streamed, 64K max tokens, adaptive thinking with summaries, effort
-  `xhigh` from the controller and the web app (the effort of the Astra comparison runs; it was `high`
-  until 2026-10-17; `claude_agent` run by hand still defaults to `high`, and Opus 5.5's own default is
-  `medium`), server-side refusal fallback
-  (`fallbacks: "default"`), and prompt caching on the system prompt and on the conversation.
-  `fast=True` turns on fast mode at twice the price. The history is append-only, because Opus 5.5
-  ties its thinking blocks to the conversation.
+  `xhigh` from the controller and the web app (the effort of the Astra comparison runs; it was
+  `high` until 2026-10-17; `claude_agent` run by hand still defaults to `high`, and Opus 5.5's own
+  default is `medium`), server-side refusal fallback (`fallbacks: "default"`), and prompt caching on
+  the system prompt and on the conversation. The history is append-only, because Opus 5.5 ties its
+  thinking blocks to the conversation.
 - Tools: `bash` (one persistent shell in an Apptainer container with no network and no key, cwd
   `/work`, 300 s per command), the text editor (run on the host, confined to the work folder), and
   `view_image` (PNG or JPEG under `/work`, downscaled to at most 2576 px, the Opus 5.5 limit; a PNG
@@ -690,7 +575,7 @@ reach.
   it with `[redacted]`. The log, `session/claude.jsonl`, is outside the container's mounts.
   `result.json` adds the agent, model, turns, tokens and a cost estimate. Exit codes: 0 ended or
   finished, 2 refusal, 3 API error, 130 interrupted.
-- A review fix that covers Codex too: the tool server runs the helpers from the repository with
+- For both agents, the tool server runs the helpers from the repository with
   `PYTHONSAFEPATH=1`, so a `.py` file the agent writes in `/work` cannot replace a module that runs
   on the host.
 - Astra vs Opus on the same Stage A meshes (2026-10-17, `runs/<object>_mv_opus_01`, effort `xhigh`
@@ -796,15 +681,8 @@ reach.
 
 ### 6. Evaluation (`gator/eval/`)
 
-- The metric code follows paper Appendix C and is already tested: unsquared Chamfer divided by 2D,
-  ADD-SB with no fitting, NC, F1 at 0.01 D or 0.02 D, and similarity ICP before CD, NC and F1.
-- First set: a few HANDAL and LM-O objects with 4 views, dataset masks and CAD references. The
-  benchmark details are in `research.md` section 4.
-- Reference numbers: the paper's MV-SAM3D rows (Tables 2, 3 and 6) for Stage A, and its GATOR rows
-  for the full pipeline. Our numbers use our own target lists and Depth Anything 3 cameras, so they
-  compare only roughly.
-- Without a reference mesh, `python -m gator.eval.photo_match ROOT... [--dino] [--json OUT]` scores a
-  session's renders against its photos per view: mask IoU, colour ΔE inside the mask, pixel ΔE,
+- `python -m gator.eval.photo_match ROOT... [--dino] [--json OUT]` scores a session's renders against
+  its photos per view, with no reference mesh: mask IoU, colour ΔE inside the mask, pixel ΔE,
   gradient correlation (edge), and the same two over the photo's background (bg_de, bg_edge; the
   render is composited over the photo with the object area filled from nearby pixels).
 
@@ -816,38 +694,22 @@ reach.
 | `envs/da3` (venv) | Depth Anything 3, torch 2.14.1+cu130 (note 4b) | Separate so DA3's dependencies cannot change `envs/sam3d` |
 | `envs/web` (micromamba) | Python 3.12, fastapi 0.143.2, uvicorn 0.54.0, av 19.0.1, rosbags 0.11.8, anthropic 1.15.0 (note 10) | The web app's server; every stage runs in its own env |
 | `envs/sam3seg` (micromamba) | Python 3.12, torch 2.14.1+cu130, transformers 5.20.0 (note 3) | SAM 3 masks; transformers 5.20 needs torch 2.6 or newer, so it cannot go into `envs/sam3d` |
-| `sif/gator-agent.sif` (Apptainer) | Node.js 24.21.0, Codex CLI 0.162.1, Blender 5.2.2 (the SIF on ICE also holds the unused Gemini CLI 0.64.0) | Built from `containers/gator-agent.def` with `--fakeroot` (note 5); run with `--nv` for Cycles OptiX |
+| `sif/gator-agent.sif` (Apptainer) | Node.js 24.21.0, Codex CLI 0.162.1, Blender 5.2.2 | Built from `containers/gator-agent.def` with `--fakeroot` (note 5); run with `--nv` for Cycles OptiX |
 | `envs/mujoco` (micromamba) | Python 3.11, mujoco 3.16.0, coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF export; no pytest |
 | `envs/vomp11` (micromamba) | VoMP v1.1 (641a22d) in `VoMP/`, Python 3.11, torch 2.4.0+cu121, bpy 4.2.0, kaolin 0.18.0, spconv-cu121 2.3.8 (note 9) | Built by `runs/vomp11_setup/cmd.sh` |
-| eval env | Python, numpy, scipy, trimesh, pytest | |
 
 ICE limits that matter: 300 GB of scratch and 1 million files, 30 GB home, and GPU sessions of at
 most 16 h. Scratch is not backed up, and files untouched for 120 days are deleted at the end of the
-semester.
-
-### 8. Build order
-
-1. Install the SAM 3D env on ICE, download the weights and run the smoke test (note 4).
-2. Write the posed GLB and `placement.json`, and check the posed mesh against `pointmap.npy` and
-   the photo. Done on the teddy (note 2).
-3. Build `gator-agent.sif` and run the Codex pilot checks (note 5).
-4. Port the controller to Apptainer, and test the Blender export and review scripts. The port is
-   done and checked with a scripted agent (note 5). The paper's prompts, the original's previews,
-   the detail rig and the cropped review sheet are in.
-5. Run the agent on the teddy (done: Astra `complete` in 475 s), then the full pipeline on a few
-   objects.
-6. Score a small HANDAL and LM-O set.
-7. Switch Stage A to MV-SAM3D for multi-view inputs. `gator/stage_a/mvsam3d.py` runs on
-   MV-SAM3D's example and a round table (note 4b), and on an office chair and a tabletop scene
-   (note 5), with the pose fitted to the masks. The agent ran on the toy, the table, the chair and
-   five tabletop objects.
+semester. `~/.config/pip/pip.conf` (written by NVIDIA PyIndex) adds `pypi.ngc.nvidia.com`, which does
+not resolve, and pip retries it on every package, so the installs set `PIP_CONFIG_FILE=/dev/null` and
+leave the user's file as it is.
 
 ### 9. Physical properties: VoMP v1.1 (`gator/physics/`)
 
 The agent's GLB is not ready for a simulator. MuJoCo 3.16.0 loads only STL, OBJ and MSH meshes and
 PNG textures, and it needs one mass and inertia per body. VoMP v1.1 takes the GLB directly and
 predicts Young's modulus E (Pa), Poisson's ratio nu and density rho (kg/m^3) per voxel of a 64^3
-grid. VoMP does not predict friction. Sources and the v1.1 changes are in `research.md` section 4.9.
+grid. VoMP does not predict friction. Sources and the v1.1 changes are in `research.md` section 4.6.
 
 Steps for one object:
 1. **Align.** `python -m gator.physics.align --glb IN.glb --out aligned.glb [--up pca|normals | --up-near X,Y,Z] [--x pca|footprint] [--opaque]`
@@ -883,19 +745,19 @@ Steps for one object:
      even when it carries no mass, and open meshes fail that check. All geoms have density 0.
    - VoMP gives no friction. `--friction` (default 0.6) goes on the collision geoms and on the
      scene floor, because MuJoCo uses the larger friction of two geoms with equal priority.
-   - A review confirmed and fixed five converter defects (floor friction, the name `scene`,
-     unwelded CoACD input, degenerate primitives, glTF normals).
+   - CoACD gets the welded mesh, a primitive with under 4 distinct vertices or no area is skipped,
+     and the visual OBJs keep the glTF normals.
 5. **USD for Isaac Sim.** `python -m gator.physics.usd --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
    (in `envs/mujoco`, which has usd-core 26.8). It writes `NAME.usd` (RigidBodyAPI and MassAPI on the
    default prim; the full inertia as `diagonalInertia` plus `principalAxes`, because MassAPI has no
    full-tensor attribute; UsdPreviewSurface visuals with base-colour and metallicRoughness textures;
    the MJCF's CoACD hulls as `convexHull` colliders with purpose `guide` and a friction material),
    `scene.usda` (PhysicsScene, ground, lights, the asset at the MJCF start height), `textures/` and
-   `usd.json`. Isaac Sim 6.x cannot open a GLB as a physics asset (`research.md` section 4.9).
-   - A review confirmed one visual defect (the metallicRoughness texture was ignored, so the knife
-     grip rendered as metal) and a latent one (no vertex-colour fallback); both are fixed. omni.physx
-     re-cooks hulls with more than 64 polygons (most CoACD hulls) into hulls 0.3 to 4 mm smaller, so
-     USD and MJCF colliders differ by that much. Normal and occlusion maps are not exported.
+   `usd.json`. Isaac Sim 6.x cannot open a GLB as a physics asset (`research.md` section 4.6).
+   - The visuals read metallic and roughness from the metallicRoughness texture, and a primitive
+     without a texture gets the mean vertex colour. omni.physx re-cooks hulls with more than 64
+     polygons (most CoACD hulls) into hulls 0.3 to 4 mm smaller, so USD and MJCF colliders differ by
+     that much. Normal and occlusion maps are not exported.
 6. **Combined scenes.** `python -m gator.physics.combine_mjcf ROOT` lays all objects out on one floor
    (`all_objects.xml`); with `--stack-on table --stack pan,plate,coffeecup,glass,knife,fork` it puts
    the items in one column above the table, 4 cm apart, turned 40 degrees and tilted 8 degrees each, so
@@ -917,8 +779,6 @@ An articulated GLB (joints in its node extras) takes the same steps with links. 
   link.
 
 Setup traps on ICE (`runs/vomp11_setup/cmd.sh`):
-- `~/.config/pip/pip.conf` adds the NGC index, which does not resolve on ICE, so every pip call
-  retried. The script sets `PIP_CONFIG_FILE=/dev/null`.
 - VoMP's `install_env.sh` asks for `spconv-cu120==2.3.8` with CUDA 12.1, but spconv-cu120 stops
   at 2.3.6 on PyPI. We use `spconv-cu121==2.3.8`.
 - The renders use Cycles on the GPU with no CPU fallback, so step 2 must run on a GPU node.
@@ -963,11 +823,7 @@ jobs, about 5 min per object; outputs in `runs/<name>_vomp11/` and `_vomp10/`, M
   patch; an independent recompute from `materials.npz` (`runs/_verify/mass/mass_check.py`) matches
   the mass, COM and inertia of every batch run exactly; every MJCF compiles with its summary's mass
   and inertia (relative difference under 2e-6).
-- Copies for the user (private data, on their Mac): `../results/gator_physics/<object>/` with
-  `astra.glb` (`stage_a.glb` for the plate, in frame W), `aligned.glb` and `aligned.json`, `mjcf/`,
-  `usd/`, and `summary_vomp1.1.json` and `summary_vomp1.0.json`; plus `all_objects.xml`,
-  `table_stack.xml` and their `.usda` versions in `../results/gator_physics/`. The user tests the
-  MJCFs and USDs themselves; nothing has been simulated here.
+- The batch MJCFs and USDs were not run in a simulator.
 
 ### 10. Web app (`gator/webapp/`)
 
@@ -1005,16 +861,9 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    from the log time when the stamps are missing or out of order.
 2. The app measures the sharpness of every frame (variance of the Laplacian, relative to the
    frames within 0.5 s) and keeps up to 32 candidate frames: the sharpest frame in each time bin.
-   In the same decode pass it writes a preview video of the input for the results page,
-   `frames/preview.mp4`: H.264 (libx264 through PyAV, yuv420p, crf 28, preset veryfast, a keyframe every
-   2 s) in MP4 with the index first. Its long side is at most 640 px, and it keeps every k-th frame, k
-   the smallest stride that brings the mean rate to at most 15 fps. Its frames are upright as the
-   frames stage turns them (the container's rotation for a video, gravity for a Stray capture). A
-   frame's time in it is its time in `meta.json` minus the time of frame 0 (`t0`). A kept frame less
-   than 2 ms after the kept frame before it (a burst of messages in a bag timed by log time) moves to
-   2 ms after that frame, so a seek 1 ms after a frame's time shows that frame. `meta.json` "preview"
-   records the size, fps, stride, frame count, `t0`, the moved frames and bytes, or the reason when
-   the encoder failed; the analysis goes on without a preview then.
+   In the same decode pass it writes `frames/preview.mp4`, a small H.264 preview of the input for the
+   results page; the `gator/webapp/video.py` docstring gives its format, its frame times and the
+   `meta.json` "preview" record. When the encoder fails, the analysis goes on without a preview.
 3. Choose Auto (the app picks N views, default 6) or Manual (click the frames; each click snaps to
    the sharpest frame within 0.25 s). Type the object noun for SAM 3, and pick the agent:
    GPT-6-Astra (asks for an OpenAI key), Claude Opus 5.5 (asks for an Anthropic key, checked with
@@ -1029,7 +878,10 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    (note 12). It is on by default for a Stray capture. For a bag, the user picks the LiDAR topic,
    sees how TF links it to the camera, and can upload a calibration file (`.yaml`, `.yml` or `.json`,
    at most 64 KB), which replaces the bag's TF. Start checks the LiDAR topic, the TF link or the
-   calibration, and the intrinsics, and shows the reason before any GPU stage runs.
+   calibration, and the intrinsics, and answers 400 with the reason before any GPU stage runs.
+   `PUT` and `DELETE /api/jobs/{id}/calibration` save or remove a bag's calibration; they answer 409
+   for a video or a Stray capture, and while the job is analyzing, queued or running. With LiDAR,
+   `/selection` adds the record in short (`lidar_compact`) for the review page.
    The box "Make a 360 video" (off by default; job.json "turntable") adds the `turntable` stage at the
    end of the build.
 4. SAM 3 masks every candidate, `prep` and Depth Anything 3 run on all candidates together, the
@@ -1060,7 +912,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    has transmission or alpha. For an articulated object, `align` also writes one GLB per link. Then
    VoMP (once per link for an articulated object), MJCF, USD, URDF, then the 360 video when the job
    asked for one (the `turntable` stage; a failure warns), then `results.zip`.
-8. The 360 video (2026-10-25, `gator/webapp/turntable.py`): the GLB that physics used
+8. The 360 video (`gator/webapp/turntable.py`): the GLB that physics used
    (`physics/up.json` "glb"), turned upright with `aligned.json` "T_s_from_w", so it shows aligned.glb's
    object and pose with all parts and the GLB's own materials. Blender renders `turntable.FRAMES` frames
    of `SIDE` x `SIDE` px (Cycles, `SAMPLES` samples, denoised) in the agent's SIF, one turn seen from
@@ -1075,16 +927,13 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    outline. `tests/test_webapp_turntable.py` checks the upright turn, the binds, the render with the fake
    Blender and the encode. Not checked on ICE yet: the upright turn, the render time and the file size.
 
-**UI** (`static/`, plain HTML, CSS and JS with no build step; reworked 2026-10-17, tabs 2026-10-22,
-Downloads tab 2026-10-23, help page 2026-10-25):
-- Tabs (2026-10-22). A job page shows the header, the status line, the next step, the warnings,
+**UI** (`static/`, plain HTML, CSS and JS with no build step). What users see: `static/help.html`.
+- Tabs. A job page shows the header, the status line, the next step, the warnings,
   Retry and Cancel, and the panels that wait for the user (the camera topic, the view review, the
   part list and the LiDAR failure). Under them are five tabs: Results, Downloads (the files, by
   group), Inputs (the input's facts, its preview video, the views used and their LiDAR points),
   Settings (the build settings) and Log.
-  - The first tab follows the job's status. A ready job shows Settings. A job in review or
-    choose_topic shows Inputs, under its waiting panel. A done job shows Results. Any other job
-    (analyzing, queued, running, failed or cancelled) shows Log. After a failure the
+  - The first tab follows the job's status (help.html's status table lists it). After a failure the
     failed stage's log loads by itself.
   - A tab that the user picks stays until the status changes. The statuses of a run (analyzing,
     queued and running) count as one, so a tab picked while the job waits for the GPU stays when
@@ -1117,11 +966,9 @@ Downloads tab 2026-10-23, help page 2026-10-25):
   the input has warnings (HDR, or a Stray export's warnings), the tab says how many, for example
   "3 input warnings", and "Show" opens the Inputs tab at the first one.
 - The review page shows the ring and the summary side by side and the picked views apart from the
-  other candidates, with Build in a fixed bottom bar. On the ring, view 0 is a star, a pick is a
-  filled dot (a locked pick a square) with its view number on the side away from the object, an
-  available view is a hollow dot, and a small or inconsistent view is a cross. The legend under
-  the ring names only the dot, the star and the object ("Top view: ● picked, ★ view 0, + object");
-  a hidden sentence says the same to a screen reader. A locked pick's card says "locked", and its
+  other candidates, with Build in a fixed bottom bar. The legend under the ring names only the dot,
+  the star and the object ("Top view: ● picked, ★ view 0, + object"), and help.html has the full
+  legend; a hidden sentence says the same to a screen reader. A locked pick's card says "locked", and its
   badge mark is a hollow square. Only a pick, or a view set to "always use", offers view 0. An added
   view that holds view 0 and is set back to "auto" gives view 0 back to the saved choice. An edited
   card says what Select again does to it: "Added when you select again.", "Left out when you select
@@ -1130,46 +977,37 @@ Downloads tab 2026-10-23, help page 2026-10-25):
   manually" opens the Settings tab in manual mode. Build, Select again and the part list's Build
   scroll the page back to the job's head, since the waiting panel closes.
 - The Results tab shows the 360 video (when the job asked for one), the viewers and the facts (plain
-  label and value rows). The video plays muted and loops, with controls that pause it; it does not
-  start by itself when the system asks for reduced motion. It is drawn once per file, so a refresh does
-  not start it again, and it plays only while the Results tab shows. When it cannot play, a line offers
-  the file. The
-  viewers show the model size in cm; until a mesh shows, its viewer says "Loading the mesh" and its
-  caption says "loading" where the size goes. When model-viewer's own script has not loaded after
-  10 s (`MV_WAIT_MS`), the viewer offers its file, as when the mesh does not load. With the agent off
-  and no split parts (a rigid object), there is one viewer, and from 1100 px up the facts sit beside
-  it. With the agent off, the facts' Agent row
-  says so, and no line under the viewers repeats it. A viewer drawn while its tab is hidden loads when
+  label and value rows). The video is drawn once per file, so a refresh does not start it again, and
+  it plays only while the Results tab shows. The viewers show the model size in cm; until a mesh
+  shows, its viewer says "Loading the mesh" and its caption says "loading" where the size goes. When
+  model-viewer's own script has not loaded after 10 s (`MV_WAIT_MS`), the viewer offers its file, as
+  when the mesh does not load. With the agent off and no split parts (a rigid object), there is one
+  viewer, and from 1100 px up the facts sit beside it. With the agent off, the facts' Agent row says
+  so, and no line under the viewers repeats it. A viewer drawn while its tab is hidden loads when
   the tab opens. A result file that does not parse (a cut write after a kill or a full disk) gives
   "Could not read the results: ..." in the facts; the Downloads and Inputs tabs still draw.
-- Downloads tab (2026-10-23): every output file of `server.OUTPUTS` that exists (all of them are in
-  `ALLOW`), in five groups, each under an h3 heading. Everything is `results.zip` (help.html says
-  what it holds). Meshes are `posed.glb`, `parts.glb`, `refined.glb` and `aligned.glb`. Video is
-  `turntable.mp4` (2026-10-25).
-  Simulation is `model.urdf`, whose line says that it needs the meshes in `results.zip`. Records are
-  `placement.json`, `summary.json`, `lidar.json`, `selection.json`, `parts.json` and `mjcf.json`.
-  The agent's result is not served alone. Each row is the file name as a download link (each file
-  downloads as `<job id>_<file>`, for example `<job id>_results.zip`) and its size.
-  The download arrow is decoration with empty alternative text. A group without files is left
-  out. When the tab lists files but not `results.zip`, a line above the groups says why: in
-  review (or before a build) "More files after the build.", and after a failed or cancelled build
-  "Build stopped before results.zip." While a build runs the tab lists no files, because the
-  build replaces them as it goes. A done job has no next step.
-  `GET /api/jobs/{id}` adds "sizes" (`server.sizes_of`): the bytes of each file in "files", from one
-  stat each.
+- Downloads tab: every output file of `server.OUTPUTS` that exists (all of them are in `ALLOW`), in
+  five groups (help.html lists them), each under an h3 heading. The agent's result is not served
+  alone. Each row is the file name as a download link and its size. The download arrow is decoration
+  with empty alternative text. A group without files is left out. When the tab lists files but not
+  `results.zip`, a line above the groups says why: in review (or before a build) "More files after
+  the build.", and after a failed or cancelled build "Build stopped before results.zip." While a
+  build runs the tab lists no files, because the build replaces them as it goes. A done job has no
+  next step. `GET /api/jobs/{id}` adds "sizes" (`server.sizes_of`): the bytes of each file in
+  "files", from one stat each.
 - The jobs list shows a thumbnail, the input kind, the status, a short time and a trash can button (named
   "Delete <file>" for screen readers), and marks jobs that wait for the user. It is redrawn only when it changed.
 - Uploads show the bytes sent and the time left, and can be cancelled.
 - The page follows the system dark mode and works at phone width. On a phone, each job of the jobs table is one
   compact block with a rule under it.
-- The look (2026-10-25) is a plain lab tool: hairline rules instead of cards, near-black text on near-white
+- The look is a plain lab tool: hairline rules instead of cards, near-black text on near-white
   (graphite in dark mode), one ink accent for links and focus, a near-black primary button, status as a small
   square mark and a word, and mono for file names, ids, sizes and times. The stylesheet uses system fonts only.
   The job's status line says its state once ("Done"), and the object noun follows the input's name in the title
   in a muted color.
 - Messages are live regions. All controls, frame cells and stage names included, work with the
   keyboard.
-- Articulated objects (2026-10-20): the settings form has the "Articulated (has moving parts)" box,
+- Articulated objects: the settings form has the "Articulated (has moving parts)" box,
   which shows the three parts modes and, for "I type them", the part list (`#partlist`, read by the
   top-level `parseParts()`). A job that waits after `propose` shows the "Part list" panel:
   view 0's photo, the VLM's list as editable text, its warnings, "Build" and "Undo edits". Results
@@ -1177,7 +1015,7 @@ Downloads tab 2026-10-23, help page 2026-10-25):
   the part-mask check images, the links, base and joints from `mjcf.json`, the number of joints
   delivered and the link masses. The Downloads tab adds `parts.glb` and `parts.json`. The agent stage's label
   names its task ("agent sets the joints").
-- Metric scale from LiDAR (2026-10-21, note 12):
+- Metric scale from LiDAR (note 12):
   - The upload box takes a Stray Scanner export as a `.zip`, and the jobs list names its kind "Stray
     capture". A Stray job's Inputs tab shows the turn from gravity, the number of depth and
     confidence images, and the export's warnings.
@@ -1196,75 +1034,66 @@ Downloads tab 2026-10-23, help page 2026-10-25):
     in review.
   - When the `lidar` stage fails, the status line gives the reason, and the stage list and the panel
     "LiDAR scale failed" do not repeat it. The panel shows the warnings, the check images and
-    "LiDAR settings" (in the Settings tab). The status line names the next step, for example "In
-    Settings, upload a calibration and Retry, or turn LiDAR off and build again." For a Stray
-    capture it says to build again with LiDAR off or with other views.
+    "LiDAR settings" (in the Settings tab). The status line names the next step.
   - Results add the row "Metric scale": the scale with the LiDAR topic (or "iPhone LiDAR depth"), the
     views used and the spread, or "Depth Anything 3's estimate (no LiDAR)".
-- Inputs tab (2026-10-22): once the frames are read, the tab shows the preview video (muted, with
-  controls, loading only its metadata first) with the input's name and kind, such as "table.MOV
-  (video)" or "scan.bag (rosbag, camera topic /cam/image_rect)". Under it are
-  "Change topic" (a bag that can change it), the HDR warning, a Stray capture's facts,
-  and the video facts with the sharpness plot (folded). Once the views are selected (in review,
-  during the build and after), "Views used" shows one figure per view in run order: the view's image
-  (`run/input/images/<i>.png`, loaded lazily) and a caption such as "view 0, frame 152, 15.2 s" from
-  `selection.json`; a star marks view 0. Each view is a button that puts the video at the frame that
-  the preview shows for it, paused (it never plays by itself), marks it as current, and says in a
-  live region which frame the video shows and at what time in the video (the kept frame before the
-  view's frame when the preview skipped it). After `place`, the button "Mesh fit" swaps
-  every image for place's overlay (`run/overlay_<i>.png`: the posed mesh in red, the mask outline in
-  green); it looks pressed while it is on, and the hint names the two colors. A job analyzed before
-  previews says "No preview video.", and a job whose preview file is gone "Preview video missing."
-  Before the views are selected, and while a new selection runs, the strip says
-  "No views selected yet." The video is drawn once per preview file,
-  so a refresh or a new selection does not stop it. The views are drawn once per selection. On a
-  running job's page, the event that says `select` is done draws the views, and the event that says
-  `place` is done adds the toggle without drawing them again. A portrait preview gets a narrow box,
-  without black bars. The video stops when the Inputs tab hides.
-  The server serves `frames/preview.mp4` as `video/mp4`, and the run's view images. Starlette's
-  `FileResponse` answers Range requests (206 with Content-Range, 416 for a range past the end), so
-  the browser can seek; the file route also answers HEAD.
+- Inputs tab: once the frames are read, the tab shows the preview video (muted, with controls,
+  loading only its metadata first) with the input's name and kind, such as "table.MOV (video)" or
+  "scan.bag (rosbag, camera topic /cam/image_rect)". Under it are "Change topic" (a bag that can
+  change it), the HDR warning, a Stray capture's facts, and the video facts with the sharpness plot
+  (folded). Once the views are selected (in review, during the build and after), "Views used" shows
+  one figure per view in run order: the view's image (`run/input/images/<i>.png`, loaded lazily) and
+  a caption such as "view 0, frame 152, 15.2 s" from `selection.json`; a star marks view 0. Each
+  view is a button that puts the video at the frame that the preview shows for it, paused (it never
+  plays by itself), marks it as current, and says in a live region which frame the video shows and
+  at what time in the video (the kept frame before the view's frame when the preview skipped it).
+  After `place`, the button "Mesh fit" swaps every image for place's overlay
+  (`run/overlay_<i>.png`); it looks pressed while it is on, and the hint names the colors. A job
+  analyzed before previews says "No preview video.", and a job whose preview file is gone "Preview
+  video missing." Before the views are selected, and while a new selection runs, the strip says "No
+  views selected yet." The video is drawn once per preview file, so a refresh or a new selection
+  does not stop it. The views are drawn once per selection. On a running job's page, the event that
+  says `select` is done draws the views, and the event that says `place` is done adds the toggle
+  without drawing them again. A portrait preview gets a narrow box, without black bars. The video
+  stops when the Inputs tab hides. The server serves `frames/preview.mp4` as `video/mp4`, and the
+  run's view images. Starlette's `FileResponse` answers Range requests (206 with Content-Range, 416
+  for a range past the end), so the browser can seek; the file route also answers HEAD.
   `GET /api/jobs/{id}` adds "preview" (`server.preview_of`): the record with "seek" (for each view of
   `selection.json`, the frame that the preview shows and its time in the preview), `{"error": ...}`,
   `{"missing": true}`, or null for an older job.
-- LiDAR points (2026-10-25): a job with LiDAR shows "LiDAR points" under the views, once they are
-  selected (`app.js` `renderCloud`). A picker ("view 0", "view 2", ...) lists the views that have a
-  file, view 0 first; Reset goes back to the start. The canvas draws the view's whole scan in gray,
-  the camera as a small pyramid, and the points that the scale used in the accent color on top. It
-  starts at the view's camera, looking at the median of the used points, so it looks like the photo;
-  the field is 50 degrees up and down, wider on a canvas narrower than the frame (`fieldOf`, a phone),
-  so the camera's frame always shows whole. A drag turns, the wheel or a pinch zooms, and on the
-  focused canvas (role application, "3D view", described by its legend) the arrow keys turn and + and -
-  zoom. The legend gives "Whole scan (41,203)" and "Used for the scale: ×1.05 (280 pts)", the view's
-  scale and status from `pool/lidar.json` as the review gives them (`lidarViewText`), or the used
-  points' count without a record. When the scale failed (no views used), the picker lists the pool's
-  views by frame name instead (`lidar/cloud/<view>.glb`, `server.pool_clouds`; note 12). WebGL1,
-  hand-written, with no library; it draws only on a change, and the context is freed when the
-  section draws again or another job opens. A view's file is fetched once (`readCloud` parses it),
-  and only when the canvas first has a size, so a hidden tab loads nothing. A LiDAR job without
+- LiDAR points: a job with LiDAR shows "LiDAR points" under the views, once they are selected
+  (`app.js` `renderCloud`). A picker ("view 0", "view 2", ...) lists the views that have a file,
+  view 0 first; Reset goes back to the start. The canvas draws the view's whole scan, the camera and
+  the points that the scale used. It starts at the view's camera, looking at the median of the used
+  points, so it looks like the photo; the field is 50 degrees up and down, wider on a canvas
+  narrower than the frame (`fieldOf`, a phone), so the camera's frame always shows whole. The canvas
+  has role application and the name "3D view", its legend describes it, and it also works with the
+  keyboard. The legend gives "Whole scan (41,203)" and "Used for the scale: ×1.05 (280 pts)", the
+  view's scale and status from `pool/lidar.json` as the review gives them (`lidarViewText`), or the
+  used points' count without a record. When the scale failed (no views used), the picker lists the
+  pool's views by frame name instead (`lidar/cloud/<view>.glb`, `server.pool_clouds`; note 12).
+  WebGL1, hand-written, with no library; it draws only on a change, and the context is freed when
+  the section draws again or another job opens. A view's file is fetched once (`readCloud` parses
+  it), and only when the canvas first has a size, so a hidden tab loads nothing. A LiDAR job without
   files says "No LiDAR points to show."; without WebGL, or for a file that does not parse, a line
   offers the file. `GET /api/jobs/{id}` lists `run/lidar/<i>.glb` in "files" after the outputs, with
   their sizes, and the file route serves them as `model/gltf-binary`. The worker mirrors them as
   review files (`relay.GLOBS`, owner `select`). Help explains the colors and the controls.
-- Help (2026-10-25): the UI keeps its words short, and what the items mean and how they are found
-  is in one static page, `static/help.html` (served at `/help.html`, also without the login
-  cookie, so its troubleshooting reads when the cookie is stale; `site.py` builds the public copy). The header has one Help link, which opens in a new tab, so an upload or an edited list keeps
-  going. Its section follows the screen (`HELP_AT` in `app.js`): the jobs list, a waiting panel, else
-  the tab shown. A failed job's error ends with a Help link to the troubleshooting section.
-  `tests/test_help_page.py` checks the page's numbers against the code.
-- Demos (2026-10-25): the header's Demos link opens `demos.html` in a new tab, a gallery of the finished jobs
+- Help: the UI keeps its words short, and what the items mean and how they are found is in one
+  static page, `static/help.html` (served at `/help.html`, also without the login cookie, so its
+  troubleshooting reads when the cookie is stale). The header has one Help link, which opens in a
+  new tab, so an upload or an edited list keeps going. Its section follows the screen (`HELP_AT` in
+  `app.js`): the jobs list, a waiting panel, else the tab shown. A failed job's error ends with a
+  Help link to the troubleshooting section. `tests/test_help_page.py` checks the page's numbers
+  against the code.
+- Demos: the header's Demos link opens `demos.html` in a new tab, a gallery of the finished jobs
   that the owner picked (`gator/webapp/demos.py`). The server takes the demos folder from `--demos DIR` or
   `WEBAPP_DEMOS` and serves `/demos.html` and `/demos/<name>/<file>`; `docs/public_site.md` (Demos) has the rest.
-- The 37 node tests in `tests/test_webapp_server.py` load `app.js`, and so do two in
-  `tests/test_webapp_demos.py` (the demos' facts and file sizes). They need `node`, which ICE
-  does not have, so run them on the Mac. Three more tests there check the tabs and panels of
-  `index.html`, and the styles of the Downloads rows and of the 360 video in `style.css`.
+- The node tests in `tests/test_webapp_server.py` and `tests/test_webapp_demos.py` load `app.js`.
+  They need `node`, which ICE does not have, so run them on the Mac. Other tests there check the tabs
+  and panels of `index.html` and the styles in `style.css`.
 
-**Public site.** `docs/public_site.md` describes the public site: a static page on Supabase, where users
-sign in with Google or GitHub. Jobs run only on users' own GPU machines: `python -m gator.webapp --worker`
-runs a personal worker in the server, on the same Runner, signed in as that user. Without `--worker` the server
-and the tunnel work as before, except that a second server on the same runs folder refuses to start while the
-first one is known to run (`.runner.json` in the runs folder; delete it when that server is gone).
+**Public site and personal workers:** `docs/public_site.md`.
 
 **Security.** The server port on the compute node is open to other ICE users, so every request
 needs the login cookie (a random token), except the help page and its stylesheet, which hold no
@@ -1311,8 +1140,8 @@ Decisions (2026-10-20, user):
 - The part meshes come from splitting the one MV-SAM3D mesh by a face vote. There are no MV-SAM3D
   runs per part, and hidden interiors are left to the agent.
 - The job's VLM lists the parts: GPT-6-Astra through the OpenAI Responses API, or Claude Opus 5.5
-  through the Anthropic API. The web app offers "The VLM lists the parts" or "The VLM proposes, I edit
-  the list". With agent none there is no VLM, so the user types the parts.
+  through the Anthropic API. The web app offers "VLM" or "VLM, then I check". With agent none there
+  is no VLM, so the user types the parts.
 - The export is MJCF and USD with links and joints, plus a URDF.
 - VoMP runs once per part, with the model loaded once. A rigid job keeps the single whole-object run.
 - The agent's budget for an articulated session is 900 s. Refinement keeps 600 s.
@@ -1396,16 +1225,19 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
    score is 0.4 (`--threshold`). There is no pick: the vote uses every instance. A rerun replaces the
    folder only after every photo is done.
 3. **Vote** (`envs/sam3d`): `python -m gator.parts.stage vote --job "$J"` writes `faces.npz` and
-   `vote.json` (`gator/parts/vote.py`). The rules, in short:
+   `vote.json` (`gator/parts/vote.py`) and prints one line per lost prompt, with counts per status.
+   The rules, in short:
    - Every view gets a face-id map of the posed mesh (`gator/parts/render.py`, painter's algorithm, at
      most 768 px on the long side). The face ids are 0-based, and -1 means no face. Only pixels inside
      the object mask, dilated by 1% of the long side, count.
    - Every SAM 3 instance is clipped to that mask. A base instance that covers more than 80% of the
      object is dropped, and the union of the kept ones is the view's base mask. A part instance that
-     holds at least 80% of the base mask is the whole object and is dropped (`WHOLE`). In a view
-     without a base mask, a part instance that covers more than 80% of the object is dropped. Within
-     one view and prompt, an instance that holds at least half of each of two or more other instances
-     is dropped as their union. Then an instance that has at least half of its pixels inside a kept
+     holds at least 80% of the base mask is the whole object and is dropped (`WHOLE`; SAM 3 can take
+     the whole chair for "seat"). In a view without a base mask, a part instance that covers more than
+     80% of the object is dropped. So a part that is most of the object, such as a chair's seat and
+     backrest above its base, is kept. Within one view and prompt, an instance that holds at least half
+     of each of two or more other instances is dropped as their union (SAM 3 can take a stack of drawers
+     as one). Then an instance that has at least half of its pixels inside a kept
      instance of a higher score is dropped as a duplicate.
    - Instances of one prompt are clustered across views. Two instances join when, on the faces that
      both views see, they share at least 10% of the smaller one's area and their IoU is at least 0.5.
@@ -1415,7 +1247,8 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
      as many of their pixels as the best view does.
    - A face's share of a part is the share of its pixels inside the part's instances, counted only in
      the views where SAM 3 found that prompt. The base's share comes from the base masks. Of the
-     clusters of one prompt, only the one with the highest share keeps a face's share. The shares then
+     clusters of one prompt, only the one with the highest share keeps a face's share (on a tie, the one
+     with more views). The shares then
      become probabilities, least area first: the label whose masks hold the least area takes its share,
      the next one takes its share of what is left, and so on. What is left at the end goes to the base.
    - Faces that no view sees take the majority label of their neighbours, ring by ring. An unseen face
@@ -1426,7 +1259,9 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
    - A graph cut (alpha-expansion over the face adjacency of the welded mesh) then sets the labels with
      the least cost. The cost is the area of each face times one minus the probability of its label,
      plus the length of every edge between two labels times 0.4% of the object's diagonal (`SMOOTH`).
-     An unseen face costs nothing for the labels that may reach it. The cut uses
+     A patch survives when its votes outweigh its border: a disc of radius r goes when r < 2 x 0.4% of
+     the diagonal / the difference of the probabilities. So SAM 3's ragged masks give whole regions, not
+     speckle. An unseen face costs nothing for the labels that may reach it. The cut uses
      `scipy.sparse.csgraph.maximum_flow` on int32 capacities, scaled so that they sum to 2^30.
    - A cleanup then gives each piece of a part that is not its largest and holds less than 10% of its
      area to the neighbour it shares the most edges with. A part left with less than 0.3% of the
@@ -1438,13 +1273,16 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
    `posed.glb`, bakes the transforms and joins the meshes. Each polygon gets its part by order when the
    polygon centers match the centroids in `faces.npz` in order, within 1e-4 of the centroids' diagonal.
    Otherwise each polygon takes the part of the nearest centroid, a polygon farther than that from
-   every centroid goes to the base, and a warning gives the count. The script clears custom normals,
-   welds coincident vertices and marks the edges between parts. For each part it deletes the other
+   every centroid goes to the base, and a warning gives the count. The script clears custom normals
+   (or the caps would copy their neighbours' normals) and shades the faces smooth. It welds coincident
+   vertices, which texture seams split (the UVs are per corner, so they survive the weld), and marks the
+   edges between parts, also as sharp. For each part it deletes the other
    faces and fills every hole bounded by marked edges: `edgeloop_fill` first, then `holes_fill`, then a
    fan from the loop's centre. Each cap is turned to face the same way as its neighbours and gets
    material slot 0, flat shading and the mean UV of the corners around it. A cap with more than 3
    corners is then fanned from its centre with `bmesh.ops.poke`. Blender's `mesh.validate` runs on
-   each part, and a correction is reported as a warning. The script exports with the exporter call of
+   each part, and a correction is reported as a warning. Each part's object and its mesh take the
+   part's name. The script exports with the exporter call of
    `export_glb.py` (`export_extras=True`), imports the GLB again, checks the node names and writes
    `run/parts/split_report.json`.
 5. **Finish** (`envs/sam3d`): `python -m gator.parts.stage finish --job "$J"` checks `parts.glb` with
@@ -1577,7 +1415,7 @@ after `propose` and the stages `propose`, `parts` and `urdf` are described in no
   files: 2 visual OBJs and 70 hulls, none missing; yourdfpy is not installed). MuJoCo counts 3 bodies
   (the world and the 2 links) and 2 joints (free and hinge). The MJCF excludes the pair base and top.
   The probe moves a vertex of the top by up to 0.30 m at q = 0.4 rad, and 4 s of simulation stayed
-  stable. The user found the video "pretty bad", because the split and the hinge were synthetic.
+  stable.
 - Real chair, first pass (`$G/dev_tests/chair_real/v1`, the old prompt and vote). The run folder comes
   from an MV-SAM3D run of the user's office chair video: 5 views (`img1` to `img5`), part-mask photos
   at 1024 x 576 px, vote maps at 768 x 432 px and a posed mesh of 10,268 faces. Opus 5.5 proposed in
@@ -1598,22 +1436,6 @@ after `propose` and the stages `propose`, `parts` and `urdf` are described in no
   | "seat" | the top instance covers 97 to 101% of the object and about all of the base mask |
   | "backrest" | 37 to 49% of the object |
 
-- A trap found while debugging: `render.face_ids` is 0-based, with -1 for no face. An overlay script
-  that reads the map as 1-based colours each face with a neighbour's label and shows false speckle.
-- The fixes, in the code now:
-  1. `part_masks.py` segments the base too, first, when the list has another part.
-  2. `vote.py`: the whole-object rule uses the base mask (`WHOLE`); the old 80% cover rule applies
-     only in a view without a base mask.
-  3. `vote.py`: the base's share comes from the base masks, and the shares become probabilities,
-     least area first.
-  4. `vote.py`: the graph cut replaces the two-pass majority filter.
-  5. `vote.py`: only face-id pixels inside the dilated object mask count, so the mesh's rims past the
-     object are unseen there.
-  6. `propose.py`: the prompt asks for whole rigid pieces, a base that SAM 3 can find apart from the
-     parts, one joint per part, and no small parts unless nothing larger moves.
-  7. `stage.py`: the vote printout has one line per lost prompt, with counts per status.
-
-  471 tests passed on the Mac after these fixes, and 485 after the web-app phase.
 - Real chair, second pass (`$G/dev_tests/chair_real`):
   - Propose: Opus 5.5 took 80.9 s. It listed the base "chair base" and one part, "seat and backrest",
     revolute, on the chair base, with the axis hint "vertical axis through gas cylinder, seat swivels
@@ -1657,15 +1479,6 @@ after `propose` and the stages `propose`, `parts` and `urdf` are described in no
   - Video: a 12 s sweep of the swivel through its range with the base held, then 3 s of free physics.
     The largest |qvel| at the end was 0.12 (MuJoCo units, m/s or rad/s), because the swivel has no
     damping and the seat keeps turning slowly.
-  - On the user's Mac: `results/chair_articulated/chair_articulated.mp4` and
-    `results/chair_articulated/office_chair_physics.zip` (`mjcf/`, `urdf/`, `usd/`). `results/` is
-    gitignored.
-- Tests: on the Mac, 485 passed and 2 were skipped, node tests included, with the two torch-only test
-  files left out. On ICE, `envs/web` ran the web-app test files: 112 passed and 12 were skipped (among
-  them the 8 node tests, because ICE has no `node`). `envs/sam3d` passed 233 (parts, propose, joints,
-  agent). The physics and URDF tests did not run on ICE, because `envs/mujoco` has no pytest. They
-  pass on the Mac, and the chair run used that code. The code is synced to `$G/gator_clone` and
-  `$G/gator_dev` on ICE.
 
 Measured times on ICE for the real chair (5 views, 10,268 faces, 2 parts):
 
@@ -1688,8 +1501,7 @@ Measured times on ICE for the real chair (5 views, 10,268 faces, 2 parts):
 - The prompt's examples come from an office chair ("seat and backrest", "chair base"), so the chair
   result does not show that the prompt and the vote work for other objects.
 - With agent none, when the agent stage is skipped, or when the session delivers no joints (verdict
-  `unchanged`, `fallback_original` or `invalid`), the parts get no joints, and physics makes them one
-  body.
+  `unchanged` or `fallback_original`), the parts get no joints, and physics makes them one body.
 - A part has one joint. A part that both turns and slides gets only its main motion: the chair's
   gas-lift height is not modelled.
 - The swivel's range is -pi to pi rad, while a real office chair turns without limit. The joint spec
@@ -1745,7 +1557,7 @@ Decisions (2026-10-21, user):
     failed, was cancelled, or ran with another calibration).
   - Phase 0 on ICE (2026-10-21, job 6432672, `$G/dev_tests/scale_eq`) ran MV-SAM3D and `place` on
     copies of the user's office chair run (5 views) with DA3's output scaled by s = 1, 1.25 and 2.
-    `lidar_scale scale-run` made the copies. MV-SAM3D took about 170 s per run.
+    MV-SAM3D took about 170 s per run.
   - MV-SAM3D is exactly scale-equivariant. At s = 2, the pose translation and scale ratios were both
     2.0000, and the rotation changed by 0.000 deg. At s = 1.25, the ratios were 1.2498 and 1.2501, and
     the rotation changed by 0.008 deg.
@@ -1885,16 +1697,17 @@ Decisions (2026-10-21, user):
    edit list hides it. A reader that follows the edit list gets N - 1 frames that start at saved
    frame 1, and it pairs every color frame with the next frame's depth and pose. So `stray.probe` and
    `stray.frames` read `rgb.mp4` with FFmpeg's `ignore_editlist` option (`stray.OPEN`), and `probe`
-   checks that the frame count equals the odometry rows. A review of the Stray code found this.
+   checks that the frame count equals the odometry rows.
 5. **Rotation from gravity.** `rgb.mp4` stores each frame as the sensor sees it, in landscape, so a
    portrait capture is stored turned by a quarter turn. The file has no rotation tag, so nothing turns
    it back. ARKit's world has +y up, so the up direction in the camera is R_wc^T (0, 1, 0), and its x
-   and y give the direction of up in the image. `stray.upright_turns` averages that direction over
-   the frames and picks one number k of counterclockwise quarter turns for the whole capture. A frame
+   and y give the direction of up in the image. `stray.upright_turns` takes the circular mean of that
+   direction over the frames and picks, for the whole capture, the one number k of counterclockwise
+   quarter turns that brings it closest to (0, -1), the top of the image. A frame
    that looks straight up or down does not vote. A warning appears when more than 20% of the voting
    frames give another k (the phone turned during the capture), or when no frame votes (then k is
    0). `video.frames(..., turns=k)` replaces the container's rotation, so no frame is turned twice.
-6. **Depth samples.** `stray.depth_samples` keeps the depth pixels with confidence 2 (ARKit's high
+6. **Depth samples.** `stray.depth_points` keeps the depth pixels with confidence 2 (ARKit's high
    confidence) and z from 0.1 m to 5 m. It moves each pixel from the depth image's size to the frame's
    stored size, `(u_d + 0.5) * W / w_d - 0.5`, and then turns it by k. The depth itself is not
    resampled. The scale of a Stray capture needs no extrinsic, no intrinsics and no time matching. Without
@@ -1954,7 +1767,7 @@ The server takes only `.yaml`, `.yml` and `.json` files (else it answers 415) of
 **Estimator** (`lidar_scale.estimate`, on the pool after `da3`). The samples are one (N, 3) array
 `[u, v, z]` per pool frame: pixels of the upright full-size frame (`scene/images/<name>.png`, pixel
 centers at integers), and z, the depth in meters along the camera's optical axis. The estimator does
-not turn them. For a Stray capture, `stray.depth_samples` has already turned them upright with
+not turn them. For a Stray capture, `stray.depth_points` has already turned them upright with
 `lidar_scale.rot90_points`.
 1. **Map to the DA3 grid.** Each sample goes through prep's crop box (`pool/prep.json`) to DA3's grid,
    with the half-pixel convention of `mvsam3d.cameras()`: `(u + 0.5 - x0) * w / (x1 - x0) - 0.5`.
@@ -2025,7 +1838,7 @@ calibration (see the last bullet), it is the stage's done marker.
   sha256 of the job's calibration (both are null without one). So an upload or a delete of the
   calibration makes the record stale.
 
-**Points for the Inputs tab** (2026-10-25). The Inputs tab shows each view's LiDAR points in 3D (note
+**Points for the Inputs tab.** The Inputs tab shows each view's LiDAR points in 3D (note
 10): the view's whole scan, and the points that the scale used.
 - `lidar_scale.view_ratio`'s points gain `index`, each point's row in the samples, and
   `estimate(..., points_out={})` hands every view's points back. The record and the CLI do not change.
@@ -2064,32 +1877,13 @@ calibration (see the last bullet), it is the stage's done marker.
   serves. A job built before this has no points until its `lidar` stage runs again (the cache version
   changed).
 
-**Steps** (`envs/web`, from `$G/gator_clone`). On ICE these commands work only after the code is
-synced to `$G/gator_clone` (see "Checks so far"). On the Mac, run them from the `gator_clone` root.
+**Steps** (`envs/web`, from `$G/gator_clone` on ICE, or from the repo root on the Mac).
 1. **Stage:** `python -m gator.webapp.lidar scale --job "$J"` gathers the samples (from the cache
    first), runs the estimate, writes the check images and then `pool/lidar.json`, and prints one line
    per view. It exits 1 with the reason when the record is not ok.
 2. **Estimate alone:** `python -m gator.stage_a.lidar_scale estimate --pool P --samples S.npz --out F [--check DIR]`.
-3. **Phase 0 tools:** `python -m gator.stage_a.lidar_scale scale-run --run R --s 2 --out O` copies a
-   run with its DA3 output scaled by s. `python -m gator.stage_a.lidar_scale compare-runs --a A --b B --s 2`
-   compares two placed runs.
 
-**Web app** (details in note 10):
-- The settings form has the box "Use LiDAR for metric scale" for a bag or a Stray capture. Start
-  checks the LiDAR topic, the TF link or the calibration, and the intrinsics, and answers 400 with the
-  reason before any GPU stage runs.
-- `PUT` and `DELETE /api/jobs/{id}/calibration` save or remove a bag's calibration. They answer 409
-  for a video or a Stray capture, and while the job is analyzing, queued or running. A change makes
-  the scale stale, so the next Build or Retry starts from `lidar`. A job that was in review, or that
-  pauses for review, then stops in review again and shows the new scale.
-- The review page shows the scale, the views used, the spread and the check images. `/selection` adds
-  the record in short (`lidar_compact`).
-- When `lidar` fails, a panel shows the reason, the check images and the button "Go to the LiDAR
-  settings". The status line names the next step: upload or replace the calibration and Retry, or
-  Build again with LiDAR off. For a Stray capture, it says to build again with LiDAR off or with
-  other views.
-- Results show the row "Metric scale", and `results.zip` adds `lidar.json`.
-- The Inputs tab shows each view's LiDAR points in 3D (above).
+**Web app:** note 10.
 
 **Fake mode.** `python -m gator.webapp --fake` runs the real `lidar` stage. For a job with LiDAR, the
 fake `da3` multiplies the depth, the pointmaps and the camera translations by 0.8
@@ -2097,29 +1891,18 @@ fake `da3` multiplies the depth, the pointmaps and the camera translations by 0.
 (`run_scale`). So a scale that `select` did not apply shows as 0.8 times the size in `placement.json`
 and in `physics/aligned.json`.
 
-**Checks so far** (2026-10-21):
-- Phase 0 on ICE: see "Where the scale enters".
-- Tests: `tests/test_lidar_scale.py`, `tests/test_webapp_lidar.py` and `tests/test_webapp_stray.py` are
-  new. `tests/test_webapp_rosbag.py` gains LiDAR, Livox and TF cases on synthetic ROS1, MCAP and db3
-  bags. `tests/test_webapp_views.py` gains three cases for the scale in `select`, and
-  `tests/test_mvsam3d.py` gains one for `metric_scale` in `placement.json`.
-  `tests/test_webapp_video.py` gains a Stray job. The jobs, server and node tests gain LiDAR and
-  Stray cases. All test data is synthetic. On the
-  Mac, 619 passed and 2 were skipped, node tests included, with the two torch-only test files left
-  out. On ICE, `envs/web` (Python 3.12.15, rosbags 0.11.8, ruamel 0.19.1) passed the tests of phases 0
-  to 2 (143 passed, 1 skipped), before phases 3 to 5 were built.
-- Fake mode: the stage found 1.25 for a rosbag with a PointCloud2 and `/tf_static`, and for a
-  synthetic Stray capture in landscape and in portrait. In the browser, the start form showed the
-  LiDAR topic, the TF chain and the calibration upload. The review page showed "Metric scale from
-  LiDAR: x1.250 (8 of 8 views, spread 0.0%)" with the check images, and a results page showed
+**Checks so far:**
+- Phase 0 on ICE (2026-10-21): see "Where the scale enters".
+- All test data is synthetic: ROS1, MCAP and db3 bags and Stray captures.
+- Fake mode (2026-10-21): the stage found 1.25 for a rosbag with a PointCloud2 and `/tf_static`, and
+  for a synthetic Stray capture in landscape and in portrait. In the browser, the start form showed
+  the LiDAR topic, the TF chain and the calibration upload. The review page showed "Metric scale
+  from LiDAR: x1.250 (8 of 8 views, spread 0.0%)" with the check images, and a results page showed
   "x1.250 from LiDAR (/lidar/points, 16 views, spread 0.0%)".
-- On ICE (2026-10-21), `envs/web` passed the LiDAR, Stray and web-app tests: 238 passed and 19 were
-  skipped (among them the node tests, because ICE has no `node`). The code is synced to `$G/gator_clone`
-  and `$G/gator_dev`.
-- Points for the Inputs tab (2026-10-25, Mac only): 916 passed and 3 were skipped. In fake mode, a bag
-  with 3,000 points behind the camera and a portrait Stray capture showed their points; drag, wheel,
-  arrow keys, Reset and a view change worked, in light and dark mode and at 375 px, with no console
-  errors. Not yet run on ICE or on a real bag.
+- Points for the Inputs tab (2026-10-25, Mac only): in fake mode, a bag with 3,000 points behind the
+  camera and a portrait Stray capture showed their points; drag, wheel, arrow keys, Reset and a view
+  change worked, in light and dark mode and at 375 px, with no console errors. Not yet run on ICE or on
+  a real bag.
 
 **Open issues.**
 - No real rosbag with a LiDAR and no real Stray capture has run yet. The next check needs one bag from

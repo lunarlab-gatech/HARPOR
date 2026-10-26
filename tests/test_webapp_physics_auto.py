@@ -169,7 +169,7 @@ def test_align_job_picks_the_glb_and_aligns_it(tmp_path, capsys):
     assert "finish GLB, verdict complete" in up["glb_rule"]
     assert json.loads((j / "physics" / "aligned.json").read_text())["opaque"]
     for r in ({**result, "verdict": "fallback_original"}, {**result, "glb": None}, {**result, "glb": "../../run/posed.glb"},
-              {"verdict": "invalid", "glb": None}):
+              {"verdict": "needs_review", "glb": None}):
         (j / "agent" / "result.json").write_text(json.dumps(r))
         g, rule = A.pick_glb(j)
         assert g == j / "run" / "posed.glb" and "no usable GLB" in rule

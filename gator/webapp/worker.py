@@ -1,5 +1,5 @@
 """The personal worker: a thread inside the HARPOR server on a user's own GPU machine that serves the public site
-(plan.md section 5, addendum section 6).
+(docs/public_site.md, What the worker does).
 
     python -m gator.webapp --worker [--local-keys astra,opus]
 
@@ -10,37 +10,29 @@ runner.shutdown (server.on_stop), so the worker never copies the "cancelled" tha
 It signs in as the machine's user (session.Session) and talks to Supabase only through one supa.Store
 over that session: the user's own rows under RLS, and the own_* functions.
 
-A relayed request (plan.md 5.4): the worker claims it, takes its sealed key off Supabase in every case,
-and checks it against fresh rows: the user is approved (a delete is exempt), the request is this user's,
-and the job is of this machine with its folder here (a delete is exempt from both). The agent that
-server.py will run (relay.effective_agent) must be in access.agents, which holds only astra and opus.
-A sealed key is opened with this start's KeyBox, the AAD built from the request, this worker's id and
-that agent; the worker may instead read the machine's own key file (--local-keys). The request goes to
-the app as relay.build makes it, the job is published, and only then is the answer written, so the
-page's refresh after the answer sees the new view.
+A relayed request: the worker claims it, takes its sealed key off Supabase in every case, and checks it
+against fresh rows: the user is approved (a delete is exempt), the request is this user's, and the job is
+of this machine with its folder here (a delete is exempt from both). The agent that server.py will run
+(relay.effective_agent) must be in access.agents, which holds only astra and opus. A sealed key is opened
+with this start's KeyBox, the AAD built from the request, this worker's id and that agent; the worker may
+instead read the machine's own key file (--local-keys). The request goes to the app as relay.build makes
+it, the job is published, and only then is the answer written, so the page's refresh after the answer
+sees the new view.
 
-Publishing a job (plan.md 5.5), in this order: the log text of its running stage (server.tick, without
-PROGRESS lines, scrubbed, at most LOG_CAP per stage run), the files of stages that are not running
-(relay.mirror_plan: uploaded under names that hold their hash, scanned for the job's keys, lean review
-files, left out with a note when too large), then the view, the live state, the snapshots and the
-jobs row in one own_publish call. A change of status, or of a stage's status, publishes at once;
-progress alone at most every 2 s.
+Publishing a job, in this order: the log text of its running stage (server.tick, without PROGRESS lines,
+scrubbed, at most LOG_CAP per stage run), the files of stages that are not running (relay.mirror_plan:
+uploaded under names that hold their hash, scanned for the job's keys, lean review files, left out with a
+note when too large), then the view, the live state, the snapshots and the jobs row in one own_publish
+call. A change of status, or of a stage's status, publishes at once; progress alone at most every 2 s.
 
-The start (addendum 6.4): the workers row, then the jobs rows against the job folders here (reconcile),
-orphan objects, interrupted jobs resumed at most RESUMES times (plan.md 5.8), and a first publish of
-every job. Inputs stay on the machine: a local upload (its own UI, or `worker add`) gets a row
-(local_jobs). Near the end of a Slurm job the worker takes no builds; at the stop, active jobs keep
-their status with a note, and the next start resumes them. Housekeeping, every minute: the settings row
-again, and the key of a job that waited in review over KEY_HOURS goes; every hour, retention (review
-files and logs REVIEW_DAYS, results RESULT_DAYS after a job stopped, also for a job whose folder is gone
-from the machine) and the orphan objects of the user's folder (own_orphans). pg_cron sweeps the rows
-(private.sweep); no worker does.
-
-    python -m gator.webapp.worker login [--provider github|google] [--name NAME] [--port 8767] [--no-browser]
-    python -m gator.webapp.worker status | logout | add PATH [--name NAME]
-
-are the personal worker's commands (session.py does the work): sign in and bind this machine, show the
-account and the session, sign out, and add a local input to the server on this machine.
+The start: the workers row, then the jobs rows against the job folders here (reconcile), orphan objects,
+interrupted jobs resumed at most RESUMES times, and a first publish of every job. Inputs stay on the
+machine: a local upload (its own UI, or `worker add`) gets a row (local_jobs). Near the end of a Slurm
+job the worker takes no builds; at the stop, active jobs keep their status with a note, and the next
+start resumes them. Housekeeping, every minute: the settings row again, and the key of a job that waited
+in review over KEY_HOURS goes; every hour, retention (review files and logs REVIEW_DAYS, results
+RESULT_DAYS after a job stopped, also for a job whose folder is gone from the machine) and the orphan
+objects of the user's folder (own_orphans). pg_cron sweeps the rows (private.sweep); no worker does.
 """
 
 import argparse
@@ -74,7 +66,6 @@ STOP_WAIT = 30  # s that a delete waits for a cancelled job to stop
 SETTLE = 5  # publishes the mirror again at most this often while stages change under it
 PAUSE_S = 300  # a worker whose account lost its approval tries again after 5 minutes
 OFFLINE_S = 60  # a worker that cannot reach Supabase at its start tries again after this long
-SNAPSHOTS = ("frames", "selection", "parts")
 RESUMES = 2  # automatic resumes of one job, so a job that crashes the server does not loop
 HOUSEKEEPING_S = 60
 HOURLY_S = 3600
@@ -82,7 +73,6 @@ SQUEUE_S = 600  # the Slurm job's end is read again this often (the limit can ch
 REVIEW_DAYS, RESULT_DAYS = 14, 90  # retention on the site, counted from when a job stopped
 KEY_HOURS = 24  # a key held for a job in review goes after this long
 ORPHAN_ROUNDS = 20  # own_orphans calls of 1,000 names in one pass at most
-LOCAL_KEY_FILES = {"astra": "openai.env", "opus": "anthropic.env"}  # in ~/.config/gator, as the HARPOR CLI has them
 SIGNED_OUT = ("signed out of the HARPOR site: run python -m gator.webapp.worker login, then start the server "
               "again")
 ENDED = "{place} stopped. This job goes on when HARPOR runs there again."
@@ -138,8 +128,8 @@ class Worker:
 
     def __init__(self, app, cfg, local_keys=(), store=None, session=None, local_key=None):
         local_keys = tuple(local_keys or ())
-        if set(local_keys) - set(relay.PUBLIC_AGENTS):
-            raise ValueError(f"local keys are for {' and '.join(relay.PUBLIC_AGENTS)}")
+        if set(local_keys) - set(steps.PROVIDER):
+            raise ValueError(f"local keys are for {' and '.join(steps.PROVIDER)}")
         self.inner = app.app if isinstance(app, server.TokenGate) else app
         self.runner = self.inner.state.runner
         self.cfg, self.local_keys, self.session = cfg, local_keys, session
@@ -264,7 +254,7 @@ class Worker:
             if self.store.worker_id is None:  # it never started: no row to stop
                 return
             for jid, pub in list(self.jobs.items()):
-                if not pub.gone and (pub.live or {}).get("status") in server.ACTIVE:
+                if not pub.gone and (pub.live or {}).get("status") in jobs.ACTIVE:
                     await self.store.publish(jid, row={"note": ENDED.format(place=self.place)})
             await self.store.stop()
         except Exception as e:
@@ -311,11 +301,11 @@ class Worker:
         return out
 
     async def reconcile(self):
-        """The jobs rows against the job folders at a start (addendum 6.4); the jobs it serves are tracked. A copied
-        job whose row is gone gets job.json public.gone and is no longer copied (its folder stays; the user may
-        delete it in the local UI), unless its delete request waits: RLS hides a row in "deleting", and the delete
-        still needs the folder. A row whose folder is missing here becomes failed, and its files on the site wait for
-        retention (folderless). Returns {uuid: row} of the rows it read; it never deletes a folder."""
+        """The jobs rows against the job folders at a start; the jobs it serves are tracked. A copied job whose
+        row is gone gets job.json public.gone and is no longer copied (its folder stays; the user may delete it in
+        the local UI), unless its delete request waits: RLS hides a row in "deleting", and the delete still needs
+        the folder. A row whose folder is missing here becomes failed, and its files on the site wait for retention
+        (folderless). Returns {uuid: row} of the rows it read; it never deletes a folder."""
         rows = {r["id"]: r for r in await self.store.job_rows()}
         rest = dict(rows)  # the rows without a folder here; rows itself goes on to resume_interrupted
         for jid, (local, pub) in self.folders().items():
@@ -339,15 +329,15 @@ class Worker:
                                                  filters={"state": "in.(pending,taken)"}, limit=1))
 
     async def resume_interrupted(self, rows):
-        """plan.md 5.8: a row that says analyzing, queued or running while job.json says failed (Runner._recover
-        after a crash or SIGKILL) or cancelled (the stop) goes on: the analysis again while the frames are not done,
-        else the build from the first stage not done (app.js retryFrom), without a key, so a stage that needs one
-        waits in review. A job whose cancel was answered after the row's last update stays. RESUMES at most per job,
-        counted in job.json public.resumes."""
+        """A row that says analyzing, queued or running while job.json says failed (Runner._recover after a crash
+        or SIGKILL) or cancelled (the stop) goes on: the analysis again while the frames are not done, else the
+        build from the first stage not done (app.js retryFrom), without a key, so a stage that needs one waits in
+        review. A job whose cancel was answered after the row's last update stays. RESUMES at most per job, counted
+        in job.json public.resumes."""
         order = sorted((rows[jid].get("updated_at") or "", jid) for jid in self.jobs if jid in rows)
         for _, jid in order:
             row, pub = rows[jid], self.jobs[jid]
-            if pub.gone or row.get("deleted_at") or row["status"] not in server.ACTIVE:
+            if pub.gone or row.get("deleted_at") or row["status"] not in jobs.ACTIVE:
                 continue
             try:
                 J = self.runner.job_dir(pub.local)
@@ -562,10 +552,10 @@ class Worker:
         J = self.runner.runs / str(local)
         if not jobs.ID.fullmatch(str(local)) or not (J / "job.json").is_file():
             return 404, {"detail": "no such job"}
-        if jobs.load(J)["status"] in server.ACTIVE:
+        if jobs.load(J)["status"] in jobs.ACTIVE:
             await self.client.post(f"/api/jobs/{local}/cancel")
             with anyio.move_on_after(STOP_WAIT):
-                while (J / "job.json").is_file() and jobs.load(J)["status"] in server.ACTIVE:
+                while (J / "job.json").is_file() and jobs.load(J)["status"] in jobs.ACTIVE:
                     await anyio.sleep(0.2)
         resp = await self.client.delete(f"/api/jobs/{local}")
         try:
@@ -597,7 +587,8 @@ class Worker:
             await self._publish(jid, force)
 
     async def publish_safely(self, jid, force=False, locked=False):
-        """publish, with errors logged; the messages of addendum 6.4 stop, pause or end the copy."""
+        """publish, with errors logged; a stopped worker, a paused account or a job gone from the site stops,
+        pauses or ends the copy."""
         try:
             if locked:
                 await self._publish(jid, force)
@@ -638,7 +629,7 @@ class Worker:
             job = jobs.load(J)
             notes = await self.mirror(pub, J, job)
             raw = (await self.client.get(f"/api/jobs/{pub.local}")).json()
-            answers = {path: await self.client.get(f"/api/jobs/{pub.local}/{path}") for path in SNAPSHOTS}
+            answers = {path: await self.client.get(f"/api/jobs/{pub.local}/{path}") for path in supa.SNAPSHOTS}
             if stage_states(jobs.load(J)) == stage_states(job):
                 break
         ctx = self.ctx(pub)
@@ -813,13 +804,13 @@ class Worker:
         for jid, pub in list(self.jobs.items()):
             if pub.gone:
                 continue
-            active = (pub.live or {}).get("status") in server.ACTIVE
+            active = (pub.live or {}).get("status") in jobs.ACTIVE
             if not active:
                 try:
                     J = self.runner.job_dir(pub.local)
                     if (J / "job.json").stat().st_mtime_ns == pub.mtime:
                         continue
-                    active = jobs.load(J)["status"] in server.ACTIVE
+                    active = jobs.load(J)["status"] in jobs.ACTIVE
                 except (ValueError, OSError):
                     continue
             if active or every:
@@ -888,7 +879,7 @@ class Worker:
             self.track(jid, local)
             await self.publish_safely(jid, force=True)
 
-    # ---- housekeeping (plan.md 5.9, addendum 6.6) ----
+    # ---- housekeeping ----
 
     async def housekeeping_loop(self):
         """Every HOUSEKEEPING_S; the hourly part every HOURLY_S (start() deleted the orphans already)."""
@@ -921,7 +912,7 @@ class Worker:
         self.settings = await self.store.settings()
 
     async def retention(self):
-        """Hourly, counted from when a job stopped (plan.md 5.9, addendum 6.6): a job whose files on the site still
+        """Hourly, counted from when a job stopped: a job whose files on the site still
         include review files or logs after REVIEW_DAYS, or results after RESULT_DAYS, is published again. mirror()
         leaves those files out with a note and drops them from job_files, and their objects go 10 minutes later. A job
         whose folder is gone (reconcile, or a delete in the local UI while the server runs) goes through
@@ -988,7 +979,7 @@ class Worker:
 def stop_time(job):
     """When the job last stopped (its newest stage end, in seconds since the epoch), or None while it is active or
     before any stage ended."""
-    if not job or job.get("status") in server.ACTIVE:
+    if not job or job.get("status") in jobs.ACTIVE:
         return None
     ends = [st.get("ended") for st in (job.get("stages") or {}).values()
             if isinstance(st, dict) and isinstance(st.get("ended"), (int, float))]
@@ -1001,18 +992,20 @@ def expired_roles(days):
 
 
 def check_local_keys(agents, folder=None):
-    """Refuse (SystemExit) a start with --local-keys unless each agent's key file (LOCAL_KEY_FILES) is a file of
+    """Refuse (SystemExit) a start with --local-keys unless each agent's key file (session.KEY_FILES) is a file of
     this user with mode 0600 in a folder of mode 0700. Only the modes are looked at here; the key is read when a
     job needs it (session.local_key)."""
+    from gator.webapp.session import KEY_FILES
+
     folder = Path(folder) if folder else Path.home() / ".config" / "gator"
     supa.private_folder(folder)
     for agent in agents:
-        path = folder / LOCAL_KEY_FILES[agent]
+        path = folder / KEY_FILES[agent]
         try:
             st = os.lstat(path)
         except FileNotFoundError:
             raise SystemExit(f"--local-keys {agent} needs {path} with the {steps.PROVIDER[agent]} key "
-                             f"({jobs.KEY_VAR[agent]}=...), mode 0600") from None
+                             f"({steps.KEY_VAR[agent]}=...), mode 0600") from None
         if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
             raise SystemExit(f"{path} must be a file of this user with mode 0600 (chmod 600 {path})")
 
@@ -1041,7 +1034,7 @@ def refused_upload(e):
 
 
 def main(argv=None):
-    """python -m gator.webapp.worker login | status | logout | add: the personal worker's commands (addendum 7.1).
+    """python -m gator.webapp.worker login | status | logout | add: the personal worker's commands.
     Exit codes: 0 for success, 1 for an error with a one-line reason, 2 for wrong arguments."""
     ap = argparse.ArgumentParser(prog="python -m gator.webapp.worker",
                                  description="The personal worker's commands. Start the worker itself with python -m "

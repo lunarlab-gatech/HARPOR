@@ -7,14 +7,15 @@ Inputs stay on the machine. Jobs, views, logs and result files are copied to Sup
 The site's owner can run a personal worker on any machine of theirs, like any other user.
 
 The worker is a thread inside the server process. It shares the server's one job runner, sends each request
-from the site to the unchanged server routes, and makes only outbound HTTPS calls. The tunnel mode
-(`start_ice.sh`, `open_mac.sh` and the login token) works as before. Without `--worker` nothing new starts.
+from the site to the unchanged server routes, and makes only outbound HTTPS calls. A server started without
+`--worker` runs no worker and serves only the local UI, which the tunnel mode (`start_ice.sh`, `open_mac.sh`
+and the login token) opens.
 
-One change reaches the tunnel too: the runner writes `.runner.json` into the runs folder, and a second server
-on the same runs folder refuses to start while the first one is known to run (a HARPOR server process of yours
-on the same node, or a Slurm job that squeue reports as running). Stop the first server, or, if it is gone,
-delete `.runner.json` in the runs folder. A file that cannot be checked (no Slurm job in it, or no answer from
-squeue) counts as stale, and the server starts as before.
+In both modes the runner writes `.runner.json` into the runs folder, and a second server on the same runs
+folder refuses to start while the first one is known to run (a HARPOR server process of yours on the same
+node, or a Slurm job that squeue reports as running). Stop the first server, or, if it is gone, delete
+`.runner.json` in the runs folder. A file that cannot be checked (no Slurm job in it, or no answer from
+squeue) counts as stale, and the server starts.
 
 Where the code is:
 
@@ -26,13 +27,12 @@ Where the code is:
 | Demos | `gator/webapp/demos.py` and `static/demos.html` (see Demos below) |
 | Tests | `tests/test_supabase_sql.py` with `tests/pgcheck/`, `test_webapp_supa.py`, `test_webapp_keybox.py`, `test_webapp_relay.py`, `test_webapp_worker.py`, `test_webapp_session.py`, `test_webapp_contract.py`, `test_webapp_supa_js.py`, `test_site.py`, `test_help_page.py`, `test_webapp_demos.py` and `fake_supabase.py` |
 
-Help for users is in one file, `static/help.html`. The server serves it at `/help.html`, and `site.py` builds the
-public site's copy. The build puts the public text of `site.py`'s `HELP_PUBLIC` in place of each block that the file
-marks `<!-- local:NAME -->`: the upload, the SSH tunnel, the `?token=` link and the agent "None" go, and the sections
-on the account, setting up a machine and the machines' status come in. The header's Help link opens the section of
-the screen that shows, in a new tab. On the public jobs list, the machines panel lists each machine with its state,
-and its "Set up a machine" link opens the setup steps on the help page. The banner under the header shows only the
-machines that are offline or stopping.
+Help for users is in one file, `static/help.html` (build_plan.md note 10), and `site.py` builds the public
+site's copy. The build puts the public text of `site.py`'s `HELP_PUBLIC` in place of each block that the file
+marks `<!-- local:NAME -->`: the upload, the SSH tunnel, the `?token=` link and the agent "None" go, and the
+sections on the account, setting up a machine and the machines' status come in. On the public jobs list, the
+machines panel lists each machine with its state, and its "Set up a machine" link opens the setup steps on the
+help page. The banner under the header shows only the machines that are offline or stopping.
 
 ## What the worker does
 
@@ -148,8 +148,9 @@ Nothing below is done by the code. Do every account step and every git step your
 
    Then run one real job end to end on a personal machine, with a second test account.
 10. **Before anyone else signs in.** Run gitleaks or trufflehog over the whole git history, turn on GitHub
-    secret scanning and push protection, check the privacy page, and decide on the plan. On Pro, turn the
-    spend cap on.
+    secret scanning and push protection, check the privacy page, and decide on the plan. Free pauses after
+    about 7 days of low activity (sign-in stops too) and has 5 GB of egress a month. On Pro, turn the spend
+    cap on.
 
 **A risk that stays.** A personal worker is the user's own code. It can write anything within its user's caps
 into that user's rows and folder, and the copies use your Storage and egress. The Storage cap
@@ -235,7 +236,7 @@ nohup setsid srun --jobid=JOBID --overlap --ntasks=1 bash -lc \
 
 - `--host 0.0.0.0` lets the login node reach the server. The login token still guards it, as in the tunnel
   mode. `start_ice.sh` and `open_mac.sh` then find this server in `webapp.json` and reuse it, so the local UI
-  opens on your laptop as before.
+  opens on your laptop.
 - Do not run `start_ice.sh` while a worker server that listens on 127.0.0.1 runs in the job. It cannot reach
   that server, so it deletes `webapp.json` and tries to start a second server, which the first one blocks.
 - Run `worker login --name NAME` on the login node before you start the server. The home folder is shared, so
@@ -341,7 +342,3 @@ demos are files of the site, not rows or Storage objects, so nothing in Supabase
 | a request | a JSON body of 128 KB, nested at most 32 deep; once done, the body keeps 1 KB, an answer over 1 KB goes after an hour and the row after 7 days | `relay()`, `private.sweep()` |
 | kept on the site | log text 14 days after a job stops; review images, LiDAR points and log files 14 days, results 90 days, while the machine runs | the sweep, the worker |
 | a demo's file | 25 MiB (Cloudflare Pages' limit per file) | `demos.MAX_FILE` |
-
-Free is a demo: every file is capped at 50 MB, the project has 1 GB of Storage and 5 GB of egress a month, and
-it pauses after about 7 days with little activity, which also stops sign-in. Pro costs $25 a month; turn the
-spend cap on.

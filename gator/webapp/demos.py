@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
+from gator.fileio import read_json
 from gator.webapp import relay, steps
 
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
@@ -410,29 +411,22 @@ def page(src, shown, soon=()):
 
 # ---- add and check ----
 
-def _json(path):
-    try:
-        return json.loads(Path(path).read_text())
-    except (OSError, ValueError):
-        return None
-
-
 def facts_of(J, job=None):
     """[[label, value]] of the Results tab's rows (app.js renderResults) that a demo shows, from the records in folder
     J: Input (the source's kind and the views used; job.json, when there is one), Size (the upright extent), Mass,
     Links and each joint (an articulated job), and the Agent. Never the input's name, a topic, a path or a LiDAR
     value."""
     J, out = Path(J), []
-    sel = _json(J / "selection.json") or {}
+    sel = read_json(J / "selection.json") or {}
     n = len(sel.get("picks") or [])
     if job:
         kind = steps.source(job)["kind"]
         out.append(["Input", KIND.get(kind, kind) + (f", {n} view{'s' if n != 1 else ''}" if n else "")])
-    ext = (_json(J / "physics" / "aligned.json") or {}).get("extent_s")
+    ext = (read_json(J / "physics" / "aligned.json") or {}).get("extent_s")
     if isinstance(ext, list) and len(ext) == 3:
         out.append(["Size", " x ".join(fixed(100 * v, 0) for v in ext) + " cm"])
     art = steps.articulated(job) if job else (J / "run" / "parts.glb").is_file()
-    mj, phys = _json(J / "physics" / "mjcf" / "mjcf.json") if art else None, _json(J / "physics" / "summary.json")
+    mj, phys = read_json(J / "physics" / "mjcf" / "mjcf.json") if art else None, read_json(J / "physics" / "summary.json")
     links = mj.get("links") if isinstance(mj, dict) else None
     if phys:
         rb = (mj.get("inertial") if links else None) or phys.get("rigid_body") or {}
@@ -448,7 +442,7 @@ def facts_of(J, job=None):
         out += [[f"Joint of {k}", f"none (welded to {to})"] for k, to in (mj.get("welded") or {}).items()]
     elif mj and art:
         out.append(["Links", "1 (no joints, one rigid body)"])
-    r = _json(J / "agent" / "result.json")
+    r = read_json(J / "agent" / "result.json")
     if job and steps.agent(job) == "none":
         out.append(["Agent", "off"])
     elif isinstance(r, dict) and r.get("agent"):
@@ -506,7 +500,7 @@ def add(source, out, name=None, title=None, video=None, glb=None, zip_=None, fac
         if (src / rel).is_file():
             private((src / rel).read_text(errors="replace"), rel)
     pick = lambda p:(Path(p).expanduser() if Path(p).expanduser().is_absolute() else src / p).resolve()  # noqa: E731
-    job = _json(src / "job.json") if (src / "job.json").is_file() else None
+    job = read_json(src / "job.json") if (src / "job.json").is_file() else None
     if job is not None:
         if not isinstance(job, dict) or job.get("status") != "done":
             raise DemoError(f"the job is {job.get('status') if isinstance(job, dict) else 'unreadable'}, not done")

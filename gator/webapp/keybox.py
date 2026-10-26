@@ -1,5 +1,4 @@
-"""Sealed API keys: the worker's side of how a user's key travels from the public page (plan.md section 8,
-security.md section 3).
+"""Sealed API keys: the worker's side of how a user's key travels from the public page.
 
 Each worker start makes a new ECDH P-256 key pair in memory (KeyBox) and puts the public half in its
 workers row: base64 of the 65-byte uncompressed point, 88 characters. The private half is never
@@ -15,17 +14,13 @@ where ref is a new uuid per request. The worker builds it again from the request
 and the agent that server.py will run (aad), never from the secret row. So a key sealed for another
 job, user, agent, worker or request does not open (Invalid). No error quotes the key.
 
-seal() and sealed() do what the page does, for the tests and the fake Supabase.
-
-Needs the cryptography package (PIN) in envs/web. Only the worker imports this module, so the tunnel
+Needs the cryptography package in envs/web. Only the worker imports this module, so the tunnel
 mode runs without it.
 """
 
 import base64
 import binascii
-import os
 import re
-import uuid
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
@@ -33,9 +28,9 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-PIN = "cryptography==50.0.2"  # the version in envs/web; node 20's WebCrypto and it agree on the scheme
+from gator.webapp import steps
+
 VERSION = "harpor-key-v1"
-AGENTS = ("astra", "opus")  # the agents that take a key
 ID = re.compile(r"[A-Za-z0-9-]{1,64}")  # job, user, worker and ref are uuids: never "|", so the AAD reads one way
 MAX_KEY = 512  # jobs.KEY: at most 512 characters, so ct has at most 512 + 16 bytes
 
@@ -46,8 +41,8 @@ class Invalid(Exception):
 
 def aad(job, user, agent, worker, ref):
     """The additional data that ties a sealed key to one job, user, agent, worker start and request."""
-    if agent not in AGENTS:
-        raise Invalid(f"keys are sealed for {' or '.join(AGENTS)}, not {agent!r}")
+    if agent not in steps.PROVIDER:  # the agents that take a key
+        raise Invalid(f"keys are sealed for {' or '.join(steps.PROVIDER)}, not {agent!r}")
     if not all(isinstance(p, str) and ID.fullmatch(p) for p in (job, user, worker, ref)):
         raise Invalid("the job, user, worker and ref of a sealed key are uuids")
     return f"{VERSION}|{job}|{user}|{agent}|{worker}|{ref}".encode()
@@ -108,18 +103,3 @@ class KeyBox:
         except UnicodeDecodeError:
             raise Invalid("the sealed key is not ASCII") from None
 
-
-def seal(public_b64, key, aad):
-    """What the page does: {"epk", "iv", "ct"} in base64, key sealed under aad to a worker's public key."""
-    eph = ec.generate_private_key(ec.SECP256R1())
-    epk, iv = point(eph), os.urandom(12)
-    shared = eph.exchange(ec.ECDH(), peer(unb64(public_b64, "public key"), "worker's public key"))
-    return {"epk": b64(epk), "iv": b64(iv), "ct": b64(aes(shared, epk, aad).encrypt(iv, key.encode(), aad))}
-
-
-def sealed(worker, key, job, user, agent, ref=None):
-    """relay()'s p_sealed for key sealed to a workers row ({"id", "public_key"}), as supa.js seal() makes it:
-    {ref, worker_id, agent, epk, iv, ct}."""
-    ref = ref or str(uuid.uuid4())
-    return {"ref": ref, "worker_id": worker["id"], "agent": agent,
-            **seal(worker["public_key"], key, aad(job, user, agent, worker["id"], ref))}

@@ -11,50 +11,8 @@ masks/, proposal.json and parts/sam3 (gator.stage_a.part_masks), and writes:
                    and visibility per view, the dropped
                    instances with the reason, the views and the counts of every step
 
-Steps:
-1. Every view gets a face-id map (render.face_ids, at most 768 px) and the whole-object mask
-   (masks/<view>.png) at that size, dilated by 1% of the long side. Only the map's pixels inside the
-   dilated mask count: where the mesh reaches past the object (a rim a few pixels wide), its faces are
-   not seen in that view, rather than seen outside every part mask.
-2. Every SAM 3 instance is clipped to that mask; one left empty is dropped. part_masks segments the base
-   too: a base instance that covers more than 80% of the object is dropped, and the union of the kept ones
-   is the view's base mask. A part instance that holds at least 80% of the view's base mask is the whole
-   object and dropped (SAM 3 took the whole chair for "seat"); in a view without a base mask, one that
-   covers more than 80% of the object is. So a part that is most of the object (a chair's seat and
-   backrest above its base) is kept. Within one view and prompt, an instance that holds at least half of
-   each of two or more other instances (which are not duplicates of each other) is dropped as their union
-   (SAM 3 took a stack of drawers as one), and then, in order of score, an instance with at least half of
-   its pixels inside a kept instance of a higher score is dropped as a duplicate. A face is in an
-   instance when at least half of its pixels in that view lie inside it.
-3. Instances of one prompt are clustered across views (union-find, best pairs first): two instances of
-   different views join when, on the faces both views see, they share at least 10% of the smaller
-   one's area and their IoU is at least 0.5, and a cluster never takes two instances of one view. A
-   cluster whose faces cover less than 0.3% of the surface is dropped_small. A cluster is unconfirmed
-   when fewer than half of the views that see its faces well (at least 25% of the visible pixels of
-   the best view) and found its prompt hold it: one wrong instance in one view makes no part. The
-   others are named by the prompt's slug, <slug>_1, <slug>_2, ... when the prompt has more than one.
-4. A face's share of a cluster is the share of its pixels inside the cluster's instances, in the views
-   where SAM 3 found the cluster's prompt (a kept instance of it, of any cluster); its share of the base
-   likewise, from the base masks. A view that found no instance of the prompt does not count, so a part
-   that SAM 3 missed in some views is kept, but a wrong instance is outvoted by the views that see the
-   same faces and found the prompt elsewhere. Of the clusters of one prompt, only the one with the highest
-   share keeps it (then the one with more views). The shares become one probability per label, least
-   area first: the label whose faces cover the least area takes its share, the next one its share of what
-   is left, and so on, and what is left at the end goes to the base. So a handle on a door goes to the
-   handle, and a face in no mask to the base. A seen face starts with its most probable label. Faces that
-   no view sees take the majority of their neighbours, ring by ring, but a part only reaches faces inside
-   the oriented box of its voted faces, grown by 10% of its size on every side (at least 2% of the
-   object's diagonal); the base reaches every face. So an unseen bottom goes to the base, not to the door
-   above it.
-5. Regions: a graph cut (alpha-expansion over the face adjacency) gives the labels with the least cost:
-   the area of every face times one minus the probability of its label, plus the length of every edge
-   between two labels times 0.4% of the object's diagonal. A patch survives when its votes outweigh its
-   border (a disc of radius r goes when r < 2 x 0.4% of the diagonal / the difference of the
-   probabilities), so SAM 3's ragged masks give whole regions, not speckle. A face that no view sees
-   costs nothing for the labels that may reach it. Then a cleanup: a connected piece of a part that is
-   not its largest and holds less than 10% of its area joins the neighbour it shares the most edges
-   with. A part left with less than 0.3% of the surface is dropped_small (its why says whether the vote
-   took its faces), and its faces go to their neighbours too.
+Rules: build_plan.md note 11, step 3 (Vote). A face is in a SAM 3 instance when at least half of its pixels in
+that view lie inside it.
 No part is named "world" (joints.WORLD, the parent of a fixed base).
 Neighbours come from mesh.face_adjacency of the welded mesh (geometry.topology), so they cross the
 texture seams. Everything is deterministic.
@@ -67,6 +25,7 @@ from pathlib import Path
 import numpy as np
 
 from gator import frames
+from gator.fileio import replace, write_json
 from gator.parts import geometry, joints, render
 from gator.stage_a.sam3_masks import slug
 
@@ -584,11 +543,8 @@ def run(run_dir, max_side=render.MAX_SIDE):
             warnings.append(f"part {p!r}: {n} found, the proposal says {counts[p]}")
 
     (R / "parts").mkdir(exist_ok=True)
-    tmp = R / "parts" / ".tmp_faces.npz"
-    with open(tmp, "wb") as fh:
-        np.savez(fh, part=label.astype(np.int32), names=np.array(names), centroids=centroids,
-                 score=score.astype(np.float32))
-    tmp.replace(R / "parts" / "faces.npz")
+    replace(R / "parts" / "faces.npz", np.savez, part=label.astype(np.int32), names=np.array(names),
+            centroids=centroids, score=score.astype(np.float32))
     vote = {"base": base_slug, "names": names, "clusters": out, "dropped_instances": dropped_inst,
             "views": [{"name": v["name"], "size_wh": list(v["size"]), "visible_faces": int(s.sum()),
                        "object_px": int(v["object"].sum())} for v, s in zip(views, seen)],
@@ -598,7 +554,5 @@ def run(run_dir, max_side=render.MAX_SIDE):
                          "min_iou": MIN_IOU, "inside": INSIDE, "whole": WHOLE, "sees": SEES, "grow": GROW,
                          "min_grow": MIN_GROW, "min_area": MIN_AREA, "piece": PIECE, "smooth": SMOOTH},
             "warnings": warnings, "seconds": round(time.time() - t0, 1)}
-    from gator.agent.tools import write_json_atomic
-
-    write_json_atomic(R / "parts" / "vote.json", vote)
+    write_json(R / "parts" / "vote.json", vote)
     return vote

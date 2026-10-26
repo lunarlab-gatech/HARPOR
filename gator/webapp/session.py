@@ -1,4 +1,4 @@
-"""A personal worker's session with the public HARPOR site (addendum sections 6.3 and 7).
+"""A personal worker's session with the public HARPOR site (docs/public_site.md, Run a personal worker).
 
     python -m gator.webapp.worker login [--provider github|google] [--name NAME] [--port 8767] [--no-browser]
                                         [--site-config PATH]
@@ -31,16 +31,13 @@ import json
 import os
 import re
 import socket
-import time
 import webbrowser
 from pathlib import Path
 
 import anyio
 import httpx
 
-from gator.webapp import jobs, supa
-
-SignedOut = supa.SignedOut  # the refresh token was refused (Tokens raises it): run login again
+from gator.webapp import jobs, steps, supa
 
 FILE = Path(".config") / "gator" / "harpor_session.json"  # under the home folder
 LOCK = ".harpor_session.lock"  # next to the session file
@@ -57,11 +54,6 @@ ADD_TIMEOUT = httpx.Timeout(600, connect=10)  # the server answers once the whol
 
 def path_of(path=None):
     return Path(path) if path else Path.home() / FILE
-
-
-def stamp():
-    """Now, in job.json's "created" format (local time): mirror_since."""
-    return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def machine_name(host=None):
@@ -155,10 +147,10 @@ class Lock:
 
 
 class Session:
-    """The session of a personal worker (addendum 6.3): the session file, read under its lock, which this object
-    holds until close(). bearer() gives an access token with at least 5 minutes left and renews it first when
-    needed; each renewal writes the new refresh token into the file before anything uses the new access token.
-    SignedOut when Supabase refuses the refresh token. transport: an httpx transport for tests."""
+    """The session of a personal worker: the session file, read under its lock, which this object holds until
+    close(). bearer() gives an access token with at least 5 minutes left and renews it first when needed; each
+    renewal writes the new refresh token into the file before anything uses the new access token. supa.SignedOut
+    when Supabase refuses the refresh token. transport: an httpx transport for tests."""
 
     def __init__(self, path=None, transport=None):
         self.path = path_of(path)
@@ -207,7 +199,7 @@ def local_key(agent, folder=None):
     this user's with mode 0600 in a folder of mode 0700. An error names the file and the line, never the text."""
     if agent not in KEY_FILES:
         raise ValueError(f"no key file for the agent {agent!r}")
-    var = jobs.KEY_VAR[agent]
+    var = steps.KEY_VAR[agent]
     path = (Path(folder) if folder else Path.home() / ".config" / "gator") / KEY_FILES[agent]
     for line in supa.read_private(path).decode("utf-8", errors="replace").splitlines():
         k, sep, v = line.strip().removeprefix("export ").partition("=")
@@ -245,9 +237,9 @@ def _opener(browser):
 
 def login(provider="github", name=None, port=8767, browser=True, site_config=None, *, path=None, transport=None,
           timeout=supa.LOGIN_TIMEOUT):
-    """`worker login` (addendum 7.3). browser: open the sign-in page with webbrowser (True), only print it (False),
-    or a function of the page's URL (tests). A login over an earlier session of the same account and project
-    keeps its machine id and mirror_since. Returns the exit code."""
+    """`worker login`. browser: open the sign-in page with webbrowser (True), only print it (False), or a function
+    of the page's URL (tests). A login over an earlier session of the same account and project keeps its machine
+    id and mirror_since. Returns the exit code."""
     from gator.webapp import site
 
     name = machine_name() if name is None else name
@@ -282,7 +274,7 @@ def login(provider="github", name=None, port=8767, browser=True, site_config=Non
         approved, machine_id = anyio.run(bind)
         write({"version": VERSION, "url": cfg["url"], "publishable_key": cfg["publishableKey"],
                "user_id": grant.user_id, "email": grant.email, "provider": grant.provider or provider,
-               "machine_id": machine_id, "machine_name": name, "mirror_since": old.get("mirror_since") or stamp(),
+               "machine_id": machine_id, "machine_name": name, "mirror_since": old.get("mirror_since") or jobs.stamp(),
                "refresh_token": grant.refresh_token, "saved_at": supa.now()}, path)
     except SystemExit as e:
         print(e)

@@ -40,20 +40,6 @@ lines, with G=$(readlink -f ~/scratch)/gator and the job folder J under G/webapp
            envs/web     turntable encode        does not fail the job (OPTIONAL)
   package  envs/web     jobs package            results.zip
 
-job.json "articulated" (true or false; older jobs lack it: false) turns on the parts of an
-articulated object (build_plan.md note 11), and "parts" {"mode", "list", "confirmed"} says who lists
-them: "vlm" (the job's VLM), "vlm_edit" (the VLM proposes, the user confirms or edits the list) or
-"user" (the user types the list at the start). A job without an agent has no VLM, so its mode is
-"user". Without the agent (or when the agent stage is skipped) the parts get no joints, and physics
-welds them into one body.
-
-job.json "lidar" (lidar(); null for a video and for older jobs) names the LiDAR that gives the
-metric scale (build_plan.md note 12): {"kind": "rosbag", "topic": T}, a LiDAR topic of the job's bag,
-or {"kind": "stray"}, the depth images of a Stray Scanner capture.
-
-job.json "turntable" (true or false; older jobs lack it: false) asks for the 360 video of the finished
-object (build_plan.md note 10), which the turntable stage makes before package.
-
 With WEBAPP_FAKE=1 every stage runs `python -m gator.webapp.fake_steps STAGE --job J` instead,
 with the same outputs, so the app works on a Mac without GPUs.
 """
@@ -93,6 +79,7 @@ MIN_IOU = 0.5
 # job.json "agent": GPT-6-Astra (Codex CLI), Claude Opus 5.5 (claude_agent) or no agent stage
 AGENTS = ("astra", "opus", "none")
 PROVIDER = {"astra": "OpenAI", "opus": "Anthropic"}  # whose API key each agent takes
+KEY_VAR = {"astra": "OPENAI_API_KEY", "opus": "ANTHROPIC_API_KEY"}  # the key file's line, per agent
 # job.json "parts" "mode": the job's VLM lists the parts, the VLM proposes and the user edits, or the user types them
 PARTS_MODES = ("vlm", "vlm_edit", "user")
 
@@ -104,13 +91,6 @@ class Config:
     fake: bool = False
     demos: Path | None = None  # the demos folder (WEBAPP_DEMOS), shown at /demos.html (demos.py)
 
-    @property
-    def sif(self):
-        return Path(self.G) / "sif" / "gator-agent.sif"
-
-    def python(self, env):
-        return Path(self.G) / "envs" / env / "bin" / "python"
-
 
 def config_from_env():
     G = Path(os.environ.get("GATOR_ROOT") or Path("~/scratch").expanduser().resolve() / "gator")
@@ -119,7 +99,8 @@ def config_from_env():
                   fake=os.environ.get("WEBAPP_FAKE") == "1", demos=Path(demos).expanduser() if demos else None)
 
 
-def _job(job_dir):
+def job(job_dir):
+    """job.json of the job folder."""
     return json.loads((Path(job_dir) / "job.json").read_text())
 
 
@@ -184,6 +165,7 @@ def command(stage, job, cfg, key_file=None):
 
     lines = ["set -eo pipefail", f"G={q(str(cfg.G))}", f"J={q(str(Path(cfg.runs) / job['id']))}"]
     run = "cd $G/gator_clone && "
+    sif = " --sif $G/sif/gator-agent.sif"  # the agent's container, which also runs Blender
     if stage in ("topics", "frames", "extract", "lidar", "select", "package"):
         module = {"topics": "gator.webapp.video topics", "frames": "gator.webapp.video analyze",
                   "extract": "gator.webapp.video extract", "lidar": "gator.webapp.lidar scale",
@@ -217,7 +199,7 @@ def command(stage, job, cfg, key_file=None):
         # Blender renders the frames in the agent's SIF (envs/sam3d), and PyAV encodes them in envs/web.
         step = run + '$G/envs/{}/bin/python -m gator.webapp.turntable {} --job "$J"'
         lines += ['rm -rf "$J/turntable"', f"export {STAGE_A_ENV}",
-                  step.format("sam3d", "render") + " --sif $G/sif/gator-agent.sif", step.format("web", "encode")]
+                  step.format("sam3d", "render") + sif, step.format("web", "encode")]
     elif stage == "parts":
         # One script in two envs: SAM 3 part masks in envs/sam3seg, then the vote, the split (Blender in the
         # agent's SIF) and parts.json, the done marker, in envs/sam3d. The old marker is removed first.
@@ -226,7 +208,7 @@ def command(stage, job, cfg, key_file=None):
                   run + '$G/envs/sam3seg/bin/python -m gator.stage_a.part_masks --run "$J/run" '
                         '--proposal "$J/run/proposal.json" --out "$J/run/parts/sam3"',
                   f"export {STAGE_A_ENV}", stage_cmd.format("vote"),
-                  stage_cmd.format("split") + " --sif $G/sif/gator-agent.sif", stage_cmd.format("finish")]
+                  stage_cmd.format("split") + sif, stage_cmd.format("finish")]
     else:
         lines.append(f"export {STAGE_A_ENV}")
         py = "$G/envs/da3/bin/python" if stage == "da3" else "$G/envs/sam3d/bin/python"
@@ -236,7 +218,7 @@ def command(stage, job, cfg, key_file=None):
                 "sam3d": '-m gator.stage_a.mvsam3d sam3d --mv-root $G/MV-SAM3D --sam3d-root $G/sam-3d-objects --out "$J/run"',
                 "place": '-m gator.stage_a.mvsam3d place --out "$J/run"',
                 "propose": '-m gator.parts.stage propose --job "$J"' + keyed,
-                "agent": '-m gator.webapp.agent_step --job "$J" --sif $G/sif/gator-agent.sif' + keyed,
+                "agent": '-m gator.webapp.agent_step --job "$J"' + sif + keyed,
                 "align": '-m gator.webapp.physics_auto align --job "$J"'}[stage]
         if stage == "prep":  # a view that lost its mask must not stay in the pool from an earlier prep
             lines.append('rm -rf "$J/pool/input" "$J/pool/masks" "$J/pool/prep.json"')
@@ -254,7 +236,7 @@ def done(stage, job_dir):
         names = names.values() if isinstance(names, dict) else names
         return bool(names) and all((J / "scene" / "images" / f"{n}.png").is_file() for n in names)
     if stage == "masks":
-        return (J / "scene" / f"sam3_{_job(J)['slug']}" / "sam3.json").is_file()
+        return (J / "scene" / f"sam3_{job(J)['slug']}" / "sam3.json").is_file()
     if stage == "da3":  # kept across mask changes, so it must still cover every view prep made
         import numpy as np
 
@@ -315,12 +297,12 @@ def guard(stage, job_dir):
         return "no camera image topics in the bag" + (f"; not usable: {left}" if left else "")
     if stage != "masks":
         return None
-    job = _job(J)
-    rec = _json(J / "scene" / f"sam3_{job['slug']}" / "sam3.json")
+    j = job(J)
+    rec = _json(J / "scene" / f"sam3_{j['slug']}" / "sam3.json")
     if not rec:
         return None
     k = sum(v.get("mask") is not None for v in rec["views"])
-    return f"SAM 3 found {job['prompt']} in only {k} frames; try another noun" if k < 2 else None
+    return f"SAM 3 found {j['prompt']} in only {k} frames; try another noun" if k < 2 else None
 
 
 def skip(stage, job_dir):
@@ -375,13 +357,13 @@ def waits_for_parts(job_dir, job=None):
 def agent_glb(job_dir):
     """The agent's deliverable when it gave one, else None.
 
-    A fallback or invalid verdict, a missing file, a symlink or a file that holds the API key
-    (result key_found_in) all mean None.
+    A fallback verdict, a missing file, a symlink or a file that holds the API key (result
+    key_found_in) all mean None.
     """
     J = Path(job_dir)
     r = _json(J / "agent" / "result.json")
     glb = r.get("glb")
-    if r.get("source") and r.get("verdict") not in (None, "fallback_original", "invalid") and glb \
+    if r.get("source") and r.get("verdict") not in (None, "fallback_original") and glb \
             and glb not in (r.get("key_found_in") or []):
         p = J / "agent" / "s" / glb
         if p.is_file() and not p.is_symlink() and p.resolve().is_relative_to((J / "agent" / "s").resolve()):

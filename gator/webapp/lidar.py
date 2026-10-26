@@ -8,79 +8,22 @@ J/job.json "lidar" (steps.lidar) names the source. SOURCES has one function per 
 LiDAR samples of the pool frames: "rosbag" (rosbag_samples), a LiDAR topic of the job's bag, and
 "stray" (stray_samples), the depth images of a Stray Scanner capture.
 
-Samples. Every pool frame ("f00012", frame 12 of the input: message 12 of the camera topic, or frame
-12 of a capture's rgb.mp4) gets an (N, 3) array [u, v, z]: the LiDAR points at the frame's time as
-pixels of scene/images/<name>.png (pixel centres at integers, as lidar_scale takes them) and their
-depth z in meters along the camera's optical axis. The frames that extract wrote but prep left out are
-sampled too, so that a mask change finds them in the cache. The cache is J/lidar/samples.npz with
-J/lidar/samples.json, keyed by the input file (name, bytes, mtime_ns) and what else the samples
-depend on (a bag's topics, the calibration file's sha256 and the time window; a capture's turn, the
-frames' size and the depth filters); a rerun with the same key reads no scans or depth images.
-
-A rosbag's samples:
-  extrinsic   T_cam_lidar from the uploaded calibration (job.json "calibration": the file
-              J/lidar/calibration/<name>, read again with lidar_scale.read_calibration), else from the
-              bag's TF from the camera topic's frame_id to the LiDAR's (rosbag.camera_to_lidar; a
-              dynamic link is taken at each frame's camera stamp from the /tf values logged within
-              that frame's read windows, with a warning when a frame has no /tf value of it within
-              READ_S of its stamp), else the stage fails with "upload the calibration".
-              T_cam_lidar is to the camera topic's frame, the unrectified optical frame, as TF's is:
-              a rectified topic's camera_info R turns the points after it (a warning says so when the
-              calibration gives T_cam_lidar but not K).
-  intrinsics  the calibration's K, D and distortion_model (for its image_size, else for the frames'
-              size), else the camera topic's camera_info (rosbag.camera_model, whose R turns the points
-              first), else the stage fails. extract writes the frames at their full size, so the matrix
-              fits them as it is; for another size of the same aspect ratio it is scaled.
-  time        the frames' stamps come from frames/stamps.json (rosbag.probe again when it is missing or
-              is for another topic). Scans are read only within +-READ_S of each frame's log time (and
-              of that time plus time_offset_s, for a bag whose log times copy each sensor's header
-              stamps). time_offset_s relates the header clocks (t_lidar = t_cam + time_offset_s). The
-              time base is the header stamps when the camera's header stamps are usable, every scan has
-              a stamp, and either time_offset_s is given (the log times then only check it) or the two
-              clocks' log-minus-header offsets agree within CLOCK_TOL_S. Else frames and scans are
-              matched by log time, the recorder's one clock, without time_offset_s and with a warning.
-              A frame's stamp (plus time_offset_s in the header base) is matched to the points of the
-              scans read for that frame: with per-point times, the points within +-WINDOW_S of it;
-              without them (a PointCloud2 without a time field), every point of the nearest scan
-              within one scan period (the median step between the scans read).
-  projection  x_cam = T_cam_lidar x_lidar, then lidar_scale.project. While the scans are read, each
-              keeps only the points that land in the image of a frame whose read window holds it, so a
-              360 degree LiDAR does not fill the memory.
-
-A Stray Scanner capture's samples (stray.depth_points): the depth image depth/NNNNNN.png of each
-frame, in millimetres, aligned with the color camera, so there is no extrinsic and no time matching.
-The scale needs no intrinsics; they are read only for the clouds (stray.intrinsics: odometry.csv,
-else camera_matrix.csv, scaled from the video's size to the frame's), and without them the record
-has a warning and the Inputs tab no points. Each depth pixel with confidence 2 and z within 0.1 to
-5 m is scaled from the depth image's size to the frame's as stored, then turned upright by the turn
-that the frames got (frames/meta.json "video" "rotation", from gravity). The zip is unpacked in
-J/video/stray (stray.unpack, which the frames stage did already). A frame without a depth image, or
-with one but without its confidence image, gets no samples, with a warning.
-The record's source is {kind "stray", file, depth_size, frames (the frames sampled)}, its extrinsic
-{source "stray (depth aligned with the color camera)"}, its intrinsics {source "stray: depth scaled to
-the frame size", depth_size, frame_size, turns, min_confidence, z_range_m, K_from (odometry.csv,
-camera_matrix.csv or null)} and its time {base "frame index"}.
-
-Clouds. For the Inputs tab, each sampled frame also gets its LiDAR points as camera points (meters,
-OpenCV optical axes of the upright frame): xyz, the samples' points row for row, and scan, the frame's
-whole scan. A rosbag's scan is frame_points over a random subset of each scan read (at most SCAN_KEEP
-points, kept before the in-view filter), so the points behind and beside the camera are in it too, then
-at most SCAN_POINTS of them; a Stray capture's is every depth pixel with a depth, at any confidence.
-They are cached in J/lidar/clouds.npz ("<frame>_xyz", "<frame>_scan") next to the samples. The stage
-writes J/lidar/cloud/<view>.glb (cloud_glb: node "scan", the whole scan, and node "used", the points
-that the scale used, view_ratio's used rows of xyz) with the check images, also when the record is not
-ok, before pool/lidar.json. select copies the picks' files to J/run/lidar/<i>.glb; while the record is not
-ok, the server offers the pool's own files instead (server.pool_clouds).
+Every pool frame ("f00012") gets an (N, 3) array [u, v, z] of samples: the LiDAR points at the frame's
+time as pixels of scene/images/<name>.png and their depth in meters. The samples and the frames' clouds for
+the Inputs tab are cached in J/lidar/samples.npz and J/lidar/clouds.npz, keyed in J/lidar/samples.json. The
+stage writes J/lidar/cloud/<view>.glb (cloud_glb) with the check images, also when the record is not ok,
+before pool/lidar.json. How the samples, the time matching, the intrinsics and the clouds work:
+build_plan.md note 12 (Rosbag source, Stray Scanner source, Points for the Inputs tab).
 
 The estimate is lidar_scale.estimate, with the check images in J/lidar/check. The record,
 pool/lidar.json, gains source, extrinsic {source, file, calibration_sha256, chain, link, camera_axes,
 T_cam_lidar}, intrinsics {source, K, D, model, R, size, frame_size}, time {base, window_ms, offset_ms,
 log_minus_header_ms {camera, lidar}, scan_period_ms, scan_period_from, point_times} and the warnings of
-both steps, and is written last. extrinsic.calibration_sha256 (null without a calibration) lets
-steps.done see a record that an upload or a delete of the calibration made stale. When the samples
-cannot be made (no TF link, no intrinsics, ...), the record has ok false and the reason. The stage
-prints PROGRESS lines while it reads scans, then one line per view
-(lidar_scale.summary), and exits 1 with the reason when the record is not ok.
+both steps (a Stray capture's fields: build_plan.md note 12, pool/lidar.json), and is written last.
+extrinsic.calibration_sha256 (null without a calibration) lets steps.done see a record that an upload or a
+delete of the calibration made stale. When the samples cannot be made (no TF link, no intrinsics, ...), the
+record has ok false and the reason. The stage prints PROGRESS lines while it reads scans, then one line per
+view (lidar_scale.summary), and exits 1 with the reason when the record is not ok.
 """
 
 import argparse
@@ -95,12 +38,12 @@ from pathlib import Path
 
 import numpy as np
 
+from gator.fileio import read_json, replace, write_json
 from gator.stage_a import lidar_scale
 
 WINDOW_S = 0.05  # points within +-50 ms of a camera stamp
 READ_S = 0.3  # scans are read within +-0.3 s of each frame's log time
 CLOCK_TOL_S = 0.2  # the camera's and the LiDAR's log-minus-header offsets agree this well: the header base
-ASPECT_TOL = 0.01  # intrinsics for another size are scaled to the frames when the aspect ratios agree this well
 # A bag whose topics.json is older than the LiDAR listing (Runner.submit_analyze lists it again on a topic choice).
 OLD_TOPICS = ("the bag was listed before LiDAR topics were; choose its camera topic again to list them (for a job in "
               "review or done: upload the bag again)")
@@ -129,19 +72,6 @@ def tf_reason(camera_frame, lidar_frame, lidar_topic):
     return f"the bag's TF does not link {camera_frame} to {lidar_frame}; upload the calibration"
 
 
-def write_json(path, data):
-    tmp = path.with_name(".tmp_" + path.name)
-    tmp.write_text(json.dumps(data, indent=1))
-    os.replace(tmp, path)
-
-
-def read_json(path):
-    try:
-        return json.loads(Path(path).read_text())
-    except (OSError, ValueError):
-        return None
-
-
 def progress(x):
     print(f"PROGRESS {x:.3f}", flush=True)
 
@@ -165,23 +95,16 @@ def cache_read(J, key, names):
     return samples, meta.get("info") or {}, clouds
 
 
-def _savez(path, arrays):
-    tmp = path.with_name(".tmp_" + path.name)
-    with open(tmp, "wb") as f:
-        np.savez(f, **arrays)
-    os.replace(tmp, path)
-
-
 def cache_write(J, key, samples, info, clouds):
     """lidar/samples.npz, lidar/clouds.npz, then lidar/samples.json (the key) last; the old key goes first."""
     d = Path(J) / "lidar"
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     (d / "samples.json").unlink(missing_ok=True)
-    _savez(d / "samples.npz", {n: np.asarray(a, np.float32).reshape(-1, 3) for n, a in samples.items()})
-    _savez(d / "clouds.npz", {f"{n}_{k}": np.asarray(a, np.float32).reshape(-1, 3) for n, c in clouds.items()
-                              for k, a in zip(("xyz", "scan"), c)})
+    replace(d / "samples.npz", np.savez, **{n: np.asarray(a, np.float32).reshape(-1, 3) for n, a in samples.items()})
+    replace(d / "clouds.npz", np.savez, **{f"{n}_{k}": np.asarray(a, np.float32).reshape(-1, 3)
+                                           for n, c in clouds.items() for k, a in zip(("xyz", "scan"), c)})
     write_json(d / "samples.json", {"key": key, "frames": sorted(samples), "clouds": sorted(clouds), "info": info,
-                                    "points": {n: int(len(a)) for n, a in sorted(samples.items())}})
+                                    "points": {n: int(len(a)) for n, a in sorted(samples.items())}}, indent=1)
 
 
 # ---- the parts of a rosbag's samples ----
@@ -238,7 +161,7 @@ def fit_matrix(K, size, frame_size, source):
     if tuple(size) == tuple(frame_size):
         return np.asarray(K, float)
     sx, sy = frame_size[0] / size[0], frame_size[1] / size[1]
-    if abs(sx / sy - 1) > ASPECT_TOL:
+    if abs(sx / sy - 1) > rosbag.ASPECT_TOL:
         raise Failed(f"the intrinsics ({source}) are for {size[0]}x{size[1]} images but the frames are "
                      f"{frame_size[0]}x{frame_size[1]}; give K for the frames' size in the calibration")
     return rosbag.rescale(K, sx, sy)
@@ -495,9 +418,9 @@ def to_samples(xyz, T, intr, frame_size):
 
 
 def rosbag_samples(J, job, spec, names):
-    """({frame name: (N, 3) [u, v, z]}, info, clouds) of a rosbag job's LiDAR topic (see the module docstring).
-    info: source, extrinsic, intrinsics, time and warnings; clouds: {frame name: (xyz, scan)}. Failed with
-    the reason."""
+    """({frame name: (N, 3) [u, v, z]}, info, clouds) of a rosbag job's LiDAR topic (build_plan.md note 12,
+    Rosbag source). info: source, extrinsic, intrinsics, time and warnings; clouds: {frame name: (xyz, scan)}.
+    Failed with the reason."""
     from gator.webapp import steps
     from gator.webapp.jobs import INPUTS
 
@@ -797,7 +720,7 @@ def scale(job_dir):
         samples, info, clouds = SOURCES[spec["kind"]](J, job, spec, names)
     except Failed as e:
         rec = record({"ok": False, "s": None, "reason": str(e), "views": [], "combine": None}, e.info, t0)
-        write_json(out, rec)
+        write_json(out, rec, indent=1)
         raise SystemExit(f"no metric scale: {e}") from None
     progress(0.9)
     src, ext, tm = info.get("source") or {}, info.get("extrinsic") or {}, info.get("time") or {}
@@ -817,11 +740,12 @@ def scale(job_dir):
         est = lidar_scale.estimate(J / "pool", {n: samples[n] for n in names if n in samples}, check_dir=check,
                                    points_out=pts)
     except ValueError as e:  # a pool that prep and da3 left inconsistent
-        write_json(out, record({"ok": False, "s": None, "reason": str(e), "views": [], "combine": None}, info, t0))
+        write_json(out, record({"ok": False, "s": None, "reason": str(e), "views": [], "combine": None}, info, t0),
+                   indent=1)
         raise SystemExit(f"no metric scale: {e}") from None
     write_clouds(cloud, {n: clouds[n] for n in names if n in clouds}, pts)  # with the check images, also when not ok
     rec = record(est, info, t0)
-    write_json(out, rec)  # last: with ok, the stage's done marker
+    write_json(out, rec, indent=1)  # last: with ok, the stage's done marker
     lines = lidar_scale.summary(rec)
     print("\n".join(lines[:-1]))
     for w in rec["warnings"]:

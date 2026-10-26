@@ -25,24 +25,17 @@ points with their rows in the samples ("index"), so the lidar stage can show whi
 used. read_calibration() reads the LiDAR-camera calibration file (YAML or JSON).
 
     python -m gator.stage_a.lidar_scale estimate --pool P --samples S.npz --out F [--check DIR]
-    python -m gator.stage_a.lidar_scale scale-run --run R --s 2 --out O
-    python -m gator.stage_a.lidar_scale compare-runs --a A --b B --s 2
-
-scale-run copies a run folder's inputs (input/, masks/, prep.json) and its da3_output.npz with the
-scale applied. MV-SAM3D (mvsam3d sam3d) and place then run on the copy. compare-runs reads pose.json
-and placement.json of two runs and reports how their translations, scales and extents relate:
-with b scaled by s from a, each ratio should be s and the rotation and the mask IoU the same.
 """
 
 import argparse
 import json
-import os
 import re
-import shutil
 import time
 from pathlib import Path
 
 import numpy as np
+
+from gator.fileio import write_json
 
 SCALED = ("depth", "pointmaps", "pointmaps_sam3d")  # scaled whole; the extrinsics' translation column too
 VERSION = 1  # of pool/lidar.json
@@ -698,58 +691,6 @@ def read_calibration(text, name="calibration.yaml"):
             "distortion_model": model, "image_size": size, "given_as": key}
 
 
-def scale_run(run, s, out):
-    """Copy run's inputs to out with da3_output.npz scaled by s; image_files point into out."""
-    run, out = Path(run), Path(out)
-    if out.exists():
-        raise SystemExit(f"{out} exists; give a new folder")
-    out.mkdir(parents=True)
-    for d in ("input", "masks"):
-        shutil.copytree(run / d, out / d)
-    shutil.copy2(run / "prep.json", out / "prep.json")
-    with np.load(run / "da3_output.npz") as da:
-        arrays = apply_scale({k: da[k] for k in da.files}, s)
-    arrays["image_files"] = np.array([str(out / "input" / "images" / Path(str(f)).name) for f in arrays["image_files"]])
-    with open(out / "da3_output.npz", "wb") as f:
-        np.savez(f, **arrays)
-    print(f"{out}: da3_output.npz scaled by {s}; run mvsam3d sam3d and place with --out {out}")
-
-
-def _quat_angle_deg(a, b):
-    a, b = np.asarray(a, float) / np.linalg.norm(a), np.asarray(b, float) / np.linalg.norm(b)
-    return float(np.degrees(2 * np.arccos(min(1.0, abs(float(a @ b))))))
-
-
-def compare_runs(a, b, s):
-    """How run b relates to run a when b's DA3 output is a's times s: ratios that should equal s, the
-    rotation difference in degrees and the mean mask IoU difference. Returns the record."""
-    a, b = Path(a), Path(b)
-    pa, pb = (json.loads((r / "placement.json").read_text()) for r in (a, b))
-    ma, mb = pa["pose_mvsam3d"], pb["pose_mvsam3d"]
-    ta, tb = np.asarray(ma["translation"], float), np.asarray(mb["translation"], float)
-    ea, eb = np.asarray(pa["posed_extent_W"], float), np.asarray(pb["posed_extent_W"], float)
-    ca, cb = np.asarray(pa["posed_center_W"], float), np.asarray(pb["posed_center_W"], float)
-    rec = {"s": float(s),
-           "mvsam3d": {"translation_ratio": float(np.linalg.norm(tb) / np.linalg.norm(ta)),
-                       "translation_angle_deg": float(np.degrees(np.arccos(np.clip(ta @ tb / np.linalg.norm(ta) / np.linalg.norm(tb), -1, 1)))),
-                       "scale_ratio": float(np.mean(mb["scale"]) / np.mean(ma["scale"])),
-                       "rotation_deg": _quat_angle_deg(ma["rotation_wxyz"], mb["rotation_wxyz"])},
-           "placed": {"extent_ratio": (eb / ea).tolist(),
-                      "center_ratio": float(np.linalg.norm(cb) / np.linalg.norm(ca)),
-                      "rotation_deg": _quat_angle_deg(pa["pose"]["rotation_wxyz"], pb["pose"]["rotation_wxyz"])},
-           "mean_mask_iou": [pa["check"]["mean_mask_iou"], pb["check"]["mean_mask_iou"]],
-           "fits": {r: {"scale_fit": p["scale_fit"].get("scale") if p["scale_fit"].get("applied") else None,
-                        "pose_fit_applied": p["pose_fit"].get("applied") if isinstance(p.get("pose_fit"), dict) else None}
-                    for r, p in (("a", pa), ("b", pb))}}
-    m, p = rec["mvsam3d"], rec["placed"]
-    rec["within_2pct"] = {"translation": abs(m["translation_ratio"] / s - 1) <= 0.02,
-                          "scale": abs(m["scale_ratio"] / s - 1) <= 0.02,
-                          "extent": bool(np.all(np.abs(np.asarray(p["extent_ratio"]) / s - 1) <= 0.02)),
-                          "rotation_2deg": max(m["rotation_deg"], p["rotation_deg"]) <= 2.0,
-                          "iou_0.02": abs(rec["mean_mask_iou"][1] - rec["mean_mask_iou"][0]) <= 0.02}
-    return rec
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -758,30 +699,14 @@ def main(argv=None):
     e.add_argument("--samples", required=True, help=".npz with an (N, 3) [u, v, z] array per pool frame name")
     e.add_argument("--out", required=True, help="the lidar.json record")
     e.add_argument("--check", help="folder for the check images")
-    r = sub.add_parser("scale-run", help="copy a run with its DA3 output scaled")
-    r.add_argument("--run", required=True)
-    r.add_argument("--s", type=float, required=True)
-    r.add_argument("--out", required=True)
-    c = sub.add_parser("compare-runs", help="ratios between two placed runs")
-    c.add_argument("--a", required=True)
-    c.add_argument("--b", required=True)
-    c.add_argument("--s", type=float, required=True)
     a = ap.parse_args(argv)
-    if a.cmd == "estimate":
-        rec = estimate(a.pool, a.samples, a.check)
-        out = Path(a.out)
-        tmp = out.with_name(".tmp_" + out.name)
-        tmp.write_text(json.dumps(rec, indent=1))
-        os.replace(tmp, out)
-        lines = summary(rec)
-        print("\n".join(lines[:-1]))
-        if not rec["ok"]:
-            raise SystemExit(lines[-1])
-        print(lines[-1])
-    elif a.cmd == "scale-run":
-        scale_run(a.run, a.s, a.out)
-    else:
-        print(json.dumps(compare_runs(a.a, a.b, a.s), indent=1))
+    rec = estimate(a.pool, a.samples, a.check)
+    write_json(a.out, rec, indent=1)
+    lines = summary(rec)
+    print("\n".join(lines[:-1]))
+    if not rec["ok"]:
+        raise SystemExit(lines[-1])
+    print(lines[-1])
 
 
 if __name__ == "__main__":

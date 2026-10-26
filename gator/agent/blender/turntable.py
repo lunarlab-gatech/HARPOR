@@ -35,10 +35,12 @@ import bpy
 import numpy as np
 from mathutils import Matrix, Vector
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from render_common import CV_TO_BLENDER_CAMERA, import_glb, look_at, points  # noqa: E402
+
 A = json.loads(Path(sys.argv[sys.argv.index("--") + 1]).read_text())
 FRAMES, FPS, PANEL, SAMPLES = A.get("frames", 180), A.get("fps", 30), A.get("panel", 640), A.get("samples", 32)
 ELEVATION = math.radians(A.get("elevation", 0))  # the cameras' angle above the horizontal
-CV_TO_BLENDER_CAMERA = np.diag([1.0, -1.0, -1.0, 1.0])
 FOV = math.radians(30)  # per panel, horizontal and vertical
 
 
@@ -65,35 +67,6 @@ def setup():
     return scene
 
 
-def import_glb(path):
-    before = set(bpy.data.objects)
-    bpy.ops.import_scene.gltf(filepath=str(path))
-    return [o for o in bpy.data.objects if o not in before]
-
-
-def box(objs):
-    pts = []
-    for o in objs:
-        if o.type == "MESH" and len(o.data.vertices):
-            co = np.empty(len(o.data.vertices) * 3)
-            o.data.vertices.foreach_get("co", co)
-            M = np.array(o.matrix_world)
-            pts.append(co.reshape(-1, 3) @ M[:3, :3].T + M[:3, 3])
-    p = np.concatenate(pts)
-    return p.min(0), p.max(0)
-
-
-def look_at(eye, target):
-    """OpenCV world-to-camera matrix from eye toward target, with image down along +y of W."""
-    z = (target - eye) / np.linalg.norm(target - eye)
-    x = np.cross([0.0, 1.0, 0.0], z)
-    x /= np.linalg.norm(x)
-    R = np.stack([x, np.cross(z, x), z])
-    T = np.eye(4)
-    T[:3, :3], T[:3, 3] = R, -R @ eye
-    return T
-
-
 def label(scene, text, location, size, rotation):
     curve = bpy.data.curves.new(f"label {text}", "FONT")
     curve.body, curve.align_x, curve.align_y, curve.size = text, "CENTER", "TOP", size
@@ -117,7 +90,8 @@ for i, a in enumerate(A["assets"]):
             if o.parent is None:
                 o.matrix_world = M @ o.matrix_world
         bpy.context.view_layer.update()
-    lo, hi = box(objs)
+    p = points(objs)
+    lo, hi = p.min(0), p.max(0)
     pivot = bpy.data.objects.new(f"pivot {i}", None)
     pivot.location = Vector(((lo + hi) / 2).tolist())
     scene.collection.objects.link(pivot)

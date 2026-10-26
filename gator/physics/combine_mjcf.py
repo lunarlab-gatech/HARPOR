@@ -40,12 +40,6 @@ def hull_points(mjcf_dir, n):
     return np.array(pts)
 
 
-def footprint(mjcf_dir, n):
-    """(x min, x max, y min, y max) of an object's collision hulls in its body frame."""
-    p = hull_points(mjcf_dir, n)
-    return p[:, 0].min(), p[:, 0].max(), p[:, 1].min(), p[:, 1].max()
-
-
 def load_objects(root):
     objs = []
     for d in sorted(p for p in Path(root).iterdir() if (p / "mjcf" / "mjcf.json").exists()):

@@ -15,9 +15,7 @@
 #   G=$(readlink -f ~/scratch)/gator
 #   $G/tools/micromamba create -y -p $G/envs/web -c conda-forge python=3.12 pip
 #   $G/envs/web/bin/pip install fastapi==0.143.2 uvicorn==0.54.0 av==19.0.1 rosbags==0.11.8 anthropic==1.15.0 numpy pillow scipy
-# An envs/web made before rosbag input needs only: $G/envs/web/bin/pip install rosbags==0.11.8
-# One made before the Claude Opus 5.5 agent needs: $G/envs/web/bin/pip install anthropic==1.15.0 (it checks
-# Anthropic keys), and the agent stage itself needs: $G/envs/sam3d/bin/pip install anthropic==1.15.0
+# The agent stage also needs: $G/envs/sam3d/bin/pip install anthropic==1.15.0
 set -euo pipefail
 umask 077  # server.log and webapp.json hold the login token; job folders stay private
 JOB=${1:?usage: start_ice.sh JOBID [PORT]}

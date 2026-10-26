@@ -1,12 +1,12 @@
 """The personal worker's link to Supabase: its config and sign-in, an httpx client for PostgREST, RPC and
-Storage, and the Store that worker.py talks through (addendum section 6.2).
+Storage, and the Store that worker.py talks through (docs/public_site.md, What the worker does).
 
 A personal worker runs on a user's own GPU machine (python -m gator.webapp --worker). It signs in as that
 user with PKCE and a loopback redirect, keeps the refresh token in a 0600 file and calls Supabase with the
 user's access token and the publishable key, as role authenticated, under RLS and through the own_*
 functions (Store). session.py builds that session from the parts here: sign_in (with pkce_pair,
-authorize_url, Loopback and Auth), Tokens, read_private and write_private. No part of HARPOR uses the
-project's secret key: Supa and Auth refuse one.
+authorize_url, Loopback and Auth), Tokens, and read_private and write_private (gator/fileio.py). No part of
+HARPOR uses the project's secret key: Supa and Auth refuse one.
 
 Secrets. The tokens and the PKCE verifier stay in Python variables. They never go to os.environ
 (Runner._run_stage passes os.environ to every stage), to a command line, to a log or to an error. An Error
@@ -27,20 +27,18 @@ import contextlib
 import hashlib
 import http.server
 import logging
-import os
 import re
 import secrets
 import socketserver
-import stat
-import tempfile
 import time
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 
 import anyio
 import httpx
+
+from gator.fileio import private_folder, read_private, write_private  # noqa: F401 (session uses them from here)
 
 log = logging.getLogger("harpor.supa")
 for _name in ("httpx", "httpcore"):  # their INFO and DEBUG lines name every URL
@@ -106,62 +104,6 @@ def check_url(url):
 def object_name(user_id, job_id, sha256, path):
     """The job-files object of a served file: <user>/<job>/<sha256[:16]>/<path> (job_files' check)."""
     return f"{user_id}/{job_id}/{sha256[:16]}/{path}"
-
-
-# ---- private files: the session file, the key files ----
-
-def private_folder(folder, make=False):
-    """Refuses (SystemExit) a folder that is not this user's, or that group or others may open. make: make it
-    with mode 0700 when it is missing."""
-    folder = Path(folder)
-    if make and not os.path.lexists(folder):
-        folder.mkdir(mode=0o700, parents=True)
-    try:
-        st = os.lstat(folder)
-    except FileNotFoundError:
-        raise SystemExit(f"{folder} is missing (mkdir -m 700 {folder})") from None
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
-        raise SystemExit(f"{folder} must be a folder of this user with mode 0700 (chmod 700 {folder})")
-
-
-def read_private(path):
-    """The bytes of a file that only this user may read (mode 0600), in such a folder. Refuses (SystemExit)
-    anything else, a symlink too. The check and the read use one file descriptor, so the file checked is
-    the file read."""
-    path = Path(path)
-    private_folder(path.parent)
-    bad = f"{path} must be a file of this user with mode 0600 (chmod 600 {path})"
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # O_NONBLOCK: a FIFO does not hang
-    except FileNotFoundError:
-        raise SystemExit(f"{path} is missing") from None
-    except OSError:  # a symlink
-        raise SystemExit(bad) from None
-    with os.fdopen(fd, "rb") as f:
-        st = os.fstat(f.fileno())
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
-            raise SystemExit(bad)
-        return f.read()
-
-
-def write_private(path, data):
-    """data (bytes) into path with mode 0600: a temp file in the same folder, then os.replace, so a reader
-    never sees half a file. Makes the folder with mode 0700 when it is missing, and refuses one that others
-    may open."""
-    path = Path(path)
-    private_folder(path.parent, make=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")  # mode 0600
-    try:
-        with os.fdopen(fd, "wb") as f:
-            os.fchmod(f.fileno(), 0o600)
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
 
 
 # ---- answers ----
@@ -379,7 +321,7 @@ class Server(socketserver.TCPServer):
 
 
 class Loopback:
-    """The sign-in's redirect target, http://127.0.0.1:<port>/auth/callback (addendum 7.3). It listens on
+    """The sign-in's redirect target, http://127.0.0.1:<port>/auth/callback. It listens on
     127.0.0.1 only, answers only GET /auth/callback with a plain text page and no script, never logs a
     request line (it holds the code), and gives up after timeout seconds. port 0 takes a free port."""
 
@@ -456,10 +398,10 @@ class Loopback:
 
 async def sign_in(url, publishable_key, provider="github", port=8767, browser=None, say=print,
                   timeout=LOGIN_TIMEOUT, transport=None):
-    """Steps 3 to 7 of `worker login` (addendum 7.3): a PKCE pair, the loopback on 127.0.0.1:port, the
-    authorize page (printed with say, and opened with browser(url) when given), the code it brings back, and
-    the session for that code (Grant). The verifier never leaves this function; the page holds only the
-    challenge. Error when the browser does not come back within timeout seconds or brings an error."""
+    """The sign-in of `worker login`: a PKCE pair, the loopback on 127.0.0.1:port, the authorize page (printed
+    with say, and opened with browser(url) when given), the code it brings back, and the session for that code
+    (Grant). The verifier never leaves this function; the page holds only the challenge. Error when the browser
+    does not come back within timeout seconds or brings an error."""
     auth = Auth(url, publishable_key, transport)  # refuses a secret key before anything opens
     verifier, challenge = pkce_pair()
     with Loopback(port, timeout) as lb:
@@ -598,7 +540,7 @@ class Tokens:
 # ---- the Store: what worker.py needs from Supabase ----
 
 class Store:
-    """What worker.py needs from Supabase (addendum 6.2): the personal worker of one machine, with its user's
+    """What worker.py needs from Supabase: the personal worker of one machine, with its user's
     session (role authenticated, under RLS) and the own_* functions. Rows are dicts as PostgREST gives them. An
     own_* function's refusal raises Error with its text in .message ("worker ... was stopped", "your account is
     waiting for approval", "no such job on this machine", "the job's log on the site is full")."""

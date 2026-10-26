@@ -16,7 +16,6 @@ from pathlib import Path
 
 import anyio
 import httpx
-import numpy as np
 import pytest
 
 pytest.importorskip("fastapi")
@@ -25,31 +24,14 @@ pytest.importorskip("cryptography")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import fake_supabase as fs  # noqa: E402
-from gator.webapp import jobs, keybox, relay, server, steps, supa, worker  # noqa: E402
+from gator.webapp import jobs, relay, server, steps, supa, worker  # noqa: E402
+from test_webapp_server import write_video  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN = "tok-" + secrets.token_hex(16)
 OPUS = "sk-ant-test-" + secrets.token_hex(16)
 ASTRA = "sk-test-" + secrets.token_hex(16)
 START = {"mode": "auto", "prompt": "cup", "n_views": 4, "auto_continue": False}
-
-
-def write_video(path, n=64, size=(192, 128)):
-    import av
-
-    rng = np.random.default_rng(0)
-    bg = (rng.random((size[1] // 4, size[0] // 4, 3)) * 180 + 30).astype(np.uint8).repeat(4, 0).repeat(4, 1)
-    with av.open(str(path), "w", format="mp4") as c:
-        s = c.add_stream("libx264", rate=24, options={"crf": "12"})
-        s.width, s.height, s.pix_fmt = size[0], size[1], "yuv420p"
-        for i in range(n):
-            a = bg.copy()
-            a[40:80, 10 + 2 * i:50 + 2 * i] = 240
-            for p in s.encode(av.VideoFrame.from_ndarray(a, format="rgb24")):
-                c.mux(p)
-        for p in s.encode():
-            c.mux(p)
-    return path
 
 
 @pytest.fixture(scope="module")
@@ -126,8 +108,18 @@ def machine(fake, user, name="lab-box"):
     return fake.put("machines", {"user_id": user, "name": name})["id"]
 
 
+def served(srv, fake, template):
+    """(user, machine, local job, its folder, its uuid, worker): an approved user's machine, a copy of template
+    that the worker copied to the site, and the worker."""
+    c = fake.add_user("c@example.org", approved=True)
+    mid = machine(fake, c)
+    local, J = srv.clone(template)
+    jid = own_job(fake, srv, local, c, mid)
+    return c, mid, local, J, jid, own_worker(srv, fake, c, mid)
+
+
 def sealed(fake, w, key, jid, user, agent="opus", **kw):
-    return keybox.sealed(fake.row("workers", id=w.store.worker_id), key, jid, user, agent, **kw)
+    return fs.sealed(fake.row("workers", id=w.store.worker_id), key, jid, user, agent, **kw)
 
 
 def answer(fake, rid):
@@ -206,11 +198,7 @@ def stopped_days_ago(J, days):
 # ---- relayed requests and publishing ----
 
 def test_worker_relays_publishes_and_answers_last(srv, fake, template):
-    c = fake.add_user("c@example.org", approved=True)
-    mid = machine(fake, c)
-    local, J = srv.clone(template)
-    jid = own_job(fake, srv, local, c, mid)
-    w = own_worker(srv, fake, c, mid)
+    c, mid, local, J, jid, w = served(srv, fake, template)
     seen = watch_live(fake, jid, "rpc", "own_publish")
 
     async def main():
@@ -401,11 +389,7 @@ def test_near_end_and_offline_requests(srv, fake, template):
 
 
 def test_delete_removes_the_folder_the_objects_and_the_row(srv, fake, template):
-    c = fake.add_user("c@example.org", approved=True)
-    mid = machine(fake, c)
-    local, J = srv.clone(template)
-    jid = own_job(fake, srv, local, c, mid)
-    w = own_worker(srv, fake, c, mid)
+    c, mid, local, J, jid, w = served(srv, fake, template)
 
     async def main():
         await w.start()
@@ -483,11 +467,7 @@ def test_keys_and_paths_never_leave_the_server(srv, fake, template):
 def test_tunnel_and_worker_at_once_and_the_stop_hook(srv, fake, template):
     """The worker thread and the tunnel's TestClient use one app at once; the lifespan stops the worker before the
     runner, so an active job keeps its status with a note."""
-    c = fake.add_user("c@example.org", approved=True)
-    mid = machine(fake, c)
-    local, J = srv.clone(template)
-    jid = own_job(fake, srv, local, c, mid)
-    w = own_worker(srv, fake, c, mid)
+    c, mid, local, J, jid, w = served(srv, fake, template)
     server.on_stop(srv.gate, w.stop_thread)
     with TestClient(srv.gate) as tc:
         tc.get(f"/?token={TOKEN}")
@@ -596,11 +576,7 @@ def test_own_worker_copies_local_jobs_and_relays_with_a_local_key(srv, fake, tem
 
 
 def test_own_worker_opens_a_sealed_key_and_refuses_none(srv, fake, template):
-    c = fake.add_user("c@example.org", approved=True)
-    mid = machine(fake, c)
-    local, J = srv.clone(template)
-    jid = own_job(fake, srv, local, c, mid)
-    w = own_worker(srv, fake, c, mid)
+    c, mid, local, J, jid, w = served(srv, fake, template)
 
     async def main():
         await w.start()
@@ -653,11 +629,7 @@ def test_own_worker_leaves_files_out_when_the_storage_is_full(srv, fake, templat
 
 
 def test_own_worker_stops_copying_a_job_deleted_on_the_site_and_deletes_it_later(srv, fake, template):
-    c = fake.add_user("c@example.org", approved=True)
-    mid = machine(fake, c)
-    local, J = srv.clone(template)
-    jid = own_job(fake, srv, local, c, mid)
-    w = own_worker(srv, fake, c, mid)
+    c, mid, local, J, jid, w = served(srv, fake, template)
 
     async def main():
         await w.start()
@@ -679,11 +651,7 @@ def test_own_worker_stops_copying_a_job_deleted_on_the_site_and_deletes_it_later
 
 def test_own_delete_cancels_a_job_that_still_runs(srv, fake, template):
     """A machine that was offline gets a delete for a job that runs there: it cancels the job, then deletes it."""
-    c = fake.add_user("c@example.org", approved=True)
-    mid = machine(fake, c)
-    local, J = srv.clone(template)
-    jid = own_job(fake, srv, local, c, mid)
-    w = own_worker(srv, fake, c, mid)
+    c, mid, local, J, jid, w = served(srv, fake, template)
 
     async def first():
         await w.start()
@@ -693,7 +661,7 @@ def test_own_delete_cancels_a_job_that_still_runs(srv, fake, template):
         await w.end()  # the machine goes offline while the build runs
 
     anyio.run(first)
-    assert srv.job(local)["status"] in server.ACTIVE
+    assert srv.job(local)["status"] in jobs.ACTIVE
     assert fake.row("jobs", id=jid)["note"] == "lab-box stopped. This job goes on when HARPOR runs there again."
     assert fake.rpc(c, "delete_job", p_job=jid) == "deleting"
     w2 = own_worker(srv, fake, c, mid)
@@ -709,7 +677,7 @@ def test_own_delete_cancels_a_job_that_still_runs(srv, fake, template):
 
         w2.client.post = record
         try:
-            active = srv.job(local)["status"] in server.ACTIVE
+            active = srv.job(local)["status"] in jobs.ACTIVE
             assert await w2.poll() is True
             assert posted == ([f"/api/jobs/{local}/cancel"] if active else [])
         finally:
@@ -882,12 +850,12 @@ def test_fake_supabase_passes_the_shared_cases():
     assert len(fs.load_cases()) >= 55
 
 
-# ---- the life cycle: start, resume, stop and housekeeping (plan.md 5.2, 5.8 and 5.9) ----
+# ---- the life cycle: start, resume, stop and housekeeping ----
 
 def test_a_restart_resumes_interrupted_jobs_at_most_twice(tmp_path, fake, template):
-    """plan.md 5.8: the stop (SIGTERM) keeps the row's status with a note; the next start goes on from the first
-    stage not done, without a key, at most RESUMES times (job.json public.resumes). An analysis goes on as an
-    analysis, and a job whose cancel was answered after its row last changed stays cancelled."""
+    """The stop (SIGTERM) keeps the row's status with a note; the next start goes on from the first stage not
+    done, without a key, at most RESUMES times (job.json public.resumes). An analysis goes on as an analysis, and
+    a job whose cancel was answered after its row last changed stays cancelled."""
     c = fake.add_user("c@example.org", approved=True)
     mid = machine(fake, c)
     servers = [Server(tmp_path)]
@@ -917,7 +885,7 @@ def test_a_restart_resumes_interrupted_jobs_at_most_twice(tmp_path, fake, templa
 
         anyio.run(first)
         row = fake.row("jobs", id=jid)
-        assert row["status"] in server.ACTIVE and row["note"] == worker.ENDED.format(place="lab-box")
+        assert row["status"] in jobs.ACTIVE and row["note"] == worker.ENDED.format(place="lab-box")
         # a crash during an analysis (Runner._recover failed it), and a cancel answered after the row last changed
         fake.set("jobs", {"id": analysis}, status="analyzing")
         jobs.update_stage(A, "frames", status="failed")
@@ -934,7 +902,7 @@ def test_a_restart_resumes_interrupted_jobs_at_most_twice(tmp_path, fake, templa
             await w2.start()
             try:
                 row = fake.row("jobs", id=jid)
-                assert row["note"] is None and row["status"] in server.ACTIVE
+                assert row["note"] is None and row["status"] in jobs.ACTIVE
                 assert two.job(local)["status"] in ("queued", "running") and two.job(local)["public"]["resumes"] == 1
                 assert two.job(an_local)["status"] == "analyzing" and two.job(an_local)["public"]["resumes"] == 1
                 assert two.job(held_local)["status"] == "cancelled" and two.job(held_local)["public"]["resumes"] == 0
@@ -964,9 +932,8 @@ def test_a_restart_resumes_interrupted_jobs_at_most_twice(tmp_path, fake, templa
 
 
 def test_a_personal_worker_start_keeps_local_data_and_resumes(srv, fake, template):
-    """addendum 6.4: a copied job whose row went is marked gone and stays on the machine, a row whose folder is
-    missing fails, another machine's folder is left alone, and an interrupted job goes on, counted in job.json
-    public.resumes."""
+    """A copied job whose row went is marked gone and stays on the machine, a row whose folder is missing fails,
+    another machine's folder is left alone, and an interrupted job goes on, counted in job.json public.resumes."""
     c = fake.add_user("c@example.org", approved=True)
     mid = machine(fake, c)
     gone_local, _ = srv.clone(template)
@@ -1237,7 +1204,7 @@ def test_the_heartbeat_reads_the_end_of_the_gpu_job_again(srv, fake, monkeypatch
     assert w.ends_at == end and row["ends_at"] == end and row["accepting"] is False
 
 
-# ---- the server with a worker: main() (plan.md step 13) ----
+# ---- the server with a worker: main() ----
 
 def test_main_starts_the_worker_it_is_asked_for(tmp_path, monkeypatch, capsys):
     import uvicorn
@@ -1258,9 +1225,7 @@ def test_main_starts_the_worker_it_is_asked_for(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sessions, "Session", lambda: fake.session(c, machine_id=machine(fake, c)))
     args = ["--fake", "--runs", str(tmp_path / "runs")]
     for wrong, why in ((["--local-keys", "opus"], "--local-keys needs --worker"),
-                       (["--worker", "--local-keys", "none"], "--local-keys takes astra, opus or astra,opus"),
-                       (["--worker", "own"], "unrecognized arguments: own"),
-                       (["--worker", "shared"], "unrecognized arguments: shared")):
+                       (["--worker", "--local-keys", "none"], "--local-keys takes astra, opus or astra,opus")):
         with pytest.raises(SystemExit) as e:
             server.main(args + wrong)
         assert e.value.code == 2 and why in capsys.readouterr().err

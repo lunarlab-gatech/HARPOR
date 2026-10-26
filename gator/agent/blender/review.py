@@ -3,8 +3,8 @@
 blender -b --factory-startup --python-exit-code 1 --python review.py -- ARGS.json
 
 ARGS.json comes from tools.review: root, out, clay, views (from the manifest), candidate, original
-(None in from-scratch mode) and detail (close-up cameras: center x y z, radius, view direction x y z,
-all in W). The controller also uses this script for the original's previews, with candidate None.
+and detail (close-up cameras: center x y z, radius, view direction x y z, all in W). The controller
+also uses this script for the original's previews, with candidate None.
 The stock glTF importer maps glTF to W, so Blender world coordinates are W and the input cameras
 apply as they are. Input views are cropped to the object (the mask's box and the projected assets)
 and rendered at INPUT_LONG pixels on the long side. Writes one PNG per view and asset, sheet.png (one

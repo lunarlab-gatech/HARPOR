@@ -38,15 +38,23 @@ import sys
 import time
 from pathlib import Path
 
+from gator.fileio import write_json
+
 BLENDER_SCRIPTS = Path(__file__).resolve().parent / "blender"
+# The agents' models, here because this module needs only the standard library: claude_agent, the
+# controller, gator.parts.propose and the web app's key check all read them.
+CODEX_MODEL, CLAUDE_MODEL = "gpt-6-astra", "claude-opus-5-5"
+EFFORTS = ("low", "medium", "high", "xhigh", "max")  # Claude's effort levels
+FALLBACK_BETA = "server-side-fallback-2026-07-01"  # Claude's server-side refusal fallback
+# Claude Opus 5.5's row of claude_agent.PRICES (USD per million tokens; the columns are explained there).
+OPUS_PRICES = {"input_tokens": 4.0, "output_tokens": 20.0, "cache_read_input_tokens": 0.20,
+               "cache_creation_input_tokens": 5.0, "cache_creation_1h": 8.0}
 EXPORT_TIMEOUT_S = 180.0
 MAX_EXCLUDED_S = 600.0  # cap on the export time that moves the deadline
 REVIEW_TIMEOUT_S = 300.0  # render only
 SET_JOINT_TIMEOUT_S = 120.0
 VERDICTS = {"refinement": ("complete", "unchanged", "needs_review"),
-            "from_scratch": ("reconstruction_complete", "needs_review"),
             "articulation": ("articulated", "unchanged", "needs_review")}
-REFINE_VERDICTS, SCRATCH_VERDICTS = VERDICTS["refinement"], VERDICTS["from_scratch"]
 MAX_LIMITATIONS = 3
 MAX_DETAIL_VIEWS = 4
 MAX_READ_BYTES = 2 << 30
@@ -116,18 +124,16 @@ def iso(t):
     return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).isoformat(timespec="seconds")
 
 
-def write_json_atomic(path, obj):
-    """Write a temp file in the same folder, then os.replace it, so readers never see a partial file.
-
-    The temp file is created exclusively, and os.replace swaps the name itself, so neither follows a
-    symlink. It gets the usual umask permissions (not mkstemp's 0600), so the controller and the
-    agent can read each other's files when they run as different users.
-    """
-    path = Path(path)
-    tmp = path.with_name(f".{path.name}.{os.urandom(6).hex()}")
-    with open(tmp, "x") as f:
-        json.dump(obj, f, indent=2)
-    os.replace(tmp, path)
+def env_values(path, names):
+    """The values of the lines NAME=value of an env file whose NAME is in names, in file order, without
+    one pair of quotes around them (as a shell reads them)."""
+    values = []
+    for line in Path(path).read_text().splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name in names:
+            value = value.strip()
+            values.append(value[1:-1] if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"" else value)
+    return values
 
 
 def log_event(control, event, **fields):
@@ -135,22 +141,32 @@ def log_event(control, event, **fields):
         f.write(json.dumps({"time": time.time(), "event": event, **fields}) + "\n")
 
 
+def json_lines(text):
+    """The JSON objects among the lines of text. Other lines are skipped."""
+    for line in text.splitlines():
+        with contextlib.suppress(ValueError):
+            e = json.loads(line)
+            if isinstance(e, dict):
+                yield e
+
+
+def read_jsonl(path):
+    """The JSON objects of a JSONL file. Other lines, and a missing or unreadable file, give nothing."""
+    with contextlib.suppress(OSError):
+        yield from json_lines(Path(path).read_text(errors="replace"))
+
+
 def read_events(control):
-    """Events from control/events.jsonl. Lines that do not parse are skipped."""
+    """Events from control/events.jsonl. Lines that do not parse are skipped. A missing file gives none,
+    but one that cannot be read raises OSError, so a failed read never looks like an empty log."""
     path = Path(control) / "events.jsonl"
-    events = []
-    for line in path.read_text(errors="replace").splitlines() if path.exists() else []:
-        try:
-            events.append(json.loads(line))
-        except ValueError:
-            pass
-    return [e for e in events if isinstance(e, dict)]
+    return list(json_lines(path.read_text(errors="replace"))) if path.exists() else []
 
 
 def write_budget(work, started_at, budget_s, excluded_s=0.0, exports=()):
     """Write work/run_budget.json, the agent's view of the deadline. Returns the deadline."""
     deadline = started_at + budget_s + excluded_s
-    write_json_atomic(Path(work) / "run_budget.json", {
+    write_json(Path(work) / "run_budget.json", {
         "budget_s": budget_s, "started_at": started_at, "started_at_iso": iso(started_at),
         "deadline": deadline, "deadline_iso": iso(deadline), "excluded_s": excluded_s,
         "exports": list(exports), "export_timeout_s": EXPORT_TIMEOUT_S, "max_excluded_s": MAX_EXCLUDED_S,
@@ -160,7 +176,7 @@ def write_budget(work, started_at, budget_s, excluded_s=0.0, exports=()):
 
 def start_budget(work, control, started_at, budget_s):
     """Start the clock: control/budget.json is the record, run_budget.json the agent's view."""
-    write_json_atomic(Path(control) / "budget.json", {"started_at": started_at, "budget_s": budget_s})
+    write_json(Path(control) / "budget.json", {"started_at": started_at, "budget_s": budget_s})
     return write_budget(work, started_at, budget_s)
 
 
@@ -201,6 +217,24 @@ def _run(cmd, log, timeout):
         _children.remove(p)
 
 
+def run_ok(cmd, log, timeout):
+    """True when _run exits 0. A timeout, or a command that does not start, goes to log and gives False."""
+    try:
+        return _run(cmd, log, timeout) == 0
+    except (subprocess.TimeoutExpired, OSError) as e:
+        log.write(f"{e}\n")
+        return False
+
+
+def blender_argv(blender, script, *args, blend=None):
+    """The command that runs BLENDER_SCRIPTS/script in Blender without a window, with args after "--".
+    blend: a .blend to open first, with the auto-run of the scripts stored in it off (the agent wrote
+    it). --python-exit-code must come before --python: Blender applies it only to the scripts that
+    follow it."""
+    return [*blender, "-b", "--factory-startup", *(["--disable-autoexec", str(blend)] if blend else []),
+            "--python-exit-code", "1", "--python", str(BLENDER_SCRIPTS / script), "--", *map(str, args)]
+
+
 def _on_sigterm(signum, frame):
     # No wait here: the interrupted code may hold the child's wait lock.
     for p in list(_children):
@@ -235,18 +269,12 @@ def export_glb(work, control, blender, blend=None, timeout=EXPORT_TIMEOUT_S):
     n = _count(control, "export_started") + 1
     glb = exports / f"{n:03d}.glb"
     report = glb.with_suffix(".json")
-    # Auto-run of scripts stored in the .blend stays off: the agent wrote it. --python-exit-code must come
-    # before --python: Blender applies it only to the scripts that follow it.
-    cmd = [*blender, "-b", "--factory-startup", "--disable-autoexec", str(blend), "--python-exit-code", "1",
-           "--python", str(BLENDER_SCRIPTS / "export_glb.py"), "--", str(glb), str(report)]
+    cmd = blender_argv(blender, "export_glb.py", glb, report, blend=blend)
     log_event(control, "export_started", export=n)
     t, ok, glb_sha, rep, why = time.time(), False, None, None, ""
     try:
         with open_new(glb.with_suffix(".log")) as log:
-            try:
-                ok = _run(cmd, log, timeout) == 0
-            except (subprocess.TimeoutExpired, OSError) as e:
-                log.write(f"{e}\n")
+            ok = run_ok(cmd, log, timeout)
         if ok:
             glb_sha, rep = sha256(glb), json.loads(read_file(report, 1 << 20))
     except (OSError, ValueError) as e:
@@ -291,25 +319,18 @@ def review(work, control, blender, clay=False, detail=()):
         out.mkdir()
     except FileExistsError:
         sys.exit(f"reviews/{receipt} already exists; remove it and run review again")
-    original = work / "original" / "original.glb"
-    write_json_atomic(out / "args.json", {
+    write_json(out / "args.json", {
         "root": str(work), "out": str(out), "clay": clay, "views": m["views"], "candidate": str(glb),
-        "original": str(original) if m["mode"] != "from_scratch" else None, "detail": detail,
+        "original": str(work / "original" / "original.glb"), "detail": detail,
     })
-    cmd = [*blender, "-b", "--factory-startup", "--python-exit-code", "1", "--python",
-           str(BLENDER_SCRIPTS / "review.py"), "--", str(out / "args.json")]
     with open_new(out / "blender.log") as log:
-        try:
-            ok = _run(cmd, log, REVIEW_TIMEOUT_S) == 0
-        except (subprocess.TimeoutExpired, OSError) as e:
-            log.write(f"{e}\n")
-            ok = False
+        ok = run_ok(blender_argv(blender, "review.py", out / "args.json"), log, REVIEW_TIMEOUT_S)
     if not ok:
         sys.exit(f"review render failed; see {(out / 'blender.log').relative_to(work)}")
     rec = {"receipt": receipt, "glb": str(glb.relative_to(work)), "sha256": sha, "clay": clay, "cached": cached,
            "sheet": str((out / "sheet.png").relative_to(work)), "review": str((out / "review.json").relative_to(work)),
            "time": time.time()}
-    write_json_atomic(out / "receipt.json", rec)
+    write_json(out / "receipt.json", rec)
     log_event(control, "review", receipt=receipt, glb=rec["glb"], sha256=sha)
     return rec
 
@@ -367,16 +388,11 @@ def _set_joint_run(work, blender, blend, child, spec, label):
     out, log_path = d / f"{label}.json", d / f"{label}.log"
     if os.path.lexists(out):  # set_joint.py would change the .blend and then fail to write its record
         sys.exit(f"{out.relative_to(work)} already exists; remove it and run set_joint again")
-    cmd = [*blender, "-b", "--factory-startup", "--disable-autoexec", str(blend), "--python-exit-code", "1",
-           "--python", str(BLENDER_SCRIPTS / "set_joint.py"), "--", str(out), child, json.dumps(spec)]
+    cmd = blender_argv(blender, "set_joint.py", out, child, json.dumps(spec), blend=blend)
     rec = None
     try:
         with open_new(log_path) as log:
-            try:
-                ok = _run(cmd, log, SET_JOINT_TIMEOUT_S) == 0
-            except (subprocess.TimeoutExpired, OSError) as e:
-                log.write(f"{e}\n")
-                ok = False
+            ok = run_ok(cmd, log, SET_JOINT_TIMEOUT_S)
         if ok:
             rec = json.loads(read_file(out, 1 << 22))
     except FileExistsError:
@@ -443,7 +459,7 @@ def set_joint(work, control, blender, child, spec):
     if joints and not problems:
         root, _, fixed = J.tree(joints, links)
         out.update(root=root, fixed_base=fixed, loose=J.welds(joints, links, root, out["holders"]))
-    write_json_atomic(work / "joints.json", out)
+    write_json(work / "joints.json", out)
     log_event(control, "joint", child=child, action=action, ok=True, joint=spec, joints=len(joints),
               blend_sha256=sha256(blend))
     return out
@@ -623,26 +639,20 @@ def review_articulation(work, control, blender, states=STATES, clay=False):
         check = {"error": f"{type(e).__name__}: {e}", "tolerance": None, "links": {}, "joints": {}}
     report = {"receipt": receipt, "glb": str(glb.relative_to(work)), "sha256": sha,
               "states": [{k: p[k] for k in ("name", "t", "q")} for p in poses], **check}
-    write_json_atomic(out / "report.json", report)
-    write_json_atomic(out / "args.json", {
+    write_json(out / "report.json", report)
+    write_json(out / "args.json", {
         "root": str(work), "out": str(out), "clay": clay, "views": manifest(control)["views"], "candidate": str(glb),
         "links": links, "orbit": list(ORBIT_AZIMUTHS),
         "states": [{"name": p["name"], "t": p["t"], "motions": {k: M.tolist() for k, M in p["motions"].items()}}
                    for p in poses]})
-    cmd = [*blender, "-b", "--factory-startup", "--python-exit-code", "1", "--python",
-           str(BLENDER_SCRIPTS / "review_articulation.py"), "--", str(out / "args.json")]
     with open_new(out / "blender.log") as log:
-        try:
-            ok = _run(cmd, log, REVIEW_TIMEOUT_S) == 0
-        except (subprocess.TimeoutExpired, OSError) as e:
-            log.write(f"{e}\n")
-            ok = False
+        ok = run_ok(blender_argv(blender, "review_articulation.py", out / "args.json"), log, REVIEW_TIMEOUT_S)
     if not ok:
         sys.exit(f"review_articulation render failed; see {(out / 'blender.log').relative_to(work)}")
     rec = {"receipt": receipt, "glb": str(glb.relative_to(work)), "sha256": sha, "clay": clay, "cached": cached,
            "joints": len(joints), "states": len(poses), "sheet": str((out / "sheet.png").relative_to(work)),
            "report": str((out / "report.json").relative_to(work)), "time": time.time()}
-    write_json_atomic(out / "receipt.json", rec)
+    write_json(out / "receipt.json", rec)
     log_event(control, "review_articulation", receipt=receipt, glb=rec["glb"], sha256=sha, joints=len(joints))
     return rec, report
 
@@ -676,7 +686,7 @@ def checkpoint(work, control, receipt, defect):
         sys.exit(f"{dst.relative_to(work)} already exists")
     meta = {"receipt": receipt, "glb": str(dst.relative_to(work)), "sha256": rec["sha256"],
             "status": "needs_review", "defect": defect, "time": time.time()}
-    write_json_atomic(dst.with_suffix(".json"), meta)
+    write_json(dst.with_suffix(".json"), meta)
     log_event(control, "checkpoint", glb=meta["glb"], sha256=rec["sha256"], defect=defect, receipt=receipt)
     return meta
 
@@ -713,7 +723,7 @@ def finish(work, control, receipt, verdict, reason, limitations=()):
     out = {"receipt": receipt, "verdict": verdict, "reason": reason, "limitations": list(limitations),
            "glb": "original/original.glb" if verdict == "unchanged" else rec["glb"],
            "sha256": None if verdict == "unchanged" else rec["sha256"], "time": time.time()}
-    write_json_atomic(work / "finish.json", out)
+    write_json(work / "finish.json", out)
     log_event(control, "finish", **{k: v for k, v in out.items() if k != "time"})
     return out
 
@@ -866,8 +876,7 @@ def main(argv=None):
     c.add_argument("--defect", required=True, help="the open defect")
     f = sub.add_parser("finish", help="hand off the reviewed GLB; the last action")
     f.add_argument("--receipt", required=True)
-    f.add_argument("--verdict", required=True, help=f"refinement: {', '.join(REFINE_VERDICTS)}; "
-                                                    f"from scratch: {', '.join(SCRATCH_VERDICTS)}; "
+    f.add_argument("--verdict", required=True, help=f"refinement: {', '.join(VERDICTS['refinement'])}; "
                                                     f"articulation: {', '.join(VERDICTS['articulation'])}")
     f.add_argument("--reason", required=True)
     f.add_argument("--limitation", action="append", default=[], help="repeat up to 3 times")

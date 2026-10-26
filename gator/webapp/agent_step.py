@@ -28,22 +28,16 @@ J/agent/result.json.
 
 import argparse
 import json
-import os
 import shutil
 import signal
 from pathlib import Path
+
+from gator.fileio import write_json
 
 REDACTED = "[redacted API key]"
 AGENTS = {"astra": "codex", "opus": "claude"}  # the web app's name -> the controller's
 EFFORT = {"opus": "xhigh"}
 BUDGET_S = {"refinement": 600.0, "articulation": 900.0}
-
-
-def read_key(key_file):
-    """The OPENAI_API_KEY or ANTHROPIC_API_KEY value of an env file, else '' (controller.read_key)."""
-    from gator.agent import controller
-
-    return controller.read_key(key_file)
 
 
 def scrub(x, key):
@@ -101,9 +95,7 @@ def run(job_dir, sif, key_file, agent="astra"):
                                effort=EFFORT.get(agent))
     controller.run_container_session(root, sif, key_file, budget_s=BUDGET_S[kind])
     r = scrub(json.loads((root / "result.json").read_text()), keys)
-    tmp = out.with_name(".tmp_" + out.name)
-    tmp.write_text(json.dumps(r, indent=2))
-    os.replace(tmp, out)
+    write_json(out, r)
     print(f"agent: {r['source']}, verdict {r['verdict']}, exit {r['exit']} ({r['cli_exit']}), "
           f"{r['timings']['wall_s']:.0f} s, GLB {r['glb']}")
     if r.get("model"):
