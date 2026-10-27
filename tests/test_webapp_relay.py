@@ -55,6 +55,13 @@ def test_build_makes_each_route_from_the_table():
                                                  text="T: [1, 2]\nµ: 1\n")
     assert method == "PUT" and path == f"/api/jobs/{LOCAL}/calibration?name=cal+%26x%3D1%2F..%2Fa.yaml"
     assert content == "T: [1, 2]\nµ: 1\n".encode() and headers == {"Content-Type": "application/octet-stream"}
+    # The LiDAR topic that the calibration is for goes in the query string too, encoded; "" names none.
+    _, path, _, _ = relay.build("calibration_put", LOCAL, query={"name": "c.yaml", "lidar_topic": "/a b&name=x.yaml"},
+                                text="x")
+    assert path == f"/api/jobs/{LOCAL}/calibration?name=c.yaml&lidar_topic=%2Fa+b%26name%3Dx.yaml"
+    for none in ({"name": "c.yaml"}, {"name": "c.yaml", "lidar_topic": ""}, {"name": "c.yaml", "lidar_topic": None}):
+        _, path, _, _ = relay.build("calibration_put", LOCAL, query=none, text="x")
+        assert path == f"/api/jobs/{LOCAL}/calibration?name=c.yaml"
     assert set(relay.ROUTES) == {"topic", "calibration_put", "calibration_delete", "start", "overrides", "parts",
                                  "continue", "cancel", "delete"}
     assert set(relay.NO_BUILD) | set(relay.KEY_ROUTES) == set(relay.ROUTES)
@@ -67,6 +74,8 @@ def test_build_refuses_what_is_not_in_the_table():
     assert (e.value.status, e.value.detail) == (400, "unknown request")
     with pytest.raises(relay.Refuse, match="name the file"):
         relay.build("calibration_put", LOCAL, query={"name": 5}, text="x")
+    with pytest.raises(relay.Refuse, match="the LiDAR topic is not text"):
+        relay.build("calibration_put", LOCAL, query={"name": "c.yaml", "lidar_topic": ["/lidar/points"]}, text="x")
     for bad in ("../x", f"{LOCAL}/../y", "", None, LOCAL + "\n"):
         with pytest.raises(ValueError):
             relay.build("cancel", bad)

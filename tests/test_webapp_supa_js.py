@@ -1031,8 +1031,8 @@ def test_the_sealed_agent_is_the_one_the_server_will_run():
 
 def test_delete_calibration_and_cancel_requests():
     """DELETE /api/jobs/{id} is rpc delete_job, then the job's files; a refusal is 409 and removes nothing. A calibration
-    upload is relayed with its text and name (not UTF-8: refused in the page), its removal with no text; cancel sends
-    an empty body."""
+    upload is relayed with its text, name and LiDAR topic (none when app.js sends an empty one; not UTF-8: refused in
+    the page), its removal with no text; cancel sends an empty body."""
     out = run_js(f"""
         await advance(0);
         const got = [];
@@ -1043,7 +1043,9 @@ def test_delete_calibration_and_cancel_requests():
         got.push([no.status, await no.json()]);
         const answerAll = () => setTimeout(() => {{ for (const r of db.tables.requests) if (r.state === "pending") answer(r.id, 200, {{ ok: true }}); }}, 500);
         answerAll();
-        await settle(T.fetch("/api/jobs/{JOB}/calibration?name=cal%20one.yaml", {{ method: "PUT", body: new Blob(["T_cam_lidar: [1]\\n"]) }}));
+        await settle(T.fetch("/api/jobs/{JOB}/calibration?name=cal%20one.yaml&lidar_topic=", {{ method: "PUT", body: new Blob(["T_cam_lidar: [1]\\n"]) }}));
+        answerAll();
+        await settle(T.fetch("/api/jobs/{JOB}/calibration?name=c.yaml&lidar_topic=%2Flivox%2Flidar", {{ method: "PUT", body: new Blob(["T_cam_lidar: [2]\\n"]) }}));
         const bad = await T.fetch("/api/jobs/{JOB}/calibration?name=x.yaml", {{ method: "PUT", body: new Blob([new Uint8Array([0xff, 0xfe])]) }});
         got.push([bad.status, await bad.json()]);
         answerAll();
@@ -1059,6 +1061,8 @@ def test_delete_calibration_and_cancel_requests():
                           [400, {"detail": "the calibration file is not UTF-8 text"}]]
     assert out["deletes"] == [{"p_job": JOB}] * 2 and out["listed"] == [{"p_job": JOB}]
     assert out["relayed"] == [["calibration_put", {"name": "cal one.yaml"}, {}, "T_cam_lidar: [1]\n", None],
+                              ["calibration_put", {"name": "c.yaml", "lidar_topic": "/livox/lidar"}, {},
+                               "T_cam_lidar: [2]\n", None],
                               ["calibration_delete", {}, {}, None, None], ["cancel", {}, {}, None, None]]
 
 

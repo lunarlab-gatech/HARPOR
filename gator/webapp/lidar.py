@@ -18,8 +18,9 @@ build_plan.md note 12 (Rosbag source, Stray Scanner source, Points for the Input
 The estimate is lidar_scale.estimate, with the check images in J/lidar/check. The record,
 pool/lidar.json, gains source, extrinsic {source, file, calibration_sha256, chain, link, camera_axes,
 T_cam_lidar}, intrinsics {source, K, D, model, R, size, frame_size}, time {base, window_ms, offset_ms,
-log_minus_header_ms {camera, lidar}, scan_period_ms, scan_period_from, point_times} and the warnings of
-both steps (a Stray capture's fields: build_plan.md note 12, pool/lidar.json), and is written last.
+log_minus_header_ms {camera, lidar}, log_minus_last_point_ms, scan_period_ms, scan_period_from, point_times}
+and the warnings of both steps (a Stray capture's fields: build_plan.md note 12, pool/lidar.json), and is
+written last.
 extrinsic.calibration_sha256 (null without a calibration) lets steps.done see a record that an upload or a
 delete of the calibration made stale. When the samples cannot be made (no TF link, no intrinsics, ...), the
 record has ok false and the reason. The stage prints PROGRESS lines while it reads scans, then one line per
@@ -41,13 +42,16 @@ import numpy as np
 from gator.fileio import read_json, replace, write_json
 from gator.stage_a import lidar_scale
 
-WINDOW_S = 0.05  # points within +-50 ms of a camera stamp
-READ_S = 0.3  # scans are read within +-0.3 s of each frame's log time
-CLOCK_TOL_S = 0.2  # the camera's and the LiDAR's log-minus-header offsets agree this well: the header base
+WINDOW_S = 0.05  # points within +-50 ms of a camera stamp, or within half a scan period when that is longer,
+WINDOW_MAX_S = 0.1  # up to +-100 ms (a 5 Hz LiDAR): see window()
+READ_S = 0.4  # scans are read within +-0.4 s of each frame's log time: a 5 Hz scan with points in the window is
+# logged up to 0.3 s after the stamp (+100 ms of window, a 200 ms sweep), plus its transport delay
+CLOCK_TOL_S = 0.2  # the camera's and the LiDAR's log-minus-stamp offsets agree this well (time_base): the header base
 # A bag whose topics.json is older than the LiDAR listing (Runner.submit_analyze lists it again on a topic choice).
 OLD_TOPICS = ("the bag was listed before LiDAR topics were; choose its camera topic again to list them (for a job in "
               "review or done: upload the bag again)")
-CACHE_VERSION = 3  # of lidar/samples.json; another version is a miss (3: the clouds in lidar/clouds.npz)
+CACHE_VERSION = 4  # of lidar/samples.json; another version is a miss (3: the clouds in lidar/clouds.npz; 4: the
+# log base moves point times by each scan's last point, and the window grows with the scan period)
 SCAN_POINTS = 60_000  # the most points of a view's whole scan in its cloud (lidar/cloud/<view>.glb)
 SCAN_KEEP = 20_000  # while reading, each scan also keeps a random subset of its points, at most this many, for the clouds
 NO_K = ("the export has no intrinsics (fx, fy, cx, cy in odometry.csv, or camera_matrix.csv), so the Inputs tab has "
@@ -122,11 +126,18 @@ def frame_names(J, names):
     return sorted(set(names) | {n for n in more if re.fullmatch(r"f\d+", n)})
 
 
-def calibration(J, job):
-    """(the parsed calibration, its file's sha256, its name), or (None, None, None) without one."""
+def calibration(J, job, topic):
+    """(the parsed calibration, its file's sha256, its name), or (None, None, None) without one. Failed when
+    it was uploaded for another LiDAR topic than topic (job.json calibration.lidar_topic; one without
+    lidar_topic is not checked), as jobs.lidar_settings refuses at the start: a retry or a run from lidar
+    after a later upload does not pass there."""
     cal = job.get("calibration")
     if not cal:
         return None, None, None
+    made_for = cal.get("lidar_topic")
+    if made_for and made_for != topic:
+        raise Failed(f"the calibration {cal.get('name')} is for {made_for}, not {topic}; choose {made_for}, or upload "
+                     f"a calibration for {topic}")
     name = str(cal.get("name") or "")
     f = Path(J) / "lidar" / "calibration" / name
     if not name or Path(name).name != name or not f.is_file():
@@ -271,11 +282,12 @@ def at_most(a, k, seed):
 
 
 def read_scans(path, topic, windows, keep=None, lo=0.1, hi=0.85, whole=0):
-    """[(log_ns, header_ns, xyz, t_ns or None, whole)] of the LiDAR topic within the log-time windows
-    (rosbag.scans), with PROGRESS lines from lo to hi as the windows are read. keep: a function of
-    (xyz, log_ns) that gives the points to hold (None: all), so that a 360 degree scan keeps only what
-    the camera can see (in_view). whole: (xyz, t_ns or None) of at most that many of the scan's points,
-    taken before keep (at_most, seeded by the log time), for the clouds; None when whole is 0."""
+    """[(log_ns, header_ns, xyz, t_ns or None, whole, end_ns or None)] of the LiDAR topic within the
+    log-time windows (rosbag.scans), with PROGRESS lines from lo to hi as the windows are read. keep: a
+    function of (xyz, log_ns) that gives the points to hold (None: all), so that a 360 degree scan keeps
+    only what the camera can see (in_view). whole: (xyz, t_ns or None) of at most that many of the scan's
+    points, taken before keep (at_most, seeded by the log time), for the clouds; None when whole is 0.
+    end_ns: the time of the scan's last point, also taken before keep; None without per-point times."""
     from gator.webapp import rosbag
 
     spans = rosbag.merge_windows(windows)
@@ -283,6 +295,7 @@ def read_scans(path, topic, windows, keep=None, lo=0.1, hi=0.85, whole=0):
     out, shown = [], lo
     for log, head, xyz, t in rosbag.scans(path, topic, windows):
         t = None if t is None else np.asarray(t, np.int64)
+        end = None if t is None or not len(t) else int(t.max())
         part = None
         if whole:
             rows = at_most(np.arange(len(xyz)), whole, int(log))
@@ -290,7 +303,7 @@ def read_scans(path, topic, windows, keep=None, lo=0.1, hi=0.85, whole=0):
         if keep is not None:
             m = keep(xyz, int(log))
             xyz, t = xyz[m], None if t is None else t[m]
-        out.append((int(log), int(head), xyz, t, part))
+        out.append((int(log), int(head), xyz, t, part, end))
         passed = sum(min(b, log) - a for a, b in spans if a <= log)
         x = lo + (hi - lo) * passed / total
         if x >= shown + 0.02:
@@ -300,46 +313,65 @@ def read_scans(path, topic, windows, keep=None, lo=0.1, hi=0.85, whole=0):
 
 
 def time_base(stamps, frames, scans, offset_ns):
-    """(base, the time record, warnings). offset_ns is the calibration's time_offset_s, which relates the
-    header clocks (t_lidar = t_cam + offset). "header" when the camera's header clock is usable, every
-    scan has a stamp, and either the offset is given or the log-minus-header offsets of the two clocks
-    agree within CLOCK_TOL_S; else "log". With an offset the log times only check it: in a live
-    recording their offsets differ by it, in a bag whose log times copy the header stamps they agree, and
+    """(base, the time record, warnings). offset_ns is the calibration's time_offset_s (None when it gives
+    none; 0 is given), which relates the header clocks (t_lidar = t_cam + offset). "header" when the
+    camera's header clock is usable, every scan has a stamp, and either the offset is given or the two
+    clocks agree within CLOCK_TOL_S; else "log". The clocks are compared by how long after its stamp each
+    sensor's messages are logged: the camera's frames after their header stamps, and the LiDAR's scans
+    after their header stamps and, when the points have times, also after their last point. A live
+    recorder logs a scan once it is swept, so a driver that stamps the sweep's start (livox_ros_driver2)
+    fits the last point; a bag whose log times copy the header stamps fits the header stamp. The clocks
+    agree when either fits. Without per-point times a stamp at the sweep's start puts the LiDAR's up to a
+    scan period later, which a clock offset would too, so then the log base, which takes each such scan
+    at the middle of its sweep (frame_points). With an offset the log times only check it: in a live
+    recording the two differ by it, in a bag whose log times copy the header stamps they agree, and
     otherwise a warning says so. In the log base the offset is not used, since log times come from the
     recorder's one clock. The record's offset_ms is the offset added to the camera stamps (0 in the log
-    base)."""
+    base); log_minus_last_point_ms is the LiDAR's from its last points (None without per-point times)."""
     idx = [int(n[1:]) for n in frames]
     head = np.asarray(stamps["header_ns"], np.int64)[idx]
     log = np.asarray(stamps["log_ns"], np.int64)[idx]
     cam = float(np.median(log - head)) if stamps["clock"] == "header" else None
     heads = np.array([s[1] for s in scans], np.int64)
-    lid = float(np.median(np.array([s[0] for s in scans], np.int64) - heads)) if len(heads) and heads.all() else None
+    lids = {}  # the LiDAR's log-minus-stamp offsets: from the header stamps, and from the last points
+    if len(heads) and heads.all():
+        logs = np.array([s[0] for s in scans], np.int64)
+        lids["header"] = float(np.median(logs - heads))
+        if all(s[5] is not None for s in scans):
+            lids["last_point"] = float(np.median(logs - np.array([s[5] for s in scans], np.int64)))
     tol, warnings, base = CLOCK_TOL_S * 1e9, [], "header"
-    seen = None if cam is None or lid is None else (f"(log time minus header stamp: camera {cam / 1e9:.3f} s, "
-                                                    f"LiDAR {lid / 1e9:.3f} s)")
+    shifts = (0.0,) if offset_ns is None else (float(offset_ns), 0.0)
+    # How far the LiDAR's offset nearest the camera's is from it (less the offset in a live recording). A warning
+    # names the clocks' gap by the last points when there are some: a live recorder logs a scan once it is swept.
+    gap = min((abs(v - cam + d) for v in lids.values() for d in shifts), default=None) if cam is not None else None
+    near = lids.get("last_point", lids.get("header"))
+    seen = None if cam is None or near is None else (
+        f"(log time minus header stamp: camera {cam / 1e9:.3f} s, LiDAR {lids['header'] / 1e9:.3f} s"
+        + (f"; log time minus each scan's last point: LiDAR {lids['last_point'] / 1e9:.3f} s" if "last_point" in lids
+           else "") + ")")
     if cam is None:
         base = "log"
         warnings.append("the camera's header stamps are zero, go backwards or repeat, so frames and scans are "
                         "matched by log time")
-    elif lid is None:
+    elif not lids:
         base = "log"
         warnings.append("some scans have no header stamp, so frames and scans are matched by log time")
-    elif offset_ns:
-        if abs(cam - lid - offset_ns) > tol and abs(cam - lid) > tol:
+    elif offset_ns is not None:
+        if gap > tol:
             warnings.append(f"time_offset_s is {offset_ns / 1e9:g} s, but the log times put the LiDAR's header clock "
-                            f"{(cam - lid) / 1e9:+.2f} s from the camera's {seen}; check time_offset_s")
-    elif abs(cam - lid) > tol:
+                            f"{(cam - near) / 1e9:+.2f} s from the camera's {seen}; check time_offset_s")
+    elif gap > tol:
         base = "log"
-        warnings.append(f"the camera's and the LiDAR's header clocks differ by {(cam - lid) / 1e9:+.2f} s {seen}, so "
+        warnings.append(f"the camera's and the LiDAR's header clocks differ by {(cam - near) / 1e9:+.2f} s {seen}, so "
                         "frames and scans are matched by log time, which is less exact; give time_offset_s in the "
-                        "calibration")
-    if base == "log" and offset_ns:
+                        "calibration (0 when both use one clock)")
+    if base == "log" and offset_ns is not None:
         warnings.append(f"time_offset_s ({offset_ns / 1e9:g} s) is not used: it relates the header stamps, and "
                         "frames and scans are matched by log time")
-    rec = {"base": base, "window_ms": round(WINDOW_S * 1000, 3),
-           "offset_ms": round((offset_ns if base == "header" else 0) / 1e6, 3),
-           "log_minus_header_ms": {"camera": None if cam is None else round(cam / 1e6, 3),
-                                   "lidar": None if lid is None else round(lid / 1e6, 3)}}
+    ms = {k: round(v / 1e6, 3) for k, v in lids.items()}
+    rec = {"base": base, "offset_ms": round(((offset_ns or 0) if base == "header" else 0) / 1e6, 3),
+           "log_minus_header_ms": {"camera": None if cam is None else round(cam / 1e6, 3), "lidar": ms.get("header")},
+           "log_minus_last_point_ms": ms.get("last_point")}
     return base, rec, warnings
 
 
@@ -375,21 +407,32 @@ def in_view(frames, wins, T, intr, sizes):
     return keep
 
 
+def window(period):
+    """The point window's half width in ns: half the scan period (ns), at least WINDOW_S and at most
+    WINDOW_MAX_S. A spinning LiDAR sweeps the camera's view once a period, so +-half a period holds one
+    sweep wherever the camera's stamp falls; a fixed +-50 ms would miss it for 1 frame in 5 at 5 Hz."""
+    return min(max(WINDOW_S * 1e9, period / 2), WINDOW_MAX_S * 1e9)
+
+
 def frame_points(scans, base, t_cam, period):
     """The LiDAR points (M, 3) matched to a camera stamp t_cam (ns, in the base): with per-point times the
-    points within +-WINDOW_S, else every point of the nearest scan within one period."""
-    w = WINDOW_S * 1e9
+    points within +-window(period), else every point of the nearest scan within one period. scans:
+    [(log_ns, header_ns, xyz, t_ns or None, ..., end_ns or None)] (read_scans). In the log base a point's
+    time goes to the log clock by its scan's last point (end_ns), since a scan is logged once it is swept
+    (only the transport delay is left), and a scan without per-point times counts at its log time less
+    half a period, the middle of its sweep."""
+    w = window(period)
     if all(s[3] is not None for s in scans):
         got = []
-        for log, head, xyz, t, *_ in scans:
+        for log, head, xyz, t, *_, end in scans:
             if not len(t):
                 continue
-            tb = t if base == "header" else log + (t - (head or int(t.min())))
+            tb = t if base == "header" else log + (t - end)
             keep = np.abs(tb - t_cam) <= w
             if keep.any():
                 got.append(xyz[keep])
         return np.concatenate(got) if got else np.zeros((0, 3), np.float32)
-    stamps = np.array([s[1] if base == "header" else s[0] for s in scans], np.int64)
+    stamps = np.array([s[1] if base == "header" else s[0] - round(period / 2) for s in scans], np.int64)
     i = int(np.argmin(np.abs(stamps - t_cam)))
     return scans[i][2] if abs(stamps[i] - t_cam) <= period else np.zeros((0, 3), np.float32)
 
@@ -458,12 +501,13 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
     """rosbag_samples once the topics are known."""
     from PIL import Image
 
-    cal, cal_sha, cal_name = calibration(J, job)
+    cal, cal_sha, cal_name = calibration(J, job, topic)
     frames = frame_names(J, names)
     st = path.stat()
     key = {"version": CACHE_VERSION, "kind": "rosbag",
            "input": {"name": path.name, "bytes": st.st_size, "mtime_ns": st.st_mtime_ns},
-           "topics": {"camera": cam, "lidar": topic}, "calibration_sha256": cal_sha, "window_ms": WINDOW_S * 1000}
+           "topics": {"camera": cam, "lidar": topic}, "calibration_sha256": cal_sha,
+           "window_ms": [WINDOW_S * 1000, WINDOW_MAX_S * 1000]}
     hit = cache_read(J, key, names)
     if hit is not None:
         samples, info, clouds = hit
@@ -481,7 +525,8 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
     if late:
         raise Failed(f"frames {', '.join(late[:5])} are not messages of {cam}, which has {count}; choose the camera "
                      "topic again to analyze the bag again")
-    offset = int(round((cal or {}).get("time_offset_s", 0.0) * 1e9))
+    given = (cal or {}).get("time_offset_s")
+    offset = None if given is None else int(round(given * 1e9))  # 0 is given: the header clocks are one
     r = int(READ_S * 1e9)
     wins = {}  # each frame's read windows: around its log time, and around that plus the offset
     for n in frames:
@@ -510,15 +555,15 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
     warnings += more
     period, period_from = scan_period(scans, base, lid.get("rate_hz"))
     point_times = all(s[3] is not None for s in scans)
-    info["time"] = {**trec, "scan_period_ms": round(period / 1e6, 3), "scan_period_from": period_from,
-                    "point_times": point_times}
-    add = offset if base == "header" else 0  # the offset relates the header clocks, not the log times
+    info["time"] = {**trec, "window_ms": round(window(period) / 1e6, 3), "scan_period_ms": round(period / 1e6, 3),
+                    "scan_period_from": period_from, "point_times": point_times}
+    add = (offset or 0) if base == "header" else 0  # the offset relates the header clocks, not the log times
     samples, clouds = {}, {}
     for n in frames:  # only the scans read for this frame
         near = [s for s in scans if any(a <= s[0] < b for a, b in wins[n])]
         t_cam = int(stamps["header_ns" if base == "header" else "log_ns"][int(n[1:])]) + add
         samples[n], xyz = to_samples(frame_points(near, base, t_cam, period), T[n], intr, sizes[n])
-        scan = to_camera(frame_points([(s[0], s[1], *s[4]) for s in near], base, t_cam, period), T[n], intr)
+        scan = to_camera(frame_points([(s[0], s[1], *s[4], s[5]) for s in near], base, t_cam, period), T[n], intr)
         scan = scan[np.isfinite(scan).all(1)]
         clouds[n] = (xyz, at_most(scan, SCAN_POINTS, int(n[1:])).astype(np.float32))
     info["warnings"] = warnings

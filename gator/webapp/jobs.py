@@ -23,11 +23,13 @@ Jobs made before the choice hold true (astra) or false (none).
 job.json "lidar" (steps.lidar) turns on the metric scale from LiDAR: null, {"kind": "rosbag", "topic":
 T} for a LiDAR topic of the job's bag, or {"kind": "stray"} for the depth of a Stray Scanner capture,
 which a new Stray job has (on by default). lidar_settings checks it at the start. "calibration" is the
-LiDAR-camera calibration file the user uploaded for a bag, or null: {name, bytes, sha256} and the
-fields that lidar_scale.read_calibration parsed from J/lidar/calibration/<name>. An upload or a delete
-of the calibration makes the lidar stage's record stale (steps.done), so the next Build or retry
-starts from lidar (Runner.resume). A Stray Scanner capture needs no calibration: its depth is aligned
-with the color camera. Older jobs lack both (no LiDAR); their lidar stage shows as skipped.
+LiDAR-camera calibration file the user uploaded for a bag, or null: {name, bytes, sha256, lidar_topic}
+and the fields that lidar_scale.read_calibration parsed from J/lidar/calibration/<name>. lidar_topic
+is the LiDAR topic that the upload named, or null (older jobs lack it): lidar_settings then refuses
+another LiDAR topic. An upload or a delete of the calibration makes the lidar stage's record stale
+(steps.done), so the next Build or retry starts from lidar (Runner.resume). A Stray Scanner capture
+needs no calibration: its depth is aligned with the color camera. Older jobs lack both (no LiDAR);
+their lidar stage shows as skipped.
 
 job.json "articulated" (false for a rigid object) and "parts" {"mode", "list", "confirmed"} set up the
 parts of an articulated object (steps.py). The job's VLM lists the parts in the propose stage
@@ -219,7 +221,9 @@ def lidar_settings(job_dir, job, value, read_bag=True):
     ValueError with a plain reason when:
       - a video job asks for LiDAR;
       - a Stray job asks for anything else, or a bag job for Stray's;
-      - T is not a LiDAR topic of frames/topics.json;
+      - T is not a LiDAR topic of frames/topics.json (lidar_topic_error);
+      - the calibration was uploaded for another LiDAR topic than T (its lidar_topic; a calibration
+        without one is not checked);
       - the bag's TF does not link the camera topic's frame to T's frame (tf_links), and no
         calibration was uploaded;
       - the calibration's K is for images of another aspect ratio than the camera topic's;
@@ -245,20 +249,18 @@ def lidar_settings(job_dir, job, value, read_bag=True):
         raise ValueError('lidar is null or {"topic": T}, a LiDAR topic of the bag')
     topic, f = value["topic"], Path(job_dir) / "frames" / "topics.json"
     found = json.loads(f.read_text()) if f.is_file() else {}
-    if "lidar" not in found:
-        raise ValueError(lidar.OLD_TOPICS)
+    why = lidar_topic_error(found, topic)
+    if why:
+        raise ValueError(why)
     found_lidar = {x["topic"]: x for x in found["lidar"]}
-    if topic not in found_lidar:
-        why = {x["topic"]: x["why"] for x in found.get("lidar_skipped") or []}
-        if topic in why:
-            raise ValueError(f"the LiDAR topic {topic} cannot be used: {why[topic]}")
-        raise ValueError(f"{topic} is not a LiDAR topic of the bag; "
-                         + (f"its LiDAR topics are {', '.join(found_lidar)}" if found_lidar else "the bag has none"))
     cam = steps.source(job).get("topic")
     camera = next((t for t in found.get("topics") or [] if t["topic"] == cam), None)
     if camera is None:
         raise ValueError("choose the bag's camera topic first")
     cal = job.get("calibration") or None
+    if cal and cal.get("lidar_topic") and cal["lidar_topic"] != topic:  # its T is for that LiDAR, not this one
+        raise ValueError(f"the calibration {cal.get('name')} is for {cal['lidar_topic']}, not {topic}; choose "
+                         f"{cal['lidar_topic']}, or upload a calibration for {topic}")
     if cal is None and not (camera.get("tf_links") or {}).get(topic):
         raise ValueError(lidar.tf_reason(camera.get("frame_id"), found_lidar[topic].get("frame_id"), topic))
     if cal and cal.get("K") and cal.get("image_size") and camera.get("width") and camera.get("height"):
@@ -278,6 +280,23 @@ def lidar_settings(job_dir, job, value, read_bag=True):
             raise ValueError(f"{cam} has no usable camera_info ({camera.get('camera_info') or rosbag.info_topic(cam)}); "
                              "give K (and D) in the calibration")
     return {"kind": "rosbag", "topic": topic}
+
+
+def lidar_topic_error(found, topic):
+    """Why topic is not a LiDAR topic of frames/topics.json (found, its dict) that the lidar stage can
+    use, else None. A listing from before LiDAR topics were listed gives lidar.OLD_TOPICS."""
+    from gator.webapp import lidar
+
+    if "lidar" not in found:
+        return lidar.OLD_TOPICS
+    names = [x["topic"] for x in found["lidar"]]
+    if topic in names:
+        return None
+    why = {x["topic"]: x["why"] for x in found.get("lidar_skipped") or []}
+    if topic in why:
+        return f"the LiDAR topic {topic} cannot be used: {why[topic]}"
+    return f"{topic} is not a LiDAR topic of the bag; " + (f"its LiDAR topics are {', '.join(names)}" if names
+                                                           else "the bag has none")
 
 
 def _lidar_on(job):

@@ -54,7 +54,8 @@ LIDAR = {"sensor_msgs/msg/PointCloud2": "PointCloud2",
 TF = ("tf2_msgs/msg/TFMessage", "tf/msg/tfMessage")
 TF_LISTING_S = 5  # the topics pass reads /tf from the bag's first 5 s
 RATE_MESSAGES = 11  # the topics pass times a LiDAR topic's rate by the log times of its first 11 messages
-POINT_TIME_S = 0.2  # per-point times further than this from the stamp are not used
+POINT_TIME_S = 0.5  # per-point times further than this from the stamp are not used (a scan of a 2 Hz LiDAR fits)
+TIMEBASE_S = 0.2  # a Livox timebase further than this from a set header stamp is on another clock
 MIN_FOCAL = 0.1  # camera_model: fx or fy below this share of the image's long side is a placeholder
 ASPECT_TOL = 0.01  # intrinsics for another image size are scaled when the aspect ratios agree this well
 POINT_TYPES = {1: "i1", 2: "u1", 3: "i2", 4: "u2", 5: "i4", 6: "u4", 7: "f4", 8: "f8"}  # PointField datatype
@@ -690,8 +691,9 @@ def decode_pointcloud2(msg):
     shorter than a row (0 from some converters) counts as no padding when there is one row or the data
     has no room for padding. Points with a coordinate that is not finite and points at (0, 0, 0) are
     dropped. t_ns: each point's time, from the first of "t" (uint32, ns after the stamp), "time"
-    (float32, s after the stamp) and "timestamp" (float64, absolute s or ns) whose times all lie within
-    POINT_TIME_S of the stamp, else None."""
+    (float32, s after the stamp) and "timestamp" (float64, absolute s or ns) whose times lie within
+    POINT_TIME_S of the stamp for more than half of the points, else None (point_times). With times,
+    the points whose time is not finite or lies further from the stamp are dropped too."""
     why = xyz_problem(msg.fields)
     if why:
         raise ValueError(why)
@@ -723,11 +725,15 @@ def decode_pointcloud2(msg):
     with np.errstate(over="ignore", invalid="ignore"):  # float64 beyond float32's range becomes inf
         xyz = np.stack([pts["x"], pts["y"], pts["z"]], 1).astype(np.float32)
     ok = np.isfinite(xyz).all(1) & (xyz != 0).any(1)
-    return xyz[ok], point_times(pts[ok], names, head), head, frame
+    t, timed = point_times(pts[ok], names, head)
+    return xyz[ok][timed], None if t is None else t[timed], head, frame
 
 
 def point_times(pts, names, head):
-    """Per-point times in ns of a PointCloud2's points (see decode_pointcloud2), or None."""
+    """(per-point times in ns, which points have one) of a PointCloud2's points (see decode_pointcloud2),
+    or (None, all true). A field gives times when more than half of its points lie within POINT_TIME_S
+    of the stamp; one bad time (NaN, or a slow LiDAR's jitter) then drops only its own point, not the
+    times of the whole scan."""
     for name, _, kind in POINT_TIMES:
         if name not in names:
             continue
@@ -740,12 +746,13 @@ def point_times(pts, names, head):
             offsets = [v - head / 1e9, (v - head) * 1e-9]
         for off in offsets:
             with np.errstate(invalid="ignore"):
-                if not (np.abs(off) <= POINT_TIME_S).all():
-                    continue
+                near = np.abs(off) <= POINT_TIME_S
+            if 2 * near.sum() <= len(near):
+                continue
             if kind == "offset_ns":
-                return head + pts[name].astype(np.int64)
-            return head + np.round(off * 1e9).astype(np.int64)
-    return None
+                return head + pts[name].astype(np.int64), near
+            return head + np.round(np.where(near, off, 0.0) * 1e9).astype(np.int64), near
+    return None, np.ones(len(pts), bool)
 
 
 def decode_livox(msg):
@@ -753,13 +760,13 @@ def decode_livox(msg):
     tag has (tag & 0x30) other than 0x00 or 0x10, points at (0, 0, 0) and points with a coordinate that
     is not finite are dropped. A point's time is timebase + offset_time (ns). Some drivers stamp the
     header by the ROS clock and leave timebase on the LiDAR's own clock: when timebase is further than
-    POINT_TIME_S from a set header stamp, the times are header stamp + offset_time, in the header's
+    TIMEBASE_S from a set header stamp, the times are header stamp + offset_time, in the header's
     clock like every other stamp."""
     a = np.array([(p.offset_time, p.x, p.y, p.z, p.tag) for p in msg.points], np.float64).reshape(-1, 5)
     xyz = a[:, 1:4].astype(np.float32)
     ok = np.isin(a[:, 4].astype(np.int64) & 0x30, LIVOX_TAGS) & np.isfinite(xyz).all(1) & (xyz != 0).any(1)
     head, base = stamp(msg), int(msg.timebase)
-    if head and abs(base - head) > POINT_TIME_S * 1e9:
+    if head and abs(base - head) > TIMEBASE_S * 1e9:
         base = head
     return xyz[ok], base + a[ok, 0].astype(np.int64), head, frame_name(msg.header.frame_id)
 

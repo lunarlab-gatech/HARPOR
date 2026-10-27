@@ -6,11 +6,11 @@ import urllib.error
 import urllib.request
 from types import SimpleNamespace
 
-import anthropic
 import pytest
 from PIL import Image
 
-from gator.parts import propose as P
+anthropic = pytest.importorskip("anthropic")
+from gator.parts import propose as P  # noqa: E402
 
 OPUS_KEY = "sk-ant-api03-" + "q" * 40
 OPENAI_KEY = "sk-proj-" + "z" * 40

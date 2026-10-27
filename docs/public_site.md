@@ -21,7 +21,7 @@ Where the code is:
 
 | Part | Files |
 |---|---|
-| Database | `supabase/migrations/` (six files), `supabase/seed.sql` and `supabase/config.toml` (local stack only) |
+| Database | `supabase/migrations/` (seven files), `supabase/seed.sql` and `supabase/config.toml` (local stack only) |
 | Worker | `gator/webapp/worker.py`, `relay.py`, `supa.py`, `keybox.py` and `session.py` (the worker's sign-in and commands) |
 | Page | `gator/webapp/static/supa.js`, the transport seam in `static/app.js`, `static/help.html` and `gator/webapp/site.py` |
 | Demos | `gator/webapp/demos.py` and `static/demos.html` (see Demos below) |
@@ -107,9 +107,15 @@ Nothing below is done by the code. Do every account step and every git step your
    GitHub provider page. The loopback login of a personal worker needs nothing more at Google or GitHub.
 5. **Migrations.** Turn on Cron under Integrations first. It is required: only pg_cron runs the sweep. On the
    Mac: `brew install supabase/tap/supabase`, then `supabase login`, `supabase link --project-ref <ref>` and
-   `supabase db push` from the repo. Without the CLI, paste the six files of `supabase/migrations/` in order
+   `supabase db push` from the repo. Without the CLI, paste the seven files of `supabase/migrations/` in order
    into the SQL editor. Then run the Security Advisor. Never run `supabase config push`:
-   `supabase/config.toml` is for the local stack.
+   `supabase/config.toml` is for the local stack. A project that was set up before part 7
+   (`20261101000700_harpor_relay_lidar_topic.sql`) needs only that file. If you set the project up with
+   `supabase db push`, run it again: it sends only the new file. If you pasted the files, paste part 7 into the
+   SQL editor. There `db push` would start again from part 1 and fail, because part 1 is already in place. Add
+   part 7 before you deploy a site that was built after it. The older relay() refuses a calibration upload that
+   names its LiDAR topic, with the message "bad query". A personal machine checks the topic only after it pulls
+   this version. An older worker drops the topic, so its jobs take a calibration for any LiDAR topic, as before.
 6. **Storage.** Check that the bucket `job-files` exists with a 50 MB file limit. On Free the whole project has
    1 GB, so give each account a smaller Storage cap when you approve it (step 9). On Pro, set the project's
    global file limit first, then run the two update lines at the top of

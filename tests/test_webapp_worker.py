@@ -95,10 +95,10 @@ def own_worker(srv, fake, user, machine=None, local_keys=(), local_key=None, mir
     return worker.Worker(srv.gate, srv.cfg, local_keys, store=store, session=session, local_key=local_key)
 
 
-def own_job(fake, srv, local, user, machine, status="uploaded"):
+def own_job(fake, srv, local, user, machine, status="uploaded", name="cup.mp4", kind="video"):
     """A local job that the worker copied to the site: its row and job.json "public"."""
     J = srv.cfg.runs / local
-    row = fake.put("jobs", {"user_id": user, "machine_id": machine, "input_name": "cup.mp4", "input_kind": "video",
+    row = fake.put("jobs", {"user_id": user, "machine_id": machine, "input_name": name, "input_kind": kind,
                             "input_bytes": jobs.load(J)["video"]["bytes"], "status": status})
     jobs.update(J, public={"job": row["id"], "user": user, "machine": machine, "resumes": 0})
     return row["id"]

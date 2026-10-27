@@ -76,7 +76,7 @@ def behind(i, T, n):
 
 def write_scene_bag(path, n=10, size=SIZE, dt=0.5, kind="points", tf="static", info=True, topic=CAMERA,
                     model="plumb_bob", lidar_clock_s=0.0, lidar_late_s=0.0, between=False, step=1, info_r=None,
-                    around=0):
+                    around=0, restamped=False):
     """A ROS1 bag of fake_steps' scene: n rgb8 frames of topic at 1/dt Hz (frame i at the angle
     fake_steps.frame_angle gives it), the camera_info of the topic (K and P of fake_steps.intrinsics;
     D all zero for plumb_bob, else one coefficient of model; R info_r, else the identity) unless info
@@ -85,10 +85,13 @@ def write_scene_bag(path, n=10, size=SIZE, dt=0.5, kind="points", tf="static", i
     and one LiDAR scan per frame, stamped as the frame (plus lidar_clock_s on the LiDAR's clock) and
     logged as it (plus lidar_late_s): the points the camera sees, in the LiDAR's frame. kind "points":
     a PointCloud2 without per-point times (between: another scan halfway to the next frame, of points
-    at half the distance); "livox": a Livox CustomMsg whose timebase is 50 ms before the stamp and
-    whose points' times spread over 100 ms, plus points at half the distance 150 to 190 ms after the
-    timebase, which the +-50 ms window must drop. around: every scan also holds that many points behind
-    the camera (behind), which only the clouds of the Inputs tab show."""
+    at half the distance); "livox": a Livox CustomMsg as livox_ros_driver2 writes it, stamped at its
+    timebase, its first point, 50 ms before the frame, whose points' times spread over 100 ms, plus
+    points at half the distance 110 to 150 ms after the frame, which the window (at most +-100 ms) must
+    drop; it is logged once it is swept, LAG after its last point. around: every scan also holds that
+    many points behind the camera (behind), which only the clouds of the Inputs tab show. restamped: a
+    Livox scan is logged LAG after its own stamp (its first point), as in a bag whose log times copy the
+    header stamps."""
     w, h = size
     K = F.intrinsics(w, h)
     turn = TURN_DEG if tf == "dynamic" else 0.0
@@ -126,8 +129,10 @@ def write_scene_bag(path, n=10, size=SIZE, dt=0.5, kind="points", tf="static", i
             else:
                 bad = scene_points(i, n, size, 2 * step, 0.5, T)
                 pts = [(int(o), *x, 0x10) for o, x in zip(np.linspace(0, 99_000_000, len(X)), X)]
-                pts += [(int(o), *x, 0x10) for o, x in zip(np.linspace(150_000_000, 190_000_000, len(bad)), bad)]
-                out.append((LIVOX, m.livox, log, m.livox_msg(head, head - 50_000_000, pts, frame=LIDAR)))
+                pts += [(int(o), *x, 0x10) for o, x in zip(np.linspace(160_000_000, 200_000_000, len(bad)), bad)]
+                first = head - 50_000_000
+                late = first + LAG + round(lidar_late_s * 1e9) if restamped else log + 150_000_000
+                out.append((LIVOX, m.livox, late, m.livox_msg(first, first, pts, frame=LIDAR)))
         return sorted(out, key=lambda x: x[2])
 
     return write_bag(path, make=make)
@@ -264,10 +269,10 @@ def test_tf_gives_the_scale_and_the_record(points_bag, tmp_path, capsys):
     assert np.allclose(intr["R"], np.eye(3))
     # Both clocks log 50 ms after the stamp: the header base. The scans have no per-point times, so each
     # frame takes the nearest scan (the one with its stamp, not the wrong one 0.25 s later); the period
-    # is the step between the scans read.
-    assert rec["time"] == {"base": "header", "window_ms": 50.0, "offset_ms": 0.0,
-                           "log_minus_header_ms": {"camera": 50.0, "lidar": 50.0}, "scan_period_ms": 250.0,
-                           "scan_period_from": "scans", "point_times": False}
+    # is the step between the scans read, and the window (unused here) half of it, at most 100 ms.
+    assert rec["time"] == {"base": "header", "window_ms": 100.0, "offset_ms": 0.0,
+                           "log_minus_header_ms": {"camera": 50.0, "lidar": 50.0}, "log_minus_last_point_ms": None,
+                           "scan_period_ms": 250.0, "scan_period_from": "scans", "point_times": False}
     assert rec["warnings"] == [] and rec["version"] == 1 and rec["seconds"] > 0
     out = capsys.readouterr().out
     assert "PROGRESS 0.000" in out and "PROGRESS 1.000" in out and f"metric scale {rec['s']:.4f}" in out
@@ -350,7 +355,8 @@ def test_cloud_glb():
 def test_a_dynamic_tf_link_and_a_livox_window(tmp_path):
     """The LiDAR's link only on /tf, turned TURN_DEG further at every frame: it is taken at each frame's
     time, so every frame's samples land on the scene. A Livox scan holds points at half the distance
-    100 to 140 ms after the stamp; the +-50 ms window leaves them out."""
+    110 to 150 ms after the frame; the window, here at most +-100 ms (one scan a frame, 500 ms apart),
+    leaves them out."""
     bag = write_scene_bag(tmp_path / "livox.bag", n=8, kind="livox", tf="dynamic", step=2)
     J = make_job(tmp_path, bag, lidar_topic=LIVOX)
     rec = scaled(J)
@@ -399,7 +405,7 @@ def test_a_dynamic_link_far_from_a_frame(monkeypatch):
     assert np.allclose(T["f00000"], cam_lidar(0)) and np.allclose(T["f00001"], cam_lidar(0))
     assert np.allclose(T["f00002"], cam_lidar(1, TURN_DEG))
     assert warnings == ["TF links camera_optical_frame to lidar on /tf, and 1 of the 3 frames have no /tf value of "
-                        "that link within 0.3 s of their stamp (up to 1.00 s away), so their T_cam_lidar may be "
+                        "that link within 0.4 s of their stamp (up to 1.00 s away), so their T_cam_lidar may be "
                         "wrong; check their check images, or upload the calibration"]
     edges = static + [e for _, e in logged]
     assert L.link_gaps(edges, [CAM, "base_link", LIDAR], times) == {"f00000": 10**8, "f00001": 10**9, "f00002": 0}
@@ -417,15 +423,22 @@ def test_a_dynamic_link_far_from_a_frame(monkeypatch):
 def test_the_time_base(tmp_path):
     """A LiDAR on its own clock (5 s ahead): frames and scans are matched by log time, with a warning;
     time_offset_s in the calibration brings the header stamps back. The offset relates the header
-    clocks, so it is not added to log times; a bag whose log times copy the header stamps needs it."""
+    clocks, so it is not added to log times; a bag whose log times copy the header stamps needs it. In
+    the log base a point's time goes to the log clock by its scan's last point: each scan is stamped at
+    its first point and logged 250 ms later, 50 ms after its last point, so the stamp would put every
+    point 200 ms after it was swept, and no frame would find its points."""
     bag = write_scene_bag(tmp_path / "clock.bag", n=8, kind="livox", lidar_clock_s=5.0, step=2)
     J = make_job(tmp_path, bag, lidar_topic=LIVOX)
     rec = scaled(J)
     assert rec["ok"] and rec["s"] == pytest.approx(1.25, rel=0.01), rec["reason"]
-    assert rec["time"]["base"] == "log" and rec["time"]["log_minus_header_ms"] == {"camera": 50.0, "lidar": -4950.0}
+    assert rec["time"]["base"] == "log" and rec["time"]["log_minus_header_ms"] == {"camera": 50.0, "lidar": -4750.0}
+    assert rec["time"]["log_minus_last_point_ms"] == -4950.0
+    assert (rec["time"]["window_ms"], rec["time"]["scan_period_ms"]) == (100.0, 500.0)  # at most 100 ms
+    # The gap is named by the last points: the header stamps also hold the 200 ms sweep.
     assert rec["warnings"] == ["the camera's and the LiDAR's header clocks differ by +5.00 s (log time minus header "
-                               "stamp: camera 0.050 s, LiDAR -4.950 s), so frames and scans are matched by log time, "
-                               "which is less exact; give time_offset_s in the calibration"]
+                               "stamp: camera 0.050 s, LiDAR -4.750 s; log time minus each scan's last point: LiDAR "
+                               "-4.950 s), so frames and scans are matched by log time, which is less exact; give "
+                               "time_offset_s in the calibration (0 when both use one clock)"]
     upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist(), "time_offset_s": 5.0})
     rec = scaled(J)
     assert rec["ok"] and rec["s"] == pytest.approx(1.25, rel=0.01) and rec["warnings"] == []
@@ -438,7 +451,8 @@ def test_the_time_base(tmp_path):
     rec = json.loads((J / "pool" / "lidar.json").read_text())
     assert rec["time"]["base"] == "header" and rec["warnings"][0] == (
         "time_offset_s is 4 s, but the log times put the LiDAR's header clock +5.00 s from the camera's (log time "
-        "minus header stamp: camera 0.050 s, LiDAR -4.950 s); check time_offset_s")
+        "minus header stamp: camera 0.050 s, LiDAR -4.750 s; log time minus each scan's last point: LiDAR -4.950 s); "
+        "check time_offset_s")
 
     # The camera's header stamps cannot be used: the log base, where the offset is not added (log times
     # come from the recorder's one clock), so every frame still finds its own scan.
@@ -454,41 +468,111 @@ def test_the_time_base(tmp_path):
                                "are matched by log time"]
 
     # A merged bag: each sensor's log times copy its own header stamps (plus the same delay), so the
-    # LiDAR's scans are logged 5 s after the frames. The offset finds them; the log times agree with it.
-    merged = write_scene_bag(tmp_path / "merged.bag", n=8, kind="livox", lidar_clock_s=5.0, lidar_late_s=5.0, step=2)
+    # LiDAR's scans are logged 5 s after the frames. The offset finds them; the header stamps agree with
+    # it, though a scan is logged 150 ms before its last point.
+    merged = write_scene_bag(tmp_path / "merged.bag", n=8, kind="livox", lidar_clock_s=5.0, restamped=True, step=2)
     J = make_job(tmp_path / "m", merged, lidar_topic=LIVOX)
     upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist(), "time_offset_s": 5.0})
     rec = scaled(J)
     assert rec["ok"] and rec["s"] == pytest.approx(1.25, rel=0.01) and rec["warnings"] == [], rec["reason"]
     assert rec["time"]["base"] == "header" and rec["time"]["log_minus_header_ms"] == {"camera": 50.0, "lidar": 50.0}
+    assert rec["time"]["log_minus_last_point_ms"] == -150.0
+    # The same without the LiDAR's own clock: the header base by the header stamps, with no offset given.
+    restamped = write_scene_bag(tmp_path / "restamped.bag", n=8, kind="livox", restamped=True, step=2)
+    rec = scaled(make_job(tmp_path / "r", restamped, lidar_topic=LIVOX))
+    assert rec["ok"] and rec["s"] == pytest.approx(1.25, rel=0.01) and rec["warnings"] == [], rec["reason"]
+    assert rec["time"]["base"] == "header"
+
+
+def test_a_slow_lidar_link(tmp_path):
+    """One clock, but the LiDAR's scans reach the recorder late. 180 ms after they are swept: the clocks
+    still agree, so the header base, and the read span of +-0.4 s still holds each frame's scan, which is
+    logged 380 ms after the frame (+-0.3 s would miss it). 220 ms: the log times put the clocks apart,
+    so the log base, where every point comes 220 ms late and no frame finds its points; time_offset_s 0
+    says that the clocks are one, and the header base finds them."""
+    slow = write_scene_bag(tmp_path / "slow.bag", n=8, kind="livox", lidar_late_s=0.18, step=2)
+    rec = scaled(make_job(tmp_path / "a", slow, lidar_topic=LIVOX))
+    assert rec["ok"] and rec["s"] == pytest.approx(1.25, rel=0.01) and rec["warnings"] == [], rec["reason"]
+    assert rec["time"]["base"] == "header" and rec["time"]["log_minus_last_point_ms"] == 230.0
+    slower = write_scene_bag(tmp_path / "slower.bag", n=8, kind="livox", lidar_late_s=0.22, step=2)
+    J = make_job(tmp_path / "b", slower, lidar_topic=LIVOX)
+    assert failed(J).startswith("LiDAR points cover the object in only 0 of 8 views")
+    rec = json.loads((J / "pool" / "lidar.json").read_text())
+    assert rec["time"]["base"] == "log" and rec["warnings"][0].startswith(
+        "the camera's and the LiDAR's header clocks differ by -0.22 s")
+    upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist(), "time_offset_s": 0})
+    rec = scaled(J)
+    assert rec["ok"] and rec["s"] == pytest.approx(1.25, rel=0.01), rec["reason"]
+    assert (rec["time"]["base"], rec["time"]["offset_ms"]) == ("header", 0.0) and rec["warnings"] == [
+        "time_offset_s is 0 s, but the log times put the LiDAR's header clock -0.22 s from the camera's (log time "
+        "minus header stamp: camera 0.050 s, LiDAR 0.470 s; log time minus each scan's last point: LiDAR 0.270 s); "
+        "check time_offset_s"]
 
 
 def test_time_base_and_matching_rules(monkeypatch):
     stamps = {"clock": "header", "header_ns": [S0, S0 + 10**8], "log_ns": [S0 + LAG, S0 + 10**8 + LAG]}
     frames = ["f00000", "f00001"]
 
-    def scans(lag, head=0):
-        return [(S0 + k * 10**8 + lag, S0 + k * 10**8 + head, np.zeros((1, 3)), None) for k in range(2)]
+    def scans(lag, head=0, end=None):
+        """Two scans 100 ms apart (read_scans' tuples), logged lag after their stamps; end: the time of each
+        one's last point after its stamp (None: no per-point times)."""
+        out = []
+        for k in range(2):
+            h = S0 + k * 10**8 + head
+            t = None if end is None else np.array([h + end])
+            out.append((S0 + k * 10**8 + lag, h, np.zeros((1, 3)), t, None, None if end is None else h + end))
+        return out
 
-    assert L.time_base(stamps, frames, scans(LAG + 150_000_000), 0)[0] == "header"  # within 0.2 s
-    base, rec, warn = L.time_base(stamps, frames, scans(LAG + 250_000_000), 0)
-    assert base == "log" and "differ by -0.25 s" in warn[0] and rec["log_minus_header_ms"]["lidar"] == 300.0
+    # Without per-point times the clocks agree when the LiDAR's log-minus-header offset is within 0.2 s of the
+    # camera's. A 10 Hz scan stamped at its sweep's start is logged 100 ms later, and a LiDAR clock 250 ms
+    # behind looks like a 250 ms sweep: the log base, which takes such a scan at the middle of its sweep.
+    assert L.time_base(stamps, frames, scans(LAG + 150_000_000), None)[0] == "header"
+    base, rec, warn = L.time_base(stamps, frames, scans(LAG + 250_000_000), None)
+    assert base == "log" and "differ by -0.25 s" in warn[0] and (rec["log_minus_header_ms"],
+                                                                rec["log_minus_last_point_ms"]) == (
+        {"camera": 50.0, "lidar": 300.0}, None)
+    base, _, warn = L.time_base(stamps, frames, scans(LAG - 250_000_000), None)
+    assert base == "log" and "differ by +0.25 s" in warn[0]
+    # With them, also after its last point: a live recorder logs a scan once it is swept. A 5 Hz scan stamped
+    # at its start and logged 60 ms after its last point (260 ms after its stamp) is on the camera's clock.
+    base, rec, warn = L.time_base(stamps, frames, scans(LAG + 210_000_000, end=200_000_000), None)
+    assert (base, warn, rec["log_minus_header_ms"], rec["log_minus_last_point_ms"]) == (
+        "header", [], {"camera": 50.0, "lidar": 260.0}, 60.0)
+    # A bag whose log times copy the header stamps: a 4 Hz scan is logged 200 ms before its last point, and its
+    # header stamp agrees with the camera's.
+    base, rec, warn = L.time_base(stamps, frames, scans(LAG, end=250_000_000), None)
+    assert (base, warn, rec["log_minus_header_ms"], rec["log_minus_last_point_ms"]) == (
+        "header", [], {"camera": 50.0, "lidar": 50.0}, -200.0)
+    # Neither agrees: the warning names the gap by the last points.
+    base, _, warn = L.time_base(stamps, frames, scans(LAG + 350_000_000, end=100_000_000), None)
+    assert base == "log" and warn == [
+        "the camera's and the LiDAR's header clocks differ by -0.25 s (log time minus header stamp: camera 0.050 s, "
+        "LiDAR 0.400 s; log time minus each scan's last point: LiDAR 0.300 s), so frames and scans are matched by log "
+        "time, which is less exact; give time_offset_s in the calibration (0 when both use one clock)"]
     base, rec, warn = L.time_base(stamps, frames, scans(LAG, head=2 * 10**9), 2 * 10**9)  # the offset explains it
     assert (base, rec["offset_ms"], warn) == ("header", 2000.0, [])
     # With an offset the base is the header's; the log times only check it. A bag whose log times copy the
     # header stamps (scans logged 2 s later too) agrees with it; log times that fit neither give a warning.
     assert L.time_base(stamps, frames, scans(LAG + 2 * 10**9, head=2 * 10**9), 2 * 10**9)[1:] == (
-        {"base": "header", "window_ms": 50.0, "offset_ms": 2000.0,
-         "log_minus_header_ms": {"camera": 50.0, "lidar": 50.0}},
+        {"base": "header", "offset_ms": 2000.0, "log_minus_header_ms": {"camera": 50.0, "lidar": 50.0},
+         "log_minus_last_point_ms": None},
         [])
     base, rec, warn = L.time_base(stamps, frames, scans(LAG, head=2 * 10**9), 10**9)
     assert (base, rec["offset_ms"]) == ("header", 1000.0) and warn == [
         "time_offset_s is 1 s, but the log times put the LiDAR's header clock +2.00 s from the camera's (log time "
         "minus header stamp: camera 0.050 s, LiDAR -1.950 s); check time_offset_s"]
-    no_head = [(S0 + LAG, 0, np.zeros((1, 3)), None)] + scans(LAG)[1:]
-    base, _, warn = L.time_base(stamps, frames, no_head, 0)
+    # An offset of 0 is given: the header base, where the log times alone would choose the log base.
+    base, rec, warn = L.time_base(stamps, frames, scans(LAG + 350_000_000), 0)
+    assert (base, rec["offset_ms"]) == ("header", 0.0) and warn == [
+        "time_offset_s is 0 s, but the log times put the LiDAR's header clock -0.35 s from the camera's (log time "
+        "minus header stamp: camera 0.050 s, LiDAR 0.400 s); check time_offset_s"]
+    assert L.time_base(stamps, frames, scans(LAG + 150_000_000), 0)[1:] == (
+        {"base": "header", "offset_ms": 0.0, "log_minus_header_ms": {"camera": 50.0, "lidar": 200.0},
+         "log_minus_last_point_ms": None}, [])
+    no_head = [(S0 + LAG, 0, np.zeros((1, 3)), None, None, None)] + scans(LAG)[1:]
+    base, _, warn = L.time_base(stamps, frames, no_head, None)
     assert base == "log" and warn == ["some scans have no header stamp, so frames and scans are matched by log time"]
-    base, rec, warn = L.time_base({**stamps, "clock": "log"}, frames, scans(LAG), 0)
+    base, rec, warn = L.time_base({**stamps, "clock": "log"}, frames, scans(LAG), None)
     assert base == "log" and rec["log_minus_header_ms"]["camera"] is None and "camera's header stamps" in warn[0]
     base, rec, warn = L.time_base({**stamps, "clock": "log"}, frames, scans(LAG), 10**9)  # not used in the log base
     assert (base, rec["offset_ms"], len(warn)) == ("log", 0.0, 2) and warn[1] == (
@@ -497,35 +581,52 @@ def test_time_base_and_matching_rules(monkeypatch):
     # The scan period: the median step between the scans read (steps between read windows do not count),
     # else topics.json's rate, else 100 ms.
     def at(*ms):
-        return [(S0 + t * 10**6, S0 + t * 10**6 - 7, np.zeros((1, 3)), None) for t in ms]
+        return [(S0 + t * 10**6, S0 + t * 10**6 - 7, np.zeros((1, 3)), None, None, None) for t in ms]
 
     assert L.scan_period(at(0, 100, 200, 300, 5000, 5100, 5200), "header", 1000.0) == (1e8, "scans")
     assert L.scan_period(at(0, 5000), "log", 20.0) == (5e7, "rate_hz")
     assert L.scan_period(at(0), "header", None) == (1e8, "default")
+    # The window: half the period, from 50 to 100 ms.
+    assert [L.window(p) for p in (5e7, 1e8, 1.6e8, 2e8, 5e8)] == [5e7, 5e7, 8e7, 1e8, 1e8]
 
-    # Per-point times: the points within +-50 ms, in the header's or the log's clock.
+    # Per-point times: the points within the window, in the header's or the log's clock.
     t = S0 + np.arange(0, 100_000_000, 10_000_000)
     xyz = np.arange(30.0).reshape(10, 3)
-    scan = [(S0 + 120_000_000, S0, xyz, t)]
+    scan = [(S0 + 120_000_000, S0, xyz, t, None, int(t.max()))]
     assert len(L.frame_points(scan, "header", S0 + 50_000_000, 1e8)) == 10
     assert L.frame_points(scan, "header", S0 + 120_000_000, 1e8).tolist() == xyz[7:].tolist()  # 70 to 90 ms
-    assert L.frame_points(scan, "log", S0 + 240_000_000, 1e8).tolist() == xyz[7:].tolist()  # shifted by 120 ms
-    # Without them: the nearest scan, within one scan period.
-    plain = [(S0 + k * 10**8, S0 + k * 10**8, xyz + k, None) for k in range(3)]
+    # A 5 Hz LiDAR's window is +-100 ms: from 150 ms it reaches back to the points at 50 to 90 ms.
+    assert len(L.frame_points(scan, "header", S0 + 150_000_000, 1e8)) == 0
+    assert L.frame_points(scan, "header", S0 + 150_000_000, 2e8).tolist() == xyz[5:].tolist()
+    # The log base puts the last point (90 ms) at the log time (120 ms), so every point 30 ms later. The
+    # stamp (0 ms) at the log time would put them 120 ms later, a whole sweep after they were measured.
+    assert L.frame_points(scan, "log", S0 + 150_000_000, 1e8).tolist() == xyz[7:].tolist()
+    assert len(L.frame_points(scan, "log", S0 + 240_000_000, 1e8)) == 0
+    # The last point is the whole scan's (read_scans takes it before in_view): a 360 degree LiDAR that sweeps
+    # the camera's view first keeps only its points from 0 to 90 ms, but its sweep ends at 199 ms and it is
+    # logged at 250 ms, so they come at 51 to 141 ms. The last point kept (90 ms) would put them at 160 to 250.
+    swept = [(S0 + 250_000_000, S0, xyz, t, None, S0 + 199_000_000)]
+    assert L.frame_points(swept, "log", S0 + 100_000_000, 1e8).tolist() == xyz.tolist()
+    # Without them: the nearest scan, within one scan period; in the log base by the middle of its sweep,
+    # half a period before its log time.
+    plain = [(S0 + k * 10**8, S0 + k * 10**8, xyz + k, None, None, None) for k in range(3)]
     assert L.frame_points(plain, "header", S0 + 290_000_000, 1e8).tolist() == (xyz + 2).tolist()
     assert len(L.frame_points(plain, "header", S0 + 310_000_000, 1e8)) == 0
-    assert L.frame_points(plain, "log", S0 + 40_000_000, 1e8).tolist() == xyz.tolist()
+    assert L.frame_points(plain, "header", S0 + 40_000_000, 1e8).tolist() == xyz.tolist()
+    assert L.frame_points(plain, "log", S0 + 40_000_000, 1e8).tolist() == (xyz + 1).tolist()
+    assert L.frame_points(plain, "log", S0 - 40_000_000, 1e8).tolist() == xyz.tolist()
 
     # While reading, a scan keeps only the points that keep chooses (with their times); a scan that keeps
-    # none still counts for the clocks, and the window skips it.
+    # none still counts for the clocks, and the window skips it. Its last point's time is of all its points.
     def fake_scans(path, topic, windows):
         yield S0 + LAG, S0, np.array([[0, 0, 2.0], [0, 0, -2.0]], np.float32), np.array([S0, S0 + 1])
         yield S0 + LAG + 10**8, S0 + 10**8, np.array([[0, 0, -1.0]], np.float32), np.array([S0 + 10**8])
 
     monkeypatch.setattr(rosbag, "scans", fake_scans)
     got = L.read_scans("x.bag", POINTS, [(S0, S0 + 10**9)], keep=lambda xyz, log: xyz[:, 2] > 0)
-    assert [(log, head, xyz.tolist(), t.tolist(), part) for log, head, xyz, t, part in got] == [
-        (S0 + LAG, S0, [[0, 0, 2.0]], [S0], None), (S0 + LAG + 10**8, S0 + 10**8, [], [], None)]
+    assert [(log, head, xyz.tolist(), t.tolist(), part, end) for log, head, xyz, t, part, end in got] == [
+        (S0 + LAG, S0, [[0, 0, 2.0]], [S0], None, S0 + 1),
+        (S0 + LAG + 10**8, S0 + 10**8, [], [], None, S0 + 10**8)]
     assert L.frame_points(got, "header", S0, 1e8).tolist() == [[0, 0, 2.0]]
     assert L.frame_points(got, "log", S0 + LAG + 10**8, 1e8).shape == (0, 3)
     assert L.frame_points([], "header", S0, 1e8).shape == (0, 3)  # a frame whose windows hold no scan
@@ -534,7 +635,8 @@ def test_time_base_and_matching_rules(monkeypatch):
     (xyz, t), (xyz2, t2) = (s[4] for s in got)
     assert (xyz.tolist(), t.tolist()) in (([[0, 0, 2.0]], [S0]), ([[0, 0, -2.0]], [S0 + 1]))
     assert (xyz2.tolist(), t2.tolist()) == ([[0, 0, -1.0]], [S0 + 10**8])
-    assert L.frame_points([(s[0], s[1], *s[4]) for s in got], "header", S0 + 10**8, 1e8).tolist() == [[0, 0, -1.0]]
+    assert L.frame_points([(s[0], s[1], *s[4], s[5]) for s in got], "header", S0 + 10**8, 1e8).tolist() == [
+        [0, 0, -1.0]]
     pick = L.at_most(np.arange(10), 3, 7).tolist()  # fixed by the seed, in order
     assert pick == L.at_most(np.arange(10), 3, 7).tolist() == sorted(pick) and len(set(pick)) == 3
     assert L.at_most(np.arange(3), 5, 0).tolist() == [0, 1, 2]
@@ -570,10 +672,11 @@ def test_the_samples_cache(points_bag, tmp_path, monkeypatch):
     with np.load(J / "lidar" / "clouds.npz") as f:
         assert sorted(f.files) == sorted(f"{n}_{k}" for n in frames for k in ("xyz", "scan"))
         assert all(len(f[f"{n}_xyz"]) == meta["points"][n] for n in frames)
-    assert meta["key"] == {"version": 3, "kind": "rosbag",
+    assert meta["key"] == {"version": 4, "kind": "rosbag",
                            "input": {"name": "points.bag", "bytes": points_bag.stat().st_size,
                                      "mtime_ns": points_bag.stat().st_mtime_ns},
-                           "topics": {"camera": CAMERA, "lidar": POINTS}, "calibration_sha256": None, "window_ms": 50.0}
+                           "topics": {"camera": CAMERA, "lidar": POINTS}, "calibration_sha256": None,
+                           "window_ms": [50.0, 100.0]}
     assert meta["frames"] == frames
     reads = []
     scans = rosbag.scans
@@ -623,6 +726,13 @@ def test_each_failure_says_why(points_bag, tmp_path):
     assert json.loads((J / "pool" / "lidar.json").read_text())["source"]["topic"] == POINTS
     upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist()})
     assert scaled(J)["ok"]
+    # A calibration uploaded for another LiDAR topic fails here too, not only at the start (a retry skips that check).
+    cal = json.loads((J / "job.json").read_text())["calibration"]
+    set_job(J, calibration={**cal, "lidar_topic": LIVOX})
+    assert failed(J) == (f"the calibration calib.json is for {LIVOX}, not {POINTS}; choose {LIVOX}, or upload a "
+                         f"calibration for {POINTS}")
+    set_job(J, calibration={**cal, "lidar_topic": POINTS})
+    assert scaled(J)["ok"]
     set_job(J, calibration=None)
 
     # No camera_info, then a calibration with K; K for another aspect ratio fails.
@@ -648,7 +758,7 @@ def test_each_failure_says_why(points_bag, tmp_path):
 
     # The scans were logged long after the frames.
     set_job(J, video={**job["video"], "path": str(write_scene_bag(root / "late.bag", lidar_late_s=30.0))})
-    assert failed(J) == ("/lidar/points has no scans within 0.3 s of the frames' times; was the LiDAR recording "
+    assert failed(J) == ("/lidar/points has no scans within 0.4 s of the frames' times; was the LiDAR recording "
                          "during the camera's frames?")
     # A bag without the listed topic: rosbag.py's own reason.
     set_job(J, video={**job["video"], "path": str(write_scene_bag(root / "other.bag", kind="livox", step=4))})
@@ -790,7 +900,7 @@ def test_a_stray_capture_gives_the_scale_and_its_cache(tmp_path, capsys, monkeyp
 
     meta = json.loads((J / "lidar" / "samples.json").read_text())
     zipped = J / "video" / "capture.zip"
-    assert meta["key"] == {"version": 3, "kind": "stray",
+    assert meta["key"] == {"version": 4, "kind": "stray",
                            "input": {"name": "capture.zip", "bytes": zipped.stat().st_size,
                                      "mtime_ns": zipped.stat().st_mtime_ns},
                            "turns": 1, "frame_sizes": [[240, 320]], "min_confidence": 2, "z_range_m": [0.1, 5.0]}

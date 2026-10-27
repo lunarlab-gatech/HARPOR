@@ -331,7 +331,7 @@
       source: { kind: row.input_kind, topic: null }, agent: "astra", status: row.status, mode: "auto", prompt: row.prompt,
       slug: null, n_views: 6, picks: [], view0: null, auto_continue: false, overrides: { locked: [], excluded: [], instance: {} },
       articulated: false, parts: { mode: "vlm", list: [], confirmed: false },
-      lidar: row.input_kind === "stray" ? { kind: "stray" } : null, calibration: null, turntable: false,
+      lidar: row.input_kind === "stray" ? { kind: "stray" } : null, calibration: null, lidar_current: null, turntable: false,
       stages: Object.fromEntries(STAGES.map(([name]) => [name, { ...stage }])), current: null, error: null,
       warnings: [], key_ok: false, kind: row.input_kind,
       parts_mode: "vlm", parts_review: false, preview: null,
@@ -599,8 +599,13 @@
         await removeObjects(id).catch(() => {});
         return reply(200, { deleted: id });
       }
-      if (sub === "calibration" && (m === "PUT" || m === "DELETE")) return await relay(id, m === "PUT" ? "calibration_put"
-        : "calibration_delete", opts, m === "PUT" ? { name: u.searchParams.get("name") || "" } : {});
+      // A calibration upload names its file and, when one is chosen, the LiDAR topic it is for (app.js calibrate()).
+      if (sub === "calibration" && m === "PUT") {
+        const topic = u.searchParams.get("lidar_topic");
+        return await relay(id, "calibration_put", opts,
+          { name: u.searchParams.get("name") || "", ...(topic ? { lidar_topic: topic } : {}) });
+      }
+      if (sub === "calibration" && m === "DELETE") return await relay(id, "calibration_delete", opts, {});
       if (m === "POST" && p.length === 4 && ["topic", "start", "overrides", "parts", "continue", "cancel"].includes(sub)) {
         return await relay(id, sub, opts);
       }

@@ -11,10 +11,12 @@ camera points into pixels; rot90_points() follows np.rot90 when the frames were 
 
 The estimate (estimate()) runs on the pool after da3:
   view_ratio  per view: the samples go to DA3's grid through prep's crop (source_to_grid), a z-buffer
-              drops points hidden behind nearer ones, the pool mask is eroded by about 1% of the grid
-              diagonal, DA3's depth must be valid and its conf at least the 30th percentile in the
-              mask. r = z / depth; the view's scale s_i is the median of r. Status few_points (under
-              30 points), scattered (IQR over 25% of s_i), no_mask, no_samples, else a candidate.
+              drops points hidden behind nearer ones (more than 3% plus 9 cm behind, so that range
+              noise passes), the pool mask is eroded by about 1% of the grid diagonal, DA3's depth must
+              be valid and its conf at least the 30th percentile in the mask. r = z / depth; points
+              beyond max(3 x 1.4826 MAD, ln 1.02) of the median ln r are trimmed, and the view's scale
+              s_i is the median r of the rest. Status few_points (under 30 valid points), scattered
+              (IQR of the valid points over 25% of s_i), no_mask, no_samples, else a candidate.
   combine     the weighted median of ln s_i (weights sqrt(min(points, 2000))); views beyond
               max(3 x 1.4826 MAD, ln 1.05) of it are outliers, the others are used; s is the weighted
               median of the used views. It fails when fewer than 3 views have points, fewer than 3
@@ -49,12 +51,15 @@ MODEL_ALIASES = {"radtan": "plumb_bob", "radial-tangential": "plumb_bob", "fishe
                  "kannala_brandt": "equidistant", "kannala-brandt": "equidistant"}
 
 # Per view.
-ZBUFFER_TOL = 0.03  # a point is kept when z <= (1 + tol) x the nearest z in its 3x3 DA3 pixels
+ZBUFFER_TOL = 0.03  # a point is kept when z <= (1 + tol) x the nearest z in its 3x3 DA3 pixels + ZBUFFER_ABS
+ZBUFFER_ABS = 0.09  # m: 3 sigma of a spinning LiDAR's range noise, which a relative tolerance alone would cut
 ERODE_FRAC = 0.01  # the mask is eroded by this share of the DA3 grid's diagonal (at least 1 px)
 ERODE_KEEP = 0.3  # ... less while the eroded mask keeps under this share of the mask
 CONF_PERCENTILE = 30  # DA3 conf must be at least this percentile of conf in the mask
 MIN_POINTS = 30  # fewer used points: few_points
 MAX_IQR_REL = 0.25  # a wider IQR of r over s_i: scattered
+TRIM_MADS = 3.0  # used points lie within max(TRIM_MADS x 1.4826 MAD, ln(1 + TRIM_MIN_REL)) of the median ln r
+TRIM_MIN_REL = 0.02
 
 # Combine.
 WEIGHT_CAP = 2000  # a view's weight is sqrt(min(points, WEIGHT_CAP))
@@ -75,7 +80,8 @@ MAX_YAML_DEPTH = 16  # lists and maps in lists and maps; real calibration files 
 # The camera's optical axes (x right, y down, z forward) from body axes (x forward, y left, z up).
 R_OPT_LINK = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]])
 
-VIEW_KEYS = ("zbuffer_tol", "erode_frac", "erode_keep", "conf_percentile", "min_points", "max_iqr_rel")
+VIEW_KEYS = ("zbuffer_tol", "zbuffer_abs", "erode_frac", "erode_keep", "conf_percentile", "min_points", "max_iqr_rel",
+             "trim_mads", "trim_min_rel")
 COMBINE_KEYS = ("weight_cap", "outlier_mads", "outlier_min_rel", "min_views", "max_spread_rel", "s_min", "s_max")
 
 
@@ -98,8 +104,9 @@ def apply_scale(arrays, s):
 
 def thresholds(**overrides):
     """Every threshold of the estimate by name (the module constants in lower case), with overrides."""
-    t = {"zbuffer_tol": ZBUFFER_TOL, "erode_frac": ERODE_FRAC, "erode_keep": ERODE_KEEP,
+    t = {"zbuffer_tol": ZBUFFER_TOL, "zbuffer_abs": ZBUFFER_ABS, "erode_frac": ERODE_FRAC, "erode_keep": ERODE_KEEP,
          "conf_percentile": CONF_PERCENTILE, "min_points": MIN_POINTS, "max_iqr_rel": MAX_IQR_REL,
+         "trim_mads": TRIM_MADS, "trim_min_rel": TRIM_MIN_REL,
          "weight_cap": WEIGHT_CAP, "outlier_mads": OUTLIER_MADS, "outlier_min_rel": OUTLIER_MIN_REL,
          "min_views": MIN_VIEWS, "max_spread_rel": MAX_SPREAD_REL, "s_min": S_MIN, "s_max": S_MAX}
     unknown = sorted(set(overrides) - set(t))
@@ -232,31 +239,47 @@ def project(X_c, K, D, model, size_wh):
     return u, v, z, ok
 
 
-def zbuffer(iu, iv, z, hw, tol=ZBUFFER_TOL):
+def zbuffer(iu, iv, z, hw, tol=ZBUFFER_TOL, abs_tol=ZBUFFER_ABS):
     """Which points (pixel indices iu, iv on a grid of size hw, depth z) to keep: z at most (1 + tol)
-    times the nearest z in their 3x3 neighbourhood. A LiDAR beside the camera sees surfaces that the
-    camera cannot, and their points land among the foreground's."""
+    times the nearest z in their 3x3 neighbourhood, plus abs_tol meters. A LiDAR beside the camera sees
+    surfaces that the camera cannot, and their points land among the foreground's. abs_tol lets range
+    noise pass: without it the nearest of the noisy points in a window would decide, and the points
+    kept would lie nearer than the surface."""
     from scipy.ndimage import minimum_filter
 
     iu, iv, z = np.asarray(iu, int), np.asarray(iv, int), np.asarray(z, float)
     near = np.full(tuple(hw), np.inf)
     np.minimum.at(near, (iv, iu), z)
     near = minimum_filter(near, size=3, mode="constant", cval=np.inf)
-    return z <= (1 + tol) * near[iv, iu]
+    return z <= (1 + tol) * near[iv, iu] + abs_tol
 
 
-def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, erode_frac=ERODE_FRAC, erode_keep=ERODE_KEEP,
-               conf_percentile=CONF_PERCENTILE, min_points=MIN_POINTS, max_iqr_rel=MAX_IQR_REL):
+def trim(r, mads=TRIM_MADS, min_rel=TRIM_MIN_REL):
+    """Which ratios r (all finite and positive) to keep: ln r within max(mads x 1.4826 MAD,
+    ln(1 + min_rel)) of the median ln r; mads inf keeps them all. Hidden points that the z-buffer
+    missed and points at the mask's edge sit on one side of the median and would move it. At least half
+    of the points stay, since half lie within one MAD."""
+    x = np.log(np.asarray(r, float))
+    if not len(x) or np.isinf(mads):  # inf x a MAD of 0 would be NaN, and would drop every point
+        return np.ones(len(x), bool)
+    m = np.median(x)
+    return np.abs(x - m) <= max(mads * 1.4826 * float(np.median(np.abs(x - m))), float(np.log1p(min_rel)))
+
+
+def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, zbuffer_abs=ZBUFFER_ABS, erode_frac=ERODE_FRAC,
+               erode_keep=ERODE_KEEP, conf_percentile=CONF_PERCENTILE, min_points=MIN_POINTS, max_iqr_rel=MAX_IQR_REL,
+               trim_mads=TRIM_MADS, trim_min_rel=TRIM_MIN_REL):
     """One view's ratio of LiDAR depth to DA3 depth. uvz: the frame's samples; crop: prep's crop box
     of the frame; depth, conf: DA3's (h, w) arrays; mask: the pool mask at any size.
 
     Returns (record, points). The record counts the points at each step (points: the samples,
     points_grid: inside DA3's grid, points_visible: after the z-buffer, points_mask: inside the eroded
-    mask, points_used: with valid DA3 depth and conf) and gives erode_px, conf_min, s (the median of
-    r = z / depth), iqr_rel (the IQR of r over s) and status: no_mask, no_samples, few_points,
-    scattered or candidate (combine makes it used or outlier). points holds the visible points for
-    the check image: u, v (source pixels), r (NaN without valid depth), used, and index: each
-    point's row in uvz."""
+    mask, points_valid: with valid DA3 depth and conf, points_used: also within the trim of ln r) and
+    gives erode_px, conf_min, s (the median of the used points' r = z / depth), iqr_rel (the IQR of
+    the valid points' r over s) and status: no_mask, no_samples, few_points (under min_points valid
+    points: the trim must not turn a scattered view into one that combine leaves out of its counts),
+    scattered or candidate (combine makes it used or outlier). points holds the visible points for the check image: u, v
+    (source pixels), r (NaN without valid depth), used, and index: each point's row in uvz."""
     from scipy.ndimage import distance_transform_edt
 
     from gator.webapp.views import at_size
@@ -272,7 +295,7 @@ def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, erode_frac
     iu, iv = pixel(gu), pixel(gv)
     g = (iu >= 0) & (iu < w) & (iv >= 0) & (iv < h)
     iu, iv, z, src, rows = iu[g], iv[g], uvz[g, 2], uvz[g, :2], rows[g]
-    vis = zbuffer(iu, iv, z, (h, w), zbuffer_tol)
+    vis = zbuffer(iu, iv, z, (h, w), zbuffer_tol, zbuffer_abs)
     iu, iv, z, src, rows = iu[vis], iv[vis], z[vis], src[vis], rows[vis]
 
     dist = distance_transform_edt(m)
@@ -285,14 +308,18 @@ def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, erode_frac
     d, c = depth[iv, iu], conf[iv, iu]
     valid = np.isfinite(d) & (d > 0)
     r = np.where(valid, z / np.where(valid, d, 1.0), np.nan)
-    used = inner[iv, iu] & valid & np.isfinite(c) & (c >= (conf_min if conf_min is not None else np.inf))
+    fit = inner[iv, iu] & valid & np.isfinite(c) & (c >= (conf_min if conf_min is not None else np.inf))
+    used = fit.copy()
+    used[fit] = trim(r[fit], trim_mads, trim_min_rel)
     ru = r[used]
     s = float(np.median(ru)) if len(ru) else None
-    iqr = float(np.subtract(*np.percentile(ru, [75, 25])) / s) if len(ru) else None
-    status = ("no_mask" if not m.any() else "no_samples" if not len(uvz) else "few_points" if len(ru) < max(1, min_points)
+    iqr = float(np.subtract(*np.percentile(r[fit], [75, 25])) / s) if len(ru) else None
+    status = ("no_mask" if not m.any() else "no_samples" if not len(uvz)
+              else "few_points" if fit.sum() < max(1, min_points) or not len(ru)
               else "scattered" if iqr > max_iqr_rel else "candidate")
     rec = {"points": int(len(uvz)), "points_grid": int(g.sum()), "points_visible": int(vis.sum()),
-           "points_mask": int(inner[iv, iu].sum()), "points_used": int(used.sum()), "erode_px": int(e),
+           "points_mask": int(inner[iv, iu].sum()), "points_valid": int(fit.sum()), "points_used": int(used.sum()),
+           "erode_px": int(e),
            "conf_min": None if conf_min is None else round(conf_min, 4),
            "s": None if s is None else round(s, 6), "iqr_rel": None if iqr is None else round(iqr, 4), "status": status}
     return rec, {"u": src[:, 0], "v": src[:, 1], "r": r, "used": used, "index": rows}
@@ -570,12 +597,13 @@ def read_calibration(text, name="calibration.yaml"):
     optional time_offset_s, K (3x3, 9 numbers or fx, fy, cx, cy), D, distortion_model (plumb_bob,
     rational_polynomial, equidistant) and image_size [w, h]. time_offset_s is the LiDAR clock minus the
     camera clock: t_lidar = t_cam + time_offset_s, so it is added to a camera stamp before the scans
-    are matched to it. In place of T_cam_lidar: T_lidar_cam (inverted) or FAST-LIVO2's Rcl (9 numbers)
-    and Pcl (3), at the top level or under extrin_calib. A ROS 2 parameter file (one node with
-    ros__parameters) is read from inside. ROS camera_info's camera_matrix, distortion_coefficients,
-    image_width and image_height also work. OpenCV FileStorage files (a %YAML:1.0 header,
-    !!opencv-matrix tags) are read as YAML; their distortion_coefficients without a distortion_model
-    are plumb_bob (4 or 5 numbers) or rational_polynomial (8, 12 or 14).
+    are matched to it. It is None when the file has no time_offset_s (or a null one): 0 is an offset
+    that the file gives, which says the two header clocks are one. In place of T_cam_lidar: T_lidar_cam
+    (inverted) or FAST-LIVO2's Rcl (9 numbers) and Pcl (3), at the top level or under extrin_calib. A
+    ROS 2 parameter file (one node with ros__parameters) is read from inside. ROS camera_info's
+    camera_matrix, distortion_coefficients, image_width and image_height also work. OpenCV FileStorage
+    files (a %YAML:1.0 header, !!opencv-matrix tags) are read as YAML; their distortion_coefficients
+    without a distortion_model are plumb_bob (4 or 5 numbers) or rational_polynomial (8, 12 or 14).
 
     The rotation must be orthonormal within ORTHONORMAL_TOL (it is then re-orthonormalised by SVD)
     with det > 0, the translation at most MAX_TRANSLATION (2 m) and K positive. The result's T_cam_lidar maps LiDAR points to the
@@ -657,7 +685,8 @@ def read_calibration(text, name="calibration.yaml"):
     if axes == "body":
         T[:3, :] = R_OPT_LINK @ T[:3, :]
 
-    offset = _number(data.get("time_offset_s", 0.0), "time_offset_s")
+    offset = data.get("time_offset_s")
+    offset = None if offset is None else _number(offset, "time_offset_s")
     K = data.get("K", data.get("camera_matrix"))
     if K is not None:
         k = _matrix(K, "K")

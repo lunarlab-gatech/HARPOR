@@ -785,6 +785,7 @@ def test_articulation_refuses_a_cycle_and_undoes_it(runs):
 
 def test_review_articulation_reports_penetration(tmp_path, monkeypatch):
     """A lid hinged about the body's center sweeps into the body; hinged at its back edge it does not."""
+    pytest.importorskip("rtree")  # trimesh's collision checks
     monkeypatch.setenv("PYTHONPATH", str(REPO))
     work = prepare(tmp_path, "articulation")
     control = work.parent / "control"
@@ -829,6 +830,7 @@ def test_review_articulation_reports_penetration(tmp_path, monkeypatch):
 def test_articulation_poses_move_welded_links_and_groups_them():
     """A tray parented to a drawer in Blender has no joint: it moves with the drawer, and its samples
     count as the drawer's. Here the tray sits inside the solid body, so the drawer's joint reports it."""
+    pytest.importorskip("rtree")  # trimesh's collision checks
     drawer = {"version": 1, "frame": "W", "parent": "body", "type": "prismatic", "origin": [0.0, 0.0, 0.0],
               "axis": [0.0, 0.0, -1.0], "lower": 0.0, "upper": 0.4}
     links = ["body", "drawer", "tray"]
@@ -870,6 +872,7 @@ def test_penetration_groups_links_by_their_joint():
     """Two drawers slide alike, and only drawer_0 holds a tray inside the solid body. Links are grouped by
     the joint that carries them, not by their motion, so only drawer_0 reports penetration. A knob fixed
     to drawer_1 moves with drawer_1."""
+    pytest.importorskip("rtree")  # trimesh's collision checks
     drawer = {"version": 1, "frame": "W", "parent": "body", "type": "prismatic", "origin": [0.0, 0.0, 0.0],
               "axis": [0.0, 0.0, -1.0], "lower": 0.0, "upper": 0.3}
     knob = {"version": 1, "frame": "W", "parent": "drawer_1", "type": "fixed"}
@@ -897,6 +900,7 @@ def test_penetration_groups_links_by_their_joint():
 def test_penetration_finds_a_part_passing_through_a_thin_part():
     """On a 2 m panel 18 mm thick, 0.5% of the diagonal is deeper than any point inside the panel can be.
     A thin link's tolerance is a quarter of its thickness, so a box pushed through the panel is found."""
+    pytest.importorskip("rtree")  # trimesh's collision checks
     slide = {"version": 1, "frame": "W", "parent": "panel", "type": "prismatic", "origin": [0.0, 0.0, 0.0],
              "axis": [0.0, 0.0, 1.0], "lower": 0.0, "upper": 0.4}
     meshes = {"panel": trimesh.creation.box(bounds=[[-1.0, -1.0, 0.0], [1.0, 1.0, 0.018]]),
@@ -1231,6 +1235,7 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     """A whole claude session through run_container_session: the real claude_agent CLI with a scripted
     client and a host shell, the helpers over the socket, the deliverable, the log readers, and the
     key in no file but its own (outside the session folder)."""
+    pytest.importorskip("anthropic")  # the Claude client
     from gator.agent import loop_trace
 
     monkeypatch.setenv("PYTHONPATH", str(REPO))
@@ -1299,6 +1304,7 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     variables across turns, the text editor views a file and edits another, view_image shows a PNG
     that a command made, and finish ends the session. Every request repeats the one before it and
     appends to it, and the key the shell prints reaches neither the model nor any file."""
+    pytest.importorskip("anthropic")  # the Claude client
     monkeypatch.setenv("PYTHONPATH", str(REPO))
     manual = tmp_path / "opus_dig" / "system_v1.md"
     manual.parent.mkdir()

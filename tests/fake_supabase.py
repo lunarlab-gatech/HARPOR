@@ -750,8 +750,9 @@ class FakeSupabase:
         p_body = {} if p_body is None else p_body
         if not isinstance(p_body, dict) or jsize(p_body) > 131072:
             raise_("the request body is not a JSON object of at most 128 KB")
-        if not isinstance(p_query, dict) or set(p_query) - {"name"}:
-            raise_("bad query")
+        if not isinstance(p_query, dict) or set(p_query) - {"name", "lidar_topic"} or "lidar_topic" in p_query and (
+                p_route != "calibration_put" or not isinstance(p_query["lidar_topic"], str)):
+            raise_("bad query")  # part 7: lidar_topic is text, for a calibration upload only
         if too_deep(p_body, JSON_DEPTH) or too_deep(p_query, JSON_DEPTH):
             raise_(f"the request nests lists and objects more than {JSON_DEPTH} deep")
         if p_body.get("api_key") is not None:

@@ -213,16 +213,16 @@ def test_no_postgres_means_a_skip(monkeypatch, tmp_path):
 
 
 def test_migration_files():
-    """Six migrations in order; every function has a fixed search_path; nothing secret is in supabase/."""
+    """Seven migrations in order; every function has a fixed search_path; nothing secret is in supabase/."""
     names = sorted(p.name for p in (SUPABASE / "migrations").glob("*.sql"))
     assert [n.split("_", 1)[1] for n in names] == [
         "harpor_tables.sql", "harpor_user_functions.sql", "harpor_worker_functions.sql", "harpor_storage.sql",
-        "harpor_realtime.sql", "harpor_cron.sql"]
+        "harpor_realtime.sql", "harpor_cron.sql", "harpor_relay_lidar_topic.sql"]
     assert all(n.startswith("20261101000") for n in names)
-    assert [p.name for p in pgcheck.migrations()] == names[:-1]      # the stand-in has no pg_cron
+    assert [p.name for p in pgcheck.migrations()] == [n for n in names if not n.endswith("_cron.sql")]  # no pg_cron
     for p in (SUPABASE / "migrations").glob("*.sql"):
         text = p.read_text()
-        heads = re.findall(r"create function .*?\bas \$\$", text, re.S)
+        heads = re.findall(r"create (?:or replace )?function .*?\bas \$\$", text, re.S)
         assert all("set search_path = ''" in h for h in heads), p.name
         text.encode("ascii")
     for p in SUPABASE.rglob("*"):
@@ -247,6 +247,27 @@ def test_job_files_takes_the_types_the_workers_send():
     assert not [t for t in types if re.search(r"xml|html|svg|javascript", t)]
     assert set(fs.BUCKETS["job-files"]["mime"]) == types
 
+
+
+def relay_function(name):
+    """public.relay as a migration makes it, from its create line to its end $$."""
+    text = (SUPABASE / "migrations" / name).read_text()
+    return re.search(r"create (?:or replace )?function public\.relay\(.*?\nend \$\$;", text, re.S)[0]
+
+
+def test_the_lidar_topic_migration_changes_only_the_query_check():
+    """Part 7 restates part 2's relay() whole: the same function apart from its create line and the query check,
+    which also takes lidar_topic, as text, for a calibration upload only. Its grants stay those of part 2."""
+    old, new = relay_function("20261101000200_harpor_user_functions.sql"), relay_function(
+        "20261101000700_harpor_relay_lidar_topic.sql")
+    query = re.compile(r"\n(?:  --[^\n]*\n)*  if jsonb_typeof\(p_query\) <> 'object'.*?end if;", re.S)
+    norm = lambda f: re.sub(r"\s+", " ", query.sub("", f.replace("create or replace function", "create function")))
+    assert norm(old) == norm(new)
+    assert "(p_query - 'name') <> '{}'::jsonb" in query.search(old)[0]
+    assert "(p_query - '{name,lidar_topic}'::text[]) <> '{}'::jsonb" in query.search(new)[0]
+    assert "jsonb_typeof(p_query -> 'lidar_topic') <> 'string'" in query.search(new)[0]
+    text = (SUPABASE / "migrations" / "20261101000700_harpor_relay_lidar_topic.sql").read_text()
+    assert "grant execute on function public.relay(uuid, text, jsonb, jsonb, text, jsonb) to authenticated;" in text
 
 def test_cron_migration():
     """The pg_cron file is required: it runs the sweep every 15 minutes, since no worker sweeps, and keeps

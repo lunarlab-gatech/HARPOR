@@ -153,10 +153,55 @@ def test_view_ratio_takes_the_median_and_the_relative_iqr():
     r = 1.25 * (1 + 0.4 * np.linspace(0, 1, 100) ** 3)  # skewed: the mean is above the median
     i = np.arange(100)
     uvz = np.stack([10 + i % 40, 10 + i // 40, 2.0 * r], 1)
-    rec, _ = L.view_ratio(uvz, (0, 0, W, H), np.full((H, W), 2.0), None, np.ones((H, W), bool), zbuffer_tol=10.0)
+    rec, _ = L.view_ratio(uvz, (0, 0, W, H), np.full((H, W), 2.0), None, np.ones((H, W), bool), zbuffer_tol=10.0,
+                          trim_mads=np.inf)  # no trim: it would drop the long tail
     p25, p50, p75 = np.percentile(r, [25, 50, 75])
-    assert rec["points_used"] == 100 and np.isclose(rec["s"], p50) and np.mean(r) > p50 + 0.01
+    assert rec["points_used"] == rec["points_valid"] == 100 and np.isclose(rec["s"], p50) and np.mean(r) > p50 + 0.01
     assert np.isclose(rec["iqr_rel"], (p75 - p25) / p50, atol=1e-4)
+    # The trim drops the tail beyond 3 x 1.4826 MAD of ln r; the IQR stays the valid points'.
+    rec, pts = L.view_ratio(uvz, (0, 0, W, H), np.full((H, W), 2.0), None, np.ones((H, W), bool), zbuffer_tol=10.0)
+    keep = L.trim(r)
+    assert (rec["points_valid"], rec["points_used"]) == (100, keep.sum()) and 85 < keep.sum() < 100 and keep[:85].all()
+    assert pts["used"].tolist() == keep.tolist() and np.isclose(rec["s"], np.median(r[keep]))
+    assert np.isclose(rec["iqr_rel"], (p75 - p25) / rec["s"], atol=1e-4)
+    # Without scatter (MAD 0) the cut is ln 1.02; mads inf keeps every point, also then.
+    assert L.trim([1.0] * 6 + [1.019, 1.021, 0.981, 0.979]).tolist() == [True] * 7 + [False, True, False]
+    assert L.trim([1.25] * 10 + [1.5], mads=np.inf).all() and L.trim([]).tolist() == []
+    # A view of 40 valid points with a second mode of 12: the trim drops the mode, leaving 28, but the view is
+    # scattered by its valid points, not few_points, so combine still counts it among the views with points.
+    r2 = 1.25 * np.r_[np.ones(28), np.full(12, 1.32)] * np.exp(np.random.default_rng(1).normal(0, 0.01, 40))
+    uvz2 = np.stack([10 + i[:40] % 40, 10 + i[:40] // 40, 2.0 * r2], 1)
+    rec, _ = L.view_ratio(uvz2, (0, 0, W, H), np.full((H, W), 2.0), None, np.ones((H, W), bool), zbuffer_tol=10.0)
+    assert (rec["points_valid"], rec["points_used"], rec["status"]) == (40, 28, "scattered") and rec["iqr_rel"] > 0.25
+
+
+def test_view_ratio_resists_range_noise_and_hidden_points():
+    """Two biases of the z-buffer and the median, on a plane at 0.5 m whose DA3 depth is exact (s = 1.25).
+    Range noise of 3 cm with about one point per DA3 pixel (a dense spinning LiDAR): with only the relative
+    3%, the z-buffer kept the nearer points of each 3x3 window, so s came out about 7% low; its 9 cm term
+    lets the noise pass. Points of a wall far behind, seen past the object's edge by a LiDAR beside the
+    camera, with no point of the plane next to them (a sparse LiDAR), so the z-buffer cannot drop them: a
+    fifth of the points moved the median about 2% up; the trim of ln r drops them."""
+    h, w = 120, 160
+    depth, mask = np.full((h, w), 0.4), np.ones((h, w), bool)
+    old = {"zbuffer_abs": 0.0, "trim_mads": np.inf}  # the rules before
+
+    def bias(uvz, **kw):
+        return L.view_ratio(uvz, (0, 0, w, h), depth, None, mask, **kw)[0]["s"] / 1.25 - 1
+
+    rng = np.random.default_rng(0)
+    n = h * w
+    noisy = np.stack([rng.uniform(-0.5, w - 0.5, n), rng.uniform(-0.5, h - 0.5, n), 0.5 + rng.normal(0, 0.03, n)], 1)
+    assert bias(noisy, **old) < -0.05 and abs(bias(noisy)) < 0.006
+    v, u = np.mgrid[0:h:2, 0:w:2]  # 2 px apart: no point is in another's 3x3 window
+    z = 0.5 + rng.normal(0, 0.03, u.size)
+    hidden = rng.random(u.size) < 0.2
+    z[hidden] = rng.uniform(0.7, 2.5, hidden.sum())
+    sparse = np.stack([u.ravel(), v.ravel(), z], 1)
+    assert bias(sparse, **old) > 0.012 and abs(bias(sparse)) < 0.006
+    rec, pts = L.view_ratio(sparse, (0, 0, w, h), depth, None, mask)
+    assert rec["points_visible"] == u.size and not pts["used"][hidden[pts["index"]]].any()
+    assert rec["points_valid"] - rec["points_used"] < 1.02 * hidden.sum()  # the trim drops few points of the plane
 
 
 def test_rot90_points_matches_np_rot90():
@@ -238,16 +283,19 @@ def test_project_wide_fisheye_keeps_its_outer_ring():
     assert ok.tolist() == [True, False]
 
 
-@pytest.mark.parametrize("at", [1.0, 3.0])  # the tolerance is relative: at 3 m, 3% is 9 cm
+@pytest.mark.parametrize("at", [1.0, 3.0])  # the tolerance is 3% plus 9 cm: 12 cm behind at 1 m, 18 cm at 3 m
 def test_zbuffer_drops_points_behind_a_foreground_plane(at):
     v, u = np.mgrid[0:10, 0:6]  # a plane at z = at (to 1.01 at) over columns 0..5
     iu, iv, z = u.ravel(), v.ravel(), at * (1.0 + 0.01 * (u.ravel() % 2))
     iu = np.r_[iu, 3, 6, 9, 2, 2]
     iv = np.r_[iv, 4, 4, 4, 7, 7]
-    z = np.r_[z, at * np.array([3.0, 3.0, 3.0, 1.02, 1.05])]
+    tol = 0.03 * at + 0.09
+    z = np.r_[z, 3 * at, 3 * at, 3 * at, at + tol - 0.01, at + tol + 0.01]
     keep = L.zbuffer(iu, iv, z, (10, 12))
     assert keep[:60].all()  # the plane
-    assert keep[60:].tolist() == [False, False, True, True, False]  # behind it, next to its edge, clear; 2% and 5% behind
+    assert keep[60:].tolist() == [False, False, True, True, False]  # behind it, next to its edge, clear; 1 cm within
+    # and beyond the tolerance
+    assert L.zbuffer(iu, iv, z, (10, 12), abs_tol=0.0)[60:].tolist() == [False, False, True, False, False]
 
 
 def test_view_ratio_erodes_the_mask_and_drops_low_conf():
@@ -372,7 +420,8 @@ def test_estimate_recovers_the_scale(tmp_path):
     json.dumps(rec)  # plain JSON types
     for v in rec["views"]:
         assert Image.open(tmp_path / "check" / f"{v['name']}.jpg").size == (640, 480)
-    assert L.estimate(pool, samples, min_points=600)["reason"].startswith("LiDAR points cover the object in only 0 of 8")
+    few = L.estimate(pool, samples, min_points=601)  # each view has 600 valid points
+    assert few["reason"].startswith("LiDAR points cover the object in only 0 of 8")
     with pytest.raises(TypeError, match="min_point"):
         L.estimate(pool, samples, min_point=10)
     # points_out gets every view's points, with their rows in the samples; the record stays the same.
@@ -479,7 +528,10 @@ def test_read_calibration_canonical_yaml_and_json():
     assert L.read_calibration(calib(**extra).encode(), "rig.yml") == c
     bare = L.read_calibration(calib(), "rig.yaml")
     assert (bare["camera_axes"], bare["time_offset_s"], bare["K"], bare["D"], bare["distortion_model"]) == (
-        "optical", 0.0, None, None, None)
+        "optical", None, None, None, None)
+    # An offset of 0 is given (the header clocks are one); a null one is not.
+    assert L.read_calibration(calib(time_offset_s=0), "rig.yaml")["time_offset_s"] == 0.0
+    assert L.read_calibration(calib(time_offset_s=None), "rig.yaml")["time_offset_s"] is None
 
 
 def test_read_calibration_aliases():

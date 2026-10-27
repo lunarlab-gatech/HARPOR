@@ -41,7 +41,13 @@ const NEXT = { ready: "Name the object, then Start.", queued: "You can close thi
   lidar: "In Settings, upload a calibration and Retry, or turn LiDAR off and build again.",
   lidar_cal: "In Settings, replace the calibration and Retry, or turn LiDAR off and build again.",
   // A Stray capture takes no calibration, and a retry reads the same depth and masks again.
-  lidar_stray: "In Settings, turn LiDAR off or change the views, then build again." };
+  lidar_stray: "In Settings, turn LiDAR off or change the views, then build again.",
+  // A done job whose scale was found with another calibration (V.scaleStale): Retry runs again from lidar.
+  stale: "Run lidar and later stages again to update them. It runs the lidar stage and every stage after it, GPU stages " +
+    "included." };
+// The warning of a done job whose scale was found with another calibration (V.scaleStale), and its Retry button's label.
+const SCALE_STALE = "The calibration changed after this build, so the scale and the masses are out of date.";
+const RERUN_LIDAR = "Run lidar and later stages again";
 const KIND_LABEL = { video: "video", rosbag: "rosbag", stray: "Stray capture" };  // job.json source kind, in the jobs list
 // How the page reaches its data: the server itself (tunnel mode), or Supabase (static/supa.js, on the public site).
 // Factories, not the globals themselves, so the node test harnesses (no XMLHttpRequest) still load. typeof on the bare
@@ -357,8 +363,8 @@ async function refresh() {
   fill($("#jtitle"), job.video.name, job.prompt ? [" ", h("span", { class: "jobobj" }, job.prompt)] : null);
   $("#jid").textContent = "job " + job.id + (job.where ? ", " + job.where : "");
   if (T.live.includes(job.status)) openStream();
-  // A scale found with another calibration: Retry then starts from lidar (retryFrom).
-  V.scaleStale = ["failed", "cancelled"].includes(job.status) ? await scaleStale(job).catch(() => false) : false;
+  // A scale found with another calibration: Retry then starts from lidar (retryFrom), also on a done job.
+  V.scaleStale = ["failed", "cancelled", "done"].includes(job.status) && scaleStale(job);
   renderState({ status: job.status, current: job.current, error: job.error, warnings: job.warnings, key_ok: job.key_ok,
     agent: job.agent, articulated: job.articulated, parts_mode: job.parts_mode, parts_review: job.parts_review,
     stages: job.progress }, false);
@@ -573,7 +579,10 @@ function renderState(st, follow) {
   fill($("#jstatus"), badge(st.status, stText || sum), overall, st.error ? h("div", { class: "msg errbox" }, st.error, " ",
     h("a", { href: "help.html#troubleshooting", target: "_blank", rel: "noopener" }, "Help")) : null);
   const from = retryFrom(st);
+  // A done job whose scale was found with another calibration (V.scaleStale) runs again from lidar.
+  const rerun = st.status === "done" && from === "lidar";
   let next = ["failed", "cancelled"].includes(st.status) && from === null ? "Build again from the Settings tab."
+    : rerun ? NEXT.stale + (V.job && V.job.auto_continue === false ? " It pauses for your review." : "")
     : partList ? NEXT.parts : lidarFailed(st.status, st.stages)
       ? NEXT[!V.job ? "lidar" : V.job.kind === "stray" ? "lidar_stray" : V.job.calibration ? "lidar_cal" : "lidar"]
       : NEXT[st.status] || "";
@@ -585,7 +594,7 @@ function renderState(st, follow) {
   $("#jnext").textContent = next;
   const said = sum + (st.error ? ". " + st.error : "");
   if (said !== V.said) { V.said = said; $("#announce").textContent = said; }
-  $("#jwarn").replaceChildren(...(st.warnings || []).map((w) => h("li", {}, w)));
+  $("#jwarn").replaceChildren(...[rerun ? SCALE_STALE : null, ...(st.warnings || [])].filter(Boolean).map((w) => h("li", {}, w)));
   const name = V.job ? V.job.video.name : V.id || "";
   $("#where").replaceChildren(h("span", { class: "crumb" }, "/ " + name));  // the status shows once, under the title
   document.title = ({ running: `${cur || "running"} ${Math.min(nDone + 1, build.length)}/${build.length}`, queued: "Queued",
@@ -621,14 +630,17 @@ function renderState(st, follow) {
   }
 
   $("#cancel").hidden = !(ACTIVE.includes(st.status) || st.status === "review");
-  // A done job retries only a failed optional stage (Runner.resume runs package again after it).
-  $("#retry").hidden = from === null || !(["failed", "cancelled"].includes(st.status) || st.status === "done" && OPTIONAL.includes(from));
-  if (!$("#retry").hidden) $("#retry").textContent = from === "frames" ? "Read input again"
+  // A done job retries only a failed optional stage (Runner.resume runs package again after it), or runs again from lidar
+  // (rerun).
+  $("#retry").hidden = from === null || !(["failed", "cancelled"].includes(st.status) || rerun ||
+    st.status === "done" && OPTIONAL.includes(from));
+  if (!$("#retry").hidden) $("#retry").textContent = rerun ? RERUN_LIDAR : from === "frames" ? "Read input again"
     : from === "propose" && (st.stages.find((y) => y.name === "propose") || {}).status === "done" ? "Back to part list"
       : "Retry from " + from;
+  // A rerun from lidar runs the agent stage again, and a done job's key is gone (jobs.Runner._status).
   const agent = agentOf(st.agent);
-  $("#keyrow").hidden = st.key_ok || agent === "none" || !["review", "failed", "cancelled"].includes(st.status) || from === "frames" ||
-    !!T.keyless(V.id, agent);  // the machine that runs the job holds the key
+  $("#keyrow").hidden = st.key_ok || agent === "none" || !(["review", "failed", "cancelled"].includes(st.status) || rerun) ||
+    from === "frames" || !!T.keyless(V.id, agent);  // the machine that runs the job holds the key
   $("#key2name").textContent = (AGENTS[agent] || AGENTS.astra).key || "API key";
   // The key goes next to the button that sends it.
   const home = st.status === "review" ? partList ? $("#partsbar") : $("#revbar") : $("#actions");
@@ -639,7 +651,8 @@ function retryFrom(st) {  // "frames" analyzes the input again (no key needed); 
   const stage = (name) => st.stages.find((y) => y.name === name);
   if (stage("frames").status !== "done") return "frames";
   const x = st.stages.find((x) => BUILD.includes(x.name) && !["done", "skipped"].includes(x.status));
-  if (!x || stage("extract").status === "pending") return null;
+  if (!x) return V.scaleStale === true ? "lidar" : null;  // a done job: again from lidar when its scale is stale
+  if (stage("extract").status === "pending") return null;
   // A job stopped before its part list was confirmed goes back to that list (the server resumes from propose).
   const unconfirmed = st.articulated === true && st.parts_mode === "vlm_edit" && (stage("propose") || {}).status === "done"
     && !(V.job && V.job.parts && V.job.parts.confirmed === true);
@@ -738,9 +751,11 @@ $("#cancel").onclick = () => {
   act([$("#cancel"), $("#retry")], $("#runmsg"), "cancelling", () => post(`/api/jobs/${V.id}/cancel`), null, true);
 };
 $("#retry").onclick = () => {
-  const from = retryFrom(V.state);
+  const from = retryFrom(V.state), rerun = V.state.status === "done" && from === "lidar";
+  // A done job's run from lidar replaces its results, as Build again does.
+  if (rerun && !confirm("Run lidar and every stage after it again? This replaces the current results.")) return;
   let r = null;
-  return act([$("#retry"), $("#cancel")], $("#runmsg"), "retrying from " + from,
+  return act([$("#retry"), $("#cancel")], $("#runmsg"), (rerun ? "running again from " : "retrying from ") + from,
     async () => { r = await post(`/api/jobs/${V.id}/continue`, { from, api_key: $("#key2").value || null }); },
     () => {
       $("#key2").value = "";
@@ -897,19 +912,25 @@ function tfChain(edges, target, source) {
   }
   return null;
 }
-// The status line of the camera topic's link to a LiDAR topic: [text, true when the user must act].
+// The status line of the camera topic's link to a LiDAR topic: [text, true when the user must act]. A calibration
+// replaces the bag's TF (lidar.extrinsic). One uploaded for another LiDAR topic (its lidar_topic) is refused at the start
+// (jobs.lidar_settings); one without lidar_topic is not checked.
 function lidarLink(found, camTopic, lidarTopic, cal) {
   if (!lidarTopic) return ["", false];
   const cam = (found.topics || []).find((t) => t.topic === camTopic), lid = (found.lidar || []).find((t) => t.topic === lidarTopic);
   const how = cam && (cam.tf_links || {})[lidarTopic];
-  if (!how) return [cal ? "Linked by the calibration" : "No TF link: upload a calibration", !cal];
-  const chain = (lid && tfChain(found.tf || [], cam.frame_id, lid.frame_id)) || [cam.frame_id, lid ? lid.frame_id : lidarTopic];
-  return [`Linked by ${how === "static" ? "/tf_static" : "/tf"}: ${chain.join(" <- ")}`, false];
+  const chain = how && ((lid && tfChain(found.tf || [], cam.frame_id, lid.frame_id)) || [cam.frame_id, lid ? lid.frame_id : lidarTopic]);
+  const tf = how ? `${how === "static" ? "/tf_static" : "/tf"}: ${chain.join(" <- ")}` : null;
+  if (cal && cal.lidar_topic && cal.lidar_topic !== lidarTopic)
+    return [`The calibration ${cal.name} is for ${cal.lidar_topic}: choose that topic, or upload a calibration for ${lidarTopic}`, true];
+  if (cal) return [`Linked by the calibration ${cal.name}` + (tf ? ` (it replaces ${tf})` : ""), false];
+  return tf ? ["Linked by " + tf, false] : ["No TF link: upload a calibration", true];
 }
-// job.json "calibration" in short (server.calibration_summary): the LiDAR's distance from the camera and its turn.
+// job.json "calibration" in short (server.calibration_summary): the LiDAR's distance from the camera and its turn. A
+// time_offset_s of 0 is a given offset (the two header clocks are one); null means that the file gives none.
 const calText = (c) => [`${c.name}: ${(100 * c.translation_m).toFixed(1)} cm, ${Number(c.rotation_deg).toFixed(1)}°.`,
   c.has_intrinsics ? "K from file." : "K from camera_info.", c.camera_axes === "body" ? "Body axes." : null,
-  c.time_offset_s ? `Offset ${c.time_offset_s} s.` : null].filter(Boolean).join(" ");
+  c.time_offset_s != null ? `Offset ${c.time_offset_s} s.` : null].filter(Boolean).join(" ");
 function lidarSetup(job) {  // the job's own setting, each time the frames load: a Stray capture starts with LiDAR on
   const list = V.topics && Array.isArray(V.topics.lidar) ? V.topics.lidar : [];
   const had = job.lidar && job.lidar.kind === "rosbag" && list.some((t) => t.topic === job.lidar.topic) ? job.lidar.topic : null;
@@ -957,42 +978,36 @@ function lidarChoice() {
   if (typeof topic !== "string" || !topic) throw new Error("choose a LiDAR topic, or turn LiDAR off");
   return { topic };
 }
-// Whether a rosbag job's done lidar stage ran with another calibration than the job's now (steps.done("lidar") is false):
-// the server then retries from lidar. /selection says so (calibration_changed); without a selection, pool/lidar.json's
-// calibration file is compared with the job's by name.
-async function scaleStale(job) {
-  const st = (job.stages || {}).lidar, files = job.files || [];
-  if (job.kind !== "rosbag" || !job.lidar || !st || st.status !== "done") return false;
-  if (files.includes("selection.json")) {
-    const lid = (await api(`/api/jobs/${V.id}/selection`)).lidar;
-    return !!lid && lid.calibration_changed === true;
-  }
-  if (!files.includes("pool/lidar.json")) return false;
-  const ext = (await api(file("pool/lidar.json"))).extrinsic || {}, cal = job.calibration;
-  return cal ? ext.source !== "calibration" || ext.file !== cal.name : ext.source === "calibration";
-}
-// Upload a calibration file at once (PUT: the server checks and summarises it), or remove it (f null). The summary or
-// the server's reason shows in the box. A review shows again whether the scale is current; a failed or cancelled job's
-// Retry names lidar when the scale is stale.
+// Whether a rosbag job's done lidar stage ran with another calibration than the job's now: the job's lidar_current
+// (steps.done("lidar"), which compares the calibrations' sha256) is false. The server then retries from lidar.
+function scaleStale(job) { return job.kind === "rosbag" && !!job.lidar && job.lidar_current === false; }
+// Upload a calibration file at once (PUT, with the LiDAR topic it is for: the server checks and summarises it), or
+// remove it (f null). The summary or the server's reason shows in the box. A review shows again whether the scale is
+// current; after a stop (failed, cancelled or done), Retry names lidar when the scale is stale.
 async function calibrate(f) {
   const focus = document.activeElement;
   // Retry and Build wait for the upload: they would run with the old calibration.
   const btns = [$("#calremove"), $("#start"), $("#calfile"), $("#retry"), $("#build")], was = btns.map((b) => b.disabled);
   btns.forEach((b) => { b.disabled = true; });
   say($("#calmsg"), f ? "checking " + f.name : "removing the calibration", true);
-  const url = `/api/jobs/${V.id}/calibration`;
+  const url = `/api/jobs/${V.id}/calibration`, topic = $("#lidartopic").value;  // "" when no topic is chosen
   let done = null;
   try {
-    const r = await (f ? api(url + "?name=" + encodeURIComponent(f.name), { method: "PUT", body: f })
-      : api(url, { method: "DELETE" }));
-    if (V.job) V.job.calibration = f ? r : null;
-    done = f ? `Saved ${r.name}.` : "Removed.";
+    const r = await (f ? api(url + "?name=" + encodeURIComponent(f.name) + "&lidar_topic=" +
+      encodeURIComponent(typeof topic === "string" ? topic : ""), { method: "PUT", body: f }) : api(url, { method: "DELETE" }));
+    // The public site answers 202 "pending" while the job's machine has not taken the request: nothing is saved yet.
+    if (r && r.status === "pending") done = "Sent. The job's machine has not saved it yet.";
+    else {
+      if (V.job) V.job.calibration = f ? r : null;
+      done = f ? `Saved ${r.name}.` : "Removed.";
+    }
   } catch (e) { say($("#calmsg"), e.message); }
   if (done !== null && V.sel && $("#review").hidden === false) {
     try { V.sel.lidar = (await api(`/api/jobs/${V.id}/selection`)).lidar; renderSelLidar(); } catch (e) { /* the old summary stays */ }
-  } else if (done !== null && V.job && ["failed", "cancelled"].includes(V.job.status)) {
-    V.scaleStale = await scaleStale(V.job).catch(() => false);
-    if (V.state) renderState(V.state);  // the Retry button names the stage it starts from
+  } else if (done !== null && V.job && ["failed", "cancelled", "done"].includes(V.job.status)) {
+    try { V.job.lidar_current = (await api(`/api/jobs/${V.id}`)).lidar_current; } catch (e) { /* the old value stays */ }
+    V.scaleStale = scaleStale(V.job);
+    if (V.state) renderState(V.state);  // the Retry button names the stage it starts from; a done job's warning shows
   }
   btns.forEach((b, i) => { b.disabled = was[i]; });
   lidarToggle();

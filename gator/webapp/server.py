@@ -49,8 +49,11 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       sizes in bytes ("sizes", sizes_of),
                                       "articulated", "parts_mode" and "parts_review" (the job waits for its
                                       part list), "lidar" (steps.lidar), "calibration" (the uploaded
-                                      calibration's summary, calibration_summary, or null) and "preview"
-                                      (the input's preview video and where each view is in it, preview_of)
+                                      calibration's summary, calibration_summary, or null), "lidar_current"
+                                      (steps.done("lidar") for a job with LiDAR whose lidar stage is done:
+                                      false when the calibration was uploaded or deleted after the scale
+                                      was found; else null) and "preview" (the input's preview video and
+                                      where each view is in it, preview_of)
   DELETE /api/jobs/{id}               the job folder, unless the job is uploading, analyzing, queued or
                                       running
   GET    /api/jobs/{id}/frames        frames/meta.json, with frames/pool.json as "pool" once extracted
@@ -58,19 +61,24 @@ Routes (JSON unless said otherwise; {id} is a job id):
   POST   /api/jobs/{id}/topic         {topic}: a rosbag job's camera topic (one of frames/topics.json), in
                                       choose_topic, ready, failed or cancelled; analyzes the frames again.
                                       409 for a job whose input is not a rosbag
-  PUT    /api/jobs/{id}/calibration?name=N
+  PUT    /api/jobs/{id}/calibration?name=N&lidar_topic=L
                                       a rosbag job's LiDAR-camera calibration as the raw body: .yaml, .yml
                                       or .json (else 415), at most 64 KB (else 413); 409 for a video job, for
-                                      a Stray Scanner capture (its depth is aligned with the color camera)
-                                      and while the job is analyzing, queued or running; 400 with the
-                                      reason of lidar_scale.read_calibration. Saved as
-                                      lidar/calibration/<name> (0600) and in job.json "calibration";
+                                      a Stray Scanner capture (its depth is aligned with the color camera),
+                                      while the job is analyzing, queued or running, and while a job with
+                                      LiDAR waits for its part list (the new scale would drop the list:
+                                      Runner.resume); 400
+                                      with the reason of lidar_scale.read_calibration. L (optional; empty
+                                      for none) is the LiDAR topic that the file is for, one of
+                                      frames/topics.json "lidar" (else 400); jobs.lidar_settings then
+                                      refuses another LiDAR topic. Saved as lidar/calibration/<name> (0600)
+                                      and in job.json "calibration", with "lidar_topic" (L or null);
                                       answers calibration_summary. A lidar stage that ran with another
                                       calibration is then stale: the next Build or retry starts from
                                       lidar and stops in review (Runner.resume)
-  DELETE /api/jobs/{id}/calibration   the calibration (409 for a job that is not a rosbag's, and while the
-                                      job is analyzing, queued or running); a lidar stage that ran with it
-                                      is stale, as after a PUT
+  DELETE /api/jobs/{id}/calibration   the calibration (409 for a job that is not a rosbag's, while the job
+                                      is analyzing, queued or running, and while a job with LiDAR waits for
+                                      its part list); a lidar stage that ran with it is stale, as after a PUT
   POST   /api/jobs/{id}/start         {mode, prompt, n_views, picks, view0, auto_continue, agent, api_key,
                                       articulated?, parts_mode?, parts?, lidar?, turntable?} (agent astra: an
                                       OpenAI key; opus: an Anthropic key; none: no key, physics uses the Stage A
@@ -102,7 +110,12 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       job's reruns the agent stage and the stages after it. While the job
                                       waits for its part list, a continue without "from" confirms the
                                       VLM's list as it is; a retry of a job that was cancelled at its
-                                      part list stops at the list again (it answers "from": "propose")
+                                      part list stops at the list again (it answers "from": "propose"). A
+                                      run that starts at or before select (or from lidar, when the
+                                      calibration changed after the scale was found) needs the API key when
+                                      the agent stage is done, since a done job has dropped it, and answers
+                                      400 when the job's LiDAR would fail the lidar stage's checks
+                                      (jobs.lidar_settings), before anything is deleted
   POST   /api/jobs/{id}/cancel
   GET    /api/jobs/{id}/events        SSE: "state" (status and stages) when it changes, "log" (whole
                                       lines of the running stage's log; id <stage>:<byte offset>, so a
@@ -140,6 +153,7 @@ import socket
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 
 from gator.fileio import read_json, write_json
@@ -227,18 +241,44 @@ def content_length(request):
     return 10**15 if len(size) > 15 else int(size)
 
 
-def calibration_summary(cal):
+def file_offset(path, sha256):
+    """The time_offset_s that lidar_scale.read_calibration reads from the calibration file at path (None
+    when it gives none, or when the file cannot be read or is not the one of sha256)."""
+    return _file_offset(str(path), sha256)
+
+
+@lru_cache(maxsize=256)
+def _file_offset(path, sha256):
+    from gator.stage_a import lidar_scale
+
+    try:
+        data = Path(path).read_bytes()
+        if hashlib.sha256(data).hexdigest() != sha256:
+            return None
+        return lidar_scale.read_calibration(data, Path(path).name)["time_offset_s"]
+    except (OSError, ValueError):
+        return None
+
+
+def calibration_summary(cal, J=None):
     """The short form of job.json "calibration" for the page, or None: name, bytes, translation_m (the
     length of T_cam_lidar's translation), rotation_deg (the angle of its rotation), has_intrinsics (K
-    is given), camera_axes and time_offset_s."""
+    is given), camera_axes, time_offset_s (None when the file gives none) and lidar_topic (the LiDAR
+    topic it was uploaded for, or None). A calibration stored before lidar_topic was (an older job) holds
+    time_offset_s 0.0 also for a file without one, which the lidar stage reads as none: with the job
+    folder J, its time_offset_s comes from the file (file_offset)."""
     if not cal:
         return None
+    if J is not None and "lidar_topic" not in cal:
+        cal = {**cal, "time_offset_s": file_offset(Path(J) / "lidar" / "calibration" / str(cal.get("name")),
+                                                   cal.get("sha256"))}
     T = cal["T_cam_lidar"]
     c = max(-1.0, min(1.0, (T[0][0] + T[1][1] + T[2][2] - 1) / 2))
     return {"name": cal.get("name"), "bytes": cal.get("bytes"),
             "translation_m": round(math.hypot(T[0][3], T[1][3], T[2][3]), 4),
             "rotation_deg": round(math.degrees(math.acos(c)), 2), "has_intrinsics": cal.get("K") is not None,
-            "camera_axes": cal.get("camera_axes"), "time_offset_s": cal.get("time_offset_s")}
+            "camera_axes": cal.get("camera_axes"), "time_offset_s": cal.get("time_offset_s"),
+            "lidar_topic": cal.get("lidar_topic")}
 
 
 def lidar_compact(rec, stale=False):
@@ -575,7 +615,10 @@ def make_app(cfg, token, key_dir=None):
         job.update(source=steps.source(job), kind=steps.source(job)["kind"], agent=steps.agent(job),
                    articulated=steps.articulated(job), parts_mode=steps.parts_mode(job),
                    parts_review=steps.waits_for_parts(J, job), lidar=lidar_of(job),
-                   calibration=calibration_summary(job.get("calibration")), preview=preview_of(J))
+                   calibration=calibration_summary(job.get("calibration"), J), preview=preview_of(J))
+        # The scale was found with the job's calibration as it is now (steps.done compares their sha256).
+        ran = (job["stages"].get("lidar") or {}).get("status") == "done"
+        job["lidar_current"] = steps.done("lidar", J) if job["lidar"] and ran else None
         job["progress"] = jobs.progress(J)
         found = {f: resolve(J, f) for f in OUTPUTS}
         found.update(lidar_points(J))
@@ -709,7 +752,8 @@ def make_app(cfg, token, key_dir=None):
 
     def calibration_job(J, job_id):
         """The job.json of a rosbag job that may change its calibration now; 409 for another kind of input,
-        while its upload runs or while it is analyzing, queued or running."""
+        while its upload runs, while it is analyzing, queued or running, and while a job with LiDAR waits for
+        its part list: the stale scale would then block the list's confirmation (Runner.resume)."""
         if runner.uploading(job_id):
             raise Bad(409, "the job is still uploading")
         job = idle(J)
@@ -718,15 +762,22 @@ def make_app(cfg, token, key_dir=None):
             raise Bad(409, "a Stray Scanner capture needs no calibration: its depth is aligned with the color camera")
         if kind != "rosbag":
             raise Bad(409, "a calibration is for the LiDAR of a rosbag job; this job's input is a video")
+        if lidar_of(job) is not None and steps.waits_for_parts(J, job):
+            raise Bad(409, "the job waits for its part list; confirm the list or cancel the job first, then change "
+                           "the calibration")
         return job
 
-    def set_calibration(job_id, name, data):
+    def set_calibration(job_id, name, data, lidar_topic=None):
         from gator.stage_a import lidar_scale
 
         J = job_dir(job_id)
         calibration_job(J, job_id)
         if not data:
             raise Bad(400, "the calibration file is empty")
+        if lidar_topic:  # the LiDAR that the file's T is for
+            why = jobs.lidar_topic_error(read_json(J / "frames" / "topics.json") or {}, lidar_topic)
+            if why:
+                raise Bad(400, why)
         safe = jobs.safe_name(name)
         try:
             parsed = lidar_scale.read_calibration(data, safe)
@@ -741,12 +792,13 @@ def make_app(cfg, token, key_dir=None):
         with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
             f.write(data)
         os.replace(tmp, d / safe)
-        cal = {"name": safe, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), **parsed}
+        cal = {"name": safe, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+               "lidar_topic": lidar_topic or None, **parsed}
         jobs.update(J, calibration=cal)
         return calibration_summary(cal)
 
     @app.put("/api/jobs/{job_id}/calibration")
-    async def put_calibration(job_id: str, request: Request, name: str = ""):
+    async def put_calibration(job_id: str, request: Request, name: str = "", lidar_topic: str = ""):
         job_dir(job_id)
         if not 1 <= len(name) <= 200:
             raise Bad(400, "name the file: ?name=<file name>")
@@ -761,7 +813,7 @@ def make_app(cfg, token, key_dir=None):
             data += chunk
             if len(data) > MAX_CALIBRATION:
                 raise Bad(413, too_big)
-        return await run_in_threadpool(set_calibration, job_id, name, bytes(data))
+        return await run_in_threadpool(set_calibration, job_id, name, bytes(data), lidar_topic)
 
     @app.delete("/api/jobs/{job_id}/calibration")
     def delete_calibration(job_id: str):
@@ -831,8 +883,8 @@ def make_app(cfg, token, key_dir=None):
         if key is not None:
             check_key(key, agent)
         elif agent != "none" and not later and not runner.has_key(job_id, agent):
-            raise Bad(400, f"the server holds no {steps.PROVIDER[agent]} API key for this job (it restarted, or the "
-                           "agent changed); paste the key again")
+            raise Bad(400, f"the server holds no {steps.PROVIDER[agent]} API key for this job (it restarted, the agent "
+                           "changed, or the job finished, which drops the key); paste the key again")
         return key
 
     def asks(job_id, agent, later):
@@ -877,7 +929,17 @@ def make_app(cfg, token, key_dir=None):
         if first not in jobs.BUILD:
             raise Bad(400, f"from is frames or one of {jobs.BUILD}")
         changed = agent != steps.agent(job)  # the other agent's stage runs anew (Runner.resume)
-        if changed or job["stages"]["agent"]["status"] not in ("done", "skipped"):
+        # Runner.resume runs every stage again from a start at or before select, also from lidar when the
+        # calibration changed after the scale was found. A done agent stage then needs the key, and the job's
+        # LiDAR must pass the lidar stage's checks: the run deletes the results before that stage could fail.
+        stale = lidar_of(job) is not None and not steps.done("lidar", J)
+        if lidar_of(job) is not None and (stale or steps.NAMES.index(first) <= steps.NAMES.index("lidar")):
+            try:
+                jobs.lidar_settings(J, job, job.get("lidar"), read_bag=False)
+            except ValueError as e:
+                raise Bad(400, str(e)) from None
+        again = steps.NAMES.index(first) <= steps.NAMES.index(steps.REVIEW_AFTER) or stale
+        if changed or again or job["stages"]["agent"]["status"] not in ("done", "skipped"):
             key = held_key(job_id, b, agent, later)
         elif key is not None:
             check_key(key, agent)

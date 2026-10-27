@@ -18,13 +18,14 @@ import time
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
-import anthropic
-import httpx2
 import pytest
-from anthropic.types.beta import BetaMessage
 from PIL import Image
 
-from gator.agent import claude_agent as A
+anthropic = pytest.importorskip("anthropic")
+httpx2 = pytest.importorskip("httpx2")
+from anthropic.types.beta import BetaMessage  # noqa: E402
+
+from gator.agent import claude_agent as A  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 PROMPT = "Prompt 1, byte for byte: é\n"

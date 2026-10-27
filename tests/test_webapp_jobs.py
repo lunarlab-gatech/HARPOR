@@ -404,10 +404,10 @@ def test_lidar_stage_done_skip_guard_and_derived(tmp_path):
 
 
 def test_lidar_settings_and_the_build_that_stores_them(make_runner, tmp_path, monkeypatch):
-    """lidar_settings checks the LiDAR topic, the TF link or a calibration, and the intrinsics, with plain
-    reasons; submit_build stores what it gives, and a bad setting changes nothing."""
+    """lidar_settings checks the LiDAR topic, the TF link or a calibration (made for that topic), and the
+    intrinsics, with plain reasons; submit_build stores what it gives, and a bad setting changes nothing."""
     pytest.importorskip("rosbags")
-    from test_webapp_lidar import CAMERA, POINTS, T_CAM_LIDAR, upload, write_scene_bag
+    from test_webapp_lidar import CAMERA, LIVOX, POINTS, T_CAM_LIDAR, upload, write_scene_bag
 
     from gator.webapp import fake_steps, lidar, rosbag
 
@@ -467,6 +467,21 @@ def test_lidar_settings_and_the_build_that_stores_them(make_runner, tmp_path, mo
                                              "the calibration")
     upload(J2, {"T_cam_lidar": T_CAM_LIDAR.tolist(), "K": fake_steps.intrinsics(192, 128).tolist(),
                 "image_size": [192, 128]})
+    assert jobs.lidar_settings(J2, jobs.load(J2), on) == on
+    # A calibration uploaded for another LiDAR topic (its lidar_topic) is refused, also in submit_build's check
+    # under the lock; one for this topic passes, and one that names none (older jobs) is not checked.
+    cal = jobs.load(J2)["calibration"]
+    jobs.update(J2, calibration={**cal, "lidar_topic": LIVOX})
+    why = ("the calibration calib.json is for /livox/lidar, not /lidar/points; choose /livox/lidar, or upload a "
+           "calibration for /lidar/points")
+    assert reason(J2, jobs.load(J2), on) == why
+    with pytest.raises(ValueError) as e:
+        jobs.lidar_settings(J2, jobs.load(J2), on, read_bag=False)
+    assert str(e.value) == why
+    for topic in (POINTS, None):
+        jobs.update(J2, calibration={**cal, "lidar_topic": topic})
+        assert jobs.lidar_settings(J2, jobs.load(J2), on) == on, topic
+    jobs.update(J2, calibration=cal)
     assert jobs.lidar_settings(J2, jobs.load(J2), on) == on
     _, J3, raw = job_for(write_scene_bag(bags / "raw.bag", n=3, topic="/cam/image_raw", model="weird_model"),
                          topic="/cam/image_raw")
@@ -653,6 +668,7 @@ def test_agent_choice_reads_older_jobs():
 def test_check_anthropic_key(monkeypatch):
     """Opus keys are checked with the anthropic SDK (a stand-in client here); only the kind of error is
     reported, never its text, which could quote the key."""
+    pytest.importorskip("anthropic")  # the Claude client
     import anthropic
     import httpx2
 
@@ -694,6 +710,7 @@ def test_check_anthropic_key(monkeypatch):
 def test_a_key_of_the_other_provider_is_never_sent(monkeypatch):
     """A key pasted under the wrong agent is refused by its prefix before any request, so it never goes
     to the other company's API; fake mode applies the same rule."""
+    pytest.importorskip("anthropic")  # the Claude client
     import urllib.request
 
     import anthropic

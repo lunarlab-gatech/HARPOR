@@ -7,6 +7,7 @@ Each request goes to twin jobs, two copies of one job folder on one server: the 
 personal worker serves the other, with the user's session (supa.Store)."""
 
 import secrets
+import time
 
 import anyio
 import pytest
@@ -17,8 +18,9 @@ pytest.importorskip("cryptography")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import fake_supabase as fs  # noqa: E402
-from gator.webapp import jobs, relay  # noqa: E402
+from gator.webapp import jobs, relay, server, steps  # noqa: E402
 from test_webapp_server import HOSTILE_CONTINUE, hostile_overrides, hostile_start  # noqa: E402
+from test_webapp_server import calibration_yaml, scene_bag  # noqa: E402
 from test_webapp_worker import TOKEN, Server, machine, own_job, own_worker  # noqa: E402
 from test_webapp_worker import template, video  # noqa: E402, F401 (fixtures)
 
@@ -153,3 +155,60 @@ def test_relayed_requests_get_the_tunnel_answers(tmp_path, template):
                        "this job's input is not a rosbag", "the job does not wait for its part list"}, reasons
     assert len(refused) < 20  # most hostile bodies reach the worker, and server.py answers them
     assert OPUS not in str(fake.rows("requests"))
+
+
+def test_a_relayed_calibration_keeps_its_lidar_topic(tmp_path):
+    """A calibration upload from the public page names the LiDAR topic that it is for, as app.js sends it to the
+    tunnel (?lidar_topic=). The worker passes the topic on: both twins give the same answer and keep the same topic
+    in job.json, and a topic that is not one of the bag's LiDAR topics gets the server's refusal."""
+    from test_webapp_lidar import POINTS, T_CAM_LIDAR
+
+    d = tmp_path / "template"
+    cfg = steps.Config(G=d / "G", runs=d / "runs", fake=True)
+    with TestClient(server.make_app(cfg, TOKEN, key_dir=d / "keys")) as c:  # a bag that the frames stage analyzed
+        c.get(f"/?token={TOKEN}")
+        bag = scene_bag(d / "no_tf.bag", tf=None)
+        template = cfg.runs / c.put("/api/upload", params={"name": "no_tf.bag"}, content=bag.read_bytes()).json()["id"]
+        t0 = time.time()
+        while c.get(f"/api/jobs/{template.name}").json()["status"] != "ready":
+            assert time.time() - t0 < 60
+            time.sleep(0.1)
+    fake = fs.FakeSupabase()
+    srv = Server(tmp_path)
+    tlocal, _ = srv.clone(template)
+    wlocal, WJ = srv.clone(template)
+    user = fake.add_user("c@example.org", approved=True)
+    mid = machine(fake, user)
+    jid = own_job(fake, srv, wlocal, user, mid, name="no_tf.bag", kind="rosbag")
+    w = own_worker(srv, fake, user, mid)
+    tunnel, page = Tunnel(srv, tlocal, jid), RelayClient(fake, w, user, jid, WJ)
+    yaml = calibration_yaml(T_CAM_LIDAR)
+
+    async def both(query):
+        want = await anyio.to_thread.run_sync(lambda: tunnel.send("calibration_put", query=query, text=yaml))
+        got = await page.send("calibration_put", query=query, text=yaml)
+        assert got == want, query
+        return got
+
+    def topics():
+        return [(srv.job(local)["calibration"] or {}).get("lidar_topic") for local in (tlocal, wlocal)]
+
+    async def main():
+        await w.start()
+        try:
+            assert await both({"name": "calib.yaml", "lidar_topic": "/nope"}) == (
+                400, {"detail": "/nope is not a LiDAR topic of the bag; its LiDAR topics are /lidar/points"})
+            assert topics() == [None, None]  # nothing saved
+            status, summary = await both({"name": "calib.yaml", "lidar_topic": POINTS})
+            assert status == 200 and summary["lidar_topic"] == POINTS and topics() == [POINTS, POINTS]
+            assert (await both({"name": "calib.yaml"}))[1]["lidar_topic"] is None and topics() == [None, None]
+        finally:
+            await w.end()
+
+    try:
+        anyio.run(main)
+    finally:
+        srv.runner.shutdown(timeout=10)
+    assert [r["query"] for r in fake.rows("requests")] == [{"name": "calib.yaml", "lidar_topic": "/nope"},
+                                                          {"name": "calib.yaml", "lidar_topic": POINTS},
+                                                          {"name": "calib.yaml"}]

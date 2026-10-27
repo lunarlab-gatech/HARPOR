@@ -602,11 +602,18 @@ def test_decode_pointcloud2():
             assert np.abs(t - want).max() < 1000, (head, scale)
 
     def times(name, typ, values):
-        c = {"x": np.ones(3), "y": np.ones(3), "z": np.ones(3), name: values}
-        return R.decode_pointcloud2(m.cloud(ns, c, [("x", "f4", 0), ("y", "f4", 4), ("z", "f4", 8), (name, typ, 12)], 20))[1]
+        c = {"x": np.arange(1.0, 4.0), "y": np.ones(3), "z": np.ones(3), name: values}
+        layout = [("x", "f4", 0), ("y", "f4", 4), ("z", "f4", 8), (name, typ, 12)]
+        xyz, t, _, _ = R.decode_pointcloud2(m.cloud(ns, c, layout, 20))
+        assert t is None or len(t) == len(xyz)
+        return None if t is None else (xyz[:, 0].tolist(), (t - ns).tolist())
 
-    assert times("t", "u4", [0, 10**8, 3 * 10**8]) is None  # further than 0.2 s from the stamp
-    assert times("time", "f4", [0, np.nan, 0.1]) is None
+    # A 5 Hz scan stamped at its end: its times reach past 0.2 s before the stamp, and they are all kept.
+    assert times("time", "f4", [-0.21875, -0.125, 0.0]) == ([1, 2, 3], [-218_750_000, -125_000_000, 0])
+    # A time further than 0.5 s from the stamp, or NaN, drops only its own point; more than half of them, the times.
+    assert times("t", "u4", [0, 10**8, 6 * 10**8]) == ([1, 2], [0, 10**8])
+    assert times("time", "f4", [0, np.nan, 0.1]) == ([1, 3], [0, 100_000_001])
+    assert times("t", "u4", [0, 6 * 10**8, 7 * 10**8]) is None
     assert times("t", "f4", [0, 0.01, 0.02]) is None  # "t" must be uint32 ns
     assert times("timestamp", "f8", [1.0, 2.0, 3.0]) is None  # not near the stamp at all
     assert times("intensity", "f4", [0, 1, 2]) is None

@@ -413,7 +413,7 @@ drawer x3 &gt; cabinet body : prismatic</pre>
   <dt>scattered</dt>
   <dd>Its ratios spread too much: the middle half of them spans over 25% of its scale.</dd>
   <dt>few points</dt>
-  <dd>The view has under 30 points in its mask.</dd>
+  <dd>The view has under 30 points in its mask with a confident DA3 depth.</dd>
   <dt>no mask</dt>
   <dd>The view has no mask.</dd>
   <dt>no points</dt>
@@ -432,7 +432,8 @@ drawer x3 &gt; cabinet body : prismatic</pre>
 
 <h3>The link between LiDAR and camera</h3>
 <p>For a rosbag, choose the LiDAR topic. The line under it says how the LiDAR links to the camera: linked by
-  /tf_static (or /tf) with the chain of frames, Linked by the calibration, or No TF link: upload a calibration.</p>
+  /tf_static (or /tf) with the chain of frames, Linked by the calibration with the file's name (and the TF link that it
+  replaces, when the bag has one), or No TF link: upload a calibration.</p>
 <p>Upload calibration takes a .yaml, .yml or .json file, and it replaces the bag's TF. Its keys:</p>
 <dl>
   <dt><code>T_cam_lidar</code></dt>
@@ -445,7 +446,9 @@ drawer x3 &gt; cabinet body : prismatic</pre>
   <dt><code>K</code>, <code>D</code></dt>
   <dd>Optional: the camera's intrinsics and distortion. Without K, it comes from the bag's camera_info.</dd>
   <dt><code>time_offset_s</code></dt>
-  <dd>Optional: the LiDAR clock minus the camera clock, in seconds.</dd>
+  <dd>Optional: the LiDAR clock minus the camera clock, in seconds. Without it, the stage compares the two clocks
+    by the bag's log times and matches by log time when they differ. With it, the stage trusts the header stamps;
+    0 says that both sensors use the same clock.</dd>
 </dl>
 <pre>T_cam_lidar:
   - [0, -1, 0, 0.02]
@@ -455,10 +458,19 @@ drawer x3 &gt; cabinet body : prismatic</pre>
 camera_axes: optical
 time_offset_s: 0.0</pre>
 <p>Once the file is saved, the line under the button gives its name, the LiDAR's distance and turn from the camera,
-  where K comes from (the file or camera_info), Body axes when the file uses them, and the time offset. Replace
-  calibration and Remove change it.</p>
+  where K comes from (the file or camera_info), Body axes when the file uses them, and the time offset when the file
+  gives one (0 too). Replace calibration and Remove change it.</p>
+<p>The calibration is for the LiDAR topic that was chosen when you uploaded it. When you then choose another LiDAR
+  topic, the line under the topic says so, and Start is refused. Choose the calibration's topic, or upload a
+  calibration for the new topic.</p>
 <p>When you change the calibration after the scale was found, Retry starts from the lidar stage. In review, the panel
-  says Calibration changed, and Build finds the scale again, then stops in review.</p>
+  says Calibration changed, and Build finds the scale again, then stops in review. On a done job, a warning says that
+  the scale and the masses are out of date. Run lidar and later stages again runs the lidar stage and every stage
+  after it, GPU stages included, and replaces the results, so it asks first. With Review views before building on, it
+  stops in review after the views are selected.</p>
+<p>While a job with LiDAR waits for its part list, the calibration cannot change. Confirm the list (Build) or cancel
+  the job first. Run lidar and later stages again, and Retry from lidar, first check the job's LiDAR topic and its link
+  or calibration, and refuse to start when the lidar stage would fail, so the results stay.</p>
 
 <h3>When the scale fails</h3>
 <p>The LiDAR scale failed panel shows the lidar record with its check images, and LiDAR settings opens the LiDAR
@@ -487,12 +499,13 @@ time_offset_s: 0.0</pre>
 <p>A job with LiDAR shows the LiDAR points of each view in 3D, under Views used. View picks the view. When the scale
   fails, there are no views used yet. The tab then shows the points of every candidate view, named by its frame, so you
   can check the calibration.</p>
-<p>Gray points are the view's whole scan. For a rosbag, these are the LiDAR's points at the frame's time (within 50 ms,
-  or the nearest scan when the bag has no point times), also those outside the picture, thinned at random to at most
-  60,000. For a Stray capture, they are every depth pixel, also the doubtful ones.</p>
-<p>Blue points are the ones the scale used: inside the object's mask, not hidden behind nearer points, and with a
-  confident DA3 depth. A view marked outlier, scattered or few points was left out of the scale (see
-  <a href="#lidar">How the scale is found</a>).</p>
+<p>Gray points are the view's whole scan. For a rosbag, these are the LiDAR's points at the frame's time (within 50 to
+  100 ms: half the LiDAR's scan period, or the nearest scan when the bag has no point times), also those outside the
+  picture, thinned at random to at most 60,000. For a Stray capture, they are every depth pixel, also the doubtful
+  ones.</p>
+<p>Blue points are the ones the scale used: inside the object's mask, not hidden behind nearer points, with a
+  confident DA3 depth, and not far from the view's other points. A view marked outlier, scattered or few points was
+  left out of the scale (see <a href="#lidar">How the scale is found</a>).</p>
 <p>The view starts where the camera stood, so it looks like the photo. The small pyramid marks the camera. Drag to turn,
   and use the wheel or pinch to zoom. On a focused view, the arrow keys turn and + and - zoom. Reset goes back to the
   start.</p>
@@ -727,7 +740,8 @@ time_offset_s: 0.0</pre>
     stage, such as Retry from sam3d. Read input again means that the input was not read yet. Back to part list means
     that the job stopped before you confirmed its part list. After a change of the calibration, Retry starts from
     lidar. A done job whose 360 video failed shows Retry from turntable. It makes the video again and then
-    results.zip.</dd>
+    results.zip. A done job whose calibration changed after the build shows Run lidar and later stages again: see
+    <a href="#lidar">Metric scale and LiDAR</a>.</dd>
   <dt>Cancel job</dt>
   <dd>Stops the running stage. For the API key, see <a href="#agent">The agent and API keys</a>.</dd>
   <dt>Build again</dt>

@@ -104,7 +104,7 @@ class Skip(Exception):
 def build(route, local, body=None, query=None, text=None):
     """(method, path, content, headers) of the request to the inner app for a relayed route. The path comes
     from the route table and the local job id, never from user text; the calibration's file name goes in
-    the query string."""
+    the query string, with the LiDAR topic it was made for when the page names one (server.put_calibration)."""
     if route not in ROUTES:
         raise Refuse(400, "unknown request")
     if not isinstance(local, str) or not jobs.ID.fullmatch(local):
@@ -114,10 +114,12 @@ def build(route, local, body=None, query=None, text=None):
     if kind == "json":
         content, headers = json.dumps(body or {}).encode(), {"Content-Type": "application/json"}
     elif kind == "text":
-        name = (query or {}).get("name")
+        name, topic = (query or {}).get("name"), (query or {}).get("lidar_topic")
         if not isinstance(name, str):
             raise Refuse(400, "name the file: ?name=<file name>")
-        path += "?" + urlencode({"name": name})
+        if topic is not None and not isinstance(topic, str):
+            raise Refuse(400, "the LiDAR topic is not text")
+        path += "?" + urlencode({"name": name, **({"lidar_topic": topic} if topic else {})})
         content, headers = (text or "").encode("utf-8"), {"Content-Type": "application/octet-stream"}
     return method, path, content, headers
 

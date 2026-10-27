@@ -141,6 +141,7 @@ def test_token_gate(client):
     assert "httponly" in cookie and "samesite=strict" in cookie
     assert "/static/app.js" in c.get("/").text and c.get("/static/app.js").status_code == 200
     assert c.get("/api/jobs").json() == [] and c.get("/api/jobs/20260101-000000-abcdef").status_code == 404
+    c.cookies.clear()  # newer starlette sets the login cookie for its own domain: a second set() would not replace it
     c.cookies.set(server.COOKIE, "wrong")
     assert c.get("/api/jobs").status_code == 401
 
@@ -450,7 +451,7 @@ def test_calibration_upload_and_the_lidar_start(client, tmp_path):
     angle = np.degrees(np.arccos((np.trace(T_CAM_LIDAR[:3, :3]) - 1) / 2))
     assert summary == {"name": "my_calib.json", "bytes": len(good), "translation_m": round(np.linalg.norm(T_CAM_LIDAR[:3, 3]), 4),
                        "rotation_deg": pytest.approx(angle, abs=0.01), "has_intrinsics": False, "camera_axes": "optical",
-                       "time_offset_s": 0.0}
+                       "time_offset_s": None, "lidar_topic": None}  # the file gives no time offset, the upload no topic
     f = J / "lidar" / "calibration" / "my_calib.json"
     assert f.read_text() == good and stat.S_IMODE(f.stat().st_mode) == 0o600
     assert stat.S_IMODE((J / "lidar").stat().st_mode) == stat.S_IMODE(f.parent.stat().st_mode) == 0o700
@@ -512,6 +513,206 @@ def test_calibration_upload_and_the_lidar_start(client, tmp_path):
     lid = c.get(f"/api/jobs/{job_id}/selection").json()["lidar"]
     assert lid["ok"] and lid["calibration_changed"] is False and lid["s"] == pytest.approx(1.25, rel=0.02)
     assert c.get(f"/api/jobs/{job_id}/file/pool/lidar.json").json()["extrinsic"]["file"] == "calib.yaml"
+
+
+def calibration_yaml(T, extra=""):
+    """A calibration file that gives T as T_cam_lidar, with extra lines after it."""
+    return "T_cam_lidar:\n" + "".join(f"  - [{', '.join(f'{x:.12f}' for x in row)}]\n" for row in T) + extra
+
+
+def test_a_calibration_is_for_its_lidar_topic(client, tmp_path):
+    """The upload names the LiDAR topic that the file is for (lidar_topic, one of the bag's); job.json and the
+    summary keep it, and a Start with another LiDAR topic is refused with both topics named."""
+    from test_webapp_lidar import POINTS, T_CAM_LIDAR
+
+    bag = scene_bag(tmp_path / "no_tf.bag", tf=None)
+    c, cfg = client
+    login(c)
+    job_id = c.put("/api/upload", params={"name": "no_tf.bag"}, content=bag.read_bytes()).json()["id"]
+    J = cfg.runs / job_id
+    job = wait(c, job_id, "ready", "failed")
+    assert job["status"] == "ready", job["error"]
+    url, yaml = f"/api/jobs/{job_id}/calibration", calibration_yaml(T_CAM_LIDAR)
+    for topic, why in (("/nope", "/nope is not a LiDAR topic of the bag; its LiDAR topics are /lidar/points"),
+                       ("/cam/image_rect", "/cam/image_rect is not a LiDAR topic of the bag; its LiDAR topics are /lidar/points")):
+        r = c.put(url, params={"name": "calib.yaml", "lidar_topic": topic}, content=yaml)
+        assert (r.status_code, r.json()["detail"]) == (400, why), topic
+    assert jobs.load(J)["calibration"] is None and not (J / "lidar").exists()
+    r = c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=yaml)
+    assert r.status_code == 200 and r.json()["lidar_topic"] == POINTS
+    assert jobs.load(J)["calibration"]["lidar_topic"] == POINTS and c.get(f"/api/jobs/{job_id}").json()["calibration"] == r.json()
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": ""}, content=yaml).json()["lidar_topic"] is None  # none chosen
+
+    # A second LiDAR topic, such as a depth camera's points: the calibration for /lidar/points is not for them.
+    found = json.loads((J / "frames" / "topics.json").read_text())
+    found["lidar"].append({**found["lidar"][0], "topic": "/depth/points", "frame_id": "depth_optical_frame"})
+    (J / "frames" / "topics.json").write_text(json.dumps(found))
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=yaml).status_code == 200
+    start = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": False, "agent": "none"}
+    r = c.post(f"/api/jobs/{job_id}/start", json={**start, "lidar": {"topic": "/depth/points"}})
+    assert (r.status_code, r.json()["detail"]) == (400, "the calibration calib.yaml is for /lidar/points, not /depth/points; "
+                                                        "choose /lidar/points, or upload a calibration for /depth/points")
+    assert jobs.load(J)["status"] == "ready" and jobs.load(J)["lidar"] is None
+
+    # A calibration stored before lidar_topic was (an older job) holds time_offset_s 0.0 also when its file
+    # gives none. The lidar stage reads the file, so the summary takes the offset from the file too.
+    for extra, offset in (("", None), ("time_offset_s: 0\n", 0.0)):
+        assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS},
+                     content=calibration_yaml(T_CAM_LIDAR, extra)).json()["time_offset_s"] == offset
+        old = {k: v for k, v in jobs.load(J)["calibration"].items() if k != "lidar_topic"}
+        jobs.update(J, calibration={**old, "time_offset_s": 0.0})
+        assert c.get(f"/api/jobs/{job_id}").json()["calibration"]["time_offset_s"] == offset, extra
+
+
+def test_the_calibration_cannot_change_while_the_part_list_waits(client, tmp_path):
+    """While a job with LiDAR waits for its part list, a calibration upload or delete is refused (409, with
+    what to do): the new scale would block the list's confirmation. Confirm then goes on. A job without LiDAR
+    has no scale to block it, so its calibration can change while its list waits (for a build with LiDAR)."""
+    from test_webapp_lidar import POINTS, T_CAM_LIDAR
+
+    bag = scene_bag(tmp_path / "scene.bag")
+    c, cfg = client
+    login(c)
+    job_id = c.put("/api/upload", params={"name": "scene.bag"}, content=bag.read_bytes()).json()["id"]
+    J = cfg.runs / job_id
+    assert wait(c, job_id, "ready", "failed")["status"] == "ready"
+    url = f"/api/jobs/{job_id}/calibration"
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=calibration_yaml(T_CAM_LIDAR)).status_code == 200
+    opus = "sk-ant-test-" + secrets.token_hex(16)
+    r = c.post(f"/api/jobs/{job_id}/start", json={**ARTICULATED, "agent": "opus", "api_key": opus, "parts_mode": "vlm_edit",
+                                                  "lidar": {"topic": POINTS}})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "review", "failed")
+    assert job["status"] == "review" and job["parts_review"] is True, job["error"]
+    assert job["stages"]["lidar"]["status"] == "done" and job["lidar_current"] is True
+    why = "the job waits for its part list; confirm the list or cancel the job first, then change the calibration"
+    for refused in (c.put(url, params={"name": "other.yaml", "lidar_topic": POINTS}, content=calibration_yaml(np.eye(4))),
+                    c.delete(url)):
+        assert (refused.status_code, refused.json()["detail"]) == (409, why)
+    assert jobs.load(J)["calibration"]["name"] == "calib.yaml" and [p.name for p in (J / "lidar" / "calibration").iterdir()] == \
+        ["calib.yaml"]
+    proposal = c.get(f"/api/jobs/{job_id}/parts").json()["proposal"]["parts"]
+    assert c.post(f"/api/jobs/{job_id}/parts", json={"parts": proposal}).json() == {"status": "queued", "from": "parts"}
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done" and job["lidar_current"] is True, job["error"]
+    # Once the list is confirmed (here: the job is done), the calibration can change again.
+    assert c.delete(url).json() == {"calibration": None}
+
+    job_id = c.put("/api/upload", params={"name": "scene.bag"}, content=bag.read_bytes()).json()["id"]
+    assert wait(c, job_id, "ready", "failed")["status"] == "ready"
+    r = c.post(f"/api/jobs/{job_id}/start", json={**ARTICULATED, "agent": "opus", "api_key": opus, "parts_mode": "vlm_edit"})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "review", "failed")
+    assert job["parts_review"] is True and job["lidar"] is None, job["error"]
+    url = f"/api/jobs/{job_id}/calibration"
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=calibration_yaml(T_CAM_LIDAR)).status_code == 200
+    assert c.delete(url).status_code == 200
+    proposal = c.get(f"/api/jobs/{job_id}/parts").json()["proposal"]["parts"]
+    assert c.post(f"/api/jobs/{job_id}/parts", json={"parts": proposal}).json() == {"status": "queued", "from": "parts"}
+    assert wait(c, job_id, "done", "failed")["status"] == "done"
+
+
+def test_a_done_job_says_when_its_scale_is_stale(client, tmp_path):
+    """GET /api/jobs/{id} "lidar_current": null without LiDAR or before the lidar stage is done; true while the
+    scale was found with the job's calibration; false after a delete or an upload, also of a file of the same
+    name with new content (steps.done compares the sha256). A continue from lidar on the done job finds the scale
+    again with the new file, and the job is done again."""
+    from test_webapp_lidar import POINTS, T_CAM_LIDAR
+
+    bag = scene_bag(tmp_path / "no_tf.bag", tf=None)
+    c, cfg = client
+    login(c)
+    job_id = c.put("/api/upload", params={"name": "no_tf.bag"}, content=bag.read_bytes()).json()["id"]
+    J = cfg.runs / job_id
+    job = wait(c, job_id, "ready", "failed")
+    assert job["status"] == "ready" and job["lidar_current"] is None, job["error"]
+    url, first = f"/api/jobs/{job_id}/calibration", calibration_yaml(T_CAM_LIDAR)
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=first).status_code == 200
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": True,
+                                                  "agent": "none", "lidar": {"topic": POINTS}})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done" and job["lidar_current"] is True, job["error"]
+
+    # The same name with new content: here an offset of 0, which is a given value (the header clocks are one).
+    second = calibration_yaml(T_CAM_LIDAR, "time_offset_s: 0\n")
+    r = c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=second)
+    assert r.json()["time_offset_s"] == 0
+    job = c.get(f"/api/jobs/{job_id}").json()
+    assert (job["calibration"]["name"], job["lidar_current"]) == ("calib.yaml", False)
+    assert c.delete(url).status_code == 200 and c.get(f"/api/jobs/{job_id}").json()["lidar_current"] is False
+    # Without the calibration the bag has no TF link: a run from lidar would delete the results, then fail there.
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "lidar"})
+    assert (r.status_code, r.json()["detail"]) == (400, "the bag's TF does not link camera_optical_frame to lidar; upload "
+                                                        "the calibration")
+    job = c.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "done" and "results.zip" in job["files"]
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=first).status_code == 200
+    assert c.get(f"/api/jobs/{job_id}").json()["lidar_current"] is True  # the file that the scale was found with
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=second).status_code == 200
+
+    # The page's button: lidar and every stage after it run again (auto_continue: no stop in review).
+    assert c.post(f"/api/jobs/{job_id}/continue", json={"from": "lidar"}).json() == {"status": "queued", "from": "lidar"}
+    job = wait(c, job_id, "done", "failed", "review")
+    assert job["status"] == "done" and job["lidar_current"] is True, job["error"]
+    assert job["stages"]["sam3d"]["status"] == "done" and "results.zip" in job["files"]
+    rec = c.get(f"/api/jobs/{job_id}/file/pool/lidar.json").json()
+    assert rec["extrinsic"]["calibration_sha256"] == hashlib.sha256(second.encode()).hexdigest()
+    assert c.get(f"/api/jobs/{job_id}/file/logs/lidar.log").text.count("== lidar ") == 2
+
+    # A job without LiDAR has no lidar_current, nor has one whose lidar stage failed (no scan within the read span).
+    vid = uploaded(c, tmp_path)
+    assert c.get(f"/api/jobs/{vid}").json()["lidar_current"] is None
+    late = scene_bag(tmp_path / "late.bag", lidar_late_s=30.0)
+    job_id = c.put("/api/upload", params={"name": "late.bag"}, content=late.read_bytes()).json()["id"]
+    assert wait(c, job_id, "ready", "failed")["status"] == "ready"
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": True,
+                                                  "agent": "none", "lidar": {"topic": POINTS}})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "failed", "done")
+    assert job["stages"]["lidar"]["status"] == "failed" and job["lidar"] and job["lidar_current"] is None
+
+
+def test_a_run_again_from_lidar_needs_the_key(client, tmp_path):
+    """A done job no longer holds its key, and a run that starts at or before the agent stage runs that stage
+    again. A continue from lidar, or from a later stage while the calibration changed after the scale was found
+    (Runner.resume then starts from lidar), needs the key before any stage runs. Before, it went on and the job
+    stopped at the agent stage, saying that the server had restarted."""
+    from test_webapp_lidar import POINTS, T_CAM_LIDAR
+
+    bag = scene_bag(tmp_path / "scene.bag")
+    c, cfg = client
+    login(c)
+    job_id = c.put("/api/upload", params={"name": "scene.bag"}, content=bag.read_bytes()).json()["id"]
+    assert wait(c, job_id, "ready", "failed")["status"] == "ready"
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": True,
+                                                  "agent": "astra", "api_key": KEY, "lidar": {"topic": POINTS}})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done" and job["lidar_current"] is True and not job["key_ok"], job["error"]
+    # The scale is current. A run from select or before runs every stage again, the agent's too: it needs the
+    # key. From later on, Runner.resume skips the stages that are done, so no key: nothing runs again.
+    for first in ("lidar", "select"):
+        r = c.post(f"/api/jobs/{job_id}/continue", json={"from": first})
+        assert r.status_code == 400 and "holds no OpenAI API key" in r.json()["detail"], (first, r.text)
+        assert "the job finished, which drops the key" in r.json()["detail"]
+    for first in ("sam3d", "agent", "turntable"):
+        r = c.post(f"/api/jobs/{job_id}/continue", json={"from": first})
+        assert r.json() == {"status": "queued", "from": first}, (first, r.text)
+        job = wait(c, job_id, "done", "failed", "review")
+        assert job["status"] == "done" and job["warnings"] == [], (first, job)
+    url = f"/api/jobs/{job_id}/calibration"
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS},
+                 content=calibration_yaml(T_CAM_LIDAR)).status_code == 200
+    assert c.get(f"/api/jobs/{job_id}").json()["lidar_current"] is False
+    for first in ("lidar", "urdf"):  # urdf: the stale scale moves the start back to lidar
+        r = c.post(f"/api/jobs/{job_id}/continue", json={"from": first})
+        assert r.status_code == 400 and "holds no OpenAI API key" in r.json()["detail"], (first, r.text)
+    assert c.get(f"/api/jobs/{job_id}").json()["status"] == "done"  # nothing ran
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "lidar", "api_key": KEY})
+    assert r.json() == {"status": "queued", "from": "lidar"}, r.text
+    job = wait(c, job_id, "done", "failed", "review")
+    assert job["status"] == "done" and job["lidar_current"] is True and job["warnings"] == [], job
 
 
 def test_fake_rosbag_job_with_lidar_end_to_end(client, tmp_path):
@@ -2057,7 +2258,8 @@ def test_app_js_lidar_box_per_kind():
     video (null); a bag with one LiDAR topic preselects it, and its TF chain shows; a bag with two asks for
     one and says when TF does not link it; a bag without LiDAR topics, or listed before they were, has the
     box turned off with the reason (the box's hint says nothing else); a Stray capture starts with LiDAR on, and
-    its turn and depth show."""
+    its turn and depth show. A calibration links the topics in place of TF, and the line names it and the TF link
+    it replaces; a calibration made for another LiDAR topic is a warning (one without lidar_topic is not checked)."""
     static_tf = [{"parent": "base_link", "child": "camera_link", "static": True, "T_parent_child": EYE},
                  {"parent": "camera_link", "child": "camera_optical_frame", "static": True, "T_parent_child": EYE},
                  {"parent": "base_link", "child": "livox_frame", "static": True, "T_parent_child": EYE},
@@ -2075,17 +2277,23 @@ def test_app_js_lidar_box_per_kind():
     stray_video = {"kind": "stray", "rotation": 270, "rotation_source": "gravity", "container_rotation": 0, "n_depth": 19,
                    "n_confidence": 19, "n_odometry": 20, "depth_size": [256, 192], "upright_agreement": 0.9583,
                    "warnings": ["1 of the 20 frames have no depth image, so they have no LiDAR samples"]}
-    replies = {f"/api/jobs/{i}/frames": frames_meta() for i in ("v", "b1", "b2", "b3", "b4", "b5", "b6")}
+    replies = {f"/api/jobs/{i}/frames": frames_meta() for i in ("v", "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8")}
     replies.update({f"/api/jobs/{i}/file/frames/topics.json": t for i, t in topics.items()})
     replies.update({"/api/jobs/b3/file/frames/topics.json": topics["b2"], "/api/jobs/b6/file/frames/topics.json": topics["b5"],
+                    "/api/jobs/b7/file/frames/topics.json": topics["b1"], "/api/jobs/b8/file/frames/topics.json": topics["b2"],
                     "/api/jobs/s1/frames": frames_meta(**stray_video),
                     "/api/jobs/s2/frames": frames_meta(**{**stray_video, "rotation": 0, "upright_agreement": None, "warnings": []})})
     job = {"status": "ready", "mode": "auto", "picks": [], "n_views": 4, "auto_continue": True, "agent": "none",
            "prompt": None, "lidar": None, "calibration": None}
     bag = {**job, "kind": "rosbag", "source": {"kind": "rosbag", "topic": CAM}}
+    cal = {"name": "c.yaml", "bytes": 300, "translation_m": 0.1, "rotation_deg": 90.0, "has_intrinsics": False,
+           "camera_axes": "optical", "time_offset_s": None, "lidar_topic": "/livox/lidar"}
     jobs_ = {"v": {**job, "kind": "video", "source": {"kind": "video", "topic": None}}, "b1": bag, "b2": bag,
              "b3": {**bag, "lidar": {"kind": "rosbag", "topic": "/livox/lidar"}}, "b4": bag, "b5": bag,
              "b6": {**bag, "status": "done"},
+             # A calibration made for the Livox (server.calibration_summary), where TF links it too.
+             "b7": {**bag, "lidar": {"kind": "rosbag", "topic": "/livox/lidar"}, "calibration": cal},
+             "b8": {**bag, "lidar": {"kind": "rosbag", "topic": "/livox/lidar"}, "calibration": cal},
              "s1": {**job, "kind": "stray", "source": {"kind": "stray", "topic": None}, "lidar": {"kind": "stray"}},
              "s2": {**job, "kind": "stray", "source": {"kind": "stray", "topic": None}}}
     out = run_form_js("""
@@ -2160,6 +2368,15 @@ def test_app_js_lidar_box_per_kind():
             await loadTopics(read);
             out["table_" + id] = texts.filter((t) => t === "Use" || t === "in use");
           }
+          await open("b7");
+          out.b7 = box();
+          await open("b8");
+          out.b8 = { livox: box() };
+          choose("/lidar/points");
+          out.b8.cloud = box();
+          V.job.calibration = { ...V.job.calibration, lidar_topic: null };  // an older job's, or one uploaded before a topic
+          lidarToggle();
+          out.b8.any = box();
           console.log(JSON.stringify(out));
         })()
         """, replies)
@@ -2210,24 +2427,43 @@ def test_app_js_lidar_box_per_kind():
     # Only a bag's frames load its topics.json, once per load.
     assert out["topics"] == ["b1", "b2", "b3", "b4", "b5", "b6", "b1"]
     assert out["table_b5"] == ["Use"] and out["table_b1"] == ["in use"]
+    # The calibration links the topics, and it replaces the bag's TF link.
+    assert (out["b7"]["on"], out["b7"]["warn"]) == (True, False)
+    assert out["b7"]["link"] == ("Linked by the calibration c.yaml (it replaces /tf_static: camera_optical_frame <- camera_link <- "
+                                 "base_link <- livox_frame)")
+    b8 = out["b8"]
+    assert (b8["livox"]["link"], b8["livox"]["warn"]) == (
+        "Linked by the calibration c.yaml (it replaces /tf: camera_optical_frame <- base_link <- livox_frame)", False)
+    assert (b8["cloud"]["link"], b8["cloud"]["warn"]) == (
+        "The calibration c.yaml is for /livox/lidar: choose that topic, or upload a calibration for /lidar/points", True)
+    assert (b8["any"]["link"], b8["any"]["warn"]) == ("Linked by the calibration c.yaml", False)
 
 
 def test_app_js_calibration_upload():
-    """The calibration uploads as soon as it is chosen: the box shows the server's summary, or its reason
-    for refusing the file; Remove deletes it. The status line says when it worked. The upload, Start, Retry
-    and Build wait for the request, and the focus comes back (to the upload after a Remove). In review, the
-    scale's summary says when it is stale."""
+    """The calibration uploads as soon as it is chosen, with the LiDAR topic chosen (empty when none is): the box
+    shows the server's summary, or its reason for refusing the file (also while the part list waits); Remove
+    deletes it. The status line says when it worked. The upload, Start, Retry and Build wait for the request, and
+    the focus comes back (to the upload after a Remove). A time offset shows when the file gives one, 0 too. In
+    review, the scale's summary says when it is stale."""
     found = {"topics": [camera_entry({"/lidar/points": None})], "skipped": [], "lidar": [CLOUD], "lidar_skipped": [], "tf": []}
+    # my calib.json gives no time offset.
     summary = {"name": "my_calib.json", "bytes": 412, "translation_m": 0.1234, "rotation_deg": 120.0, "has_intrinsics": False,
-               "camera_axes": "optical", "time_offset_s": 0.0}
+               "camera_axes": "optical", "time_offset_s": None, "lidar_topic": "/lidar/points"}
     lid = {"ok": True, "s": 1.25, "reason": None, "spread_rel": 0.004, "warnings": [], "views": [], "calibration_changed": False,
            "counts": {"views": 6, "views_used": 6}, "check_dir": "lidar/check"}
-    replies = {"/api/jobs/b/calibration?name=my%20calib.json": summary,
-               "/api/jobs/b/calibration?name=bad.yaml": {"__status": 400,
-                                                         "detail": "T_cam_lidar has 3 numbers; give a 4x4 matrix or 16 numbers"},
+    put = "/api/jobs/b/calibration?name="
+    waits = "the job waits for its part list; confirm the list or cancel the job first, then change the calibration"
+    replies = {put + "my%20calib.json&lidar_topic=%2Flidar%2Fpoints": summary,
+               put + "bad.yaml&lidar_topic=%2Flidar%2Fpoints": {"__status": 400,
+                                                                "detail": "T_cam_lidar has 3 numbers; give a 4x4 matrix or 16 numbers"},
+               put + "late.yaml&lidar_topic=%2Flidar%2Fpoints": {"__status": 409, "detail": waits},
                "/api/jobs/b/calibration": {"calibration": None},
-               "/api/jobs/b/calibration?name=k.yaml": {**summary, "name": "k.yaml", "has_intrinsics": True,
-                                                       "camera_axes": "body", "time_offset_s": 0.02},
+               put + "k.yaml&lidar_topic=%2Flidar%2Fpoints": {**summary, "name": "k.yaml", "has_intrinsics": True,
+                                                              "camera_axes": "body", "time_offset_s": 0.02},
+               put + "zero.yaml&lidar_topic=%2Flidar%2Fpoints": {**summary, "name": "zero.yaml", "time_offset_s": 0},
+               put + "any.yaml&lidar_topic=": {**summary, "name": "any.yaml", "lidar_topic": None},
+               # The public site, while the job's machine has not taken the request yet (supa.js relay).
+               put + "wait.yaml&lidar_topic=%2Flidar%2Fpoints": {"__status": 202, "status": "pending", "request": 7},
                "/api/jobs/b/selection": {"lidar": {**lid, "calibration_changed": True}}}
     out = run_form_js("""
         (async () => {
@@ -2253,6 +2489,8 @@ def test_app_js_calibration_upload():
           out.good = box();
           await pick("bad.yaml");
           out.bad = box();
+          await pick("late.yaml");
+          out.late = box();
           out.job = V.job.calibration.name;
           document.activeElement = $("#calremove");
           await $("#calremove").onclick();
@@ -2262,6 +2500,12 @@ def test_app_js_calibration_upload():
           out.focused = focused.splice(0);
           await pick("k.yaml");
           out.k = box().sum;
+          await pick("zero.yaml");
+          out.zero = box().sum;
+          $("#lidartopic").value = "";  // no topic chosen
+          await pick("any.yaml");
+          out.any = [box().link, V.job.calibration.lidar_topic];
+          $("#lidartopic").value = "/lidar/points";
           Object.assign($("#prompt"), { value: "box" });
           Object.assign($("#nviews"), { value: "4" });
           await $("#startform").onsubmit({ preventDefault() {} });
@@ -2274,27 +2518,43 @@ def test_app_js_calibration_upload():
           out.review = [...texts];
           out.requests = requests.filter((r) => r.url.includes("/calibration") || r.url.endsWith("/selection"))
             .map((r) => r.method + " " + r.url);
+          // A pending answer saved nothing yet: the box keeps the saved calibration.
+          V.sel = null;
+          $("#review").hidden = true;
+          const saved = box();
+          await pick("wait.yaml");
+          out.pending = [saved, box(), V.job.calibration.name];
           console.log(JSON.stringify(out));
         })()
         """, replies)
     assert out["before"] == {"link": "No TF link: upload a calibration", "warn": True, "sum": None, "btn": "Upload calibration",
                              "remove": True, "msg": "", "bad": False}
     assert out["cleared"] == ""  # the same file can be chosen again
-    assert out["good"] == {"link": "Linked by the calibration", "warn": False, "remove": False, "msg": "Saved my_calib.json.",
-                           "bad": False, "btn": "Replace calibration", "sum": "my_calib.json: 12.3 cm, 120.0°. K from camera_info."}
+    assert out["good"] == {"link": "Linked by the calibration my_calib.json", "warn": False, "remove": False,
+                           "msg": "Saved my_calib.json.", "bad": False, "btn": "Replace calibration",
+                           "sum": "my_calib.json: 12.3 cm, 120.0°. K from camera_info."}
     # A refused file changes nothing on the server: the summary stays, and the reason shows.
     assert out["bad"] == {**out["good"], "msg": "T_cam_lidar has 3 numbers; give a 4x4 matrix or 16 numbers", "bad": True}
+    assert out["late"] == {**out["good"], "msg": waits, "bad": True}
     assert out["job"] == "my_calib.json"
     assert out["removed"] == {**out["before"], "msg": "Removed."}
-    assert out["during"] == [[True] * 5] * 3 and out["after"] == [False] * 5
+    # The requests: the uploads, the delete, and after each change of a failed job its lidar_current (GET /api/jobs/b).
+    assert out["during"] == [[True] * 5] * 6 and out["after"] == [False] * 5
     # The upload keeps the focus; Remove hides after a delete, so the upload button takes it.
-    assert out["focused"] == ["#calfile", "#calfile", "#calfile"]
+    assert out["focused"] == ["#calfile"] * 4
     assert out["k"] == "k.yaml: 12.3 cm, 120.0°. K from file. Body axes. Offset 0.02 s."
+    assert out["zero"] == "zero.yaml: 12.3 cm, 120.0°. K from camera_info. Offset 0 s."  # the two header clocks are one
     assert out["sent"] == {"topic": "/lidar/points"}
     assert "Calibration changed. Build finds the scale again, then stops here." in out["review"]
-    assert out["requests"] == ["PUT /api/jobs/b/calibration?name=my%20calib.json", "PUT /api/jobs/b/calibration?name=bad.yaml",
-                               "DELETE /api/jobs/b/calibration", "PUT /api/jobs/b/calibration?name=k.yaml",
-                               "PUT /api/jobs/b/calibration?name=my%20calib.json", "GET /api/jobs/b/selection"]
+    assert out["any"] == ["", None]  # no topic chosen: no link line, and the calibration names no topic
+    topic = "&lidar_topic=%2Flidar%2Fpoints"
+    assert out["requests"] == ["PUT " + put + "my%20calib.json" + topic, "PUT " + put + "bad.yaml" + topic,
+                               "PUT " + put + "late.yaml" + topic, "DELETE /api/jobs/b/calibration",
+                               "PUT " + put + "k.yaml" + topic, "PUT " + put + "zero.yaml" + topic,
+                               "PUT " + put + "any.yaml&lidar_topic=", "PUT " + put + "my%20calib.json" + topic,
+                               "GET /api/jobs/b/selection"]
+    saved, pending, name = out["pending"]
+    assert pending == {**saved, "msg": "Sent. The job's machine has not saved it yet."} and name == "my_calib.json"
 
 
 LIDAR_VIEWS = [{"name": "f00003", "s": 1.0498, "points_used": 280, "status": "used"},
@@ -2574,9 +2834,9 @@ def test_app_js_lidar_failure_panel():
 
 def test_app_js_changed_calibration_retries_from_lidar():
     """A failed or cancelled bag job whose scale was found with another calibration: the server retries from
-    lidar (Runner.resume), so Retry says so and sends from lidar. The page learns it from /selection's
-    calibration_changed after a load or an upload, or, without a selection, from pool/lidar.json's calibration
-    file. A reply that starts earlier than asked is shown."""
+    lidar (Runner.resume), so Retry says so and sends from lidar. The page learns it from the job's lidar_current
+    (false: stale) after a load and after an upload or a delete, which fetch the job again. A reply that starts
+    earlier than asked is shown."""
     stages = [{"name": n, "status": "done"} for n in ("topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select")] + [
         {"name": "sam3d", "status": "failed"}] + [{"name": n, "status": "pending"} for n in ("place", "propose", "parts", "agent")]
     job = {"id": "c", "kind": "rosbag", "status": "failed", "video": {"name": "scan.bag"}, "prompt": "box", "current": None,
@@ -2584,21 +2844,21 @@ def test_app_js_changed_calibration_retries_from_lidar():
            "parts_mode": "vlm", "parts_review": False, "mode": "auto", "picks": [], "view0": None, "n_views": 4,
            "auto_continue": True, "parts": {}, "calibration": None, "lidar": {"kind": "rosbag", "topic": "/lidar/points"},
            "source": {"kind": "rosbag", "topic": CAM}, "files": ["selection.json", "pool/lidar.json"], "progress": stages,
-           "stages": {x["name"]: {"status": x["status"]} for x in stages}}
+           "stages": {x["name"]: {"status": x["status"]} for x in stages}, "lidar_current": True}
     found = {"topics": [camera_entry({"/lidar/points": None})], "skipped": [], "lidar": [CLOUD], "lidar_skipped": [], "tf": []}
     summary = {"name": "c.yaml", "bytes": 300, "translation_m": 0.1, "rotation_deg": 90.0, "has_intrinsics": False,
-               "camera_axes": "optical", "time_offset_s": 0.0}
-    replies = {"/api/jobs/c": job, "/api/jobs/c/frames": frames_meta(), "/api/jobs/c/file/frames/topics.json": found,
-               "/api/jobs/c/calibration?name=c.yaml": summary, "/api/jobs/c/calibration": {"calibration": None},
-               "/api/jobs/c/continue": {"status": "queued", "from": "lidar"}}
+               "camera_axes": "optical", "time_offset_s": None, "lidar_topic": "/lidar/points"}
+    replies = {"/api/jobs/c/frames": frames_meta(), "/api/jobs/c/file/frames/topics.json": found,
+               "/api/jobs/c/calibration?name=c.yaml&lidar_topic=%2Flidar%2Fpoints": summary,
+               "/api/jobs/c/calibration": {"calibration": None}, "/api/jobs/c/continue": {"status": "queued", "from": "lidar"}}
     out = run_form_js("""
         (async () => {
-          // /selection and pool/lidar.json as the server has them now.
-          let stale = false, ext = null;
+          // The job as the server has it now: lidar_current is false while the scale is stale.
+          let stale = false;
+          const J = """ + json.dumps(job) + """;
           const fetch0 = fetch, reply = (x) => Promise.resolve({ ok: true, status: 200, json: async () => x });
-          globalThis.fetch = (url, opt) => url === "/api/jobs/c/selection" ? reply({ lidar: { ok: true, calibration_changed: stale } })
-            : url === "/api/jobs/c/file/pool/lidar.json" ? reply({ ok: true, extrinsic: ext })
-              : url.includes("/file/logs/") ? Promise.resolve({ ok: false, status: 404, text: async () => "" }) : fetch0(url, opt);
+          globalThis.fetch = (url, opt) => url === "/api/jobs/c" ? reply({ ...J, lidar_current: !stale })
+            : url.includes("/file/logs/") ? Promise.resolve({ ok: false, status: 404, text: async () => "" }) : fetch0(url, opt);
           const page = () => [$("#retry").textContent, $("#jnext").textContent];
           const out = {};
           $("#log").textContent = "a log";
@@ -2626,18 +2886,10 @@ def test_app_js_changed_calibration_retries_from_lidar():
           posts.length = 0;
           await $("#retry").onclick();
           out.asked = [posts[0].body.from, $("#runmsg").textContent];
-          // Without a selection: pool/lidar.json's calibration file against the job's.
-          const J = """ + json.dumps(job) + """, nosel = { ...J, files: ["pool/lidar.json"] }, tf = { source: "tf" };
-          const cal = (name) => ({ source: "calibration", file: name });
-          out.bylidar = [];
-          for (const [e, c] of [[tf, null], [cal("a.yaml"), null], [cal("a.yaml"), "a.yaml"], [cal("a.yaml"), "b.yaml"], [tf, "a.yaml"]]) {
-            ext = e;
-            out.bylidar.push(await scaleStale({ ...nosel, calibration: c && { name: c } }));
-          }
-          ext = tf;
-          out.never = [await scaleStale({ ...nosel, kind: "stray", lidar: { kind: "stray" } }), await scaleStale({ ...nosel, lidar: null }),
-            await scaleStale({ ...nosel, calibration: { name: "a.yaml" }, stages: { ...J.stages, lidar: { status: "failed" } } }),
-            await scaleStale({ ...nosel, calibration: { name: "a.yaml" }, files: [] })];
+          // Only a bag job with LiDAR whose lidar_current is false is stale; null means that the stage is not done.
+          out.bystate = [true, false, null, undefined].map((current) => scaleStale({ ...J, lidar_current: current }));
+          out.never = [scaleStale({ ...J, kind: "stray", lidar: { kind: "stray" }, lidar_current: false }),
+            scaleStale({ ...J, lidar: null, lidar_current: false })];
           console.log(JSON.stringify(out));
         })()
         """, replies)
@@ -2647,8 +2899,80 @@ def test_app_js_changed_calibration_retries_from_lidar():
     assert out["removed"] == [*out["current"], "Removed."]
     assert out["reload"] == out["upload"][:2]
     assert out["asked"] == ["sam3d", "Starting from lidar (calibration changed)."]
-    assert out["bylidar"] == [False, True, False, True, True]
-    assert out["never"] == [False, False, False, False]
+    assert out["bystate"] == [False, True, False, False] and out["never"] == [False, False]
+
+
+def test_app_js_done_job_with_a_stale_scale_runs_again_from_lidar():
+    """A done bag job whose calibration changed after the build (lidar_current false; here a file of the same name
+    with new content) warns that the scale and the masses are out of date. Its button runs lidar and every stage
+    after it again, and the line under the status says so, and that the job pauses for review when it does; the
+    key goes with the click, since the agent runs again. The click asks first: it replaces the results. A done job
+    whose scale is current offers no button, and one whose 360 video failed runs again from lidar too."""
+    names = ["topics", "frames", *jobs.BUILD]
+    stages = [{"name": n, "status": "done"} for n in names]
+    job = {"id": "d", "kind": "rosbag", "status": "done", "video": {"name": "scan.bag"}, "prompt": "box", "current": None,
+           "error": None, "warnings": [], "key_ok": False, "agent": "astra", "articulated": False, "parts_mode": "vlm",
+           "parts_review": False, "mode": "auto", "picks": [], "view0": None, "n_views": 4, "auto_continue": False,
+           "parts": {}, "lidar": {"kind": "rosbag", "topic": "/lidar/points"}, "source": {"kind": "rosbag", "topic": CAM},
+           "calibration": {"name": "c.yaml", "bytes": 300, "translation_m": 0.1, "rotation_deg": 90.0, "has_intrinsics": False,
+                           "camera_axes": "optical", "time_offset_s": None, "lidar_topic": "/lidar/points"},
+           "files": ["selection.json", "pool/lidar.json", "results.zip"], "progress": stages,
+           "stages": {x["name"]: {"status": x["status"]} for x in stages}, "lidar_current": True}
+    found = {"topics": [camera_entry({"/lidar/points": None})], "skipped": [], "lidar": [CLOUD], "lidar_skipped": [], "tf": []}
+    replies = {"/api/jobs/d/frames": frames_meta(), "/api/jobs/d/file/frames/topics.json": found,
+               "/api/jobs/d/calibration?name=c.yaml&lidar_topic=%2Flidar%2Fpoints": {**job["calibration"], "bytes": 320},
+               "/api/jobs/d/continue": {"status": "queued", "from": "lidar"}}
+    out = run_form_js("""
+        (async () => {
+          // The job as the server has it now: lidar_current is false while the scale is stale.
+          let stale = false, answer = false;
+          const J = """ + json.dumps(job) + """, asked = [];
+          const fetch0 = fetch, reply = (x) => Promise.resolve({ ok: true, status: 200, json: async () => x });
+          globalThis.fetch = (url, opt) => url === "/api/jobs/d" ? reply({ ...J, lidar_current: !stale }) : fetch0(url, opt);
+          globalThis.confirm = (text) => { asked.push(text); return answer; };
+          const page = () => ({ retry: $("#retry").hidden ? null : $("#retry").textContent, next: $("#jnext").textContent,
+            key: $("#keyrow").hidden, warn: texts.filter((t) => t.includes("out of date")) });
+          const out = {};
+          V = { id: "d", picks: [], view0: null };
+          texts.length = 0;
+          await refresh();
+          out.current = page();
+          stale = true;  // the same file name with new content: steps.done compares the sha256
+          texts.length = 0;
+          await $("#calfile").onchange({ target: { files: [{ name: "c.yaml" }], value: "c.yaml" } });
+          out.upload = { ...page(), msg: $("#calmsg").textContent };
+          posts.length = 0;
+          await $("#retry").onclick();  // asked, and not confirmed
+          out.refused = [posts.length, [...asked]];
+          answer = true;
+          $("#key2").value = "sk-test-key";
+          await $("#retry").onclick();
+          out.sent = posts.map((p) => [p.url, p.body]);
+          // A reload finds it stale too; with auto_continue the run does not pause.
+          J.auto_continue = true;
+          V = { id: "d", picks: [], view0: null };
+          texts.length = 0;
+          await refresh();
+          out.reload = page();
+          // No agent: no key to give. A failed 360 video: the run starts from lidar all the same.
+          V.job.agent = "none";
+          const st = (over) => ({ ...V.state, ...over });
+          renderState(st({ agent: "none" }));
+          out.none = page().key;
+          renderState(st({ agent: "astra", stages: J.progress.map((x) => x.name === "turntable" ? { ...x, status: "failed" } : x) }));
+          out.turntable = page().retry;
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    assert out["current"] == {"retry": None, "next": "", "key": True, "warn": []}  # current: no button, no warning
+    warn = "The calibration changed after this build, so the scale and the masses are out of date."
+    hint = "Run lidar and later stages again to update them. It runs the lidar stage and every stage after it, GPU stages included."
+    assert out["upload"] == {"retry": "Run lidar and later stages again", "next": hint + " It pauses for your review.", "key": False,
+                             "warn": [warn], "msg": "Saved c.yaml."}
+    assert out["refused"] == [0, ["Run lidar and every stage after it again? This replaces the current results."]]
+    assert out["sent"] == [["/api/jobs/d/continue", {"from": "lidar", "api_key": "sk-test-key"}]]
+    assert out["reload"] == {"retry": "Run lidar and later stages again", "next": hint, "key": False, "warn": [warn]}
+    assert out["none"] is True and out["turntable"] == "Run lidar and later stages again"
 
 
 def test_app_js_results_show_the_metric_scale():
