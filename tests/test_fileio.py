@@ -22,6 +22,8 @@ def test_write_json_is_atomic_with_plain_or_private_permissions(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["a.json", "plain.json"]  # no temp file left
     (tmp_path / "bad.json").write_text("{")
     assert fileio.read_json(tmp_path / "bad.json") is None and fileio.read_json(tmp_path / "missing.json") is None
+    (tmp_path / "deep.json").write_text("[" * 100_000 + "]" * 100_000)  # json raises RecursionError, not ValueError
+    assert fileio.read_json(tmp_path / "deep.json") is None
 
 
 def test_replace_keeps_the_old_file_when_save_stops(tmp_path):

@@ -227,13 +227,19 @@ def unpack(zip_path, dest):
 def read_odometry(root):
     """odometry.csv as arrays, its rows in frame order: frame (int), timestamp, position (N, 3), quat (N, 4;
     qx, qy, qz, qw) and intrinsics (N, 4; fx, fy, cx, cy) or None. SystemExit when it is missing or cannot
-    be read."""
+    be read: it comes from the user's zip, so it may not be UTF-8 text or may hold a field longer than the
+    csv module reads."""
     f = Path(root) / "odometry.csv"
     if not f.is_file():
         raise SystemExit("the export has no odometry.csv, so its frames cannot be turned upright; this export is "
                          "not supported")
-    with open(f, newline="", encoding="utf-8-sig") as fh:
-        rows = [r for r in csv.reader(fh) if any(x.strip() for x in r)]
+    try:
+        with open(f, newline="", encoding="utf-8-sig") as fh:
+            rows = [r for r in csv.reader(fh) if any(x.strip() for x in r)]
+    except UnicodeDecodeError:
+        raise SystemExit("odometry.csv is not UTF-8 text; this export is not supported") from None
+    except csv.Error as e:
+        raise SystemExit(f"odometry.csv cannot be read: {e}; this export is not supported") from None
     head = [h.strip() for h in rows[0]] if rows else []
     missing = [c for c in ("frame", "qx", "qy", "qz", "qw") if c not in head]
     if missing:
@@ -325,7 +331,10 @@ def probe(root):
     try:
         with Image.open(root / first) as im:
             depth_size = list(im.size)
-    except (OSError, Image.DecompressionBombError) as e:
+    except Image.UnidentifiedImageError:  # its message holds the path on the server
+        raise SystemExit(f"{first} cannot be read (it is not an image, or its header is damaged); this export is "
+                         "not supported") from None
+    except (OSError, SyntaxError, ValueError, Image.DecompressionBombError) as e:
         raise SystemExit(f"{first} cannot be read ({e}); this export is not supported") from None
     if depth_size[0] * depth_size[1] > MAX_DEPTH_PIXELS:
         raise SystemExit(f"{first} is {depth_size[0]}x{depth_size[1]}, larger than a phone's depth images; this "
@@ -367,16 +376,24 @@ def frames(root, info, keep=None, width=None):
 
 def _pixels(path, rel):
     """(mode, pixels) of a depth or confidence image. ValueError for one of more than MAX_DEPTH_PIXELS,
-    before it is decoded."""
+    before it is decoded, and for one that cannot be decoded. Pillow raises OSError for a damaged image,
+    SyntaxError for a PNG with a broken chunk, ValueError for some (a truncated pHYs chunk), and
+    UnidentifiedImageError for a file that is not an image or a PNG whose header is damaged. The message
+    names the image by rel, not by its path on the server."""
     from PIL import Image
 
     try:
         with Image.open(path) as im:
-            if im.size[0] * im.size[1] > MAX_DEPTH_PIXELS:
-                raise ValueError(f"{rel} is {im.size[0]}x{im.size[1]}, larger than a phone's depth images")
-            return im.mode, np.asarray(im)
+            size = im.size
+            if size[0] * size[1] <= MAX_DEPTH_PIXELS:
+                return im.mode, np.asarray(im)
     except Image.DecompressionBombError as e:
         raise ValueError(f"{rel}: {e}") from None
+    except Image.UnidentifiedImageError:  # its message holds the path
+        raise ValueError(f"{rel} cannot be read: it is not an image, or its header is damaged") from None
+    except (OSError, SyntaxError, ValueError) as e:
+        raise ValueError(f"{rel} cannot be read: {e}") from None
+    raise ValueError(f"{rel} is {size[0]}x{size[1]}, larger than a phone's depth images")
 
 
 def _camera_matrix(root):
@@ -417,7 +434,8 @@ def intrinsics(root, n_frames):
 
 def _depth(root, i, min_conf):
     """(z in meters, confidence or None) of frame i's depth image: confidence only with min_conf (0: not read).
-    ValueError when the images are not what the format says."""
+    ValueError when the images cannot be read or are not what the format says: depth in one 16-bit channel,
+    confidence in one channel (8-bit as Stray writes it, or 16-bit) of the depth image's size."""
     root = Path(root)
     mode, z = _pixels(root / "depth" / f"{i:06d}.png", f"depth/{i:06d}.png")
     if mode not in ("I;16", "I;16B", "I"):
@@ -428,7 +446,9 @@ def _depth(root, i, min_conf):
     c = root / "confidence" / f"{i:06d}.png"
     if not c.is_file():
         raise ValueError(f"depth/{i:06d}.png has no confidence/{i:06d}.png")
-    _, conf = _pixels(c, f"confidence/{i:06d}.png")
+    mode, conf = _pixels(c, f"confidence/{i:06d}.png")
+    if mode not in ("L", "I;16", "I;16B", "I"):  # else the shapes below differ only in channels
+        raise ValueError(f"confidence/{i:06d}.png is a {mode} image, not one-channel confidence")
     if conf.shape != z.shape:
         raise ValueError(f"confidence/{i:06d}.png is {conf.shape[1]}x{conf.shape[0]} but depth/{i:06d}.png is "
                          f"{z.shape[1]}x{z.shape[0]}")
@@ -461,7 +481,7 @@ def depth_points(root, i, rgb_wh, k, K, min_conf=MIN_CONF, z_range=Z_RANGE):
     samples' pixels as camera points, row for row; scan (M, 3): every depth pixel with a depth (z > 0) at any
     confidence as camera points. K: the frame's intrinsics at the stored frame's size; without it (None), xyz
     and scan are None. Camera points are float32, in meters, in the upright frame's optical axes. ValueError
-    when the images are not what the format says."""
+    when the images cannot be read or are not what the format says (_depth)."""
     from gator.stage_a import lidar_scale
 
     z, conf = _depth(root, i, min_conf)

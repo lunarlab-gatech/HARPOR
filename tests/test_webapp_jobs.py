@@ -381,15 +381,37 @@ def test_lidar_stage_done_skip_guard_and_derived(tmp_path):
     assert not steps.done("lidar", J) and steps.guard("lidar", J) == f"LiDAR scale: {why}"
     (J / "pool" / "lidar.json").write_text(json.dumps({"ok": "true", "s": 1.25}))
     assert not steps.done("lidar", J) and steps.guard("lidar", J) == "LiDAR scale: no reason given"
-    ok = {"version": lidar_scale.VERSION, "ok": True, "s": 1.25, "reason": None}
+    ok = {"version": lidar_scale.VERSIONS["rosbag"], "ok": True, "s": 1.25, "reason": None}
     (J / "pool" / "lidar.json").write_text(json.dumps(ok))
     assert steps.done("lidar", J) and steps.guard("lidar", J) is None
     # A record of an older estimator, or one without a version, is not done: the lidar stage runs again.
-    for old in ({**ok, "version": lidar_scale.VERSION - 1}, {k: v for k, v in ok.items() if k != "version"}):
+    for old in ({**ok, "version": lidar_scale.VERSIONS["rosbag"] - 1}, {k: v for k, v in ok.items() if k != "version"}):
         (J / "pool" / "lidar.json").write_text(json.dumps(old))
         assert not steps.done("lidar", J) and steps.guard("lidar", J) is None
+    # Each source has its own version: a Stray capture has no rays, so its scale of version 2 stays current, and a
+    # bag's does not.
+    (J / "pool" / "lidar.json").write_text(json.dumps({**ok, "version": 2}))
+    assert lidar_scale.VERSIONS == {"rosbag": 3, "stray": 2} and not steps.done("lidar", J)
+    (J / "job.json").write_text(json.dumps({"prompt": "box", "lidar": {"kind": "stray"}}))
+    assert steps.done("lidar", J)
+    (J / "pool" / "lidar.json").write_text(json.dumps(ok))
+    assert not steps.done("lidar", J)
+    # Without a known source there is no current version: a record without one is not done either, and a kind that
+    # is not a string is no error (it was a TypeError, and the job's page answered 500).
+    for lid in ({"kind": ["stray"]}, {"kind": "foo"}, {"topic": "/livox/lidar"}, "stray", True, None):
+        (J / "job.json").write_text(json.dumps({"prompt": "box", "lidar": lid}))
+        for rec in (ok, {**ok, "version": None}, {k: v for k, v in ok.items() if k != "version"}):
+            (J / "pool" / "lidar.json").write_text(json.dumps(rec))
+            assert not steps.done("lidar", J), (lid, rec)
+    (J / "job.json").unlink()
+    assert not steps.done("lidar", J)
+    (J / "job.json").write_text(json.dumps({"prompt": "box", "lidar": {"kind": "rosbag"}}))
     (J / "pool" / "lidar.json").write_text("[]")
     assert not steps.done("lidar", J) and steps.guard("lidar", J) is None
+    # A hand edit, a cut file or one nested too deep for json: not done, and no error.
+    for bad in ("{", "", '{"ok": true, "version": 3', "[" * 100_000 + "]" * 100_000):
+        (J / "pool" / "lidar.json").write_text(bad)
+        assert not steps.done("lidar", J) and steps.guard("lidar", J) is None
     assert steps.NAMES.index("lidar") == steps.NAMES.index("da3") + 1 == steps.NAMES.index("select") - 1
     assert "lidar" not in steps.GPU and "lidar" in jobs.BUILD
 
@@ -500,13 +522,64 @@ def test_lidar_settings_and_the_build_that_stores_them(make_runner, tmp_path, mo
     with pytest.raises(ValueError, match="/nope is not a LiDAR topic"):
         runner.submit_build(job_id, None, agent="none", lidar={"topic": "/nope"})
     assert jobs.load(J)["status"] == "ready" and jobs.load(J)["lidar"] is None
-    runner.submit_build(job_id, None, agent="none", lidar={"topic": POINTS})
+    # Another tab changed the calibration after the server's Start checked the bag with the old one: refused.
+    with pytest.raises(ValueError, match="^the calibration changed while the job was starting; press Start again$"):
+        runner.submit_build(job_id, None, checked_calibration={"sha256": "0" * 64}, agent="none", lidar={"topic": POINTS})
+    assert jobs.load(J)["status"] == "ready" and jobs.load(J)["lidar"] is None
+    runner.submit_build(job_id, None, checked_calibration={"sha256": None}, agent="none", lidar={"topic": POINTS})
     job = wait(J, "review")
     assert job["lidar"] == on and job["stages"]["lidar"]["status"] == "done" and (J / "done_lidar").exists()
     runner.submit_build(job_id, None, agent="none", lidar=None)
     job = wait(J, "review")
     assert job["lidar"] is None and job["stages"]["lidar"] == {**jobs.STAGE, "status": "skipped",
                                                                "note": "turned off: no LiDAR"}
+
+
+def test_lidar_settings_of_a_listing_that_read_only_the_start_of_tf(tmp_path, monkeypatch):
+    """A listing made before the listing read all of /tf read only its first 5 s, so its tf_links can say no
+    link for a link that starts later on /tf. Such a listing has no camera_axes_from. lidar_settings then
+    checks the link on the bag's whole TF, as the stage does, and lets Start pass; under the lock
+    (read_bag False) it leaves that to Start. A new listing is not checked on the bag."""
+    pytest.importorskip("rosbags")
+    from test_webapp_lidar import POINTS, write_scene_bag
+
+    from gator.webapp import rosbag
+
+    def job_for(bag, old):
+        """A rosbag job whose listing says that TF does not link the LiDAR; old: as an old listing writes it."""
+        job_id, path = jobs.create_job(tmp_path, "scene.bag")
+        J = tmp_path / job_id
+        path.write_bytes(bag.read_bytes())
+        found = rosbag.image_topics(path)
+        for t in found["topics"]:
+            t["tf_links"] = {POINTS: None}
+            if old:
+                del t["camera_axes_from"]
+        (J / "frames").mkdir()
+        (J / "frames" / "topics.json").write_text(json.dumps(found))
+        return J, jobs.update(J, source={"kind": "rosbag", "topic": found["topics"][0]["topic"]})
+
+    def reason(J, job, **kw):
+        with pytest.raises(ValueError) as e:
+            jobs.lidar_settings(J, job, {"topic": POINTS}, **kw)
+        return str(e.value)
+
+    on = {"kind": "rosbag", "topic": POINTS}
+    why = "the bag's TF does not link camera_optical_frame to lidar; upload the calibration"
+    late = write_scene_bag(tmp_path / "late.bag", n=12, dt=1.0, tf="dynamic", tf_late_s=5.5)
+    reads = []
+    transforms = rosbag.transforms
+    monkeypatch.setattr(rosbag, "transforms", lambda r, windows=None: reads.append(windows) or transforms(r, windows))
+    J, job = job_for(late, old=True)
+    assert jobs.lidar_settings(J, job, {"topic": POINTS}) == on and reads == [None]  # all of /tf
+    assert jobs.lidar_settings(J, job, {"topic": POINTS}, read_bag=False) == on and reads == [None]
+    J, job = job_for(late, old=False)
+    assert reason(J, job) == why and reads == [None]
+    bare = write_scene_bag(tmp_path / "bare.bag", n=3, tf=None)
+    J, job = job_for(bare, old=True)
+    assert reason(J, job) == why and reads == [None, None]
+    Path(job["video"]["path"]).unlink()
+    assert reason(J, job) == "the uploaded bag scene.bag is not on the server; upload it again"
 
 
 def test_lidar_settings_of_a_stray_capture(tmp_path):
@@ -1076,7 +1149,7 @@ def test_resume_starts_from_a_lidar_stage_that_is_not_current(make_runner, monke
     def command(stage, job, cfg, key_file=None):
         J = cfg.runs / job["id"]
         if stage == "lidar":  # the record of the real stage, with the calibration it ran with
-            rec = {"version": lidar_scale.VERSION, "ok": stage not in fail, "s": 1.25, "reason": "no points",
+            rec = {"version": lidar_scale.VERSIONS["rosbag"], "ok": stage not in fail, "s": 1.25, "reason": "no points",
                    "extrinsic": {"calibration_sha256": (job.get("calibration") or {}).get("sha256")}}
             script = f"mkdir -p pool && echo '{json.dumps(rec)}' > pool/lidar.json && echo lidar >> ran"
             return ["bash", "-c", script], str(J), {}
@@ -1100,11 +1173,15 @@ def test_resume_starts_from_a_lidar_stage_that_is_not_current(make_runner, monke
     job = wait(J, "review")
     assert ran(J) == ["lidar", "select"] and job["stages"]["lidar"]["status"] == "done"
 
-    # A calibration uploaded in review: Build finds the scale again and stops in review.
+    # A calibration uploaded in review: Build finds the scale again and stops in review. When it came from
+    # another tab after the server checked the LiDAR settings (checked_calibration), the run is refused.
     jobs.update(J, calibration={"name": "c.yaml", "sha256": "1" * 64})
     assert not steps.done("lidar", J)
+    with pytest.raises(ValueError, match="^the calibration changed while the run was starting; try again$"):
+        runner.resume(job_id, "sam3d", checked_calibration={"sha256": None})
+    assert jobs.load(J)["status"] == "review"
     (J / "ran").unlink()
-    assert runner.resume(job_id, "sam3d") == "lidar"
+    assert runner.resume(job_id, "sam3d", checked_calibration={"sha256": "1" * 64}) == "lidar"
     job = wait(J, "review")
     assert ran(J) == ["lidar", "select"] and steps.done("lidar", J)
     assert json.loads((J / "pool" / "lidar.json").read_text())["extrinsic"]["calibration_sha256"] == "1" * 64
@@ -1120,7 +1197,7 @@ def test_resume_starts_from_a_lidar_stage_that_is_not_current(make_runner, monke
 
     # A scale that an older estimator found, with the job's calibration: Build finds it again first.
     rec = json.loads((J / "pool" / "lidar.json").read_text())
-    (J / "pool" / "lidar.json").write_text(json.dumps({**rec, "version": lidar_scale.VERSION - 1}))
+    (J / "pool" / "lidar.json").write_text(json.dumps({**rec, "version": lidar_scale.VERSIONS["rosbag"] - 1}))
     assert not steps.done("lidar", J)
     (J / "ran").unlink()
     assert runner.resume(job_id, "sam3d") == "lidar"
@@ -1137,7 +1214,7 @@ def test_resume_starts_from_a_lidar_stage_that_is_not_current(make_runner, monke
 def test_a_stale_scale_says_why(tmp_path):
     """GET /api/jobs/{id} gives why a done lidar stage's scale is stale as lidar_stale, and the selection's LiDAR
     record gives it as calibration_changed and estimator_changed. "calibration": the calibration was uploaded or
-    deleted since the scale was found. "estimator": an older lidar_scale.VERSION found it with the job's
+    deleted since the scale was found. "estimator": an older lidar_scale.VERSIONS found it with the job's
     calibration, so the page must not say that the calibration changed."""
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
@@ -1153,7 +1230,8 @@ def test_a_stale_scale_says_why(tmp_path):
     jobs.update_stage(J, "lidar", status="done")
     (J / "pool").mkdir()
     (J / "selection.json").write_text(json.dumps({"ok": True}))
-    rec = {"version": lidar_scale.VERSION, "ok": True, "s": 1.25, "reason": None, "extrinsic": {"calibration_sha256": "1" * 64}}
+    rec = {"version": lidar_scale.VERSIONS["rosbag"], "ok": True, "s": 1.25, "reason": None,
+           "extrinsic": {"calibration_sha256": "1" * 64}}
 
     with TestClient(server.make_app(cfg, token, key_dir=tmp_path / "keys")) as c:
         assert c.get(f"/?token={token}", follow_redirects=False).status_code == 303
@@ -1164,11 +1242,14 @@ def test_a_stale_scale_says_why(tmp_path):
             return job["lidar_current"], job["lidar_stale"], lid["calibration_changed"], lid["estimator_changed"]
 
         assert seen() == (True, None, False, False)
-        assert seen(version=lidar_scale.VERSION - 1) == (False, "estimator", False, True)
+        assert seen(version=lidar_scale.VERSIONS["rosbag"] - 1) == (False, "estimator", False, True)
         assert seen(extrinsic={"calibration_sha256": None}) == (False, "calibration", True, False)
         # Both changed: the calibration is named, since the user changed it.
         assert seen(version=None, extrinsic={"calibration_sha256": "2" * 64}) == (False, "calibration", True, False)
         assert seen(ok=False, reason="no points") == (False, None, False, False)  # not stale: failed
+        (J / "pool" / "lidar.json").write_text("{")  # a file that does not parse: not current, and no error (was 500)
+        r = c.get(f"/api/jobs/{job_id}")
+        assert r.status_code == 200 and (r.json()["lidar_current"], r.json()["lidar_stale"]) == (False, None)
 
 
 def test_cancel_stops_the_stage_group_and_the_queue(make_runner, tmp_path, monkeypatch):

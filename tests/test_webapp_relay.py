@@ -258,6 +258,9 @@ def retry_cases():
     for stale in (False, True):
         out.append((stages(**{**done, "sam3d": "failed", "place": "pending"}), False, stale))
         out.append((stages(frames="done", extract="done", masks="done", prep="failed"), False, stale))
+    # A done job whose scale is stale runs again from lidar (Run lidar and later stages again); before any build, nothing.
+    out += [(stages(**done), False, True), (stages(**{**done, "turntable": "skipped"}), False, True),
+            (stages(frames="done"), False, True)]
     return [({"stages": s} if isinstance(s, list) else s, confirmed, stale) for s, confirmed, stale in out]
 
 
@@ -265,7 +268,8 @@ def test_first_not_done_is_app_js_retry_from():
     cases = retry_cases()
     py = [relay.first_not_done(st, confirmed, stale) for st, confirmed, stale in cases]
     assert py[:7] == ["frames", "frames", "masks", None, None, "usd", "lidar"]
-    assert py[7:11] == ["propose", "parts", "parts", "parts"] and py[11:] == ["sam3d", "prep", "lidar", "prep"]
+    assert py[7:11] == ["propose", "parts", "parts", "parts"] and py[11:15] == ["sam3d", "prep", "lidar", "prep"]
+    assert py[15:] == ["lidar", "lidar", None]
     assert run_app_js({"/api/jobs": []}, f"""
         const out = [];
         for (const [st, confirmed, stale] of {json.dumps(cases)}) {{

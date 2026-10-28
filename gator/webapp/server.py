@@ -101,7 +101,10 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       calibration was uploaded or deleted after the scale was found, and its
                                       estimator_changed when an older estimator found it (lidar_stale)
   POST   /api/jobs/{id}/overrides     {locked, excluded, instance, view0, agent?, api_key?}: select again
-                                      (masks first when an instance changed); the job stops in review
+                                      (masks first when an instance changed); the job stops in review. A
+                                      run that includes the lidar stage (from masks, or from lidar when the
+                                      scale is stale) answers 400 when the job's LiDAR would fail that
+                                      stage's checks, as for continue
   GET    /api/jobs/{id}/parts         run/proposal.json ("proposal"), the job's parts settings, "waiting"
                                       (the job waits for its part list), "photo" (view 0's SAM 3 check
                                       image) and "checks" (the part masks' check images)
@@ -287,7 +290,7 @@ def calibration_summary(cal, J=None):
 def lidar_stale(J):
     """Why the scale in J/pool/lidar.json is no longer the job's, or None (no record, not ok, or current):
     "calibration" when the calibration was uploaded or deleted since the scale was found, else
-    "estimator" (steps.done also wants the record of the current lidar_scale.VERSION). The page names the
+    "estimator" (steps.done also wants its source's current lidar_scale.VERSIONS). The page names the
     cause, so a scale that an older estimator found does not say that the calibration changed."""
     rec = read_json(Path(J) / "pool" / "lidar.json")
     if not isinstance(rec, dict) or rec.get("ok") is not True or steps.done("lidar", J):
@@ -544,6 +547,25 @@ def make_app(cfg, token, key_dir=None):
             raise Bad(409, f"the job is {job['status']}")
         return job
 
+    def lidar_check(J, job, first):
+        """(stale, checked): whether the job's scale is stale (it has LiDAR and its lidar stage is not done:
+        Runner.resume then starts from lidar), and {"sha256": the calibration's} for Runner.resume's
+        checked_calibration (None without LiDAR). 400 with the reason when a run from first includes the
+        lidar stage (first is at or before it, or the scale is stale) and the job's LiDAR fails that stage's
+        checks (jobs.lidar_settings): the run deletes the results before that stage could fail. The checks
+        include the camera_info, read from the bag when the calibration has no K, so they run outside the
+        runner's lock, as Start's do. A calibration that another tab changes in between (which also makes
+        the scale stale) is refused under the lock, by the sha256 that this check saw."""
+        if lidar_of(job) is None:
+            return False, None
+        stale = not steps.done("lidar", J)
+        if stale or steps.NAMES.index(first) <= steps.NAMES.index("lidar"):
+            try:
+                jobs.lidar_settings(J, job, job.get("lidar"))
+            except ValueError as e:
+                raise Bad(400, str(e)) from None
+        return stale, {"sha256": (job.get("calibration") or {}).get("sha256")}
+
     # ---- pages ----
 
     @app.get("/")
@@ -634,7 +656,7 @@ def make_app(cfg, token, key_dir=None):
                    parts_review=steps.waits_for_parts(J, job), lidar=lidar_of(job),
                    calibration=calibration_summary(job.get("calibration"), J), preview=preview_of(J))
         # The scale was found with the job's calibration as it is now (steps.done compares their sha256), and by
-        # this estimator (lidar_scale.VERSION); lidar_stale says which of the two changed.
+        # this estimator (lidar_scale.VERSIONS, by source); lidar_stale says which of the two changed.
         ran = (job["stages"].get("lidar") or {}).get("status") == "done"
         job["lidar_current"] = steps.done("lidar", J) if job["lidar"] and ran else None
         job["lidar_stale"] = lidar_stale(J) if job["lidar_current"] is False else None
@@ -736,13 +758,14 @@ def make_app(cfg, token, key_dir=None):
             lidar = jobs.lidar_settings(J, job, value)
         except ValueError as e:
             raise Bad(400, str(e)) from None
+        checked = {"sha256": (job.get("calibration") or {}).get("sha256")}  # submit_build refuses another one
         if agent == "none":
             key, msg = None, "no key: the agent is turned off"
         elif later:  # the job asks for the key when it reaches a stage that needs it
             key, msg = None, KEY_LATER
         else:
             key, msg = b.get("api_key"), check_key(b.get("api_key"), agent)
-        runner_call(runner.submit_build, job_id, key, mode=mode,
+        runner_call(runner.submit_build, job_id, key, checked_calibration=checked, mode=mode,
                     prompt=prompt.strip(), n_views=n_views, picks=picks if mode == "manual" else [], view0=view0,
                     auto_continue=auto_continue, agent=agent, overrides={"locked": [], "excluded": [], "instance": {}},
                     articulated=articulated, parts=parts, lidar=lidar, turntable=turntable)
@@ -771,7 +794,8 @@ def make_app(cfg, token, key_dir=None):
     def calibration_job(J, job_id):
         """The job.json of a rosbag job that may change its calibration now; 409 for another kind of input,
         while its upload runs, while it is analyzing, queued or running, and while a job with LiDAR waits for
-        its part list: the stale scale would then block the list's confirmation (Runner.resume)."""
+        its part list: the stale scale would then block the list's confirmation (Runner.resume). The change
+        calls it again under runner.locked(), so that no Start comes between the check and the change."""
         if runner.uploading(job_id):
             raise Bad(409, "the job is still uploading")
         job = idle(J)
@@ -801,18 +825,21 @@ def make_app(cfg, token, key_dir=None):
             parsed = lidar_scale.read_calibration(data, safe)
         except ValueError as e:
             raise Bad(400, str(e)[:300]) from None
-        d = J / "lidar" / "calibration"
-        d.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(J / "lidar", 0o700)
-        for old in d.iterdir():  # one calibration at a time
-            old.unlink()
-        tmp = d / f".tmp_{safe}"
-        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
-            f.write(data)
-        os.replace(tmp, d / safe)
         cal = {"name": safe, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
                "lidar_topic": lidar_topic or None, **parsed}
-        jobs.update(J, calibration=cal)
+        # The check again and the write in one step: a Start or another upload may have come during the parse.
+        with runner.locked():
+            calibration_job(J, job_id)
+            d = J / "lidar" / "calibration"
+            d.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(J / "lidar", 0o700)
+            for old in d.iterdir():  # one calibration at a time
+                old.unlink()
+            tmp = d / f".tmp_{safe}"
+            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
+                f.write(data)
+            os.replace(tmp, d / safe)
+            jobs.update(J, calibration=cal)
         return calibration_summary(cal)
 
     @app.put("/api/jobs/{job_id}/calibration")
@@ -836,9 +863,10 @@ def make_app(cfg, token, key_dir=None):
     @app.delete("/api/jobs/{job_id}/calibration")
     def delete_calibration(job_id: str):
         J = job_dir(job_id)
-        calibration_job(J, job_id)
-        shutil.rmtree(J / "lidar" / "calibration", ignore_errors=True)
-        jobs.update(J, calibration=None)
+        with runner.locked():  # the check and the change in one step, as for an upload
+            calibration_job(J, job_id)
+            shutil.rmtree(J / "lidar" / "calibration", ignore_errors=True)
+            jobs.update(J, calibration=None)
         return {"calibration": None}
 
     def set_overrides(job_id, b):
@@ -868,12 +896,13 @@ def make_app(cfg, token, key_dir=None):
                 raise Bad(400, f"SAM 3 found {found.get(name, 0)} instances in {name}")
         if view0 is not None and (not isinstance(view0, str) or view0 not in names):
             raise Bad(400, "view 0 is a pool frame such as f00012")
+        first = "masks" if instance != job["overrides"].get("instance", {}) else "select"
+        _, checked = lidar_check(J, job, first)  # from masks, or from lidar when the scale is stale, as for continue
         agent = agent_of(b, job)
         key = (b.get("api_key") or None) if agent != "none" else None  # no key when the agent is off
         if key is not None:
             check_key(key, agent)
-        first = "masks" if instance != job["overrides"].get("instance", {}) else "select"
-        first = runner_call(runner.resume, job_id, first, key, view0=view0, agent=agent,
+        first = runner_call(runner.resume, job_id, first, key, view0=view0, agent=agent, checked_calibration=checked,
                             overrides={"locked": locked, "excluded": excluded, "instance": instance})
         return {"status": "queued", "from": first}
 
@@ -949,16 +978,8 @@ def make_app(cfg, token, key_dir=None):
         changed = agent != steps.agent(job)  # the other agent's stage runs anew (Runner.resume)
         # Runner.resume runs every stage again from a start at or before select, also from lidar when the
         # scale is stale (the calibration or the estimator changed after the scale was found). A done agent
-        # stage then needs the key, and the job's LiDAR must pass the lidar stage's checks: the run deletes
-        # the results before that stage could fail.
-        # The checks include the camera_info, read from the bag when the calibration has no K. They run here,
-        # outside the runner's lock, as Start's do.
-        stale = lidar_of(job) is not None and not steps.done("lidar", J)
-        if lidar_of(job) is not None and (stale or steps.NAMES.index(first) <= steps.NAMES.index("lidar")):
-            try:
-                jobs.lidar_settings(J, job, job.get("lidar"))
-            except ValueError as e:
-                raise Bad(400, str(e)) from None
+        # stage then needs the key, and the job's LiDAR must pass the lidar stage's checks (lidar_check).
+        stale, checked = lidar_check(J, job, first)
         again = steps.NAMES.index(first) <= steps.NAMES.index(steps.REVIEW_AFTER) or stale
         if changed or again or job["stages"]["agent"]["status"] not in ("done", "skipped"):
             key = held_key(job_id, b, agent, later)
@@ -968,7 +989,8 @@ def make_app(cfg, token, key_dir=None):
             later = False  # the agent stage is done: no stage needs a key
         # Build while the job waits for its part list confirms the VLM's list as it is.
         confirm = steps.waits_for_parts(J, job) and not b.get("from")
-        first = runner_call(runner.resume, job_id, first, key, confirm_parts=confirm, agent=agent, key_later=later)
+        first = runner_call(runner.resume, job_id, first, key, confirm_parts=confirm, agent=agent, key_later=later,
+                            checked_calibration=checked)
         # from: the agent stage when the agent changed, parts when confirmed
         return {"status": "queued", "from": first, **asks(job_id, agent, later)}
 

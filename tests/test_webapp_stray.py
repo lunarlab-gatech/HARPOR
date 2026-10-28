@@ -8,6 +8,7 @@ import shutil
 import stat
 import struct
 import zipfile
+import zlib
 from fractions import Fraction
 from pathlib import Path
 
@@ -396,6 +397,22 @@ def test_read_odometry(tmp_path):
         stray.read_odometry(root)
 
 
+def test_odometry_that_is_not_text_or_csv(tmp_path):
+    """The frames stage (probe) gives a plain reason for an odometry.csv that is not UTF-8 text or has a field longer
+    than the csv module reads (128 KB). Both escaped as a traceback before."""
+    root = export(tmp_path, n=4)
+    good = (root / "odometry.csv").read_bytes()
+    (root / "odometry.csv").write_bytes(good.replace(b"timestamp", b"timestamp\xe9", 1))
+    with pytest.raises(SystemExit, match=r"^odometry.csv is not UTF-8 text; this export is not supported$"):
+        stray.probe(root)
+    (root / "odometry.csv").write_bytes(good + b"1," + b"9" * 200_000 + b"\n")
+    with pytest.raises(SystemExit) as e:
+        stray.probe(root)
+    assert str(e.value) == ("odometry.csv cannot be read: field larger than field limit (131072); this export is not "
+                            "supported")
+    assert stray.intrinsics(root, 4)[1] == "camera_matrix.csv"  # the lidar stage's K falls back as for a bad row
+
+
 @pytest.mark.parametrize("k", [0, 1, 3])
 def test_a_depth_pixel_lands_on_its_rgb_pixel(tmp_path, k):
     """The marked depth pixel and the dot drawn at its colour pixel come out at the same place in the upright
@@ -553,6 +570,141 @@ def test_depth_images_larger_than_a_phones(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="depth/000000.png is 256x192, larger than a phone's depth images; this "
                                          "export is not supported"):
         stray.probe(root)
+
+
+def broken_chunk(a):
+    """a as a PNG whose first IDAT chunk says it is 4 bytes longer than it is. Pillow then reads the CRC and the next
+    chunk's length as data, finds no chunk type after them and raises SyntaxError, not OSError. a must be noisy, so
+    that its data takes more than one IDAT chunk."""
+    buf = io.BytesIO()
+    Image.fromarray(a).save(buf, "PNG")
+    b, pos = bytearray(buf.getvalue()), 8
+    while b[pos + 4:pos + 8] != b"IDAT":
+        pos += 12 + struct.unpack_from(">I", b, pos)[0]
+    struct.pack_into(">I", b, pos, struct.unpack_from(">I", b, pos)[0] + 4)
+    return bytes(b)
+
+
+def noisy_depth():
+    return (np.random.default_rng(0).random(DEPTH[::-1]) * 3000 + 200).astype(np.uint16)
+
+
+def short_phys(a):
+    """a as a PNG with a pHYs chunk of 4 bytes, where 9 belong: Pillow raises ValueError for it, not OSError."""
+    buf = io.BytesIO()
+    Image.fromarray(a).save(buf, "PNG")
+    b, data = buf.getvalue(), b"pHYs\0\0\0\1"
+    return b[:33] + struct.pack(">I", 4) + data + struct.pack(">I", zlib.crc32(data)) + b[33:]  # after IHDR
+
+
+def test_depth_and_confidence_images_that_cannot_be_used(tmp_path):
+    """A depth or confidence image that Pillow cannot decode is a ValueError that names the file, also for a broken
+    chunk (Pillow's SyntaxError) or a short pHYs chunk (Pillow's ValueError), and without the server's path. A
+    confidence image must have one channel: an RGB or LA one of the right size said "256x192 but depth is
+    256x192" before. The frames stage names a damaged first depth image without the server's path too."""
+    root = export(tmp_path, n=4)
+    (root / "depth" / "000001.png").write_bytes(broken_chunk(noisy_depth()))
+    with pytest.raises(ValueError, match=r"^depth/000001.png cannot be read: broken PNG file \(chunk "):
+        stray.depth_points(root, 1, SIZE, 0, None)
+    good = (root / "depth" / "000002.png").read_bytes()
+    (root / "depth" / "000002.png").write_bytes(good[:len(good) // 2])
+    with pytest.raises(ValueError, match=r"^depth/000002.png cannot be read: image file is truncated"):
+        stray.depth_points(root, 2, SIZE, 0, None)
+    (root / "confidence" / "000003.png").write_bytes(b"not a png")
+    with pytest.raises(ValueError, match=r"^confidence/000003.png cannot be read: it is not an image, or its header is damaged$"):
+        stray.depth_points(root, 3, SIZE, 0, None)
+    (root / "depth" / "000002.png").write_bytes(short_phys(noisy_depth()))
+    with pytest.raises(ValueError, match=r"^depth/000002.png cannot be read: Truncated pHYs chunk$"):
+        stray.depth_points(root, 2, SIZE, 0, None)
+    first = root / "depth" / "000000.png"
+    keep = first.read_bytes()
+    first.write_bytes(keep[:8] + b"\0" * 40)  # the PNG signature, then no header
+    with pytest.raises(SystemExit) as e:
+        stray.probe(root)
+    assert str(e.value) == ("depth/000000.png cannot be read (it is not an image, or its header is damaged); this "
+                            "export is not supported")
+    first.write_bytes(keep)
+    conf = root / "confidence" / "000000.png"
+    grey = Image.open(conf)
+    for mode in ("RGB", "LA"):
+        grey.convert(mode).save(conf)
+        with pytest.raises(ValueError, match=rf"^confidence/000000.png is a {mode} image, not one-channel confidence$"):
+            stray.depth_points(root, 0, SIZE, 0, None)
+    Image.fromarray(np.asarray(grey).astype(np.uint16)).save(conf)  # 16-bit grey is one channel too
+    assert len(stray.depth_points(root, 0, SIZE, 0, None)[0]) == DEPTH[0] * DEPTH[1]
+
+
+def test_a_damaged_frame_costs_only_that_frame(tmp_path):
+    """The lidar stage on a capture with a depth image that has a broken chunk and a confidence image that is not
+    an image: those frames get no samples, with a warning that names them, and the others give the scale. Before,
+    the first failed the stage with a traceback and no record, and the second failed it with the server's path.
+    Such frames are not cached, so a rerun reads them again. When they leave fewer than 3 views, the stage fails
+    with a plain reason."""
+    pytest.importorskip("rosbags")
+    from test_webapp_lidar import failed, make_stray_job, scaled
+
+    from gator.stage_a import mvsam3d
+
+    J = make_stray_job(tmp_path, portrait=1)
+    names = mvsam3d.view_names(J / "pool")
+    root = J / "video" / "stray" / "export"
+    depth, conf = root / "depth" / f"{int(names[3][1:]):06d}.png", root / "confidence" / f"{int(names[5][1:]):06d}.png"
+    good = {p: p.read_bytes() for p in (depth, conf)}
+    depth.write_bytes(broken_chunk(noisy_depth()))
+    conf.write_bytes(b"not a png")
+    rec = scaled(J)
+    assert rec["ok"] and rec["s"] == pytest.approx(1 / F.FAKE_DA3_SCALE, rel=0.01), rec["reason"]
+    assert rec["warnings"][0].startswith(
+        f"frames {names[3]}, {names[5]} have depth or confidence images that cannot be used, so they have no samples "
+        f"(depth/{depth.name} cannot be read: broken PNG file (chunk ")
+    assert rec["warnings"][1:] == [f"no LiDAR samples in 2 of {len(names)} views: {names[3]}, {names[5]}"]
+    assert {v["name"] for v in rec["views"] if v["status"] == "no_samples"} == {names[3], names[5]}
+    assert not (J / "lidar" / "samples.json").exists()
+    for p, b in good.items():
+        p.write_bytes(b)
+    again = scaled(J)
+    assert again["ok"] and again["warnings"] == [] and again["source"]["cache"] == "miss"
+    assert (J / "lidar" / "samples.json").exists()
+
+    (J / "lidar" / "samples.json").unlink()
+    for n in names[2:]:  # only two views keep a depth image that can be read
+        p = root / "depth" / f"{int(n[1:]):06d}.png"
+        p.write_bytes(p.read_bytes()[:500])
+    first = f"depth/{int(names[2][1:]):06d}.png"
+    assert failed(J) == (f"only 2 of the {len(names)} views have depth and confidence images that can be used (at least 3 are "
+                         f"needed); {first} cannot be read: image file is truncated")
+    rec = json.loads((J / "pool" / "lidar.json").read_text())
+    assert rec["warnings"] == [f"frames {', '.join(names[2:7])} and {len(names) - 7} more have depth or confidence "
+                               f"images that cannot be used, so they have no samples ({first} cannot be read: image "
+                               "file is truncated)"]
+
+    # An export without confidence images: the reason names the depth images only.
+    J = make_stray_job(tmp_path / "plain", portrait=1, without_confidence=range(24))
+    names, root = mvsam3d.view_names(J / "pool"), J / "video" / "stray" / "export"
+    for n in names[2:]:
+        p = root / "depth" / f"{int(n[1:]):06d}.png"
+        p.write_bytes(p.read_bytes()[:500])
+    first = f"depth/{int(names[2][1:]):06d}.png"
+    assert failed(J) == (f"only 2 of the {len(names)} views have depth images that can be used (at least 3 are needed); "
+                         f"{first} cannot be read: image file is truncated")
+
+
+def test_the_reason_of_a_stray_capture_names_its_causes(tmp_path):
+    """A Stray capture's depth is aligned with the color camera, so the reason names no time window and no
+    T_cam_lidar: with every depth pixel of low confidence, it names the confidence, the object's size and the
+    masks."""
+    pytest.importorskip("rosbags")
+    from test_webapp_lidar import failed, make_stray_job
+
+    from gator.stage_a import mvsam3d
+
+    J = make_stray_job(tmp_path, portrait=1)
+    names = mvsam3d.view_names(J / "pool")
+    for p in (J / "video" / "stray" / "export" / "confidence").glob("*.png"):
+        Image.fromarray(np.ones(DEPTH[::-1], np.uint8)).save(p)
+    assert failed(J) == (f"LiDAR points cover the object in only 0 of {len(names)} views (at least 3 are needed); "
+                         "the phone's depth may have low confidence on the object, the object may be small or far "
+                         "away, or the masks may miss it (see the check images)")
 
 
 def test_a_phone_that_turned_and_no_confidence(tmp_path):

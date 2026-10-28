@@ -900,6 +900,13 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    for a video or a Stray capture, while the job is analyzing, queued or running, and while a job with
    LiDAR waits for its part list. In that last case a new scale would block the list's confirmation, so
    the user confirms the list or cancels the job first. A job without LiDAR has no scale to block it.
+   The idle check and the change of the files run in one step under the runner's lock (the file is
+   parsed before), so a Start or a second upload cannot come between them. Start checks the bag before
+   it takes the lock, and `submit_build` refuses a calibration that changed since then ("the
+   calibration changed while the job was starting; press Start again"), since the check ran on the old
+   one. Build, Retry and Select again check outside the lock too (`server.lidar_check`), and
+   `Runner.resume` refuses a calibration that changed since then in the same way ("the calibration
+   changed while the run was starting; try again").
    The page sends the chosen LiDAR topic with the upload (`?lidar_topic=`, empty when none is chosen).
    On the public site, supa.js puts it in relay()'s query (migration part 7), and the worker adds it to
    the request (`relay.build`). The server checks that it is one of the bag's LiDAR topics and stores
@@ -1052,7 +1059,8 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
     calibration upload. The link line gives the TF topic and the chain of frames; or "Linked by the
     calibration <file>", with "(it replaces /tf_static: ...)" when TF links the topics too; or a
     warning when the calibration was made for another LiDAR topic; or "No TF link: upload a
-    calibration". An uploaded calibration shows its summary (the LiDAR's distance from the camera in
+    calibration"; or, for a bag listed by an older version (no `camera_axes_from`), the hint "No TF
+    link in the bag's first 5 s: Start checks the whole bag". An uploaded calibration shows its summary (the LiDAR's distance from the camera in
     cm and its turn in degrees, and the time offset when the file gives one, 0 included), with
     Replace and Remove.
   - The stage label is "metric scale (LiDAR)".
@@ -1063,7 +1071,10 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
     calibration upload.
     After a calibration change, the page says that Build finds the scale again first and then stops
     in review. For a record of an older estimator it says "The app now finds the scale in a new way.
-    Build finds the scale again, then stops here."
+    Build finds the scale again, then stops here." A job that waits for its part list with a stale scale
+    cannot confirm the list (409), so the Part list panel's first warning says so: "The app now finds the
+    scale in a new way, so Build cannot confirm this list. Cancel the job, then press Retry from lidar.
+    The job finds the scale again, and the VLM lists the parts again."
   - A done job whose calibration changed after the build (GET /api/jobs/{id} `lidar_current` is
     false) shows the warning "The calibration changed after this build, so the scale and the masses
     are out of date." When an older estimator found the scale (`lidar_stale` is `estimator`), the job
@@ -1078,9 +1089,12 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
     stage first checks that the bag is still on the server, the job's LiDAR topic, its TF link or
     calibration, and the intrinsics (the calibration's K, else the bag's camera_info)
     (`jobs.lidar_settings`),
-    and answers 400 with the reason when the stage would fail, because `Runner.resume` deletes the
-    results before the stage runs. From sam3d on, the stages that are done are skipped, so no key is
-    needed.
+    and answers 400 with the reason when one of these checks fails, because `Runner.resume` deletes the
+    results before the stage runs. `POST /overrides` (Select again) makes the same LiDAR check when its
+    run includes the lidar stage (from masks, or from lidar when the scale is stale). The checks cannot
+    tell whether the scale will be found: a calibration that passes them but fails the estimate (such as
+    T_lidar_cam given as T_cam_lidar) leaves the job failed without its old results. From sam3d on, the
+    stages that are done are skipped, so no key is needed.
   - When the `lidar` stage fails, the status line gives the reason, and the stage list and the panel
     "LiDAR scale failed" do not repeat it. The panel shows the warnings, the check images and
     "LiDAR settings" (in the Settings tab). The status line names the next step.
@@ -1597,7 +1611,8 @@ Decisions (2026-10-21, user):
 - With LiDAR on, `select` stops before it removes anything when `pool/lidar.json` is missing or not
   ok.
 - `mvsam3d.place` writes `metric_scale` and `units` in `placement.json`. The units are "meters (LiDAR
-  scale applied in select)" or "DA3 units (meters)".
+  scale applied in select)" or "DA3 units (meters)". `mvsam3d.sam3d` ends the `frame` of `run/pose.json`
+  with the same units.
 - Why this spot is safe:
   - Every later stage is built from `run/da3_output.npz`: MV-SAM3D's input, `cameras.json`, the
     checks of `place` and the up hint of `align`.
@@ -1631,7 +1646,9 @@ Decisions (2026-10-21, user):
    message. The listing reads them in the same pass as the camera topics, and it keeps one value of each
    link: the last value of a static link and the first value of a dynamic link. The stage reads all of
    `/tf` when the frames' windows hold no path (step 4), so the listing reads all of it too, and the two
-   agree. On a synthetic bag, 20,000 `/tf` messages of 2 links added about 0.5 s to the listing. Each
+   agree. A listing made by an older version read only the first 5 s of `/tf`, and its camera topics
+   have no `camera_axes_from`. When its `tf_links` says no link and no calibration was uploaded, Start
+   (`jobs.lidar_settings`) checks the link on the bag's whole `/tf`, as the stage does. On a synthetic bag, 20,000 `/tf` messages of 2 links added about 0.5 s to the listing. Each
    camera topic gains `frame_id`, `camera_axes`, `camera_axes_from` (the rule that decided the axes,
    step 5) and `tf_links` (`static`, `dynamic` or null for each LiDAR topic). LiDAR and TF problems never fail the
    listing. A bag listed by an older version, whose `frames/topics.json` has no `lidar` key, is
@@ -1650,7 +1667,9 @@ Decisions (2026-10-21, user):
 4. **TF chain.** `rosbag.transforms` reads every `/tf_static` message and the `/tf` messages within
    the frames' read windows. Namespaced TF topics such as `/robot/tf` count too. `tf_chain` finds the
    shortest path from the camera topic's `frame_id` to the LiDAR's `frame_id` by a breadth-first
-   search, and it inverts the edges that it walks backwards. A path of static links wins. For a
+   search, and it inverts the edges that it walks backwards. A path of static links wins. A camera and a LiDAR with one `frame_id` need no TF: the link is the
+   identity, in the listing and in the stage. When no TF lies near the frames, the stage then decides
+   the camera's axes from all of `/tf`, as the listing does. For a
    dynamic link, each frame takes the `/tf` value nearest its camera stamp, from the values logged in
    its own read windows (step 8). A frame whose windows hold no value of the link takes the nearest
    value from all the windows. When no window holds a path, the stage reads all of `/tf`, as the
@@ -1670,9 +1689,10 @@ Decisions (2026-10-21, user):
      camera pass. Every other turn between axis conventions is 90 deg or more from that rotation.
    - `default`: neither rule applies. The frame has body axes (x forward, y left, z up).
    For body axes, `camera_to_lidar` puts `R_OPT_LINK` on the left of the TF transform. The stage
-   decides the axes once, from the edges it takes the path from (the frames' windows, or all of `/tf`
-   when those hold no path), and that decision holds for every frame. A calibration's `camera_axes` replaces all three rules, and the record then says
-   `calibration`. A frame with optical axes that no rule finds still gets a wrong `T_cam_lidar`. An
+   decides the axes once, from the edges it takes the path from (the frames' windows; or all of `/tf`
+   when those hold no path, or for a camera and a LiDAR in one frame whose name does not give its
+   axes), and that decision holds for every frame. A calibration's `camera_axes` replaces all three
+   rules, and the record then says `calibration`. A frame with optical axes that no rule finds still gets a wrong `T_cam_lidar`. An
    example is a camera that looks backward and has no "optical" in its name. For such a frame, upload
    the calibration.
 6. **Intrinsics.** The calibration's `K`, `D` and `distortion_model` come first. That `K` is for the
@@ -1703,11 +1723,18 @@ Decisions (2026-10-21, user):
    radial factor stops increasing. For equidistant, the angle from the axis must lie below the fold
    within 0 to 90 deg. Points whose depth z along the optical axis is 0.1 m or less are dropped.
 8. **Time base and window.** The frames' stamps come from `frames/stamps.json`, which `video analyze`
-   writes for a bag: every frame's header stamp and log time in ns. The stage reads scans only within
-   ±0.4 s of each frame's log time. When `time_offset_s` is given and not zero, it also reads the
-   scans within ±0.4 s of that time plus `time_offset_s`. The 0.4 s holds every 5 Hz scan with points
-   in the ±100 ms window below: such a scan is logged up to 0.3 s after the stamp, plus its transport
-   delay. While the stage reads, each scan keeps only the points that land in the image of a frame
+   writes for a bag: every frame's header stamp and log time in ns. The stage reads scans only within a span of each frame's log time. When `time_offset_s` is given
+   and not zero, it also reads the scans within that span of that time plus `time_offset_s`. The span
+   is the point window below, plus one scan period, plus the 0.2 s of extra delay that the clock check
+   accepts, and at least 0.4 s: 0.4 s at 10 Hz, 0.5 s at 5 Hz and 0.8 s at 2 Hz. A period over 0.5 s counts as
+   0.5 s, the slowest sweep whose point times the decoder keeps, so a wrong `rate_hz` cannot make every
+   read long. A scan with points in
+   the window can be logged that far from the frame: a live recorder logs a scan once it is swept, and
+   a bag whose log times copy the header stamps logs it at its stamp, which may be its first point.
+   The stage takes the period from the topic's `rate_hz` first. When the scans read show a period more
+   than 10% longer, it reads the rest of the longer span too. A fixed ±0.4 s lost the end of the
+   window at 5 Hz when the LiDAR's scans reached the recorder 0.1 to 0.2 s later than the camera's
+   frames, and at 2.5 Hz with equal delays (synthetic). While the stage reads, each scan keeps only the points that land in the image of a frame
    whose window holds the scan, so a 360 degree LiDAR does not fill the memory.
    - The time base is the header stamps when three things hold: the camera's header stamps are
      usable, every scan has a header stamp, and either the calibration gives `time_offset_s` (0 s
@@ -1724,12 +1751,18 @@ Decisions (2026-10-21, user):
      since the header stamps also hold the sweep. The log base never uses `time_offset_s`.
    - `time_offset_s` is the LiDAR clock minus the camera clock: t_lidar = t_cam + `time_offset_s`. A
      file without it gives no offset. A `time_offset_s` of 0 s says that the two header clocks are one,
-     so the header base holds even when the log times disagree (with a warning).
+     so the header base holds even when the log times disagree (with a warning). A live bag on one
+     clock with a wrong `time_offset_s` has the same log times as a bag whose log times copy the header
+     stamps. So when only that reading fits a nonzero `time_offset_s`, a warning names both: the log
+     times copy the header stamps, or `time_offset_s` is wrong.
    - With per-point times, a frame takes the points within a window around its stamp. The window is
      half the scan period on each side, at least 50 ms and at most 100 ms. A spinning LiDAR sweeps the
      camera's view once per period, so a 5 Hz LiDAR needs ±100 ms. A fixed ±50 ms missed the view in
      about 1 frame in 5 at 5 Hz (synthetic). In the log base, a point's time goes to the log clock by
-     its scan's last point. The old rule used the header stamp, which a driver such as
+     its scan's last point. The last point is the latest time that lies no further past the 99th
+     percentile of the scan's times than the 1st percentile lies before it. For a normal sweep it is the
+     latest time. One bad time far past the sweep, which the decoder keeps when it lies within 0.5 s of
+     the stamp, is left out, so it does not move every point of the scan. The old rule used the header stamp, which a driver such as
      livox_ros_driver2 sets at the first point, so every point landed one scan period late. Without
      per-point times (a PointCloud2 without a time field), a frame takes every point of the nearest
      scan within one scan period. In the log base a scan counts at its log time minus half a period,
@@ -1737,12 +1770,15 @@ Decisions (2026-10-21, user):
      `rate_hz`, else 100 ms.
 9. **Samples cache.** The stage samples every frame that `extract` wrote, not only the pool views,
    and writes `lidar/samples.npz` and `lidar/clouds.npz` (the points for the Inputs tab, below) with
-   `lidar/samples.json`, the key, last. The cache key holds the version (`CACHE_VERSION` 5), the
+   `lidar/samples.json`, the key, last. The cache key holds the version (`CACHE_VERSIONS["rosbag"]` 7), the
    input file (name, bytes, `mtime_ns`), the camera and LiDAR topics, the calibration's sha256 and
    the point window's bounds in ms (`window_ms`: [50, 100]). Version 4 came with the last-point rule
    of the log base and the window that follows the scan period. Version 5 came with the TF rule for the
    camera's axes (step 5). That decision depends only on the bag and the code, so the input file and the
-   version hold it. A rerun with the same key, for
+   version hold it. Version 6 came with the read span that follows the scan period and the last-point
+   rule that leaves out one bad time (step 8). Version 7 came with each frame's LiDAR origin in the
+   camera frame and the frame's size in the info (`info.rays`), for the estimator's rays (Estimator,
+   step 6). A Stray capture's key stays at version 6. A rerun with the same key, for
    example after a mask change, reads no scans. A cache without `clouds.npz`, or without a frame
    that `samples.json` lists in it, is a miss.
 
@@ -1780,8 +1816,8 @@ Decisions (2026-10-21, user):
    name. `stray.probe` refuses an export that cannot be paired frame by frame: no `odometry.csv`, a
    frame count that differs from the odometry rows, a frame column that is not 0 to N - 1, no depth
    image, a depth image past the last frame, depth images for fewer than half of the frames, or a
-   first depth image of more than 2^20 px. A later depth image of more than 2^20 px fails the `lidar`
-   stage.
+   first depth image of more than 2^20 px. A later depth image of more than 2^20 px gets no samples in
+   the `lidar` stage, with a warning (6 below).
 4. **The edit-list trap.** Stray writes frame 0 one tick before the writer's start time, so the mp4's
    edit list hides it. A reader that follows the edit list gets N - 1 frames that start at saved
    frame 1, and it pairs every color frame with the next frame's depth and pose. So `stray.probe` and
@@ -1801,8 +1837,13 @@ Decisions (2026-10-21, user):
    stored size, `(u_d + 0.5) * W / w_d - 0.5`, and then turns it by k. The depth itself is not
    resampled. The scale of a Stray capture needs no extrinsic, no intrinsics and no time matching. Without
    `confidence/` images, every depth pixel from 0.1 m to 5 m is used, with a warning. A frame without
-   a depth image, or with a depth image but no confidence image, gets no samples, with a warning. The
-   cache key holds the input file, k, the frames' sizes and the depth filters.
+   a depth image, or with a depth image but no confidence image, gets no samples, with a warning. So does
+   a frame whose depth or confidence image cannot be used: Pillow cannot decode it (also a PNG with a
+   broken chunk, for which Pillow raises SyntaxError), or it is not one channel (16-bit for depth), or it
+   is larger than a phone's. The warning names the frames and gives the first error. Then the samples are
+   not cached, so the next run reads those frames again. When such frames leave fewer than 3 pool views,
+   the stage fails with a reason that says so. The cache key holds the version
+   (`CACHE_VERSIONS["stray"]` 6), the input file, k, the frames' sizes and the depth filters.
 
 **Calibration file.** The user uploads it for a bag (`PUT /api/jobs/{id}/calibration`, note 10).
 `lidar_scale.read_calibration` reads JSON for a `.json` file and YAML for the others. YAML goes
@@ -1877,7 +1918,8 @@ not turn them. For a Stray capture, `stray.depth_points` has already turned them
    `ln r` lies farther than max(3 x 1.4826 x MAD, ln 1.02) from the median `ln r`; the rest are the
    used points. A sparse LiDAR such as a Mid-360 often has no foreground point next to a hidden one,
    so the z-buffer cannot drop it. With a 10 to 15 cm baseline, 3 cm of noise and an object at 0.4 m,
-   those hidden points moved s up by 1.2% to 2.3% (synthetic). With the trim the bias is at most 0.16%.
+   those hidden points moved s up by 1.2% to 2.3% (synthetic). With the trim, hidden points far behind the object, such as a wall, move s by at most 0.16%.
+   Two effects remain at close range with a LiDAR beside the camera; step 6 handles them for a bag.
    The view's scale `s_i` is the median of the used points' r, and `iqr_rel` is the IQR of the used
    points' r over `s_i`. The view's status is `no_mask`, `no_samples`, `few_points` (under 30
    valid points, counted before the trim, so that the trim cannot turn a scattered view into one that
@@ -1888,8 +1930,110 @@ not turn them. For a Stray capture, `stray.depth_points` has already turned them
    The old rule took the IQR of all valid points before the trim. In the case above (a 30 x 20 x 20 cm
    box at 0.4 m before a wall at 2 m, 15 cm baseline, 3 cm noise, about 3,500 beams per sr), about 30%
    of each view's valid points were hidden. All 9 views of an orbit were then scattered and the stage
-   failed. Now all 9 are used and s is 0.55% high (synthetic).
-6. **Combination.** The stage takes the weighted median m of `ln s_i` over the candidates, with the
+   failed. Now all 9 are used. Without the rays of step 6, s is 0.5% to 1.1% high (0.78% on average over
+   12 seeds, synthetic).
+6. **Rays (a bag only).** A LiDAR beside the camera measures range along its own rays. Two effects then
+   move s up at close range. The numbers come from a synthetic 9-view orbit of a 30 x 20 x 20 cm box at
+   0.4 m before a wall at 2 m, a sparse LiDAR (about 3,500 beams per sr) 15 cm beside the camera, and 3 cm
+   of range noise, over 12 seeds.
+   - Range noise lies along the LiDAR's ray. With a baseline b, it moves a point's pixel along the
+     epipolar line by about f x noise x b / z^2. That is about 11 DA3 px at 0.4 m. Steps 3 to 5 then read
+     the mask and DA3's depth at the wrong pixel. This is most of the bias: with each point at the pixel of
+     its noise-free position, s was 0.12% high instead of 0.78%.
+   - The LiDAR sees faces of the object that the camera cannot see. Those points lie 0 to 15 cm behind the
+     visible face, so the z-buffer and the trim keep them. The views at yaw +10 and +20 deg came out 1.5%
+     and 2.1% high, mostly from those points.
+
+   So for a bag, `estimate(rays=...)` gets each view's camera points (row for row with the samples) and
+   the LiDAR's origin in the camera frame. Each view with an s_i from step 5 then runs steps 3 to 5 again
+   along the rays (`lidar_scale.follow_rays` and `ray_hits`):
+   - A ray runs from the LiDAR's origin through its point. It is sampled where the true range can be,
+     within ±25% of the measured range, evenly in range. It takes as many steps (64 to 512) as make the
+     span's length on DA3's grid 0.5 px per step. The pixels move faster at the span's near end, so the
+     samples there lie farther apart, by the ratio of the span's far z to its near z in the camera frame:
+     1.7 times for a LiDAR in the camera's z = 0 plane, more for one behind the camera (1.9 times at 5 cm
+     behind) or with pincushion distortion. A ray held to 512 steps is sampled more coarsely. Each ray
+     has its own steps, so its result does not
+     depend on the rays traced with it. When each chunk's rays all took the steps of its longest ray, 207
+     of 3,515 rays of a near view with 2% DA3 noise changed between hit and no hit when the chunks
+     changed. At each sample, the gap is the sample's z minus s_i times DA3's depth there (bilinear). The
+     gap is below 0 in front of the surface.
+   - The ray meets the surface at its first sample past it. If DA3's depth changes there faster than on
+     a surface that the camera sees 84 deg from face-on, plus 0.5% of the depth, the ray crossed an edge.
+     It came from behind the object as the camera sees it, so its point is dropped. So is a ray that
+     starts behind the surface or meets none in its span. The view's record counts them as
+     `points_hidden`.
+   - This test takes the place of the z-buffer of step 2, which drops no point along the rays (it only
+     limits the rays that `front_rel` counts, below). The z-buffer works at the noisy pixel. On a dense scan, the points measured short land on pixels where
+     the surface is farther, and they hid the points measured long there. With 10,000 points on a slanted
+     40 x 30 cm card at 0.5 m (about 2 per DA3 px) and a 12 cm baseline, s came out 0.56% to 0.65% low
+     along the rays (5 sets of 4 seeds). Without the z-buffer, it is within 0.03% on average.
+   - The crossing is where a line fit to the gap is 0, over the samples within 3 DA3 px of the first
+     crossing with no edge between them. With noisy DA3 depth, the first sample past the surface comes
+     early. With 1% of noise in DA3's depth at each pixel, a first version that took the first sample
+     made the views 1.2% high on average, and the combination failed. With 2% of noise, a fit over 2 px
+     used 6 to 9 of the 9 views (all 9 in 3 of 30 seed sets). The fit over 3 px uses all 9 in all 30.
+   - The mask, conf and DA3's depth are read at the crossing, not at the point's own pixel. r is the scale
+     that would put the crossing at the measured range: s_i + (range - crossing) x slope / depth, where
+     slope is the fitted gap's slope along the ray. r is linear in the range noise, so the trim of step 5
+     is on r, not on ln r. With the trim on ln r, s was 0.10% high instead of 0.03% high, and the views at
+     yaw +35 deg were 0.6% high on average.
+   - A point stays only when its twin, the point mirrored about its crossing along its ray, also lands in
+     the image and on DA3's grid. The samples hold only the points whose noisy pixel is in the image
+     (Rosbag source), so where the image's edge cuts the object on the LiDAR's side, the points measured
+     short were gone, and the others made s high. With the box 11 to 35 cm right of the axis (8 seeds), s
+     was 0.35% to 0.71% high before this rule and is now within 0.03%. The same holds at the edge of
+     prep's crop: with a 1:1 crop of the 4:3 frame, a twin that only had to land in the image left s
+     0.52% high, and the rule gives +0.16%. The view's record counts the hits it drops as `points_twin`.
+   - A point whose ray stays in front of the surface over its whole span lies in free space as the camera
+     sees it, which no occlusion explains. `front_rel` is the share of such rays among the rays from the
+     eroded mask (by the point's own pixel) of the points that the z-buffer of step 2 keeps. The record
+     gives that share as `front_rel` and the number of those rays as `rays_mask`. Over 10%, the view is
+     `scattered`. Without this rule, the rays could confirm a wrong scale. Before a wall close behind a
+     small object, a view without rays is scattered with about the wall's s. Along the rays at that s, the
+     wall's points meet the surface and the object's points stay in front of it. A 6 cm box at 0.2 m, 16
+     cm before a wall, with a 15 cm baseline and DA3's scale 0.9, then gave a scale 98% high, where the
+     estimator without rays failed. The z-buffer limits the count because the wall's points that the
+     LiDAR sees past the object's edge also meet the surface at the wall's scale. Counted too, they made a
+     lock look clean: on a dense scan (40,000 beams per sr) of a dark box that returns 15% of its beams,
+     combine took the wall's scale in 11 of 13 seed sets. With the z-buffer's count it fails in all 13.
+   - In that lock scene, locked views have `front_rel` 0.34 to 0.50 (10 seed sets). Correct views of the
+     near case have at most 0.006 with sharp DA3 edges, and at most 0.039, 0.070 and 0.097 with the edges
+     blurred by a Gaussian of 4, 6 and 8 px (4 seed sets at 3,500 beams per sr). On a dense scan (40,000
+     per sr), 8 px gives 0.102, and one view per orbit is scattered. Thin objects and the image's edge
+     can go over 0.1 (open issues).
+   - The rule comes before `few_points` when `rays_mask` is at least 30. A locked view has few hits,
+     since its rays miss the surface. With a sparser LiDAR (500 beams per sr), the lock above made most
+     views `few_points`, and the reason blamed the coverage. Now each locked view with 30 rays or more
+     (`front_rel` 0.17 or more) is `scattered`. Views whose rays find the box's scale keep 0.09 or less
+     and stay `few_points`. The reason names the disagreement in 53 of 60 seed sets. In the other 7, only
+     1 or 2 views are scattered, and the rest are `few_points` (under 30 rays, or `front_rel` at most 0.1).
+   - Each pass traces the rays at the s_i of the pass before, at most 3 passes. The passes stop when s_i
+     changes by less than 0.01%. Over 20 seed sets of 9 views, the second pass moves s_i by up to 0.17%
+     and the third by up to 0.07% (0.41% and 0.19% with 1% DA3 noise). The view's record gives `passes`
+     (0 for a view without an s_i from step 5).
+
+   Without a baseline (the origin at the camera), r is z over DA3's depth at the point, as in step 5. A
+   Stray capture has no rays, since its depth is aligned with the color camera.
+
+   Results over 12 seeds (synthetic; DA3's depth is exact unless noted):
+
+   | Baseline, noise at 0.4 m | s before | s with rays | Worst view before | Worst view with rays |
+   |---|---|---|---|---|
+   | 15 cm, 3 cm | +0.78% (+0.49% to +1.10%) | +0.03% (-0.20% to +0.13%) | +2.6% | 0.79% |
+   | 15 cm, 2 cm | +0.41% | +0.02% | +1.4% | 0.53% |
+   | 10 cm, 3 cm | +0.47% | +0.02% | +1.3% | 0.94% |
+   | 10 cm, 2 cm | +0.24% | +0.01% | +0.8% | 0.63% |
+
+   Over 6 seeds with a 15 cm baseline and 3 cm of noise, s with rays stays within 0.1%: with 1% of noise
+   in DA3's depth at each pixel (+0.05%), with a floor under the box and DA3's edges blurred over 5 px
+   (+0.08%), and with the wall 40 cm behind the box and the edges blurred over 9 px (+0.08%). Before, s was
+   0.75%, 1.01% and 0.85% high. At 0.6 m, s is -0.04% (before: +0.12%). From 0.7 m to 2 m, s is within
+   0.05% of the truth, as before. Without a baseline, s is -0.06% (before: +0.03%). The test's scene
+   (`test_the_rays_remove_the_near_field_bias`, another LiDAR model) over 30 seed sets: s is 0.06% low on
+   average (sd 0.11%, -0.28% to +0.17%), and 0.11% low with 1% DA3 noise (sd 0.11%, -0.28% to +0.19%).
+   Without rays it is 0.7% high. The mass follows s cubed.
+7. **Combination.** The stage takes the weighted median m of `ln s_i` over the candidates, with the
    weights `sqrt(min(points_used, 2000))`, and no view weighs more than the median view. Without that
    cap, one dense view (a near view of a bag) could hold more than half the weight. It was then the
    median alone, MAD was 0, and every other view became an outlier. One point more in five agreeing
@@ -1898,15 +2042,17 @@ not turn them. For a Stray capture, `stray.depth_points` has already turned them
    farther than max(3 x 1.4826 x MAD, ln 1.05) from m is an `outlier`, and the other candidates are
    `used`. `s` is e to the weighted median of the used views' `ln s_i`. `spread_rel` is exp(RMS) - 1,
    where RMS is the weighted RMS of the used views' `ln s_i` about `ln s`.
-7. **Failure checks.** A failed check fails the stage with the reason. The stage still writes the
+8. **Failure checks.** A failed check fails the stage with the reason. The stage still writes the
    check images and then `pool/lidar.json` with `ok: false`.
 
-   | Check | Fails when | The reason points to |
-   |---|---|---|
-   | coverage | fewer than 3 views have at least 30 valid points (`candidate` or `scattered`) | the object outside the LiDAR's view, the time window or `T_cam_lidar` |
-   | agreement | the used views number fewer than 3, or fewer than half of the `candidate` and `scattered` views | wrong masks, a time offset or a wrong `T_cam_lidar` |
-   | spread | `spread_rel` is over 8% | a time offset or wrong masks |
-   | range | `s` lies outside 0.5 to 2 | `T_cam_lidar` given as `T_lidar_cam`, or the units |
+   | Check | Fails when | The reason points to (bag) | The reason points to (Stray capture) |
+   |---|---|---|---|
+   | coverage | fewer than 3 views have at least 30 valid points (`candidate` or `scattered`) | the object outside the LiDAR's view, the time window or `T_cam_lidar` | low confidence of the phone's depth on the object, a small or far object, or masks that miss it |
+   | agreement | the used views number fewer than 3, or fewer than half of the `candidate` and `scattered` views | wrong masks, a time offset or a wrong `T_cam_lidar` | wrong masks, or a shiny or dark object whose depth the phone gets wrong |
+   | spread | `spread_rel` is over 8% | a time offset or wrong masks | wrong masks, or a shiny or dark object |
+   | range | `s` lies outside 0.5 to 2 | `T_cam_lidar` given as `T_lidar_cam`, or the units | depth images that do not hold millimeters |
+
+   The texts are `lidar_scale.CAUSES`. The stage passes its source kind to `estimate(..., source=)`. A Stray capture's depth is aligned with the color camera and paired with its frame by name, so its reasons name no time window and no `T_cam_lidar`.
 
    `lidar_scale estimate`, run alone, also reports when no sample's frame name is a pool view (the
    samples were made for another pool). That reason replaces the coverage reason. The stage never
@@ -1914,8 +2060,8 @@ not turn them. For a Stray capture, `stray.depth_points` has already turned them
 
    When the samples cannot be made at all, the record has `ok: false` and the reason, but no views
    and no check images. Examples are no TF link and no calibration, no intrinsics, no scans within
-   0.4 s of the frames, and a Stray export that cannot be read.
-8. **Check images.** `lidar/check/<view>.jpg` shows the prep image dimmed, with a long side of 640 px,
+   the read span of the frames (Rosbag source 8), and a Stray export that cannot be read.
+9. **Check images.** `lidar/check/<view>.jpg` shows the prep image dimmed, with a long side of 640 px,
    the mask outline in green, and the points colored by `r / s`. A point is blue where the LiDAR is
    nearer than DA3's depth times s, white where they agree, and red where the LiDAR is farther. The
    colors saturate at r / s = 0.8 and 1.25. Used points are 3 x 3 px dots, and the others are 2 x 2 px.
@@ -1923,7 +2069,8 @@ not turn them. For a Stray capture, `stray.depth_points` has already turned them
    white. Points without a valid DA3 depth are not drawn. The JPEG keeps full color resolution
    (quality 90, no chroma subsampling). The images help to spot calibration and timing errors.
 
-**`pool/lidar.json`** (version 2). The stage writes it last. With `ok: true`, the current version and
+**`pool/lidar.json`** (version 3 for a bag, 2 for a Stray capture: `lidar_scale.VERSIONS`). The stage
+writes it last. With `ok: true`, the current version and
 the job's current calibration (see the last bullet), it is the stage's done marker.
 - `ok`, `s` and `reason`.
 - `source`: for a bag `{kind, file, camera_topic, topic, type, frame_id, scans, cache}`, and for a
@@ -1941,17 +2088,26 @@ the job's current calibration (see the last bullet), it is the stage's done mark
   `{base: "frame index"}`.
 - `views`: per view `name`, `frame`, the point counts after each step (`points`, `points_grid`,
   `points_visible`, `points_mask`, `points_valid`, `points_used`), `erode_px`, `conf_min`, `s`,
-  `iqr_rel` and `status`.
+  `iqr_rel` and `status`. For a bag, also `points_hidden`, `points_twin`, `rays_mask`, `front_rel` and
+  `passes` (Estimator, step 6). Along the rays the z-buffer drops no point: `points_visible` counts the
+  hits whose twins land on the grid, so `points_grid` = `points_visible` + `points_hidden` +
+  `points_twin`. `rays_mask` equals the `points_mask` of the pass without rays.
 - `combine`: the view counts (`views`, `views_with_points`, `candidates`, `views_used`, `outliers`,
   `scattered`, `few_points`, `no_mask`, `no_samples`), `spread_rel`, `mad_rel`, `cut_rel` and
   `thresholds` (every threshold by name).
 - `da3` (`process_res`, `grid`), `warnings` and `seconds`.
-- `steps.done("lidar")` is true only when `ok` is true, `version` equals `lidar_scale.VERSION` (2),
-  and `extrinsic.calibration_sha256` equals the sha256 of the job's calibration (both are null without
+- `steps.done("lidar")` is true only when `ok` is true, `version` equals the version of the job's
+  LiDAR kind in `lidar_scale.VERSIONS` (3 for a bag, 2 for a Stray capture; a job.json without a known
+  kind, or a lidar.json that does not parse or nests too deep, is never done), and `extrinsic.calibration_sha256` equals the sha256 of
+  the job's calibration (both are null without
   one). So an upload or a delete of the calibration makes the record stale, and so does a record of an
   older estimator. Version 2 came with the time window and time base of `CACHE_VERSION` 4, the 9 cm
-  z-buffer term, the trim, the scatter rule on the used points and the weight cap. A version 1 record,
-  or one without a version, runs the lidar stage again. GET /api/jobs/{id} gives this value as
+  z-buffer term, the trim, the scatter rule on the used points and the weight cap. Version 3 came with
+  the rays (Estimator, step 6), which only a bag has. A Stray capture's scale did not change, so its
+  version stays 2, and its done jobs stay current. `lidar_scale estimate` gives the version of the
+  estimator that ran: 3 with rays, else 2, so a scale found without rays (the CLI has none) never
+  counts as a bag's current one. A record of an older version, or one without a
+  version, runs the lidar stage again. GET /api/jobs/{id} gives this value as
   `lidar_current` once the lidar stage is done. It is null before that and for a job without LiDAR.
   `lidar_stale` says why it is false: `calibration` when the calibration's sha256 differs, else
   `estimator`. The selection's `lidar` gives the same as `calibration_changed` and `estimator_changed`.
@@ -2030,6 +2186,33 @@ and in `physics/aligned.json`.
   dimensions, in portrait and in landscape.
 - The fit of `place` limits the final size to a few percent (phase 0), however exact the LiDAR scale
   is.
+- The rays (Estimator, step 6) are checked only on synthetic scenes, where DA3's depth has the true
+  shape. They take one LiDAR origin per frame, so a rig that moves during the point window shifts the
+  origin of the earlier and later points. With the origin 1 to 3 cm off, s came out up to 0.20% high
+  on average and 0.24% at worst (synthetic, 6 seeds). Known limits, all synthetic:
+  - The crossing's fit does not hold up to strong noise in DA3's depth. With 2.5% of iid noise at each
+    pixel, s along the rays is 0.42% high on average (10 seed sets of the test's scene), against 0.66%
+    without rays. With 3%, it is 0.81% high, more than the 0.65% without rays, and 7 to 9 of 9 views
+    are used. Under such noise s also depends on the sample spacing: with 2% noise, s is +0.12% at 0.5
+    DA3 px per step and -0.37% at 0.25 px (30 seed sets; exact depth gives -0.06% at either). Real DA3
+    noise has not been measured on the user's frames.
+  - Rays that graze an object's outline stay in front of DA3's blended depth there, so correct views
+    can pass the 0.1 limit of `front_rel` and be scattered. With DA3's edges blurred by a Gaussian of
+    10 px, 1 of 4 orbits had a correct view at 0.113, and at 12 px every orbit had two, and 1 of 4 runs
+    failed (those runs are already 1.5% to 2% low). Thin objects reach it sooner: a 3 cm pole (1.5 cm
+    radius) whose axis is 10 cm before a wall had 1 of 12 correct views over 0.1 with sharp edges
+    (0.135) and 4 of 10 with 3 px of blur (up to 0.34). A 3 cm chair leg with 4 px of blur had 5 of 36
+    correct views over 0.1 (0.10 to 0.135), all scattered. Where the image's edge cuts the object and the
+    baseline is 25 cm, 2 of 32 correct views (36 views in all) had 0.14 and 0.16. The combination fails
+    when these views and the views that step 5 already scatters reach half of the views: at 12 px, one
+    orbit failed with 2 views over 0.1, since step 5 had scattered 4. Otherwise it stays ok, but s moves
+    (up to 0.7% at the image's edge).
+  - `front_rel` is about the object's share of the mask's rays. When the object returns 15% of its
+    points or less (a dark object), a lock on the wall behind it can stay under 0.1, and the rays take
+    the wall's scale, as the estimator without rays does (1 of 4 seed sets at 15,000 beams per sr).
+  - With DA3's edges blurred over 8 px or more and 1 cm or less of range noise, the near rule of step 5
+    scatters most views along the rays (the trim on linear r is tight at low noise), and the
+    combination fails where the estimator without rays is ok.
 - There is no motion compensation. A frame uses its points as they are: the points within the
   window of its stamp (±50 to ±100 ms), or the whole nearest scan when the points have no times.
 - Without per-point times, the header base matches a frame to the scan whose stamp is nearest. A
@@ -2039,7 +2222,9 @@ and in `physics/aligned.json`.
   points. The stage then fails with the coverage reason.
 - A camera frame with optical axes that neither its name nor its TF links show still needs the
   calibration. An example is a camera that looks backward.
-- A bag listed before 2026-10-28 keeps the listing of the `/tf` messages in its first 5 s. A dynamic
-  TF link that starts later still shows as no link there, and Start asks for a calibration. Upload the
-  bag again to list it anew.
+- A bag listed before 2026-10-28 keeps the listing of the `/tf` messages in its first 5 s, and its
+  camera topics have no `camera_axes_from`. A dynamic TF link that starts later shows as no link there,
+  so the link line says "No TF link in the bag's first 5 s: Start checks the whole bag". Start, Build,
+  Retry and Select again read the whole `/tf` for it at each check (`jobs.lidar_settings`), since the
+  result is not stored in `topics.json`.
 

@@ -15,7 +15,8 @@ stage writes J/lidar/cloud/<view>.glb (cloud_glb) with the check images, also wh
 before pool/lidar.json. How the samples, the time matching, the intrinsics and the clouds work:
 build_plan.md note 12 (Rosbag source, Stray Scanner source, Points for the Inputs tab).
 
-The estimate is lidar_scale.estimate, with the check images in J/lidar/check. The record,
+The estimate is lidar_scale.estimate, with the check images in J/lidar/check. For a rosbag job it also follows
+the LiDAR's rays (rays: the camera points of the samples and the LiDAR's origin in the camera frame). The record,
 pool/lidar.json, gains source, extrinsic {source, file, calibration_sha256, chain, link, camera_axes,
 camera_axes_from, T_cam_lidar}, intrinsics {source, K, D, model, R, size, frame_size}, time {base, window_ms,
 offset_ms, log_minus_header_ms {camera, lidar}, log_minus_last_point_ms, scan_period_ms, scan_period_from,
@@ -44,15 +45,16 @@ from gator.stage_a import lidar_scale
 
 WINDOW_S = 0.05  # points within +-50 ms of a camera stamp, or within half a scan period when that is longer,
 WINDOW_MAX_S = 0.1  # up to +-100 ms (a 5 Hz LiDAR): see window()
-READ_S = 0.4  # scans are read within +-0.4 s of each frame's log time: a 5 Hz scan with points in the window is
-# logged up to 0.3 s after the stamp (+100 ms of window, a 200 ms sweep), plus its transport delay
+READ_S = 0.4  # scans are read at least +-0.4 s from each frame's log time, and further for a slow LiDAR (read_span)
 CLOCK_TOL_S = 0.2  # the camera's and the LiDAR's log-minus-stamp offsets agree this well (time_base): the header base
 # A bag whose topics.json is older than the LiDAR listing (Runner.submit_analyze lists it again on a topic choice).
 OLD_TOPICS = ("the bag was listed before LiDAR topics were; choose its camera topic again to list them (for a job in "
               "review or done: upload the bag again)")
-CACHE_VERSION = 5  # of lidar/samples.json; another version is a miss (3: the clouds in lidar/clouds.npz; 4: the
-# log base moves point times by each scan's last point, and the window grows with the scan period; 5: the camera's
-# axes can come from TF, rosbag.camera_axes_from, so the key's bag and version hold that decision)
+CACHE_VERSIONS = {"rosbag": 7, "stray": 6}  # of lidar/samples.json, by kind; another version is a miss (3: the
+# clouds in lidar/clouds.npz; 4: the log base moves point times by each scan's last point, and the window grows with the
+# scan period; 5: the camera's axes can come from TF, rosbag.camera_axes_from, so the key's bag and version hold that
+# decision; 6: the read span grows with the scan period, read_span, and one bad point time does not set a scan's last
+# point, last_point; 7, a bag only: the info has each frame's LiDAR origin and size for the estimator's rays, rays)
 SCAN_POINTS = 60_000  # the most points of a view's whole scan in its cloud (lidar/cloud/<view>.glb)
 SCAN_KEEP = 20_000  # while reading, each scan also keeps a random subset of its points, at most this many, for the clouds
 NO_K = ("the export has no intrinsics (fx, fy, cx, cy in odometry.csv, or camera_matrix.csv), so the Inputs tab has "
@@ -213,12 +215,13 @@ def intrinsics(path, topic, info_topic, cal, cal_name, frame_size, warnings):
 def extrinsic(path, cam_frame, lidar_frame, lidar_topic, cal, cal_name, cal_sha, wins, times, warnings):
     """(the extrinsic record, {frame name: T_cam_lidar 4x4}). From the calibration, else from the bag's
     TF: the static edges and /tf within the frames' read windows (wins: {name: [(start_ns, stop_ns)]}),
-    or all of /tf when those hold no path, as the topic listing reads it all (each frame then takes the
-    nearest value, with the warning below). A dynamic link is taken at each frame's camera stamp (times:
+    or all of /tf when those hold no path, or for one frame whose name does not give its axes, as the
+    topic listing reads it all (each frame then takes the nearest value, with the warning below). A dynamic link is taken at each frame's camera stamp (times:
     {name: ns}) from the /tf values logged within that frame's own windows, so a TF publisher on another
     clock than the camera's cannot give a frame another frame's value; a frame whose windows hold none
     takes the nearest of all. The camera's
     axes are decided once, from all the edges (rosbag.camera_axes_from), and hold for every frame. A
+    camera and a LiDAR in one frame need no TF: the link is the identity, as in the listing. A
     warning names the frames whose value is more than READ_S from their stamp (link_gaps). Failed when
     TF has no path."""
     from gator.webapp import rosbag
@@ -232,12 +235,15 @@ def extrinsic(path, cam_frame, lidar_frame, lidar_topic, cal, cal_name, cal_sha,
     if cam_frame and lidar_frame:
         with rosbag.open_bag(path) as r:
             edges = rosbag.transforms(r, [w for n in times for w in wins[n]])
-            first = rosbag.camera_to_lidar(cam_frame, lidar_frame, edges) if edges else None
-            if first is None:  # the link may be on /tf only away from the frames; the listing reads all of /tf
+            first = rosbag.camera_to_lidar(cam_frame, lidar_frame, edges)  # one frame: the identity, also without TF
+            # No path near the frames (the link may be on /tf only away from them), or one frame for the camera and
+            # the LiDAR whose name does not give its axes: all of /tf, as the listing reads it.
+            lone = first is not None and len(first["chain"]) == 1 and first["camera_axes_from"] != "name"
+            if first is None or lone:
                 whole = rosbag.transforms(r)
-                first = rosbag.camera_to_lidar(cam_frame, lidar_frame, whole) if whole else None
-                if first is not None:  # the frames need only the values of the chain's links
-                    pairs = set(zip(first["chain"], first["chain"][1:]))
+                got = rosbag.camera_to_lidar(cam_frame, lidar_frame, whole) if whole else None
+                if got is not None:  # the frames need only the values of the chain's links
+                    first, pairs = got, set(zip(got["chain"], got["chain"][1:]))
                     edges = [e for e in whole if (e[0], e[1]) in pairs or (e[1], e[0]) in pairs]
             if first is not None and first["link"] == "dynamic":
                 static = [e for e in edges if e[3]]
@@ -297,7 +303,8 @@ def read_scans(path, topic, windows, keep=None, lo=0.1, hi=0.85, whole=0):
     function of (xyz, log_ns) that gives the points to hold (None: all), so that a 360 degree scan keeps
     only what the camera can see (in_view). whole: (xyz, t_ns or None) of at most that many of the scan's
     points, taken before keep (at_most, seeded by the log time), for the clouds; None when whole is 0.
-    end_ns: the time of the scan's last point, also taken before keep; None without per-point times."""
+    end_ns: the time of the scan's last point (last_point), also taken before keep; None without per-point
+    times."""
     from gator.webapp import rosbag
 
     spans = rosbag.merge_windows(windows)
@@ -305,7 +312,7 @@ def read_scans(path, topic, windows, keep=None, lo=0.1, hi=0.85, whole=0):
     out, shown = [], lo
     for log, head, xyz, t in rosbag.scans(path, topic, windows):
         t = None if t is None else np.asarray(t, np.int64)
-        end = None if t is None or not len(t) else int(t.max())
+        end = None if t is None or not len(t) else last_point(t)
         part = None
         if whole:
             rows = at_most(np.arange(len(xyz)), whole, int(log))
@@ -322,6 +329,32 @@ def read_scans(path, topic, windows, keep=None, lo=0.1, hi=0.85, whole=0):
     return out
 
 
+def last_point(t):
+    """The time (ns) of a scan's last point, from its points' times t (int64): the latest time that lies no
+    further past the 99th percentile than the 1st percentile lies before it. That is the latest time of a
+    normal sweep. point_times keeps a bad time up to POINT_TIME_S from the stamp, and in the log base the
+    last point moves every point of the scan (frame_points), so one bad time far past the sweep is left out."""
+    d = t - t.min()
+    lo, hi = np.percentile(d, [1, 99])
+    return int(t[d <= 2 * hi - lo].max())
+
+
+def unread(windows, done):
+    """The parts of the log-time windows [(start_ns, stop_ns)] that the windows done do not cover, merged."""
+    from gator.webapp import rosbag
+
+    out, done = [], rosbag.merge_windows(done)
+    for a, b in rosbag.merge_windows(windows):
+        for c, d in done:
+            if c < b and a < d:  # they overlap
+                if a < c:
+                    out.append((a, c))
+                a = max(a, d)
+        if a < b:
+            out.append((a, b))
+    return out
+
+
 def time_base(stamps, frames, scans, offset_ns):
     """(base, the time record, warnings). offset_ns is the calibration's time_offset_s (None when it gives
     none; 0 is given), which relates the header clocks (t_lidar = t_cam + offset). "header" when the
@@ -335,7 +368,9 @@ def time_base(stamps, frames, scans, offset_ns):
     scan period later, which a clock offset would too, so then the log base, which takes each such scan
     at the middle of its sweep (frame_points). With an offset the log times only check it: in a live
     recording the two differ by it, in a bag whose log times copy the header stamps they agree, and
-    otherwise a warning says so. In the log base the offset is not used, since log times come from the
+    otherwise a warning says so. A live recording on one clock with a wrong offset has the log times of
+    such a bag, so when only the zero shift fits a nonzero offset, a warning names both readings. In
+    the log base the offset is not used, since log times come from the
     recorder's one clock. The record's offset_ms is the offset added to the camera stamps (0 in the log
     base); log_minus_last_point_ms is the LiDAR's from its last points (None without per-point times)."""
     idx = [int(n[1:]) for n in frames]
@@ -370,6 +405,10 @@ def time_base(stamps, frames, scans, offset_ns):
         if gap > tol:
             warnings.append(f"time_offset_s is {offset_ns / 1e9:g} s, but the log times put the LiDAR's header clock "
                             f"{(cam - near) / 1e9:+.2f} s from the camera's {seen}; check time_offset_s")
+        elif offset_ns and min(abs(v - cam + offset_ns) for v in lids.values()) > tol:  # only the zero shift fits
+            warnings.append(f"time_offset_s is {offset_ns / 1e9:g} s, but the log times put the LiDAR's header clock "
+                            f"within {CLOCK_TOL_S:g} s of the camera's {seen}; either the bag's log times copy the "
+                            "header stamps, or time_offset_s is wrong (0 when both use one clock); check time_offset_s")
     elif gap > tol:
         base = "log"
         warnings.append(f"the camera's and the LiDAR's header clocks differ by {(cam - near) / 1e9:+.2f} s {seen}, so "
@@ -424,6 +463,20 @@ def window(period):
     return min(max(WINDOW_S * 1e9, period / 2), WINDOW_MAX_S * 1e9)
 
 
+def read_span(period):
+    """The half width in ns of each frame's read windows, for a scan period in ns. A scan with points in
+    the frame's window can be logged as far as the window, one sweep and CLOCK_TOL_S from the frame's log
+    time: a live recorder logs a scan once it is swept, a bag whose log times copy the header stamps logs
+    it at its stamp, which may be its first point, and the clock check (time_base) accepts CLOCK_TOL_S
+    more delay than the camera's. At least READ_S: 0.4 s at 10 Hz, 0.5 s at 5 Hz, 0.8 s at 2 Hz. A longer
+    period counts as 0.5 s, the slowest sweep whose point times rosbag keeps (POINT_TIME_S), so a wrong
+    rate in the listing cannot make every read long."""
+    from gator.webapp.rosbag import POINT_TIME_S
+
+    period = min(period, POINT_TIME_S * 1e9)
+    return max(READ_S * 1e9, window(period) + period + CLOCK_TOL_S * 1e9)
+
+
 def frame_points(scans, base, t_cam, period):
     """The LiDAR points (M, 3) matched to a camera stamp t_cam (ns, in the base): with per-point times the
     points within +-window(period), else every point of the nearest scan within one period. scans:
@@ -461,6 +514,19 @@ def project(xyz, T, intr, frame_size):
     X = to_camera(xyz, T, intr)
     K = fit_matrix(intr["K"], intr["size"], frame_size, intr["source"])
     return (*lidar_scale.project(X, K, intr["D"], intr["model"], frame_size), X)
+
+
+def rays(info, clouds):
+    """lidar_scale.estimate's rays of a rosbag job: each frame's camera points (the clouds' xyz, row for row with the
+    samples), the LiDAR's origin in that frame (info's rays) and the intrinsics that made the samples' pixels. Frames
+    without both are left out, and those views are found without rays."""
+    intr = info.get("intrinsics") or {}
+    out = {}
+    for n, r in (info.get("rays") or {}).items():
+        if n in clouds:
+            out[n] = {"points": clouds[n][0], "origin": r["origin"], "size": r["size"], "D": intr["D"],
+                      "model": intr["model"], "K": fit_matrix(intr["K"], intr["size"], r["size"], intr["source"])}
+    return out
 
 
 def to_samples(xyz, T, intr, frame_size):
@@ -514,7 +580,7 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
     cal, cal_sha, cal_name = calibration(J, job, topic)
     frames = frame_names(J, names)
     st = path.stat()
-    key = {"version": CACHE_VERSION, "kind": "rosbag",
+    key = {"version": CACHE_VERSIONS["rosbag"], "kind": "rosbag",
            "input": {"name": path.name, "bytes": st.st_size, "mtime_ns": st.st_mtime_ns},
            "topics": {"camera": cam, "lidar": topic}, "calibration_sha256": cal_sha,
            "window_ms": [WINDOW_S * 1000, WINDOW_MAX_S * 1000]}
@@ -537,11 +603,17 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
                      "topic again to analyze the bag again")
     given = (cal or {}).get("time_offset_s")
     offset = None if given is None else int(round(given * 1e9))  # 0 is given: the header clocks are one
-    r = int(READ_S * 1e9)
-    wins = {}  # each frame's read windows: around its log time, and around that plus the offset
-    for n in frames:
-        t = int(stamps["log_ns"][int(n[1:])])
-        wins[n] = [(t - r, t + r)] + ([(t + offset - r, t + offset + r)] if offset else [])
+
+    def read_windows(r):  # each frame's read windows: around its log time, and around that plus the offset
+        out = {}
+        for n in frames:
+            t = int(stamps["log_ns"][int(n[1:])])
+            out[n] = [(t - r, t + r)] + ([(t + offset - r, t + offset + r)] if offset else [])
+        return out
+
+    listed = scan_period([], "log", lid.get("rate_hz"))[0]  # no scans yet: the listing's rate, else 100 ms
+    r = int(read_span(listed))
+    wins = read_windows(r)
     windows = [w for n in frames for w in wins[n]]
     intr = intrinsics(path, cam, camera.get("camera_info"), cal, cal_name, sizes[frames[0]], warnings)
     tf_time = {n: int(stamps["header_ns" if stamps["clock"] == "header" else "log_ns"][int(n[1:])]) for n in frames}
@@ -555,15 +627,26 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
                         f"({camera.get('frame_id') or 'the camera frame'}); if it was calibrated on the rectified "
                         "images, give K in the calibration too")
     progress(0.1)
-    print(f"reading {topic} within {READ_S} s of {len(frames)} frames", flush=True)
+    print(f"reading {topic} within {r / 1e9:.3g} s of {len(frames)} frames", flush=True)
     scans = read_scans(path, topic, windows, in_view(frames, wins, T, intr, sizes), whole=SCAN_KEEP)
     info = {"source": {**source, "scans": len(scans)}, "extrinsic": ext, "intrinsics": intr}
     if not scans:
-        raise Failed(f"{topic} has no scans within {READ_S} s of the frames' times; was the LiDAR recording "
+        raise Failed(f"{topic} has no scans within {r / 1e9:.3g} s of the frames' times; was the LiDAR recording "
                      "during the camera's frames?", info)
     base, trec, more = time_base(stamps, frames, scans, offset)
-    warnings += more
     period, period_from = scan_period(scans, base, lid.get("rate_hz"))
+    if period > 1.1 * listed and read_span(period) > r:  # the listing's rate was too high, not jitter: read the rest
+        r = int(read_span(period))
+        print(f"reading {topic} within {r / 1e9:.3g} s of the frames, for its scan period of {period / 1e6:.0f} ms",
+              flush=True)
+        wider = read_windows(r)
+        rest = unread([w for n in frames for w in wider[n]], windows)
+        scans = sorted(scans + read_scans(path, topic, rest, in_view(frames, wider, T, intr, sizes), 0.85, 0.9,
+                                          SCAN_KEEP), key=lambda s: s[0])
+        wins, info["source"]["scans"] = wider, len(scans)
+        base, trec, more = time_base(stamps, frames, scans, offset)
+        period, period_from = scan_period(scans, base, lid.get("rate_hz"))
+    warnings += more
     point_times = all(s[3] is not None for s in scans)
     info["time"] = {**trec, "window_ms": round(window(period) / 1e6, 3), "scan_period_ms": round(period / 1e6, 3),
                     "scan_period_from": period_from, "point_times": point_times}
@@ -576,6 +659,8 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
         scan = to_camera(frame_points([(s[0], s[1], *s[4], s[5]) for s in near], base, t_cam, period), T[n], intr)
         scan = scan[np.isfinite(scan).all(1)]
         clouds[n] = (xyz, at_most(scan, SCAN_POINTS, int(n[1:])).astype(np.float32))
+    info["rays"] = {n: {"origin": np.round(to_camera(np.zeros(3), T[n], intr)[0], 6).tolist(), "size": list(sizes[n])}
+                    for n in frames}  # the LiDAR's origin where the samples' z lives
     info["warnings"] = warnings
     cache_write(J, key, samples, info, clouds)
     return samples, {**info, "source": {**info["source"], "cache": "miss"}}, clouds
@@ -583,7 +668,10 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
 
 def stray_samples(J, job, spec, names):
     """({frame name: (N, 3) [u, v, z]}, info, clouds) of a Stray Scanner capture's depth images (see the module
-    docstring); clouds: {frame name: (xyz, scan)}, none without intrinsics. Failed with the reason."""
+    docstring); clouds: {frame name: (xyz, scan)}, none without intrinsics. Failed with the reason. A frame whose
+    depth or confidence image cannot be used (stray.depth_points' ValueError) gets no samples, with a warning, and
+    the samples are then not cached, so the next run reads it again. Failed when such frames leave fewer than
+    lidar_scale.MIN_VIEWS pool views."""
     from PIL import Image
 
     from gator.webapp import rosbag, steps, stray
@@ -615,7 +703,7 @@ def stray_samples(J, job, spec, names):
         raise Failed(f"frames {', '.join(off[:5])} are {w}x{h}, but the capture's upright frames are "
                      f"{upright[0]}x{upright[1]}; analyze the input again", {"source": source})
     st = path.stat()
-    key = {"version": CACHE_VERSION, "kind": "stray",
+    key = {"version": CACHE_VERSIONS["stray"], "kind": "stray",
            "input": {"name": path.name, "bytes": st.st_size, "mtime_ns": st.st_mtime_ns}, "turns": k,
            "frame_sizes": sorted(map(list, set(sizes.values()))),
            "min_confidence": stray.MIN_CONF, "z_range_m": list(stray.Z_RANGE)}
@@ -644,6 +732,7 @@ def stray_samples(J, job, spec, names):
     print(f"reading the depth images of {len(frames)} frames, turned {90 * k} degrees", flush=True)
     samples, clouds = {}, {}
     missing, unsure = [], []  # frames without a depth image; with one but without its confidence
+    bad = {}  # {frame: why its depth or confidence image cannot be used}
     for j, n in enumerate(frames):
         i = int(n[1:])
         if not (root / "depth" / f"{i:06d}.png").is_file():
@@ -655,23 +744,36 @@ def stray_samples(J, job, spec, names):
             Ki = None if K is None or i >= len(K) else rosbag.rescale(K[i], w / stored[0], h / stored[1])
             try:
                 samples[n], xyz, scan = stray.depth_points(root, i, sizes[n], k, Ki, min_conf=min_conf)
-            except (ValueError, OSError) as e:
-                raise Failed(f"{n}: {e}", {"source": source}) from None
-            if Ki is not None:
-                clouds[n] = (xyz, at_most(scan, SCAN_POINTS, i))
+            except (ValueError, OSError) as e:  # a damaged image costs only its frame
+                bad[n] = str(e)
+            else:
+                if Ki is not None:
+                    clouds[n] = (xyz, at_most(scan, SCAN_POINTS, i))
         samples.setdefault(n, np.zeros((0, 3), np.float32))
         progress(0.1 + 0.75 * (j + 1) / len(frames))
     for left, what in ((missing, "no depth image"), (unsure, "a depth image but no confidence image")):
         if left:
             more = f" and {len(left) - 5} more" if len(left) > 5 else ""
             warnings.append(f"frames {', '.join(left[:5])}{more} have {what}, so they have no samples")
+    if bad:
+        first, more = next(iter(bad.values())), f" and {len(bad) - 5} more" if len(bad) > 5 else ""
+        warnings.append(f"frames {', '.join(list(bad)[:5])}{more} have depth or confidence images that cannot be used, "
+                        f"so they have no samples ({first})")
+        lost = [n for n in names if n in bad]
+        read = [n for n in names if n not in bad and n not in missing and n not in unsure]
+        if lost and len(read) < lidar_scale.MIN_VIEWS:
+            images = "depth and confidence images" if min_conf else "depth images"  # an export may have no confidence
+            raise Failed(f"only {len(read)} of the {len(names)} views have {images} that can be used (at least "
+                         f"{lidar_scale.MIN_VIEWS} are needed); {bad[lost[0]]}",
+                         {"source": source, "warnings": warnings})
     info = {"source": {**source, "depth_size": video.get("depth_size"), "frames": len(frames)},
             "extrinsic": {"source": "stray (depth aligned with the color camera)", "calibration_sha256": None},
             "intrinsics": {"source": "stray: depth scaled to the frame size", "depth_size": video.get("depth_size"),
                            "frame_size": list(sizes[frames[0]]), "turns": k, "min_confidence": min_conf,
                            "z_range_m": list(stray.Z_RANGE), "K_from": K_from},
             "time": {"base": "frame index"}, "warnings": warnings}
-    cache_write(J, key, samples, info, clouds)
+    if not bad:  # else the next run reads the damaged frames again (a disk error may have passed)
+        cache_write(J, key, samples, info, clouds)
     return samples, {**info, "source": {**info["source"], "cache": "miss"}}, clouds
 
 
@@ -735,9 +837,10 @@ def write_clouds(folder, clouds, points):
 
 # ---- the stage ----
 
-def record(rec, info, t0):
-    """pool/lidar.json: lidar_scale.estimate's record (or a failed one) with the source's fields."""
-    out = {"version": lidar_scale.VERSION, "ok": rec["ok"], "s": rec["s"], "reason": rec["reason"],
+def record(rec, info, t0, kind):
+    """pool/lidar.json: lidar_scale.estimate's record (or a failed one) with the source's fields; kind: the source's
+    kind, which picks the version (lidar_scale.VERSIONS)."""
+    out = {"version": lidar_scale.VERSIONS[kind], "ok": rec["ok"], "s": rec["s"], "reason": rec["reason"],
            "source": info.get("source"), "extrinsic": info.get("extrinsic"), "intrinsics": info.get("intrinsics"),
            "time": info.get("time")}
     out.update({k: v for k, v in rec.items() if k not in out and k not in ("warnings", "seconds")})
@@ -774,7 +877,7 @@ def scale(job_dir):
     try:
         samples, info, clouds = SOURCES[spec["kind"]](J, job, spec, names)
     except Failed as e:
-        rec = record({"ok": False, "s": None, "reason": str(e), "views": [], "combine": None}, e.info, t0)
+        rec = record({"ok": False, "s": None, "reason": str(e), "views": [], "combine": None}, e.info, t0, spec["kind"])
         write_json(out, rec, indent=1)
         raise SystemExit(f"no metric scale: {e}") from None
     progress(0.9)
@@ -793,13 +896,15 @@ def scale(job_dir):
     pts = {}
     try:
         est = lidar_scale.estimate(J / "pool", {n: samples[n] for n in names if n in samples}, check_dir=check,
-                                   points_out=pts)
+                                   points_out=pts, source=spec["kind"],  # the reason names the source's causes
+                                   rays=rays(info, clouds) if spec["kind"] == "rosbag" else None)
     except ValueError as e:  # a pool that prep and da3 left inconsistent
-        write_json(out, record({"ok": False, "s": None, "reason": str(e), "views": [], "combine": None}, info, t0),
+        write_json(out, record({"ok": False, "s": None, "reason": str(e), "views": [], "combine": None}, info, t0,
+                               spec["kind"]),
                    indent=1)
         raise SystemExit(f"no metric scale: {e}") from None
     write_clouds(cloud, {n: clouds[n] for n in names if n in clouds}, pts)  # with the check images, also when not ok
-    rec = record(est, info, t0)
+    rec = record(est, info, t0, spec["kind"])
     write_json(out, rec, indent=1)  # last: with ok, the stage's done marker
     lines = lidar_scale.summary(rec)
     print("\n".join(lines[:-1]))

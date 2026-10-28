@@ -292,13 +292,16 @@ def row_fields(view, queue_pos=None):
 
 def first_not_done(state, parts_confirmed=False, scale_stale=False):
     """app.js retryFrom: "frames" while the input is not analyzed, else the first build stage not done or
-    skipped (None when all are, or before any build). A job stopped at an unconfirmed part list goes back to
-    propose, and a stale LiDAR scale (scale_stale: another calibration or an older estimator) to lidar."""
+    skipped (None before any build, and when all are, unless the scale is stale). A job stopped at an
+    unconfirmed part list goes back to propose, and a stale LiDAR scale (scale_stale: another calibration or
+    an older estimator) to lidar, also on a done job."""
     stage = {s["name"]: s for s in state["stages"]}
     if stage["frames"]["status"] != "done":
         return "frames"
     x = next((s for s in state["stages"] if s["name"] in jobs.BUILD and s["status"] not in ("done", "skipped")), None)
-    if x is None or stage["extract"]["status"] == "pending":
+    if x is None:  # a done job
+        return "lidar" if scale_stale else None
+    if stage["extract"]["status"] == "pending":
         return None
     unconfirmed = state.get("articulated") is True and state.get("parts_mode") == "vlm_edit" \
         and stage.get("propose", {}).get("status") == "done" and not parts_confirmed

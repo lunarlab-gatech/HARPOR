@@ -19,12 +19,23 @@ The estimate (estimate()) runs on the pool after da3:
               points), scattered (the IQR of the used points over 25% of s_i, or the trim drops more
               than 40% of the valid points, or more than 10% below the median r: hidden points are
               never nearer), no_mask, no_samples, else a candidate.
+  rays        with estimate(rays=...) (a LiDAR beside the camera: each point's camera point and the LiDAR's
+              origin), view_ratio runs again along the LiDAR's rays, from the s_i above (follow_rays). Each
+              ray is traced through DA3's depth times s_i (ray_hits), which takes the z-buffer's place. A
+              ray that meets the surface only at an edge comes from behind the object as the camera sees
+              it, so its point is dropped. The mask, conf and depth are read where the ray meets the
+              surface, not at the point's own pixel, which range noise moves along the epipolar line. r is
+              the scale that would put that crossing at the measured range, and the trim is on r, not
+              ln r. A point stays only when its twin, mirrored about the crossing, also lands in the image
+              and on DA3's grid. The view is also scattered when over 10% of its mask's rays stay in front
+              of the surface. Each pass starts from the s_i of the pass before, at most 3 passes.
   combine     the weighted median of ln s_i (weights sqrt(min(points, 2000)), and no view weighs more
               than the median view); views beyond max(3 x 1.4826 MAD, ln 1.05) of it are outliers, the
               others are used; s is the weighted median of the used views. It fails when fewer than 3
               views have points, fewer than 3 or under half of them agree, the spread is over 8%, or s
               is outside 0.5 to 2.
-The record is pool/lidar.json (version 2); check images show the points coloured by r / s on the
+The record is pool/lidar.json (VERSIONS: 3 for a bag, 2 for a Stray capture); check images show the
+points coloured by r / s on the
 prep image, to spot calibration and timing errors. estimate(points_out=...) also gives each view's
 points with their rows in the samples ("index"), so the lidar stage can show which points the scale
 used. read_calibration() reads the LiDAR-camera calibration file (YAML or JSON).
@@ -43,10 +54,14 @@ import numpy as np
 from gator.fileio import write_json
 
 SCALED = ("depth", "pointmaps", "pointmaps_sam3d")  # scaled whole; the extrinsics' translation column too
-# Of pool/lidar.json. steps.done("lidar") takes only a record of this version, so the scale is found again when the
-# estimator changes. Version 2 came with the samples' time window and time base of lidar.CACHE_VERSION 4,
-# ZBUFFER_ABS, the trim, the scatter rule on the used points, and the weights capped at the median view's.
-VERSION = 2
+# Of pool/lidar.json, by the samples' source (job.json "lidar" "kind"). steps.done("lidar") takes only a record of its
+# source's version, so the scale is found again when the estimator changes for that source. Version 2 came with the
+# samples' time window and time base of lidar.CACHE_VERSION 4, ZBUFFER_ABS, the trim, the scatter rule on the used
+# points, and the weights capped at the median view's. Version 3 (a bag only) follows the points along the LiDAR's rays
+# (follow_rays): at 0.4 m with a LiDAR 15 cm beside the camera, s came out 0.8% high on average and single views up to
+# 2.6% high (synthetic). A Stray capture has no rays and gets the same scale as before, so its jobs stay current.
+VERSIONS = {"rosbag": 3, "stray": 2}
+VERSION = max(VERSIONS.values())  # the newest
 
 # Projection.
 MIN_Z = 0.1  # m; nearer points are dropped
@@ -69,6 +84,23 @@ TRIM_MIN_REL = 0.02
 MAX_TRIM_REL = 0.4  # the trim drops more of the valid points: scattered (two groups of about the same size)
 MAX_TRIM_NEAR_REL = 0.1  # ... more of them below the median r, where no hidden point lies: scattered
 
+# Rays (ray_hits, follow_rays).
+RAY_SPAN = 0.25  # a ray is traced where the true range can be: within +-25% of the measured range
+RAY_STEP_PX = 0.5  # its samples lie this many DA3 px apart on average (more at the span's near end) ...
+RAY_STEPS = (64, 512)  # ... with at least and at most this many steps along it
+RAY_EDGE_DEG = 84.0  # DA3's depth that changes faster along a ray than a surface seen this far from face-on,
+RAY_EDGE_REL = 0.005  # plus this share of the depth (DA3's noise), is an edge
+RAY_FIT_PX = 3.0  # the crossing is where a line fit to the gap over this many DA3 px either side of it is zero
+# A larger share of the eroded mask's rays in front of the surface over their span: scattered. In synthetic scenes,
+# correct views of a 30 cm box stay at or below 0.1 with DA3 edges blurred by up to 8 px (Gaussian sigma) at 3,500
+# beams per sr, and up to 6 px at 40,000 (8 px gives 0.102). Views locked on a wall close behind a small box lie at
+# 0.34 to 0.5. Thin objects, softer edges and the image's edge can put correct views over it, and a dark object's lock
+# can stay under it (build_plan.md note 12, open issues).
+RAY_MAX_FRONT = 0.1
+RAY_PASSES = 3  # at most; a pass traces the rays at the s_i of the pass before ...
+RAY_TOL = 1e-4  # ... until s_i changes by less than this share
+RAY_CHUNK = 250_000  # ray samples at a time
+
 # Combine.
 WEIGHT_CAP = 2000  # a view's weight is sqrt(min(points, WEIGHT_CAP)), and at most the median view's
 OUTLIER_MADS = 3.0  # outliers lie beyond max(OUTLIER_MADS x 1.4826 MAD, ln(1 + OUTLIER_MIN_REL))
@@ -76,6 +108,22 @@ OUTLIER_MIN_REL = 0.05
 MIN_VIEWS = 3
 MAX_SPREAD_REL = 0.08  # the weighted RMS of the used views' ln s_i about ln s, as a share
 S_MIN, S_MAX = 0.5, 2.0  # outside: likely an inverted transform or wrong units
+# What the reason of each failed check points to, by the samples' source (job.json "lidar" "kind"). A Stray capture's
+# depth is aligned with the color camera and paired with its frame by name, so it has no time window, no time offset
+# and no T_cam_lidar.
+CAUSES = {
+    "rosbag": {"coverage": "the object may be outside the LiDAR's view, or the time window or T_cam_lidar is wrong "
+                           "(see the check images)",
+               "agreement": "look for wrong masks, a time offset or a wrong T_cam_lidar in the check images",
+               "spread": "look for a time offset or wrong masks in the check images",
+               "range": "check T_cam_lidar (is it T_lidar_cam?) and the units"},
+    "stray": {"coverage": "the phone's depth may have low confidence on the object, the object may be small or far "
+                          "away, or the masks may miss it (see the check images)",
+              "agreement": "look for wrong masks, or a shiny or dark object whose depth the phone gets wrong, in the "
+                           "check images",
+              "spread": "look for wrong masks, or a shiny or dark object whose depth the phone gets wrong, in the "
+                        "check images",
+              "range": "check that the depth images hold millimeters, as Stray Scanner writes them"}}
 
 # Check images.
 CHECK_SIDE = 640  # long side in px
@@ -90,6 +138,7 @@ R_OPT_LINK = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]])
 
 VIEW_KEYS = ("zbuffer_tol", "zbuffer_abs", "erode_frac", "erode_keep", "conf_percentile", "min_points", "max_iqr_rel",
              "trim_mads", "trim_min_rel", "max_trim_rel", "max_trim_near_rel")
+RAY_KEYS = ("ray_span", "ray_step_px", "ray_edge_deg", "ray_edge_rel", "ray_fit_px", "ray_max_front")
 COMBINE_KEYS = ("weight_cap", "outlier_mads", "outlier_min_rel", "min_views", "max_spread_rel", "s_min", "s_max")
 
 
@@ -116,6 +165,8 @@ def thresholds(**overrides):
          "conf_percentile": CONF_PERCENTILE, "min_points": MIN_POINTS, "max_iqr_rel": MAX_IQR_REL,
          "trim_mads": TRIM_MADS, "trim_min_rel": TRIM_MIN_REL, "max_trim_rel": MAX_TRIM_REL,
          "max_trim_near_rel": MAX_TRIM_NEAR_REL,
+         "ray_span": RAY_SPAN, "ray_step_px": RAY_STEP_PX, "ray_edge_deg": RAY_EDGE_DEG, "ray_edge_rel": RAY_EDGE_REL,
+         "ray_fit_px": RAY_FIT_PX, "ray_max_front": RAY_MAX_FRONT, "ray_passes": RAY_PASSES,
          "weight_cap": WEIGHT_CAP, "outlier_mads": OUTLIER_MADS, "outlier_min_rel": OUTLIER_MIN_REL,
          "min_views": MIN_VIEWS, "max_spread_rel": MAX_SPREAD_REL, "s_min": S_MIN, "s_max": S_MAX}
     unknown = sorted(set(overrides) - set(t))
@@ -263,28 +314,146 @@ def zbuffer(iu, iv, z, hw, tol=ZBUFFER_TOL, abs_tol=ZBUFFER_ABS):
     return z <= (1 + tol) * near[iv, iu] + abs_tol
 
 
-def trim(r, mads=TRIM_MADS, min_rel=TRIM_MIN_REL):
+def trim(r, mads=TRIM_MADS, min_rel=TRIM_MIN_REL, log=True):
     """Which ratios r (all finite and positive) to keep: ln r within max(mads x 1.4826 MAD,
     ln(1 + min_rel)) of the median ln r; mads inf keeps them all. Hidden points that the z-buffer
     missed and points at the mask's edge sit on one side of the median and would move it. At least half
-    of the points stay, since half lie within one MAD."""
-    x = np.log(np.asarray(r, float))
+    of the points stay, since half lie within one MAD. log False trims r itself, within max(mads x
+    1.4826 MAD, min_rel x the median): r that is linear in the range noise (follow_rays) stays even
+    about its median, and a cut even in ln r would drop more of its low side."""
+    x = np.log(np.asarray(r, float)) if log else np.asarray(r, float)
     if not len(x) or np.isinf(mads):  # inf x a MAD of 0 would be NaN, and would drop every point
         return np.ones(len(x), bool)
     m = np.median(x)
-    return np.abs(x - m) <= max(mads * 1.4826 * float(np.median(np.abs(x - m))), float(np.log1p(min_rel)))
+    least = float(np.log1p(min_rel)) if log else min_rel * abs(float(m))
+    return np.abs(x - m) <= max(mads * 1.4826 * float(np.median(np.abs(x - m))), least)
+
+
+def bilinear(a, x, y):
+    """a (h, w) at grid coordinates x, y (pixel centres at integers), bilinear. NaN outside the pixel
+    centres and next to a pixel that is not finite and positive."""
+    h, w = a.shape
+    a = np.where(np.isfinite(a) & (a > 0), a, np.nan)
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    inside = (x >= 0) & (x <= w - 1) & (y >= 0) & (y <= h - 1)  # NaN is outside
+    x, y = np.where(inside, x, 0.0), np.where(inside, y, 0.0)
+    x0, y0 = np.minimum(np.floor(x), max(w - 2, 0)).astype(int), np.minimum(np.floor(y), max(h - 2, 0)).astype(int)
+    fx, fy = x - x0, y - y0
+    x1, y1 = np.minimum(x0 + 1, w - 1), np.minimum(y0 + 1, h - 1)
+    v = (1 - fy) * ((1 - fx) * a[y0, x0] + fx * a[y0, x1]) + fy * ((1 - fx) * a[y1, x0] + fx * a[y1, x1])
+    return np.where(inside, v, np.nan)
+
+
+def ray_hits(points, origin, camera, crop, depth, s, span=RAY_SPAN, step_px=RAY_STEP_PX, edge_deg=RAY_EDGE_DEG,
+             edge_rel=RAY_EDGE_REL, fit_px=RAY_FIT_PX):
+    """Where each LiDAR ray meets s x DA3's depth, a surface as the camera sees it: (hit, rho, gu, gv,
+    slope, front), one row per point.
+
+    points (N, 3): the points in the camera frame (meters); origin (3,): the LiDAR's origin in that
+    frame; camera: the K, D, distortion model ("model") and image size ("size", w x h) that made the
+    samples' pixels (project); crop, depth: as view_ratio's. A ray runs from origin through its point. It
+    is sampled where its range lies within rho / (1 + span) to rho / (1 - span) of the point's range rho
+    (so the true range is within +-span of the measured one), evenly in range, with as many steps as make
+    the span's pinhole length on the grid step_px DA3 px per step (at most RAY_STEPS[1]). The pixels move
+    faster at the near end, by the ratio of the span's far z to its near z in the camera frame times the
+    mean step: (1 + span) / (1 - span) for an origin in the camera's z = 0 plane, more for one behind the
+    camera or with pincushion distortion. Each ray has its own steps, so its result does not depend on
+    the other rays in the call. Its gap
+    g = z - s x depth (bilinear; unknown outside the image or the grid, or without valid depth) is below
+    0 in front of the surface. The ray meets the surface at its first sample with g >= 0, unless the depth
+    changes there faster than on a surface that the camera sees edge_deg from face-on, plus edge_rel of
+    the depth. That is an edge: the ray came from behind the object as the camera sees it (a face that
+    only the LiDAR sees, or what lies behind the object). A ray that starts behind the surface, or meets
+    none in its span, is not a hit either. front marks the rays that stay in front of the surface over
+    their whole span (with at least one known sample): points in free space as the camera sees it, which
+    no occlusion explains.
+
+    rho (the crossing's range) and slope (dg / drho there) come from a line fit to g over the samples
+    within fit_px DA3 px of the first crossing, with no edge between them. With noisy depth, the first
+    sample past the surface comes early. gu, gv: the crossing on DA3's grid. Rows that are not hits have
+    NaN."""
+    P0 = np.asarray(points, float).reshape(-1, 3)
+    O = np.asarray(origin, float).reshape(3)
+    depth = np.where(np.isfinite(depth) & (depth > 0), np.asarray(depth, float), np.nan)
+    h, w = depth.shape
+    K, D, model = np.asarray(camera["K"], float), camera.get("D"), camera.get("model")
+    size = tuple(int(x) for x in camera["size"])
+    x0, y0, x1, y1 = (float(c) for c in crop[:4])
+    slope_px = np.tan(np.radians(edge_deg)) * (x1 - x0) / (K[0, 0] * w)  # relative depth change per DA3 px
+    n = len(P0)
+    hit, front, rho, gu, gv, slope = np.zeros(n, bool), np.zeros(n, bool), *(np.full(n, np.nan) for _ in range(4))
+    ray = P0 - O
+    rng = np.linalg.norm(ray, axis=1)
+    good = np.isfinite(rng) & (rng > 0)
+    dirs = ray / np.where(good, rng, 1.0)[:, None]
+    lo, hi = rng / (1 + span), rng / (1 - span)
+
+    def grid(X):  # (gu, gv, z) of points on DA3's grid; gu is NaN outside the image
+        u, v, z, ok = project(X.reshape(-1, 3), K, D, model, size)
+        a, b = source_to_grid(u, v, crop, (w, h))
+        shape = X.shape[:-1]
+        return np.where(ok, a, np.nan).reshape(shape), b.reshape(shape), z.reshape(shape)
+
+    rows = np.flatnonzero(good)
+    ends = [O + r[rows, None] * dirs[rows] for r in (lo, hi)]
+    with np.errstate(invalid="ignore", divide="ignore"):  # the span's length on the grid, pinhole: also off the image
+        a, b = ((e[:, :2] / e[:, 2:]) @ K[:2, :2].T * [w / (x1 - x0), h / (y1 - y0)] for e in ends)
+        far = np.where((ends[0][:, 2] > MIN_Z) & (ends[1][:, 2] > MIN_Z), np.hypot(*(a - b).T), np.inf)
+    steps = np.clip(np.ceil(np.where(np.isfinite(far), far, np.inf) / step_px), *RAY_STEPS).astype(int)
+    order = np.argsort(steps, kind="stable")
+    rows, steps = rows[order], steps[order]  # rays with a similar number of steps go together
+    per = max(1, RAY_CHUNK // (RAY_STEPS[1] + 1))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        for i in range(0, len(rows), per):
+            c, n_ = rows[i:i + per], steps[i:i + per, None]
+            m = int(n_.max())
+            k = np.arange(len(c))
+            q = np.arange(m + 1) / n_  # each ray at its own steps, and NaN past its end
+            R = np.where(q <= 1, lo[c, None] + (hi - lo)[c, None] * q, np.nan)
+            u, v, z = grid(O + R[..., None] * dirs[c, None, :])
+            hgt = s * bilinear(depth, u, v)
+            g = z - hgt
+            lim = z[:, 1:] * (slope_px * np.hypot(np.diff(u, axis=1), np.diff(v, axis=1)) + edge_rel)
+            edge = np.c_[np.zeros(len(c), bool), ~(np.abs(np.diff(hgt, axis=1)) <= lim)]  # unknown depth too
+            behind = g >= 0  # unknown is not behind
+            front[c] = ~behind.any(axis=1) & np.isfinite(g).any(axis=1)
+            j = np.maximum(np.argmax(behind, axis=1), 1)
+            ok = behind[k, j] & (g[k, j - 1] < 0) & ~edge[k, j]  # the ray starts in front and crosses no edge
+            f = -g[k, j - 1] / (g[k, j] - g[k, j - 1])  # the crossing between the two samples
+            cu, cv = u[k, j - 1] + f * (u[k, j] - u[k, j - 1]), v[k, j - 1] + f * (v[k, j] - v[k, j - 1])
+            seg = np.cumsum(edge, axis=1)
+            win = (seg == seg[k, j][:, None]) & (np.hypot(u - cu[:, None], v - cv[:, None]) <= fit_px) & np.isfinite(g)
+            cnt = win.sum(1)
+            mr = np.where(win, R, 0.0).sum(1) / np.maximum(cnt, 1)
+            mg = np.where(win, g, 0.0).sum(1) / np.maximum(cnt, 1)
+            dr = np.where(win, R - mr[:, None], 0.0)
+            b_ = (dr * np.where(win, g - mg[:, None], 0.0)).sum(1) / (dr * dr).sum(1)
+            r_ = mr - mg / b_
+            ok &= (cnt >= 2) & (b_ > 0) & (r_ >= lo[c]) & (r_ <= hi[c])
+            q = np.clip(np.where(ok, (r_ - lo[c]) / (hi - lo)[c] * n_[:, 0], 0.0), 0, n_[:, 0] - 1e-9)
+            q0 = np.floor(q).astype(int)
+            fq = q - q0
+            cu, cv = u[k, q0] + fq * (u[k, q0 + 1] - u[k, q0]), v[k, q0] + fq * (v[k, q0 + 1] - v[k, q0])
+            ok &= np.isfinite(cu) & np.isfinite(cv)
+            hit[c], rho[c], slope[c] = ok, np.where(ok, r_, np.nan), np.where(ok, b_, np.nan)
+            gu[c], gv[c] = np.where(ok, cu, np.nan), np.where(ok, cv, np.nan)
+    return hit, rho, gu, gv, slope, front
 
 
 def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, zbuffer_abs=ZBUFFER_ABS, erode_frac=ERODE_FRAC,
                erode_keep=ERODE_KEEP, conf_percentile=CONF_PERCENTILE, min_points=MIN_POINTS, max_iqr_rel=MAX_IQR_REL,
                trim_mads=TRIM_MADS, trim_min_rel=TRIM_MIN_REL, max_trim_rel=MAX_TRIM_REL,
-               max_trim_near_rel=MAX_TRIM_NEAR_REL):
+               max_trim_near_rel=MAX_TRIM_NEAR_REL, ray=None, s_ref=None, ray_span=RAY_SPAN, ray_step_px=RAY_STEP_PX,
+               ray_edge_deg=RAY_EDGE_DEG, ray_edge_rel=RAY_EDGE_REL, ray_fit_px=RAY_FIT_PX,
+               ray_max_front=RAY_MAX_FRONT):
     """One view's ratio of LiDAR depth to DA3 depth. uvz: the frame's samples; crop: prep's crop box
     of the frame; depth, conf: DA3's (h, w) arrays; mask: the pool mask at any size.
 
     Returns (record, points). The record counts the points at each step (points: the samples,
-    points_grid: inside DA3's grid, points_visible: after the z-buffer, points_mask: inside the eroded
-    mask, points_valid: with valid DA3 depth and conf, points_used: also within the trim of ln r) and
+    points_grid: inside DA3's grid, points_visible: after the z-buffer, or along rays the hits whose
+    twins land on the grid, points_mask:
+    inside the eroded mask, points_valid: with valid DA3 depth and conf, points_used: also within the
+    trim of ln r) and
     gives erode_px, conf_min, s (the median of the used points' r = z / depth), iqr_rel (the IQR of
     the used points' r over s) and status: no_mask, no_samples, few_points (under min_points valid
     points: the trim must not turn a scattered view into one that combine leaves out of its counts),
@@ -293,7 +462,27 @@ def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, zbuffer_ab
     max_trim_near_rel of them below their median r. Hidden points that the z-buffer missed always lie
     farther. The trim may drop them, up to max_trim_rel of the valid points, and the view keeps its s,
     since the IQR is that of the points that give s. points holds the visible points for the check
-    image: u, v (source pixels), r (NaN without valid depth), used, and index: each point's row in uvz."""
+    image: u, v (source pixels), r (NaN without valid depth), used, and index: each point's row in uvz.
+
+    ray (follow_rays): the view's LiDAR rays, {points: (N, 3) camera points row for row with uvz,
+    origin, and the camera of ray_hits}, traced at the scale s_ref. ray_hits then takes the z-buffer's
+    place: at the noisy pixel, the points measured short hid the ones measured long, and on a dense scan s
+    came out about 0.6% low. A visible point must be a ray hit; the record's points_hidden counts the
+    others, and points_twin the hits that the twin rule below drops. The mask, conf and depth are read
+    where its ray meets the surface. Its r is the scale that puts that crossing at the measured range:
+    s_ref + (range - crossing) x slope / depth. That is linear in the range noise, so the trim is on r, not
+    ln r (trim with log False). Without a baseline (origin 0), r is z over DA3's depth at the point.
+    A hit stays only when its twin (the point mirrored about its crossing along its ray) also lands in the
+    image and on DA3's grid. The samples hold only the points whose noisy pixel is in the image, so near
+    the image's edge on the LiDAR's side the points measured short are gone; without their twins' rule the
+    others made s high there. front_rel is the share of the rays from the eroded mask (by their own pixel)
+    that stay in front of the surface over their whole span (ray_hits' front), and over ray_max_front the
+    view is scattered. No occlusion explains such points, so s_ref is likely the scale of another surface,
+    such as a wall close behind a small object, which the rays then confirm. front_rel counts only the
+    points that the z-buffer keeps (rays_mask of them): the wall's points that the LiDAR sees past the
+    object's edge are hits at the wall's scale, and on a dense scan they made a lock look clean. This rule
+    comes before few_points when rays_mask is at least min_points: such a view has few hits because its
+    rays miss the surface, and few_points would leave it out of combine's counts."""
     from scipy.ndimage import distance_transform_edt
 
     from gator.webapp.views import at_size
@@ -303,6 +492,8 @@ def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, zbuffer_ab
     conf = np.ones_like(depth) if conf is None else np.asarray(conf, float)
     m = at_size(np.asarray(mask) > 0, (h, w))
     uvz = np.asarray(uvz, float).reshape(-1, 3)
+    if ray is not None and len(ray["points"]) != len(uvz):
+        raise ValueError(f"the rays have {len(ray['points'])} points and the samples {len(uvz)}; they go row for row")
     rows = np.flatnonzero(np.isfinite(uvz).all(1) & (uvz[:, 2] > 0))
     uvz = uvz[rows]
     gu, gv = source_to_grid(uvz[:, 0], uvz[:, 1], crop, (w, h))
@@ -310,36 +501,85 @@ def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, zbuffer_ab
     g = (iu >= 0) & (iu < w) & (iv >= 0) & (iv < h)
     iu, iv, z, src, rows = iu[g], iv[g], uvz[g, 2], uvz[g, :2], rows[g]
     vis = zbuffer(iu, iv, z, (h, w), zbuffer_tol, zbuffer_abs)
-    iu, iv, z, src, rows = iu[vis], iv[vis], z[vis], src[vis], rows[vis]
-
+    if ray is None:  # along the rays, ray_hits drops what the camera cannot see, and vis counts only in front_rel
+        iu, iv, z, src, rows = iu[vis], iv[vis], z[vis], src[vis], rows[vis]
     dist = distance_transform_edt(m)
     e = max(1, round(erode_frac * np.hypot(h, w)))
     while e > 0 and (dist > e).sum() < erode_keep * m.sum():
         e -= 1
     inner = dist > e
+    hidden = front_rel = None
+    own_n = 0
+    if ray is not None:
+        O = np.asarray(ray["origin"], float).reshape(3)
+        X = np.asarray(ray["points"], float).reshape(-1, 3)[rows]
+        hit, rho, hu, hv, slope, fr = ray_hits(X, O, ray, crop, depth, s_ref, ray_span, ray_step_px, ray_edge_deg,
+                                               ray_edge_rel, ray_fit_px)
+        own = inner[iv, iu] & vis  # the points' own pixels in the eroded mask, of the points the z-buffer keeps
+        own_n = int(own.sum())
+        hidden, front_rel = int((~hit).sum()), float((fr & own).sum() / own_n) if own_n else None
+        with np.errstate(invalid="ignore"):  # the twin: the point mirrored about its crossing, along its ray
+            rng = np.linalg.norm(X - O, axis=1)
+            tu, tv, _, tok = project(O + (2 * rho - rng)[:, None] * (X - O) / rng[:, None], ray["K"], ray.get("D"),
+                                     ray.get("model"), tuple(int(x) for x in ray["size"]))
+            tu, tv = source_to_grid(np.where(tok, tu, -1.0), np.where(tok, tv, -1.0), crop, (w, h))
+        twin = tok & (pixel(tu) >= 0) & (pixel(tu) < w) & (pixel(tv) >= 0) & (pixel(tv) < h)
+        keep = hit & twin
+        twins = int((hit & ~twin).sum())
+        X, rho, hu, hv, slope, src, rows = X[keep], rho[keep], hu[keep], hv[keep], slope[keep], src[keep], rows[keep]
+        iu, iv = np.clip(pixel(hu), 0, w - 1), np.clip(pixel(hv), 0, h - 1)
+
     in_mask = m & np.isfinite(conf)
     conf_min = float(np.percentile(conf[in_mask], conf_percentile)) if in_mask.any() else None
-    d, c = depth[iv, iu], conf[iv, iu]
-    valid = np.isfinite(d) & (d > 0)
-    r = np.where(valid, z / np.where(valid, d, 1.0), np.nan)
+    c = conf[iv, iu]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if ray is None:
+            d = depth[iv, iu]
+            valid = np.isfinite(d) & (d > 0)
+            r = np.where(valid, z / np.where(valid, d, 1.0), np.nan)
+        else:
+            d = bilinear(depth, hu, hv)
+            r = s_ref + (np.linalg.norm(X - O, axis=1) - rho) * slope / d
+            valid = np.isfinite(r) & (r > 0)
+            r = np.where(valid, r, np.nan)
     fit = inner[iv, iu] & valid & np.isfinite(c) & (c >= (conf_min if conf_min is not None else np.inf))
     used = fit.copy()
-    used[fit] = trim(r[fit], trim_mads, trim_min_rel)
+    used[fit] = trim(r[fit], trim_mads, trim_min_rel, log=ray is None)
     ru = r[used]
     s = float(np.median(ru)) if len(ru) else None
     iqr = float(np.subtract(*np.percentile(ru, [75, 25])) / s) if len(ru) else None
     rf, dropped = r[fit], ~used[fit]  # the valid points' r, and which of them the trim dropped
     near = int((dropped & (rf < np.median(rf))).sum()) if len(rf) else 0
     status = ("no_mask" if not m.any() else "no_samples" if not len(uvz)
+              else "scattered" if own_n >= max(1, min_points) and front_rel > ray_max_front  # also without hits
               else "few_points" if fit.sum() < max(1, min_points) or not len(ru)
               else "scattered" if iqr > max_iqr_rel or dropped.sum() > max_trim_rel * len(rf)
               or near > max_trim_near_rel * len(rf) else "candidate")
-    rec = {"points": int(len(uvz)), "points_grid": int(g.sum()), "points_visible": int(vis.sum()),
+    rec = {"points": int(len(uvz)), "points_grid": int(g.sum()), "points_visible": int(len(rows)),
            "points_mask": int(inner[iv, iu].sum()), "points_valid": int(fit.sum()), "points_used": int(used.sum()),
            "erode_px": int(e),
            "conf_min": None if conf_min is None else round(conf_min, 4),
            "s": None if s is None else round(s, 6), "iqr_rel": None if iqr is None else round(iqr, 4), "status": status}
+    if hidden is not None:
+        rec["points_hidden"], rec["points_twin"], rec["rays_mask"] = hidden, twins, own_n
+        rec["front_rel"] = None if front_rel is None else round(front_rel, 4)
     return rec, {"u": src[:, 0], "v": src[:, 1], "r": r, "used": used, "index": rows}
+
+
+def follow_rays(uvz, crop, depth, conf, mask, ray, s, t):
+    """view_ratio along the view's LiDAR rays (ray, as view_ratio's), from s, the view's scale without
+    them. Each pass traces the rays at the s of the pass before, up to t["ray_passes"] times, until s
+    changes by less than RAY_TOL. The crossings move with s, so the first pass, at the scale without
+    rays, can still be off by a little of that scale's bias. t: thresholds(). The record gains passes."""
+    kw = {k: t[k] for k in VIEW_KEYS + RAY_KEYS}
+    passes = 0
+    while True:
+        passes += 1
+        rec, points = view_ratio(uvz, crop, depth, conf, mask, ray=ray, s_ref=s, **kw)
+        done = rec["s"] is None or abs(rec["s"] / s - 1) < RAY_TOL or passes >= t["ray_passes"]
+        s = rec["s"]
+        if done:
+            return {**rec, "passes": passes}, points
 
 
 def weighted_median(x, w):
@@ -356,12 +596,14 @@ def weighted_median(x, w):
 
 
 def combine(views, weight_cap=WEIGHT_CAP, outlier_mads=OUTLIER_MADS, outlier_min_rel=OUTLIER_MIN_REL,
-            min_views=MIN_VIEWS, max_spread_rel=MAX_SPREAD_REL, s_min=S_MIN, s_max=S_MAX):
+            min_views=MIN_VIEWS, max_spread_rel=MAX_SPREAD_REL, s_min=S_MIN, s_max=S_MAX, source="rosbag"):
     """The scale from view_ratio's records (see the module docstring). Every candidate's status
     becomes used or outlier, in place. Returns ok, s (None when no view is a candidate), reason
-    (None when ok), spread_rel, the outlier cut and the counts. A view's weight is at most the median
-    view's. Else a view with more than half the weight is the median alone and its MAD is 0, so every
-    other view becomes an outlier, and one point more or less in the other views can flip the result."""
+    (None when ok; its causes are CAUSES[source]), spread_rel, the outlier cut and the counts. A view's
+    weight is at most the median view's. Else a view with more than half the weight is the median alone
+    and its MAD is 0, so every other view becomes an outlier, and one point more or less in the other
+    views can flip the result."""
+    causes = CAUSES[source]
     cand = [v for v in views if v["status"] == "candidate"]
     with_points = sum(v["status"] in ("candidate", "scattered") for v in views)
     s = spread = mad = cut = None
@@ -383,18 +625,15 @@ def combine(views, weight_cap=WEIGHT_CAP, outlier_mads=OUTLIER_MADS, outlier_min
     need = max(min_views, int(np.ceil(with_points / 2)))
     if with_points < min_views:
         reason = (f"LiDAR points cover the object in only {with_points} of {len(views)} views (at least {min_views} "
-                  "are needed); the object may be outside the LiDAR's view, or the time window or T_cam_lidar is "
-                  "wrong (see the check images)")
+                  f"are needed); {causes['coverage']}")
     elif kept < need:
         reason = (f"the per-view scales disagree: {kept} of the {with_points} views with LiDAR points agree "
-                  f"({count['scattered']} scattered, {count['outlier']} outliers) and at least {need} must; look for "
-                  "wrong masks, a time offset or a wrong T_cam_lidar in the check images")
+                  f"({count['scattered']} scattered, {count['outlier']} outliers) and at least {need} must; "
+                  f"{causes['agreement']}")
     elif spread > max_spread_rel:
-        reason = (f"the per-view scales spread by {spread:.1%}, more than {max_spread_rel:.0%}; look for a time "
-                  "offset or wrong masks in the check images")
+        reason = f"the per-view scales spread by {spread:.1%}, more than {max_spread_rel:.0%}; {causes['spread']}"
     elif not s_min <= s <= s_max:
-        reason = (f"the LiDAR scale {s:.2f} is far from Depth Anything 3's metric estimate; "
-                  "check T_cam_lidar (is it T_lidar_cam?) and the units")
+        reason = f"the LiDAR scale {s:.2f} is far from Depth Anything 3's metric estimate; {causes['range']}"
     else:
         reason = None
     return {"ok": reason is None, "s": s, "reason": reason, "spread_rel": None if spread is None else round(spread, 5),
@@ -419,11 +658,14 @@ def load_samples(samples):
     return out
 
 
-def estimate(pool_dir, samples, check_dir=None, points_out=None, **overrides):
+def estimate(pool_dir, samples, check_dir=None, points_out=None, source="rosbag", rays=None, **overrides):
     """The lidar.json record of a pool (mvsam3d prep and da3 ran on it) and the LiDAR samples
     ({pool name: (N, 3) [u, v, z]} or an .npz). overrides change thresholds by name (thresholds()).
     With check_dir, writes check_dir/<name>.jpg for every view. A dict points_out gets {view name:
-    view_ratio's points}."""
+    view_ratio's points}. source, the samples' kind, picks the causes that a failed check names (CAUSES).
+    rays: {pool name: view_ratio's ray}. A view with rays and a scale goes on along them (follow_rays);
+    its record has passes (0 when the view had no scale to start from). The record's version is that of
+    the estimator that ran: a bag's with rays, else a Stray capture's (VERSIONS)."""
     from PIL import Image
 
     from gator.stage_a.mvsam3d import view_names
@@ -446,10 +688,15 @@ def estimate(pool_dir, samples, check_dir=None, points_out=None, **overrides):
             raise ValueError(f"{n} is not in {pool_dir / 'prep.json'}; rerun prep")
         mask = np.array(Image.open(pool_dir / "masks" / f"{n}.png")) > 0
         i = stem[n]
-        rec, points[n] = view_ratio(samples.get(n, np.zeros((0, 3))), crops[n], depth[i], conf[i], mask,
-                                    **{k: t[k] for k in VIEW_KEYS})
+        args = (samples.get(n, np.zeros((0, 3))), crops[n], depth[i], conf[i], mask)
+        rec, points[n] = view_ratio(*args, **{k: t[k] for k in VIEW_KEYS})
+        ray = (rays or {}).get(n)
+        if ray is not None and rec["s"] is not None:
+            rec, points[n] = follow_rays(*args, ray, rec["s"], t)
+        elif ray is not None:
+            rec["passes"] = 0
         views.append({"name": n, "frame": int(n[1:]) if re.fullmatch(r"f\d+", n) else None, **rec})
-    comb = combine(views, **{k: t[k] for k in COMBINE_KEYS})
+    comb = combine(views, source=source, **{k: t[k] for k in COMBINE_KEYS})
     ok, s, reason = comb.pop("ok"), comb.pop("s"), comb.pop("reason")
     if points_out is not None:
         points_out.update(points)
@@ -474,7 +721,8 @@ def estimate(pool_dir, samples, check_dir=None, points_out=None, **overrides):
             ref = s if s is not None else v["s"]
             check_image(pool_dir / "input" / "images" / f"{v['name']}.png", pool_dir / "masks" / f"{v['name']}.png",
                         crops[v["name"]], points[v["name"]], ref, check_dir / f"{v['name']}.jpg")
-    return {"version": VERSION, "ok": ok, "s": s, "reason": reason, "views": views, "combine": {**comb, "thresholds": t},
+    return {"version": VERSIONS["rosbag" if rays else "stray"], "ok": ok, "s": s, "reason": reason, "views": views,
+            "combine": {**comb, "thresholds": t},
             "da3": {"process_res": process_res, "grid": [int(depth.shape[2]), int(depth.shape[1])]},
             "warnings": warnings, "seconds": round(time.time() - t0, 2)}
 

@@ -15,7 +15,7 @@ def read_json(path):
     """The JSON in path, or None when the file is missing or does not parse."""
     try:
         return json.loads(Path(path).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # RecursionError: nested too deep for json
         return None
 
 

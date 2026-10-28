@@ -14,8 +14,8 @@ Four steps write into one run folder, each in its own process:
   place  fits the mesh to the masks of all views: first its scale (MV-SAM3D's own scale was 11% too
          large on its example), then shift, size and a small rotation (its position was 17 cm off on
          the round table); --fit scale or --fit none limit this. Then -> posed.glb in frame W (view 0's OpenCV camera, DA3
-         units), cameras.json (every view's K at the image size and w2c relative to view 0, for the
-         agent's manifest), placement.json (the fit, mask IoU per view, view 0 depth check) and
+         units, or meters when select applied a LiDAR scale),
+         cameras.json (every view's K at the image size and w2c relative to view 0, for the agent's manifest), placement.json (the fit, mask IoU per view, view 0 depth check) and
          overlay_<name>.png
 
     python -m gator.stage_a.mvsam3d prep --scene DIR --mask-prompt NAME --out RUN [--max-side 1024]
@@ -190,8 +190,10 @@ def sam3d(mv_root, sam3d_root, out, seed):
     def arr(x):
         return np.asarray(x.detach().float().cpu() if hasattr(x, "detach") else x).reshape(-1).tolist()
 
+    # MV-SAM3D's pose is in the units of the pointmaps. They are meters when select applied a LiDAR scale, as in place().
+    units = "meters (LiDAR scale applied in select)" if "metric_scale" in da.files else "DA3 units (meters)"
     pose = {"rotation_wxyz": arr(res["rotation"]), "translation": arr(res["translation"]), "scale": arr(res["scale"]),
-            "frame": "canonical -> view 0 camera, PyTorch3D axes, row vectors (note 2), DA3 units",
+            "frame": f"canonical -> view 0 camera, PyTorch3D axes, row vectors (note 2), {units}",
             "views": names, "view0": names[0], "seed": seed, "glb_extents": np.asarray(res["glb"].extents).tolist(),
             "glb_faces": int(len(res["glb"].faces)), "seconds": round(time.time() - t0, 1),
             "peak_gib": round(torch.cuda.max_memory_allocated() / 2**30, 1)}

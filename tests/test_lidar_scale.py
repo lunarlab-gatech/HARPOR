@@ -226,14 +226,16 @@ def test_view_ratio_resists_range_noise_and_hidden_points():
     assert rec["points_valid"] - rec["points_used"] < 1.02 * hidden.sum()  # the trim drops few points of the plane
 
 
-def near_field_view(yaw, seed, z=0.4, size=(0.3, 0.2, 0.2), wall=2.0, baseline=0.15, noise=0.03, density=3500):
-    """view_ratio's record of one view of note 12's near case: a box of size (m) at z, turned by yaw about the
-    vertical, before a wall at z = wall. A 640x480 camera (f 500) at the origin; DA3's depth on a 504x378 grid is the
-    true depth / 1.25. A sparse random LiDAR (density beams per sr, as a Mid-360) baseline m to the camera's right,
-    with range noise (m)."""
-    Wc, Hc, w, h, f = 640, 480, 504, 378, 500.0
+def near_field_scene(yaw, seed, z=0.4, size=(0.3, 0.2, 0.2), wall=2.0, baseline=0.15, noise=0.03, density=3500,
+                     depth_noise=0.0, x=0.0, scale=1.25, crop=(0, 0, 640, 480), grid=(504, 378), keep=1.0):
+    """One view of note 12's near case: a box of size (m) at z (and x to the right), turned by yaw about the
+    vertical, before a wall at z = wall. A 640x480 camera (f 500) at the origin; DA3's depth on a grid (w x h) over
+    prep's crop is the true depth / scale, times e^N(0, depth_noise) at each pixel. A sparse random LiDAR (density
+    beams per sr, as a Mid-360) baseline m to the camera's right, with range noise (m); a dark box returns only the
+    share keep of its beams. Returns view_ratio's (uvz, crop, depth, conf, mask) and the view's rays."""
+    (Wc, Hc), (w, h), f = (640, 480), grid, 500.0
     Kc = np.array([[f, 0, Wc / 2 - 0.5], [0, f, Hc / 2 - 0.5], [0, 0, 1]])
-    c, half = np.array([0.0, 0.0, z]), np.asarray(size) / 2
+    c, half = np.array([x, 0.0, z]), np.asarray(size) / 2
     R = np.array([[np.cos(yaw), 0, np.sin(yaw)], [0, 1, 0], [-np.sin(yaw), 0, np.cos(yaw)]])
 
     def cast(o, d):  # the distance to the first hit along the rays, and whether it is the box
@@ -247,7 +249,7 @@ def near_field_view(yaw, seed, z=0.4, size=(0.3, 0.2, 0.2), wall=2.0, baseline=0
         return np.minimum(tb, tw), tb <= tw
 
     v, u = np.mgrid[0:h, 0:w].astype(float)
-    us, vs = (u + 0.5) * Wc / w - 0.5, (v + 0.5) * Hc / h - 0.5
+    us, vs = crop[0] + (u + 0.5) * (crop[2] - crop[0]) / w - 0.5, crop[1] + (v + 0.5) * (crop[3] - crop[1]) / h - 0.5
     d = np.stack([(us - Kc[0, 2]) / f, (vs - Kc[1, 2]) / f, np.ones_like(us)], -1).reshape(-1, 3)
     t, on = cast(np.zeros(3), d)
     rng = np.random.default_rng(seed)
@@ -256,12 +258,24 @@ def near_field_view(yaw, seed, z=0.4, size=(0.3, 0.2, 0.2), wall=2.0, baseline=0
     el = np.arcsin(rng.uniform(-np.sin(np.radians(40)), np.sin(np.radians(40)), n))
     dl = np.stack([np.sin(az) * np.cos(el), np.sin(el), np.cos(az) * np.cos(el)], -1)
     o = np.array([baseline, 0.0, 0.0])
-    tl, _ = cast(o, dl)
+    tl, box = cast(o, dl)
     hit = np.isfinite(tl)
+    if keep < 1:
+        hit &= ~box | (np.random.default_rng([seed, 1]).random(n) < keep)
     X = o + dl[hit] * (tl[hit] + rng.normal(0, noise, hit.sum()))[:, None]
     uu, vv, zz, ok = L.project(X, Kc, None, None, (Wc, Hc))
-    return L.view_ratio(np.stack([uu[ok], vv[ok], zz[ok]], 1), (0, 0, Wc, Hc), (t * d[:, 2]).reshape(h, w) / 1.25, None,
-                        on.reshape(h, w))[0]
+    depth = (t * d[:, 2]).reshape(h, w) / scale
+    if depth_noise:
+        depth = depth * np.exp(rng.normal(0, depth_noise, (h, w)))
+    return ((np.stack([uu[ok], vv[ok], zz[ok]], 1), crop, depth, None, on.reshape(h, w)),
+            {"points": X[ok], "origin": o, "K": Kc, "D": None, "model": None, "size": (Wc, Hc)})
+
+
+def near_field_view(yaw, seed, rays=False, **kw):
+    """view_ratio's record of one view of near_field_scene; with rays, follow_rays' record from it."""
+    args, ray = near_field_scene(yaw, seed, **kw)
+    rec = L.view_ratio(*args)[0]
+    return L.follow_rays(*args, ray, rec["s"], L.thresholds())[0] if rays else rec
 
 
 def test_near_views_with_many_hidden_points_agree():
@@ -276,6 +290,220 @@ def test_near_views_with_many_hidden_points_agree():
         assert abs(v["s"] / 1.25 - 1) < 0.03 and v["iqr_rel"] < 0.25, v
     c = L.combine(views)
     assert c["ok"] and c["views_used"] == 5 and abs(c["s"] / 1.25 - 1) < 0.01, c
+
+
+@pytest.mark.parametrize("depth_noise, bound, view_bound", [(0.0, 0.002, 0.012), (0.01, 0.002, 0.012),
+                                                              (0.02, 0.006, 0.018)])
+def test_the_rays_remove_the_near_field_bias(depth_noise, bound, view_bound):
+    """Note 12's near case on an orbit of 9 views. Without rays, s came out 0.55% high and the views at yaw +10
+    and +20 deg 1.7% and 2.2% high. Range noise moves each point along the epipolar line, so the depth and the mask
+    were read at the wrong pixel, and the LiDAR sees a face of the box that the camera cannot. Along the rays, for
+    these seeds, each view is within 1.2% and s is 0.12% high (0.09% with 1% DA3 noise). Over 30 seed sets s is 0.06%
+    low on average (sd 0.11%, -0.28% to +0.17%) and 0.11% low with 1% DA3 noise (sd 0.11%, -0.28% to +0.19%),
+    against 0.7% high without rays. With noise in DA3's depth at each pixel, the first sample past the surface comes
+    early, so the crossing is a line fit over 3 DA3 px. With 2% noise every view stays (a fit over 2 px left 8 here,
+    and 6 to 9 over 30 seed sets), but s is less sure: +0.51% here, the highest of the 30 seed sets, and single
+    views reach 1.4% over those sets. front_rel counts the rays of the points that the z-buffer keeps, the eroded
+    mask's points of the pass without rays."""
+    yaws = np.radians([-50, -35, -20, -10, 0, 10, 20, 35, 50])
+    old, new = [], []
+    for i, a in enumerate(yaws):
+        args, ray = near_field_scene(a, i, depth_noise=depth_noise)
+        rec = L.view_ratio(*args)[0]
+        old.append({"name": f"f{i:05d}", **rec})
+        new.append({"name": f"f{i:05d}", **L.follow_rays(*args, ray, rec["s"], L.thresholds())[0]})
+    bias = lambda v: v["s"] / 1.25 - 1  # noqa: E731
+    c_old, c_new = L.combine(old), L.combine(new)
+    assert bias(c_old) > 0.004 and max(map(bias, old)) > 0.015
+    assert c_new["ok"] and c_new["views_used"] == 9 and abs(bias(c_new)) < bound, c_new
+    assert all(abs(bias(v)) < view_bound for v in new), [round(bias(v), 4) for v in new]
+    assert all(1 <= v["passes"] <= 3 and v["front_rel"] < 0.02 for v in new)
+    assert [v["rays_mask"] for v in new] == [v["points_mask"] for v in old]
+    # The face that only the LiDAR sees: its points are hidden, and more of them at yaw +10 and +20 deg.
+    assert min(new[5]["points_hidden"], new[6]["points_hidden"]) > max(v["points_hidden"] for v in new[:5])
+
+
+@pytest.mark.parametrize("x, crop, grid", [(0.192, (0, 0, 640, 480), (504, 378)), (0.08, (80, 0, 560, 480), (378, 378))])
+def test_the_rays_keep_their_twins_at_the_image_edge(x, crop, grid):
+    """The near case with the box right of the axis, so the image's right edge (or prep's 1:1 crop's) cuts it on the
+    LiDAR's side. The samples hold only the points whose noisy pixel is in the image, so there the points measured
+    short are gone, and s came out 0.52% high along the rays. A point now stays only when its twin, mirrored about
+    its crossing, also lands in the image and on DA3's grid (the crop: +0.52% when it only had to land in the image).
+    Along the rays every point on the grid is visible, hidden or a twin's drop."""
+    views = []
+    for i, a in enumerate(np.radians([-50, -35, -20, -10, 0, 10, 20, 35, 50])):
+        args, ray = near_field_scene(a, i, x=x, crop=crop, grid=grid)
+        rec = L.view_ratio(*args)[0]
+        views.append({"name": f"f{i:05d}", **L.follow_rays(*args, ray, rec["s"], L.thresholds())[0]})
+    c = L.combine(views)
+    assert c["ok"] and c["views_used"] == 9 and abs(c["s"] / 1.25 - 1) < 0.003, c
+    assert all(v["points_grid"] == v["points_visible"] + v["points_hidden"] + v["points_twin"] for v in views)
+    assert all(v["points_twin"] >= 10 for v in views), [v["points_twin"] for v in views]
+
+
+def test_a_scale_that_puts_the_masks_points_in_free_space_is_scattered():
+    """A 6 cm box at 0.2 m before a wall 16 cm behind it, a LiDAR 15 cm beside the camera, and DA3's scale 0.9. Each
+    view without rays is scattered, with about the wall's s. Traced at that s, the wall's rays meet the surface and
+    the box's rays stay in front of it, so each view looked like a clean candidate, and combine took a scale 98% high.
+    No occlusion explains a point in front of the surface. So a view with over 10% of its mask's rays there (30% to
+    50% here) is scattered, and combine fails, as without rays. (A view whose s without rays is a mix of the box's and
+    the wall's can find the box's along the rays, a right candidate.) With a sparser LiDAR, few rays meet the
+    surface, and such views were few_points: combine left them out and blamed the coverage. The rule now comes first
+    when the view's mask holds at least 30 rays (rays_mask)."""
+    def orbit(density, ray_max_front=L.RAY_MAX_FRONT):
+        plain, views = [], []
+        for i, a in enumerate(np.radians([-50, -35, -20, -10, 0, 10, 20, 35, 50])):
+            args, ray = near_field_scene(a, i, z=0.2, size=(0.06, 0.036, 0.036), wall=0.36, noise=0.02, scale=0.9,
+                                         density=density)
+            plain.append(L.view_ratio(*args)[0])
+            s = plain[-1]["s"]
+            rec = L.follow_rays(*args, ray, s, L.thresholds(ray_max_front=ray_max_front))[0] if s else plain[-1]
+            views.append({"name": f"f{i:05d}", **rec})
+        return plain, views
+
+    plain, on = orbit(3500)
+    off = orbit(3500, ray_max_front=1.0)[1]
+    assert sum(v["status"] == "scattered" and v["s"] / 0.9 > 1.5 for v in plain) >= 7
+    locked = [v for v in on if v["front_rel"] > 0.3]
+    assert len(locked) >= 7 and all(v["status"] == "scattered" for v in locked)
+    c_off, c_on = L.combine(off), L.combine(on)
+    assert c_off["ok"] and c_off["s"] / 0.9 - 1 > 0.9
+    assert not c_on["ok"] and c_on["views_used"] <= 2 and c_on["reason"].startswith("the per-view scales disagree")
+    sparse = orbit(500)[1]
+    gated = [v for v in sparse if v.get("rays_mask", 0) >= 30 and v["front_rel"] > 0.1]
+    assert all(v["status"] == "scattered" for v in gated) and any(v["points_valid"] < 30 for v in gated), sparse
+    assert all(v["status"] == "few_points" for v in sparse if v.get("rays_mask", 0) < 30 and v["points_valid"] < 30)
+    assert not L.combine(sparse)["ok"]
+
+
+def test_a_dark_box_on_a_dense_scan_shows_its_lock():
+    """The lock above on a dense scan (40,000 beams per sr) of a dark box that returns 15% of its beams. Along the
+    rays the z-buffer does not run, so the wall's points that the LiDAR sees past the box's edge counted in front_rel
+    too: they meet the surface at the wall's scale, and the locks looked clean (front_rel down to 0.07). combine took a
+    scale 98% high from 5 views, and did so in 11 of 13 seed sets. front_rel now counts only the points that the
+    z-buffer keeps, and combine fails in all 13."""
+    views = []
+    for i, a in enumerate(np.radians([-50, -35, -20, -10, 0, 10, 20, 35, 50])):
+        args, ray = near_field_scene(a, 100 + i, z=0.2, size=(0.06, 0.036, 0.036), wall=0.36, noise=0.02, scale=0.9,
+                                     density=40000, keep=0.15)
+        rec = L.view_ratio(*args)[0]
+        views.append({"name": f"f{i:05d}", **L.follow_rays(*args, ray, rec["s"], L.thresholds())[0]})
+        assert views[-1]["rays_mask"] == rec["points_mask"]
+    c = L.combine(views)
+    assert not c["ok"] and c["views_used"] <= 3, c
+
+
+def test_each_pass_starts_from_the_last():
+    """follow_rays from 5% above the converged s of a near view (yaw +50 deg): the crossings move with s, so one pass
+    stays 0.44% off (0.24% to 0.81% over 30 seeds). Three passes, each from the s of the pass before, land within
+    0.05%."""
+    args, ray = near_field_scene(np.radians(50), 4)
+    s0 = L.view_ratio(*args)[0]["s"]
+    ref = L.follow_rays(*args, ray, s0, L.thresholds(ray_passes=10))[0]["s"]
+    three = L.follow_rays(*args, ray, 1.05 * ref, L.thresholds())[0]
+    one = L.follow_rays(*args, ray, 1.05 * ref, L.thresholds(ray_passes=1))[0]
+    assert three["passes"] >= 2 and abs(three["s"] / ref - 1) < 5e-4, three
+    assert one["passes"] == 1 and abs(one["s"] / ref - 1) > 2e-3, one
+
+
+def plane_rays(origin, noise=0.0, n=400, seed=0):
+    """A 160x120 camera (f 100) before a 40 x 30 cm card at 0.5 m in a plane z = 0.5 + 0.2 x (a wall at 2 m around
+    it); DA3's depth (the same grid) is the true depth / 1.25. LiDAR points on the card, seen from origin, with range
+    noise along the rays. Returns (uvz, crop, depth, mask, ray, the true points)."""
+    w, h, f = 160, 120, 100.0
+    K = np.array([[f, 0, w / 2 - 0.5], [0, f, h / 2 - 0.5], [0, 0, 1]])
+    v, u = np.mgrid[0:h, 0:w].astype(float)
+    x, y = (u - K[0, 2]) / f, (v - K[1, 2]) / f
+    z = 0.5 / (1 - 0.2 * x)  # the plane along the camera's rays
+    card = (np.abs(x * z) < 0.2) & (np.abs(y * z) < 0.15)
+    depth = np.where(card, z, 2.0) / 1.25
+    rng = np.random.default_rng(seed)
+    X0 = np.zeros((0, 3))
+    while len(X0) < n:  # points on the card, as the LiDAR's rays meet the plane z = 0.5 + 0.2 x
+        p = np.c_[rng.uniform(-0.18, 0.18, n), rng.uniform(-0.13, 0.13, n)]
+        X0 = np.r_[X0, np.c_[p, 0.5 + 0.2 * p[:, 0]]][:n]
+    O = np.asarray(origin, float)
+    d = X0 - O
+    X = O + d * (1 + rng.normal(0, noise, n)[:, None] / np.linalg.norm(d, axis=1)[:, None])
+    uu, vv, zz, ok = L.project(X, K, None, None, (w, h))
+    assert ok.all()
+    return (np.stack([uu, vv, zz], 1), (0, 0, w, h), depth, card,
+            {"points": X, "origin": O, "K": K, "D": None, "model": None, "size": (w, h)}, X0)
+
+
+def test_ray_hits_meet_the_surface_where_the_ray_does():
+    """ray_hits on a slanted card: each ray from the LiDAR (12 cm right of the camera) meets s x DA3's depth
+    where it meets the card, whatever its range noise. A range far outside the span, or a point that only the
+    LiDAR sees, is not a hit."""
+    uvz, crop, depth, mask, ray, X0 = plane_rays((0.12, 0.0, 0.0), noise=0.03)
+    hit, rho, gu, gv, slope, front = L.ray_hits(ray["points"], ray["origin"], ray, crop, depth, 1.25)
+    true = np.linalg.norm(X0 - ray["origin"], axis=1)
+    assert hit.mean() > 0.97 and np.abs(rho - true)[hit].max() < 2e-3 and (slope[hit] > 0).all()
+    pix = L.project(X0, ray["K"], None, None, ray["size"])
+    assert np.hypot(gu - pix[0], gv - pix[1])[hit].max() < 0.5  # the grid is the image here
+    # At another s the crossing moves along the ray, by about the depth's change over the slope.
+    s2 = L.ray_hits(ray["points"], ray["origin"], ray, crop, depth, 1.25 * 1.01)
+    both = hit & s2[0]
+    moved = s2[1][both] - rho[both]
+    assert (moved > 0).all() and np.allclose(moved, 0.01 * 1.25 * L.bilinear(depth, gu, gv)[both] / slope[both], rtol=0.05)
+    # 40% beyond the card's range: outside the +-25% span.
+    far = ray["origin"] + (X0 - ray["origin"]) * 1.4
+    assert not L.ray_hits(far, ray["origin"], ray, crop, depth, 1.25)[0].any()
+    # Points 11 cm behind the card's right edge and 2.5 cm past it, which the LiDAR sees past the edge: the camera
+    # sees the card there, and the rays reach them across the edge, behind the card as the camera sees it.
+    O = ray["origin"]
+    back = np.c_[np.full(20, 0.225), np.linspace(-0.1, 0.1, 20), np.full(20, 0.65)]
+    pix = L.project(back, ray["K"], None, None, ray["size"])
+    assert pix[3].all() and mask[L.pixel(pix[1]), L.pixel(pix[0])].all()  # the camera sees the card there
+    assert not L.ray_hits(back, O, ray, crop, depth, 1.25)[0].any()
+
+
+def test_view_ratio_along_the_rays():
+    """view_ratio with rays on the slanted card: r is the scale that puts each crossing at the measured range, so
+    without noise every point gives s exactly, and with a LiDAR at the camera (no baseline) r is z over the depth at
+    the point. The rays go row for row with the samples."""
+    uvz, crop, depth, mask, ray, _ = plane_rays((0.12, 0.0, 0.0))
+    rec, pts = L.view_ratio(uvz, crop, depth, None, mask, ray=ray, s_ref=1.3)
+    used = pts["used"]
+    assert rec["status"] == "candidate" and rec["points_hidden"] == 0 and rec["points_visible"] == len(uvz)
+    assert used.sum() == rec["points_used"] > 300 and np.allclose(pts["r"][used], 1.25, rtol=2e-3)
+    uvz0, crop, depth, mask, ray0, _ = plane_rays((0.0, 0.0, 0.0), noise=0.02)
+    rec0, pts0 = L.view_ratio(uvz0, crop, depth, None, mask, ray=ray0, s_ref=1.25)
+    g = L.source_to_grid(uvz0[pts0["index"], 0], uvz0[pts0["index"], 1], crop, (160, 120))
+    ok = np.isfinite(pts0["r"])
+    assert np.allclose(pts0["r"][ok], uvz0[pts0["index"], 2][ok] / L.bilinear(depth, *g)[ok], rtol=1e-6)
+    with pytest.raises(ValueError, match="the rays have 399 points and the samples 400"):
+        L.view_ratio(uvz, crop, depth, None, mask, ray={**ray, "points": ray["points"][1:]}, s_ref=1.25)
+
+
+def test_the_rays_replace_the_zbuffer_on_a_dense_scan():
+    """A dense scan of the slanted card (10000 points, about 2 per DA3 pixel) from a LiDAR 12 cm beside the camera,
+    with 3 cm of range noise. Range noise moves the points measured short onto pixels where the card is farther, so
+    the z-buffer at the noisy pixel dropped the points measured long near them, and s came out 0.6% low along the
+    rays. ray_hits now takes the z-buffer's place, and s is within 0.3% in each view and 0.1% on average."""
+    bias = []
+    for seed in range(4):
+        uvz, crop, depth, mask, ray, _ = plane_rays((0.12, 0.0, 0.0), noise=0.03, n=10000, seed=seed)
+        s0 = L.view_ratio(uvz, crop, depth, None, mask)[0]["s"]
+        rec = L.follow_rays(uvz, crop, depth, None, mask, ray, s0, L.thresholds())[0]
+        assert rec["status"] == "candidate" and rec["points_grid"] == len(uvz), rec
+        bias.append(rec["s"] / 1.25 - 1)
+    assert max(map(abs, bias)) < 0.003 and abs(np.mean(bias)) < 0.001, bias
+
+
+def test_ray_hits_do_not_depend_on_the_chunks(monkeypatch):
+    """ray_hits traces its rays in chunks. Each ray has its own steps, so a ray's result does not depend on the
+    other rays of its chunk. Each chunk's rays all took the steps of its longest ray, so with 2% noise in DA3's depth,
+    207 of 3515 rays of a near view changed between hit and no hit when the chunks changed."""
+    args, ray = near_field_scene(np.radians(20), 6, depth_noise=0.02)
+    out = []
+    for chunk in (L.RAY_CHUNK, 10**9, 7 * (L.RAY_STEPS[1] + 1)):
+        monkeypatch.setattr(L, "RAY_CHUNK", chunk)
+        out.append(L.ray_hits(ray["points"], ray["origin"], ray, args[1], args[2], 1.25))
+    for o in out[1:]:
+        assert (o[0] == out[0][0]).all() and (o[5] == out[0][5]).all()
+        assert np.allclose(o[1], out[0][1], rtol=0, atol=1e-12, equal_nan=True)
+    assert out[0][0].sum() > 1500
 
 
 def test_rot90_points_matches_np_rot90():
@@ -507,10 +735,13 @@ def test_combine_weights_and_checks():
 
 
 def test_estimate_recovers_the_scale(tmp_path):
+    """Without rays (as the CLI runs it), the record has the version of the estimator without them, a Stray
+    capture's, whatever the source. A bag's version would mark a scale found without rays as current."""
     pool, samples = lidar_pool(tmp_path)
     rec = L.estimate(pool, samples, check_dir=tmp_path / "check")
     assert rec["ok"] and rec["reason"] is None and abs(rec["s"] / 1.25 - 1) < 0.005
-    assert rec["version"] == L.VERSION == 2 and rec["da3"] == {"process_res": 504, "grid": [W, H]} and rec["warnings"] == []
+    assert rec["version"] == L.VERSIONS["stray"] == 2 and L.VERSION == 3
+    assert rec["da3"] == {"process_res": 504, "grid": [W, H]} and rec["warnings"] == []
     assert [v["status"] for v in rec["views"]] == ["used"] * 8 and [v["frame"] for v in rec["views"]] == list(range(0, 80, 10))
     assert min(v["points_used"] for v in rec["views"]) > 300 and rec["combine"]["views_used"] == 8
     assert rec["combine"]["spread_rel"] < 0.005 and rec["combine"]["thresholds"]["min_points"] == 30
@@ -530,6 +761,29 @@ def test_estimate_recovers_the_scale(tmp_path):
         p = pts[v["name"]]
         assert p["used"].sum() == v["points_used"] and len(p["index"]) == v["points_visible"]
         assert np.array_equal(np.stack([p["u"], p["v"]], 1), samples[v["name"]][p["index"], :2])
+
+
+def test_estimate_follows_the_rays(tmp_path):
+    """estimate with rays (here a LiDAR at the camera, so r is z over the depth at the point): each view with a scale
+    goes on along its rays, and a view without one (no samples) has passes 0. Views without rays have neither
+    passes nor points_hidden. The rays go row for row with the samples."""
+    pool, samples = lidar_pool(tmp_path, no_samples=(7,))
+    Ki = np.linalg.inv(K_SRC)
+    cam = {"origin": [0.0, 0.0, 0.0], "K": K_SRC, "D": None, "model": None, "size": SRC}
+    rays = {n: {**cam, "points": a[:, 2:] * (np.c_[a[:, :2], np.ones(len(a))] @ Ki.T)} for n, a in samples.items()}
+    rays["f00070"] = {**cam, "points": np.zeros((0, 3))}
+    rec = L.estimate(pool, samples, rays=rays)
+    assert rec["ok"] and abs(rec["s"] / 1.25 - 1) < 0.005 and rec["combine"]["views_used"] == 7
+    assert rec["version"] == L.VERSIONS["rosbag"] == 3
+    views = rec["views"]
+    assert all(1 <= v["passes"] <= 3 and v["points_hidden"] >= 0 for v in views[:7])
+    assert views[7]["status"] == "no_samples" and views[7]["passes"] == 0 and "points_hidden" not in views[7]
+    assert rec["combine"]["thresholds"]["ray_span"] == L.RAY_SPAN
+    plain = L.estimate(pool, samples, rays={n: r for n, r in rays.items() if n != "f00000"})
+    assert "passes" not in plain["views"][0] and "points_hidden" not in plain["views"][0] and plain["views"][1]["passes"]
+    bad = {**rays, "f00000": {**rays["f00000"], "points": rays["f00000"]["points"][1:]}}
+    with pytest.raises(ValueError, match="they go row for row"):
+        L.estimate(pool, samples, rays=bad)
 
 
 def test_estimate_leaves_out_outliers_and_odd_views(tmp_path):
@@ -602,6 +856,45 @@ def test_estimate_fails_far_from_da3(tmp_path):
     assert not rec["ok"] and abs(rec["s"] / 3 - 1) < 0.005
     assert rec["reason"] == ("the LiDAR scale 3.00 is far from Depth Anything 3's metric estimate; "
                              "check T_cam_lidar (is it T_lidar_cam?) and the units")
+
+
+def test_the_reasons_fit_the_source(tmp_path):
+    """Each failed check's reason names the likely causes of the source. A bag's name the time window, a time offset
+    and T_cam_lidar. A Stray capture has neither: its depth is aligned with the color camera and paired with its
+    frame by name, so its reasons name the phone's depth, the object and the masks."""
+    def views(*pairs, status="candidate"):
+        return [{"s": s, "points_used": n, "status": status} for s, n in pairs]
+
+    cases = {  # the views that fail each check
+        "coverage": lambda: views((1.0, 100), (1.0, 100)),
+        "agreement": lambda: views((1.0, 500), (1.01, 500), (0.99, 500)) + views(*[(1.0, 500)] * 4, status="scattered"),
+        "spread": lambda: views(*[(float(np.exp(x)), 100) for x in (0.0, 0.1, -0.1, 0.12, -0.12, 0.1, -0.1)]),
+        "range": lambda: views(*[(3.0, 100)] * 4)}
+    facts = {"coverage": "LiDAR points cover the object in only 2 of 2 views (at least 3 are needed); ",
+             "agreement": "the per-view scales disagree: 3 of the 7 views with LiDAR points agree (4 scattered, "
+                          "0 outliers) and at least 4 must; ",
+             "spread": "the per-view scales spread by 10.4%, more than 8%; ",
+             "range": "the LiDAR scale 3.00 is far from Depth Anything 3's metric estimate; "}
+    bag = {"coverage": "the object may be outside the LiDAR's view, or the time window or T_cam_lidar is wrong (see "
+                       "the check images)",
+           "agreement": "look for wrong masks, a time offset or a wrong T_cam_lidar in the check images",
+           "spread": "look for a time offset or wrong masks in the check images",
+           "range": "check T_cam_lidar (is it T_lidar_cam?) and the units"}
+    stray = {"coverage": "the phone's depth may have low confidence on the object, the object may be small or far "
+                         "away, or the masks may miss it (see the check images)",
+             "agreement": "look for wrong masks, or a shiny or dark object whose depth the phone gets wrong, in the "
+                          "check images",
+             "spread": "look for wrong masks, or a shiny or dark object whose depth the phone gets wrong, in the check "
+                       "images",
+             "range": "check that the depth images hold millimeters, as Stray Scanner writes them"}
+    for check, make in cases.items():
+        assert L.combine(make())["reason"] == L.combine(make(), source="rosbag")["reason"] == facts[check] + bag[check]
+        assert L.combine(make(), source="stray")["reason"] == facts[check] + stray[check]
+    # The stage passes its source to estimate.
+    pool, samples = lidar_pool(tmp_path)
+    few = L.estimate(pool, samples, min_points=601, source="stray")
+    assert few["reason"] == ("LiDAR points cover the object in only 0 of 8 views (at least 3 are needed); "
+                             + stray["coverage"])
 
 
 # Calibration files.

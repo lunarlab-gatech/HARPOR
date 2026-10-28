@@ -37,6 +37,7 @@ const queueText = (status, pos) => status === "queued" && Number.isInteger(pos) 
 const NEXT = { ready: "Name the object, then Start.", queued: "You can close this page.", running: "You can close this page.",
   review: "Check the picked views, then Build.", failed: "Check the log, then Retry.",
   parts: "Check the part list, then Build.",  // a review of the part list
+  parts_stale: "The scale is out of date: cancel the job, then Retry from lidar.",  // ... that the server cannot confirm
   // The lidar stage failed (a rosbag); ... that has a calibration.
   lidar: "In Settings, upload a calibration and Retry, or turn LiDAR off and build again.",
   lidar_cal: "In Settings, replace the calibration and Retry, or turn LiDAR off and build again.",
@@ -45,18 +46,25 @@ const NEXT = { ready: "Name the object, then Start.", queued: "You can close thi
   // A done job whose scale is stale (V.scaleStale: another calibration or an older estimator): Retry runs again from lidar.
   stale: "Run lidar and later stages again to update them. It runs the lidar stage and every stage after it, GPU stages " +
     "included." };
+// The part list's review with a stale scale: the server refuses to confirm the list (jobs.Runner.resume), and a cancelled
+// job's Retry starts from lidar (retryFrom).
+const STALE_PARTS = " so Build cannot confirm this list. Cancel the job, then press Retry from lidar. The job finds the " +
+  "scale again, and the VLM lists the parts again.";
 // Why a scale is stale, by its cause (staleBy): the warning of a done job (V.scaleStale), the line when the server
-// starts from lidar, and the line in the review.
+// starts from lidar, the line in the review, and the line in the part list's review.
 const SCALE_STALE = {
   calibration: { done: "The calibration changed after this build, so the scale and the masses are out of date.",
     start: "Starting from lidar (calibration changed).",
-    review: "Calibration changed. Build finds the scale again, then stops here." },
+    review: "Calibration changed. Build finds the scale again, then stops here.",
+    parts: "The calibration changed after the scale was found," + STALE_PARTS },
   estimator: { done: "The app now finds the LiDAR scale in a new way, so this build's scale and masses are out of date.",
     start: "Starting from lidar (the app now finds the scale in a new way).",
-    review: "The app now finds the scale in a new way. Build finds the scale again, then stops here." },
+    review: "The app now finds the scale in a new way. Build finds the scale again, then stops here.",
+    parts: "The app now finds the scale in a new way," + STALE_PARTS },
   unknown: { done: "The scale and the masses of this build are out of date.",
     start: "Starting from lidar (the scale is out of date).",
-    review: "The scale is out of date. Build finds the scale again, then stops here." } };
+    review: "The scale is out of date. Build finds the scale again, then stops here.",
+    parts: "The scale is out of date," + STALE_PARTS } };
 // The cause the server gives (job.lidar_stale): "calibration", or "estimator" when an older version of the app found
 // the scale. A Stray capture has no calibration. A page that does not know the cause (the server was updated while a
 // stopped job's page was open) names none.
@@ -600,7 +608,7 @@ function renderState(st, follow) {
   const rerun = st.status === "done" && from === "lidar";
   let next = ["failed", "cancelled"].includes(st.status) && from === null ? "Build again from the Settings tab."
     : rerun ? NEXT.stale + (V.job && V.job.auto_continue === false ? " It pauses for your review." : "")
-    : partList ? NEXT.parts : lidarFailed(st.status, st.stages)
+    : partList ? NEXT[V.job && scaleStale(V.job) ? "parts_stale" : "parts"] : lidarFailed(st.status, st.stages)
       ? NEXT[!V.job ? "lidar" : V.job.kind === "stray" ? "lidar_stray" : V.job.calibration ? "lidar_cal" : "lidar"]
       : NEXT[st.status] || "";
   const ran = (name) => build.some((x) => x.name === name && x.status === "done");
@@ -932,7 +940,8 @@ function tfChain(edges, target, source) {
 }
 // The status line of the camera topic's link to a LiDAR topic: [text, true when the user must act]. A calibration
 // replaces the bag's TF (lidar.extrinsic). One uploaded for another LiDAR topic (its lidar_topic) is refused at the start
-// (jobs.lidar_settings); one without lidar_topic is not checked.
+// (jobs.lidar_settings); one without lidar_topic is not checked. A listing made before the camera topics had
+// camera_axes_from read only the bag's first 5 s of /tf, so its missing link is not final: Start reads all of /tf.
 function lidarLink(found, camTopic, lidarTopic, cal) {
   if (!lidarTopic) return ["", false];
   const cam = (found.topics || []).find((t) => t.topic === camTopic), lid = (found.lidar || []).find((t) => t.topic === lidarTopic);
@@ -942,7 +951,9 @@ function lidarLink(found, camTopic, lidarTopic, cal) {
   if (cal && cal.lidar_topic && cal.lidar_topic !== lidarTopic)
     return [`The calibration ${cal.name} is for ${cal.lidar_topic}: choose that topic, or upload a calibration for ${lidarTopic}`, true];
   if (cal) return [`Linked by the calibration ${cal.name}` + (tf ? ` (it replaces ${tf})` : ""), false];
-  return tf ? ["Linked by " + tf, false] : ["No TF link: upload a calibration", true];
+  if (tf) return ["Linked by " + tf, false];
+  return cam && !("camera_axes_from" in cam) ? ["No TF link in the bag's first 5 s: Start checks the whole bag", false]
+    : ["No TF link: upload a calibration", true];
 }
 // job.json "calibration" in short (server.calibration_summary): the LiDAR's distance from the camera and its turn. A
 // time_offset_s of 0 is a given offset (the two header clocks are one); null means that the file gives none. info is
@@ -1394,7 +1405,10 @@ async function loadParts() {
   const who = p.source === "vlm" ? VLM[p.agent] || "The VLM" : "You";
   fill($("#partssum"), !p.parts.length ? "No part list yet." : n ? `${who}: ${n} moving ${n === 1 ? "part" : "parts"}. Base: ${p.base}.`
     : `${who} found no moving parts. Add them under the base (${p.base}).`);
-  $("#partswarn").replaceChildren(...(p.warnings || []).map((w) => h("li", {}, w)));
+  // A stale scale comes first: the server refuses Build then, so the line says what to do. While the list waits, the
+  // calibration cannot change, so the cause is mostly an older estimator.
+  const stale = !!V.job && scaleStale(V.job) ? h("li", { class: "warn" }, SCALE_STALE[staleBy()].parts) : null;
+  fill($("#partswarn"), stale, (p.warnings || []).map((w) => h("li", {}, w)));
   fill($("#partshints"), moving.filter((x) => x.axis_hint).map((x) => h("li", {}, h("b", {}, x.name), ": " + x.axis_hint)));
   $("#partsfig").hidden = !r.photo;
   if (r.photo) $("#partsphoto").src = file(r.photo);

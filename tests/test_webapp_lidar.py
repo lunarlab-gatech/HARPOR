@@ -258,6 +258,12 @@ def test_tf_gives_the_scale_and_the_record(points_bag, tmp_path, capsys):
     names = mvsam3d.view_names(J / "pool")
     assert [v["name"] for v in rec["views"]] == names and all(v["status"] == "used" for v in rec["views"])
     assert rec["combine"]["views_used"] == len(names) and rec["reason"] is None
+    # Each view went on along the LiDAR's rays, from its origin in the camera frame (T_cam_lidar's translation).
+    assert all(1 <= v["passes"] <= lidar_scale.RAY_PASSES and v["points_hidden"] >= 0 for v in rec["views"])
+    assert all(v["points_grid"] == v["points_visible"] + v["points_hidden"] + v["points_twin"] for v in rec["views"])
+    rays = json.loads((J / "lidar" / "samples.json").read_text())["info"]["rays"]
+    assert sorted(rays) == sorted(p.stem for p in (J / "scene" / "images").glob("*.png"))
+    assert all(np.allclose(r["origin"], T_CAM_LIDAR[:3, 3], atol=1e-6) and r["size"] == list(SIZE) for r in rays.values())
     assert sorted(p.stem for p in (J / "lidar" / "check").glob("*.jpg")) == names
     assert rec["source"] == {"kind": "rosbag", "file": "points.bag", "camera_topic": CAMERA, "topic": POINTS,
                              "type": "PointCloud2", "frame_id": LIDAR, "scans": 19, "cache": "miss"}
@@ -275,7 +281,7 @@ def test_tf_gives_the_scale_and_the_record(points_bag, tmp_path, capsys):
     assert rec["time"] == {"base": "header", "window_ms": 100.0, "offset_ms": 0.0,
                            "log_minus_header_ms": {"camera": 50.0, "lidar": 50.0}, "log_minus_last_point_ms": None,
                            "scan_period_ms": 250.0, "scan_period_from": "scans", "point_times": False}
-    assert rec["warnings"] == [] and rec["version"] == lidar_scale.VERSION and rec["seconds"] > 0
+    assert rec["warnings"] == [] and rec["version"] == lidar_scale.VERSIONS["rosbag"] == 3 and rec["seconds"] > 0
     out = capsys.readouterr().out
     assert "PROGRESS 0.000" in out and "PROGRESS 1.000" in out and f"metric scale {rec['s']:.4f}" in out
     assert f"{names[0]}: used, " in out and "extrinsic from tf (camera_optical_frame <- base_link <- lidar, static)" in out
@@ -521,12 +527,18 @@ def test_the_time_base(tmp_path):
 
     # A merged bag: each sensor's log times copy its own header stamps (plus the same delay), so the
     # LiDAR's scans are logged 5 s after the frames. The offset finds them; the header stamps agree with
-    # it, though a scan is logged 150 ms before its last point.
+    # it, though a scan is logged 150 ms before its last point. A live bag on one clock with a wrong
+    # offset has the same log times, so a warning names both readings.
     merged = write_scene_bag(tmp_path / "merged.bag", n=8, kind="livox", lidar_clock_s=5.0, restamped=True, step=2)
     J = make_job(tmp_path / "m", merged, lidar_topic=LIVOX)
     upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist(), "time_offset_s": 5.0})
     rec = scaled(J)
-    assert rec["ok"] and rec["s"] == pytest.approx(1.25, rel=0.01) and rec["warnings"] == [], rec["reason"]
+    assert rec["ok"] and rec["s"] == pytest.approx(1.25, rel=0.01), rec["reason"]
+    assert rec["warnings"] == [
+        "time_offset_s is 5 s, but the log times put the LiDAR's header clock within 0.2 s of the camera's (log time "
+        "minus header stamp: camera 0.050 s, LiDAR 0.050 s; log time minus each scan's last point: LiDAR -0.150 s); "
+        "either the bag's log times copy the header stamps, or time_offset_s is wrong (0 when both use one clock); "
+        "check time_offset_s"]
     assert rec["time"]["base"] == "header" and rec["time"]["log_minus_header_ms"] == {"camera": 50.0, "lidar": 50.0}
     assert rec["time"]["log_minus_last_point_ms"] == -150.0
     # The same without the LiDAR's own clock: the header base by the header stamps, with no offset given.
@@ -559,6 +571,131 @@ def test_a_slow_lidar_link(tmp_path):
         "time_offset_s is 0 s, but the log times put the LiDAR's header clock -0.22 s from the camera's (log time "
         "minus header stamp: camera 0.050 s, LiDAR 0.470 s; log time minus each scan's last point: LiDAR 0.270 s); "
         "check time_offset_s"]
+
+
+def sweep_job(root, period, phase, late, rate_hz=None):
+    """A job of one camera frame (stamped S0 + 3 s, logged LAG later) and a Livox topic that sweeps for one
+    period (ns), from phase ns after each multiple of the period, and is logged late ns after its last
+    point. Every point lies 2 m ahead of the camera, and its x in the camera's frame is its time after the
+    frame in s, so the frame's camera points tell which times it got. rate_hz replaces the listing's rate.
+    (J, job.json)."""
+    H = S0 + 3 * 10**9
+
+    def make(m):
+        P = np.hstack([F.intrinsics(*SIZE), np.zeros((3, 1))])
+        links = [("base_link", CAM, *T_BASE_CAM), ("base_link", LIDAR, *T_BASE_LIDAR)]
+        out = [("/cam/camera_info", CI, S0, m.info(S0, [0.0] * 5, F.intrinsics(*SIZE), P, size=SIZE)),
+               ("/tf_static", TFM, S0, m.tf(S0, links)),
+               (CAMERA, IMG, H + LAG, m.image(H, picture(0, SIZE), "rgb8", frame=CAM))]
+        for k in range(int(6e9 // period)):
+            first = S0 + k * period + phase
+            offs = np.linspace(0, period - 1_000_000, 200).astype(np.int64)
+            X = np.c_[(first + offs - H) / 1e9, np.zeros(200), np.full(200, 2.0), np.ones(200)]
+            X = (X @ np.linalg.inv(T_CAM_LIDAR).T)[:, :3]
+            pts = [(int(o), *x, 0x10) for o, x in zip(offs, X)]
+            out.append((LIVOX, m.livox, first + int(offs[-1]) + late, m.livox_msg(first, first, pts, frame=LIDAR)))
+        return sorted(out, key=lambda x: x[2])
+
+    bag = write_bag(root / "sweeps.bag", make=make)
+    J = root / "job"
+    (J / "frames").mkdir(parents=True)
+    found = rosbag.image_topics(bag)
+    if rate_hz is not None:
+        found["lidar"][0]["rate_hz"] = rate_hz
+    (J / "frames" / "topics.json").write_text(json.dumps(found))
+    (J / "scene" / "images").mkdir(parents=True)
+    Image.fromarray(picture(0, SIZE)).save(J / "scene" / "images" / "f00000.png")
+    job = {"video": {"name": bag.name, "path": str(bag)}, "source": {"kind": "rosbag", "topic": CAMERA},
+           "lidar": {"kind": "rosbag", "topic": LIVOX}, "calibration": None}
+    return J, job
+
+
+@pytest.mark.parametrize("period, phase, late, rate_hz, reads", [
+    (200_000_000, 40_000_000, LAG + 190_000_000, None, 1),  # 5 Hz, 0.19 s later than the camera
+    (400_000_000, 250_000_000, LAG, None, 1),  # 2.5 Hz, as late as the camera
+    (200_000_000, 40_000_000, LAG + 190_000_000, 20.0, 2)])  # the listing's rate is wrong: a second read
+def test_a_slow_lidar_sweep_after_the_frame(tmp_path, monkeypatch, period, phase, late, rate_hz, reads):
+    """A sweep that starts inside the frame's window, after the frame's stamp, is logged one sweep later,
+    plus the LiDAR's delay, which the clock check accepts up to 0.2 s more than the camera's. The stage
+    reads that far from the frame (read_span: the window, a scan period and the clock tolerance), so the
+    frame gets the points of its whole window (+-100 ms). Before, it read +-0.4 s only, and the points
+    after the frame were lost without a warning. The period comes from the listing's rate, and when the
+    scans read show a longer one, the stage reads the rest too."""
+    J, job = sweep_job(tmp_path, period, phase, late, rate_hz)
+    calls = []
+    scans = rosbag.scans
+    monkeypatch.setattr(rosbag, "scans", lambda *a: calls.append(a) or scans(*a))
+    samples, info, clouds = L.rosbag_samples(J, job, {"kind": "rosbag", "topic": LIVOX}, ["f00000"])
+    assert (info["time"]["base"], info["time"]["window_ms"], info["warnings"]) == ("header", 100.0, [])
+    assert info["time"]["scan_period_ms"] == period / 1e6 and len(calls) == reads
+    t = clouds["f00000"][0][:, 0]  # the camera points' x: each point's time after the frame, in s
+    assert len(samples["f00000"]) == len(t) and t.min() == pytest.approx(-0.1, abs=0.003)
+    assert t.max() == pytest.approx(0.1, abs=0.003)
+    assert L.read_span(1e8) == 4e8 and L.read_span(2e8) == 5e8 and L.read_span(5e8) == 8e8
+    assert L.read_span(5e9) == 8e8  # a listing's rate of 0.2 Hz reads no longer than 2 Hz does
+
+
+def test_one_frame_for_the_camera_and_the_lidar(tmp_path, monkeypatch):
+    """The camera and the LiDAR share one frame_id, and the bag has no TF: the link is the identity, as the
+    listing says, and the axes come from the frame's name. Before, the stage said that TF does not link the
+    frame to itself."""
+    monkeypatch.setattr(sys.modules[__name__], "LIDAR", CAM)  # the scans' frame_id
+    monkeypatch.setattr(sys.modules[__name__], "cam_lidar", lambda i=0, turn=0.0: np.eye(4))  # their points
+    bag = write_scene_bag(tmp_path / "one.bag", n=6, tf=None)
+    J = make_job(tmp_path, bag)
+    found = json.loads((J / "frames" / "topics.json").read_text())
+    assert (found["lidar"][0]["frame_id"], found["topics"][0]["tf_links"], found["tf"]) == (CAM, {POINTS: "static"}, [])
+    assert jobs.lidar_settings(J, json.loads((J / "job.json").read_text()), {"topic": POINTS})["topic"] == POINTS
+    rec = scaled(J)
+    assert rec["ok"] and rec["s"] == pytest.approx(1 / F.FAKE_DA3_SCALE, rel=0.01), rec["reason"]
+    ext = rec["extrinsic"]
+    assert (ext["source"], ext["chain"], ext["link"], ext["camera_axes"], ext["camera_axes_from"]) == (
+        "tf", [CAM], "static", "optical", "name")
+    assert np.allclose(ext["T_cam_lidar"], np.eye(4)) and rec["warnings"] == []
+
+
+
+def test_one_frame_takes_its_axes_from_all_of_tf(monkeypatch):
+    """One frame, named cam0, for the camera and the LiDAR, and no TF of it near the frames (only an unrelated
+    static link): the link is the identity, and the stage decides the camera's axes from all of /tf, as the
+    listing does, so a body-to-optical link logged away from the frames counts. Before, it decided them from
+    the edges near the frames, so by the name only."""
+    calls, imu = [], ("base_link", "imu", np.eye(4), True, 0)
+
+    def transforms(r, windows=None):
+        calls.append(windows is None)
+        return [imu] if windows is not None else [imu, ("base_link", "cam0", matrix(*T_BASE_CAM), False, 10**10)]
+
+    monkeypatch.setattr(rosbag, "open_bag", lambda path: contextlib.nullcontext(None))
+    monkeypatch.setattr(rosbag, "transforms", transforms)
+    ext, per = L.extrinsic("one.bag", "cam0", "cam0", POINTS, None, None, None, {"f00000": [(0, 1)]}, {"f00000": 0}, [])
+    assert (ext["chain"], ext["link"], ext["camera_axes"], ext["camera_axes_from"]) == (["cam0"], "static", "optical", "tf")
+    assert np.allclose(per["f00000"], np.eye(4)) and calls == [False, True]
+
+def test_a_bad_point_time_does_not_move_its_scan(monkeypatch):
+    """A scan's last point (read_scans' end_ns) is its latest time, unless that time lies far past the rest:
+    point_times keeps any time within 0.5 s of the stamp, and in the log base the last point moves every
+    point of the scan. A 10 Hz scan with one time at 450 ms keeps its last point at 98 ms."""
+    t = S0 + np.arange(0, 100_000_000, 1_000_000)
+    bad = t.copy()
+    bad[-1] = S0 + 450_000_000
+    early = t.copy()
+    early[0] = S0 - 450_000_000  # one bad time before the sweep leaves the last point as it is
+    few = S0 + np.array([0, 90_000_000])  # a scan of two points keeps its latest time
+    xyz = np.arange(300.0).reshape(100, 3)
+
+    def fake_scans(path, topic, windows):
+        for k, times in enumerate((t, bad, early, few)):
+            yield S0 + k * 10**9, S0, xyz[:len(times)], times
+
+    monkeypatch.setattr(rosbag, "scans", fake_scans)
+    got = L.read_scans("x.bag", POINTS, [(S0, S0 + 10**10)])
+    assert [s[5] - S0 for s in got] == [99_000_000, 98_000_000, 99_000_000, 90_000_000]
+    # In the log base the scan is logged 20 ms after its last point. A frame logged with it gets the points
+    # swept 48 to 98 ms after the stamp, and a frame logged 50 ms earlier gets every point but the bad one.
+    scan = [(S0 + 118_000_000, S0, xyz, bad, None, got[1][5])]
+    assert len(L.frame_points(scan, "log", S0 + 118_000_000, 1e8)) == 51
+    assert len(L.frame_points(scan, "log", S0 + 68_000_000, 1e8)) == 99  # all but the bad time
 
 
 def test_time_base_and_matching_rules(monkeypatch):
@@ -605,10 +742,20 @@ def test_time_base_and_matching_rules(monkeypatch):
     assert (base, rec["offset_ms"], warn) == ("header", 2000.0, [])
     # With an offset the base is the header's; the log times only check it. A bag whose log times copy the
     # header stamps (scans logged 2 s later too) agrees with it; log times that fit neither give a warning.
+    # The log times of such a bag are those of a live bag on one clock with a wrong offset, so when only the
+    # zero shift fits, a warning names both readings.
+    both = ("time_offset_s is 2 s, but the log times put the LiDAR's header clock within 0.2 s of the camera's (log "
+            "time minus header stamp: camera 0.050 s, LiDAR 0.050 s); either the bag's log times copy the header "
+            "stamps, or time_offset_s is wrong (0 when both use one clock); check time_offset_s")
     assert L.time_base(stamps, frames, scans(LAG + 2 * 10**9, head=2 * 10**9), 2 * 10**9)[1:] == (
         {"base": "header", "offset_ms": 2000.0, "log_minus_header_ms": {"camera": 50.0, "lidar": 50.0},
          "log_minus_last_point_ms": None},
-        [])
+        [both])
+    assert L.time_base(stamps, frames, scans(LAG), 2 * 10**9)[1:] == (
+        {"base": "header", "offset_ms": 2000.0, "log_minus_header_ms": {"camera": 50.0, "lidar": 50.0},
+         "log_minus_last_point_ms": None},
+        [both])
+    assert L.time_base(stamps, frames, scans(LAG), 10**8)[2] == []  # a small offset fits too
     base, rec, warn = L.time_base(stamps, frames, scans(LAG, head=2 * 10**9), 10**9)
     assert (base, rec["offset_ms"]) == ("header", 1000.0) and warn == [
         "time_offset_s is 1 s, but the log times put the LiDAR's header clock +2.00 s from the camera's (log time "
@@ -724,7 +871,7 @@ def test_the_samples_cache(points_bag, tmp_path, monkeypatch):
     with np.load(J / "lidar" / "clouds.npz") as f:
         assert sorted(f.files) == sorted(f"{n}_{k}" for n in frames for k in ("xyz", "scan"))
         assert all(len(f[f"{n}_xyz"]) == meta["points"][n] for n in frames)
-    assert meta["key"] == {"version": 5, "kind": "rosbag",
+    assert meta["key"] == {"version": 7, "kind": "rosbag",
                            "input": {"name": "points.bag", "bytes": points_bag.stat().st_size,
                                      "mtime_ns": points_bag.stat().st_mtime_ns},
                            "topics": {"camera": CAMERA, "lidar": POINTS}, "calibration_sha256": None,
@@ -808,9 +955,10 @@ def test_each_failure_says_why(points_bag, tmp_path):
                          "equidistant; use a rectified topic or give K and D in the calibration")
     set_job(J, video=job["video"], source=job["source"])
 
-    # The scans were logged long after the frames.
+    # The scans were logged long after the frames. The listing's LiDAR scans at 4 Hz, so the stage reads
+    # 0.55 s from each frame (read_span).
     set_job(J, video={**job["video"], "path": str(write_scene_bag(root / "late.bag", lidar_late_s=30.0))})
-    assert failed(J) == ("/lidar/points has no scans within 0.4 s of the frames' times; was the LiDAR recording "
+    assert failed(J) == ("/lidar/points has no scans within 0.55 s of the frames' times; was the LiDAR recording "
                          "during the camera's frames?")
     # A bag without the listed topic: rosbag.py's own reason.
     set_job(J, video={**job["video"], "path": str(write_scene_bag(root / "other.bag", kind="livox", step=4))})
@@ -931,6 +1079,7 @@ def test_a_stray_capture_gives_the_scale_and_its_cache(tmp_path, capsys, monkeyp
     assert rec["ok"] and rec["s"] == pytest.approx(1 / F.FAKE_DA3_SCALE, rel=0.01), rec["reason"]
     assert steps.done("lidar", J) and steps.guard("lidar", J) is None
     assert [v["name"] for v in rec["views"]] == names and all(v["status"] == "used" for v in rec["views"])
+    assert not any("passes" in v for v in rec["views"])  # the depth is the color camera's: no rays
     assert rec["source"] == {"kind": "stray", "file": "capture.zip", "depth_size": [256, 192],
                              "frames": len(extracted), "cache": "miss"}
     assert rec["extrinsic"] == {"source": "stray (depth aligned with the color camera)", "calibration_sha256": None}
@@ -938,6 +1087,7 @@ def test_a_stray_capture_gives_the_scale_and_its_cache(tmp_path, capsys, monkeyp
                                  "frame_size": [240, 320], "turns": 1, "min_confidence": 2, "z_range_m": [0.1, 5.0],
                                  "K_from": "odometry.csv"}
     assert rec["time"] == {"base": "frame index"} and rec["warnings"] == []
+    assert rec["version"] == lidar_scale.VERSIONS["stray"] == 2  # no rays: a Stray job keeps its scale
     out = capsys.readouterr().out
     assert ("LiDAR stray capture.zip, cache miss; extrinsic from stray (depth aligned with the color camera); "
             "intrinsics from stray: depth scaled to the frame size") in out
@@ -952,7 +1102,7 @@ def test_a_stray_capture_gives_the_scale_and_its_cache(tmp_path, capsys, monkeyp
 
     meta = json.loads((J / "lidar" / "samples.json").read_text())
     zipped = J / "video" / "capture.zip"
-    assert meta["key"] == {"version": 5, "kind": "stray",
+    assert meta["key"] == {"version": 6, "kind": "stray",
                            "input": {"name": "capture.zip", "bytes": zipped.stat().st_size,
                                      "mtime_ns": zipped.stat().st_mtime_ns},
                            "turns": 1, "frame_sizes": [[240, 320]], "min_confidence": 2, "z_range_m": [0.1, 5.0]}

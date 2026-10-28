@@ -251,6 +251,62 @@ def test_place_rejects_an_unknown_fit(tmp_path):
         M.place(tmp_path, fit="Pose")
 
 
+def fake_mv_sam3d(monkeypatch, mv_root):
+    """Stand-ins for torch and the MV-SAM3D modules that sam3d() imports, so that it runs without a GPU. The
+    pipeline returns a box and a fixed pose."""
+    import sys
+    import types
+
+    import trimesh
+
+    class Splat:
+        def save_ply(self, path):
+            with open(path, "w") as f:
+                f.write("ply\n")
+
+    class Pipeline:
+        def run_multi_view(self, **kw):
+            return {"glb": trimesh.creation.box(), "gs": Splat(), "rotation": [1.0, 0.0, 0.0, 0.0],
+                    "translation": [0.0, 0.0, 0.6], "scale": [0.2, 0.2, 0.2]}
+
+    class Inference:
+        def __init__(self, *a, **kw):
+            self._pipeline = Pipeline()
+
+    def load(folder, mask_prompt):
+        names = M.view_names(folder.parent)
+        return [None] * len(names), [None] * len(names), names
+
+    ns = types.SimpleNamespace
+    for name, mod in {"torch": ns(cuda=ns(max_memory_allocated=lambda: 0)), "inference": ns(Inference=Inference),
+                      "load_images_and_masks": ns(load_images_and_masks_from_path=load),
+                      "sam3d_objects": ns(__file__=str((mv_root / "sam3d_objects" / "__init__.py").resolve())),
+                      "sam3d_objects.model.backbone.tdfy_dit.utils": ns(render_utils=ns(render_frames=None)),
+                      "sam3d_objects.utils.latent_weighting": ns(WeightingConfig=dict)}.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setattr(sys, "path", list(sys.path))  # sam3d() puts MV-SAM3D first on it
+    monkeypatch.setenv("CONDA_PREFIX", sys.prefix)
+
+
+def test_sam3d_pose_names_the_units_of_the_run(tmp_path, monkeypatch):
+    """pose.json's frame names the units as placement.json does. When select applied a LiDAR scale, the
+    pointmaps that MV-SAM3D gets are in meters, so its translation and scale are too."""
+    fake_mv_sam3d(monkeypatch, tmp_path / "MV-SAM3D")
+    out = tmp_path / "run"
+    (out / "input" / "images").mkdir(parents=True)
+    for n in ("0", "1"):
+        Image.new("RGB", (16, 12)).save(out / "input" / "images" / f"{n}.png")
+    arrays = dict(pointmaps_sam3d=np.ones((2, 3, 12, 16), np.float32),
+                  image_files=np.array([str(out / "input" / "images" / f"{n}.png") for n in ("0", "1")]))
+    for extra, units in (({}, "DA3 units (meters)"),
+                         ({"metric_scale": np.float64(1.25)}, "meters (LiDAR scale applied in select)")):
+        np.savez(out / "da3_output.npz", **arrays, **extra)
+        M.sam3d(tmp_path / "MV-SAM3D", tmp_path / "sam-3d-objects", out, seed=42)
+        pose = json.loads((out / "pose.json").read_text())
+        assert pose["frame"] == f"canonical -> view 0 camera, PyTorch3D axes, row vectors (note 2), {units}"
+        assert pose["views"] == ["0", "1"] and pose["translation"] == [0.0, 0.0, 0.6]
+
+
 def test_place_records_the_metric_scale(tmp_path):
     import trimesh
 

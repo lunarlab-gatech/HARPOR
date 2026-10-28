@@ -27,7 +27,7 @@ LiDAR-camera calibration file the user uploaded for a bag, or null: {name, bytes
 and the fields that lidar_scale.read_calibration parsed from J/lidar/calibration/<name>. lidar_topic
 is the LiDAR topic that the upload named, or null (older jobs lack it): lidar_settings then refuses
 another LiDAR topic. An upload or a delete of the calibration makes the lidar stage's record stale
-(steps.done), and so does a record of an older estimator (lidar_scale.VERSION), so the next Build or
+(steps.done), and so does a record of an older estimator (lidar_scale.VERSIONS), so the next Build or
 retry starts from lidar (Runner.resume). A Stray Scanner capture
 needs no calibration: its depth is aligned with the color camera. Older jobs lack both (no LiDAR);
 their lidar stage shows as skipped.
@@ -226,14 +226,17 @@ def lidar_settings(job_dir, job, value, read_bag=True):
       - the calibration was uploaded for another LiDAR topic than T (its lidar_topic; a calibration
         without one is not checked);
       - the bag's TF does not link the camera topic's frame to T's frame (tf_links), and no
-        calibration was uploaded;
+        calibration was uploaded. A listing made before the listing read all of /tf (its camera topics
+        have no camera_axes_from) read only the first 5 s, so for it the bag's whole TF decides
+        (rosbag.transforms, then rosbag.tf_chain), as in the stage;
       - the calibration's K is for images of another aspect ratio than the camera topic's;
       - the uploaded bag, or a Stray job's export, is not on the server;
       - neither the calibration's K nor the camera topic's camera_info (rosbag.camera_model) gives the
         intrinsics.
     A bag listed before LiDAR topics were (topics.json without "lidar") must be listed again
-    (lidar.OLD_TOPICS). read_bag False leaves out the camera_info check, which opens the bag. That is
-    for submit_build under the lock, after the server's Start checked it all."""
+    (lidar.OLD_TOPICS). read_bag False leaves out the checks that open the bag: the camera_info, and the
+    whole TF of such an old listing. That is for submit_build under the lock, after the server's Start
+    checked it all."""
     if value is None or value is False:
         return None
     from gator.webapp import lidar
@@ -266,8 +269,10 @@ def lidar_settings(job_dir, job, value, read_bag=True):
     if cal and cal.get("lidar_topic") and cal["lidar_topic"] != topic:  # its T is for that LiDAR, not this one
         raise ValueError(f"the calibration {cal.get('name')} is for {cal['lidar_topic']}, not {topic}; choose "
                          f"{cal['lidar_topic']}, or upload a calibration for {topic}")
-    if cal is None and not (camera.get("tf_links") or {}).get(topic):
-        raise ValueError(lidar.tf_reason(camera.get("frame_id"), found_lidar[topic].get("frame_id"), topic))
+    cam_frame, lidar_frame = camera.get("frame_id"), found_lidar[topic].get("frame_id")
+    unlinked = cal is None and not (camera.get("tf_links") or {}).get(topic)
+    if unlinked and "camera_axes_from" in camera:  # a listing that read all of /tf
+        raise ValueError(lidar.tf_reason(cam_frame, lidar_frame, topic))
     if cal and cal.get("K") and cal.get("image_size") and camera.get("width") and camera.get("height"):
         try:  # the stage's own check (lidar.fit_matrix), before any GPU stage runs
             lidar.fit_matrix(cal["K"], cal["image_size"], (camera["width"], camera["height"]),
@@ -277,6 +282,18 @@ def lidar_settings(job_dir, job, value, read_bag=True):
     bag = Path(job["video"]["path"])
     if not bag.is_file():  # the lidar stage's own reason (lidar.rosbag_samples), without the server's path
         raise ValueError(f"the uploaded bag {bag.name} is not on the server; upload it again")
+    if unlinked and read_bag:  # an old listing: the link may start on /tf after the 5 s that it read
+        from gator.webapp import rosbag
+
+        linked = None
+        if cam_frame and lidar_frame:
+            try:
+                with rosbag.open_bag(bag) as r:
+                    linked = rosbag.tf_chain(rosbag.transforms(r), cam_frame, lidar_frame)
+            except SystemExit as e:
+                raise ValueError(f"cannot read the TF of {bag.name}: {e}") from None
+        if linked is None:
+            raise ValueError(lidar.tf_reason(cam_frame, lidar_frame, topic))
     if read_bag and not (cal and cal.get("K")):
         from gator.webapp import rosbag
 
@@ -522,6 +539,12 @@ class Runner:
         with self._cv:
             return job_id in self._uploads
 
+    def locked(self):
+        """The runner's lock, for a server request that checks that a job is idle and then changes its files (the
+        calibration): while it is held, no build or resume starts and no other such request runs. Hold it only for
+        quick file work, since the runner's threads wait for it."""
+        return self._cv
+
     def submit_analyze(self, job_id, topic=None):
         """Run the analysis now, in its own thread (CPU only, so it may run while another job builds):
         "topics" unless it is done, then "frames". topic, one of a rosbag job's frames/topics.json, sets
@@ -589,14 +612,16 @@ class Runner:
             self._later.discard(job_id)
             shutil.rmtree(J)
 
-    def submit_build(self, job_id, api_key, **settings):
+    def submit_build(self, job_id, api_key, checked_calibration=None, **settings):
         """Queue the build from extract with the settings in job.json (mode, prompt, n_views, picks, view0,
         auto_continue, overrides, agent, articulated, parts, lidar, turntable); settings are written to
         job.json first, under the same lock. parts is {"mode": steps.PARTS_MODES, "list": the typed parts}; it
         is stored with the mode the job runs with (parts_settings). lidar is None, {"topic": T} or
         {"kind": "stray"}, stored as lidar_settings gives it (its ValueError passes on); the camera_info check,
-        which opens the bag, is left to the caller (the server's Start makes it). turntable is true or false;
-        the server checks its type, as it does for mode and n_views. api_key is for the agent (and the VLM of
+        which opens the bag, is left to the caller (the server's Start makes it). checked_calibration is
+        {"sha256": the job's calibration sha256 or None} when the caller made that check: a calibration that
+        another tab changed since then is refused, since the check ran on the other one. turntable is true or
+        false; the server checks its type, as it does for mode and n_views. api_key is for the agent (and the VLM of
         the part list), unless the agent is "none". None queues the build without a key (a key held for the job is
         dropped, key_ok is false): the job waits in review with NO_KEY_LATER when it reaches a stage that
         needs the key. An earlier build's outputs are deleted first."""
@@ -617,6 +642,9 @@ class Runner:
                 raise ValueError(str(e)) from None
             settings.update(parts_settings(job))
             if "lidar" in settings:  # the bag is not opened under the lock; the server's Start did that check
+                if checked_calibration is not None and settings["lidar"] and \
+                        (job.get("calibration") or {}).get("sha256") != checked_calibration["sha256"]:
+                    raise ValueError("the calibration changed while the job was starting; press Start again")
                 settings["lidar"] = lidar_settings(J, job, settings["lidar"], read_bag=False)
             agent = steps.agent(job)
             if agent != "none" and api_key is not None:
@@ -632,7 +660,7 @@ class Runner:
             self._cv.notify()
 
     def resume(self, job_id, from_stage, api_key=None, confirm_parts=False, parts_list=None, key_later=False,
-               **fields):
+               checked_calibration=None, **fields):
         """Queue the stages from from_stage on; api_key replaces the key held for the job, and fields
         (overrides, view0, agent) are written to job.json first, under the same lock. key_later, without
         api_key: the key was left out on purpose, so a job without one that reaches a stage that needs
@@ -658,9 +686,11 @@ class Runner:
 
         A job with LiDAR whose lidar stage is not done (it failed or was cancelled, the calibration was
         uploaded or deleted since it ran, or an older estimator made its record: steps.done) starts from
-        lidar when from_stage is later, as
-        a run from a stage up to select does: the new scale is shown in the review before the build
-        goes on. A confirm_parts then raises ValueError, since the run from lidar would drop the list.
+        lidar when from_stage is later, as a run from a stage up to select does: the new scale is shown
+        in the review before the build goes on. A confirm_parts then raises ValueError, since the run
+        from lidar would drop the list. checked_calibration is {"sha256": the job's calibration sha256 or
+        None} when the caller checked the LiDAR settings outside the lock (server.lidar_check): a
+        calibration that another tab changed since then raises ValueError, as in submit_build.
         """
         J = self.job_dir(job_id)
         if confirm_parts:
@@ -685,6 +715,9 @@ class Runner:
                 raise ValueError("the job waits for its part list; confirm or edit it first")
             if not confirm_parts and i > p and steps.pause_after(steps.PARTS_AFTER, J):
                 from_stage, i = steps.PARTS_AFTER, p  # cancelled or failed at the part list: back to it
+            if checked_calibration is not None and _lidar_on(job) and \
+                    (job.get("calibration") or {}).get("sha256") != checked_calibration["sha256"]:
+                raise ValueError("the calibration changed while the run was starting; try again")
             li = steps.NAMES.index("lidar")
             if i > li and _lidar_on({**job, **fields}) and not steps.done("lidar", J):
                 if confirm_parts:

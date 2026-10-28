@@ -12,7 +12,7 @@ lines, with G=$(readlink -f ~/scratch)/gator and the job folder J under G/webapp
   prep     envs/sam3d   mvsam3d prep            pool/prep.json
   da3      envs/da3     mvsam3d da3             pool/da3_output.npz with every pool view
   lidar    envs/web     lidar scale             pool/lidar.json "ok", made with the job's calibration and
-                                                this lidar_scale.VERSION (skipped without LiDAR); the
+                                                its source's lidar_scale.VERSIONS (skipped without LiDAR); the
                                                 metric scale from LiDAR, which select applies
   select   envs/web     views select            selection.json "ok" and run/da3_output.npz
            (the job pauses here for review unless auto_continue)
@@ -247,12 +247,17 @@ def done(stage, job_dir):
             seen = {Path(str(p)).stem for p in da["image_files"]}
         return {p.stem for p in (J / "pool" / "input" / "images").glob("*.png")} <= seen
     if stage == "lidar":  # an upload or delete of the calibration since the record, or an older estimator, makes it stale
-        from gator.stage_a.lidar_scale import VERSION
+        from gator.fileio import read_json
+        from gator.stage_a.lidar_scale import VERSIONS
 
-        rec = _json(J / "pool" / "lidar.json")
-        if not isinstance(rec, dict) or rec.get("ok") is not True or rec.get("version") != VERSION:
+        rec = read_json(J / "pool" / "lidar.json")  # None when it does not parse: not done
+        if not isinstance(rec, dict) or rec.get("ok") is not True:
             return False
-        cal = _json(J / "job.json").get("calibration") or {}
+        meta = _json(J / "job.json")
+        kind = meta["lidar"].get("kind") if isinstance(meta.get("lidar"), dict) else None  # each source has its version
+        if not isinstance(kind, str) or kind not in VERSIONS or rec.get("version") != VERSIONS[kind]:
+            return False
+        cal = meta.get("calibration") or {}
         return (rec.get("extrinsic") or {}).get("calibration_sha256") == cal.get("sha256")
     if stage == "select":
         return _json(J / "selection.json").get("ok") is True and (J / "run" / "da3_output.npz").is_file()
@@ -287,7 +292,9 @@ def guard(stage, job_dir):
     """The reason a stage that ran (or failed) leaves the job unusable, else None."""
     J = Path(job_dir)
     if stage == "lidar":
-        rec = _json(J / "pool" / "lidar.json")
+        from gator.fileio import read_json
+
+        rec = read_json(J / "pool" / "lidar.json")  # None when it does not parse
         if not isinstance(rec, dict) or not rec or rec.get("ok") is True:
             return None
         return f"LiDAR scale: {rec.get('reason') or 'no reason given'}"

@@ -435,7 +435,9 @@ drawer x3 &gt; cabinet body : prismatic</pre>
 <h3>The link between LiDAR and camera</h3>
 <p>For a rosbag, choose the LiDAR topic. The line under it says how the LiDAR links to the camera: linked by
   /tf_static (or /tf) with the chain of frames, Linked by the calibration with the file's name (and the TF link that it
-  replaces, when the bag has one), or No TF link: upload a calibration.</p>
+  replaces, when the bag has one), or No TF link: upload a calibration. For a bag that an older version of the app
+  listed, it may say No TF link in the bag's first 5 s: Start checks the whole bag. That listing read only the start
+  of the bag's TF, so Start looks at all of it before it asks for a calibration.</p>
 <p>Upload calibration takes a .yaml, .yml or .json file, and it replaces the bag's TF. Its keys:</p>
 <dl>
   <dt><code>T_cam_lidar</code></dt>
@@ -472,9 +474,17 @@ time_offset_s: 0.0</pre>
   after it, GPU stages included, and replaces the results, so it asks first. With Review views before building on, it
   stops in review after the views are selected.</p>
 <p>While a job with LiDAR waits for its part list, the calibration cannot change. Confirm the list (Build) or cancel
-  the job first. Run lidar and later stages again, Retry from lidar, and Build after a calibration change first check
-  the job's LiDAR topic, its link or calibration, and the intrinsics (K in the calibration, else the bag's camera_info).
-  They refuse to start when the lidar stage would fail, so the results stay.</p>
+  the job first. When an update changed how the app finds the scale while the list waited, the Part list panel says
+  that Build cannot confirm the list. Cancel the job, then press Retry from lidar. The job finds the scale again, and
+  the VLM lists the parts again.</p>
+<p>Run lidar and later stages again, Retry from lidar, and Build and Select again when they run the lidar stage (after
+  a calibration change, for example) first check the lidar stage's settings: the bag is still on the server, the LiDAR
+  topic is one of the bag's (and the calibration's, when it names one), the bag's TF links the camera to the LiDAR or a
+  calibration is uploaded, and the intrinsics are there (K in the calibration, for images of the camera's aspect ratio,
+  else the bag's camera_info). When a check fails, they refuse to start, and the results stay. The checks cannot tell
+  whether the scale will be found. A calibration that passes them can still make the lidar stage fail, for example when
+  it gives T_lidar_cam as T_cam_lidar. The run has deleted the old results by then, so the job is failed and has no
+  results. Fix the calibration, then press Retry from lidar.</p>
 
 <h3>When the scale fails</h3>
 <p>The LiDAR scale failed panel shows the lidar record with its check images, and LiDAR settings opens the LiDAR

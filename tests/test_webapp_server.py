@@ -767,6 +767,118 @@ def test_a_run_from_lidar_checks_the_intrinsics_first(client, tmp_path):
     assert (J / "results.zip").is_file() and (J / "run").is_dir()
 
 
+def test_select_again_checks_the_lidar_first(client, tmp_path):
+    """Select again (POST /overrides) in review, after the calibration of a bag without a TF link was removed. The
+    scale is stale, so Runner.resume would start from lidar and delete the selection, and the lidar stage would fail.
+    Select again answers 400 with the reason first, as Build does, and the review stays; also from masks (an
+    instance changed), whose run includes the lidar stage. Before, the job went from review to failed. With the
+    calibration back, it selects again."""
+    from test_webapp_lidar import POINTS, T_CAM_LIDAR
+
+    bag = scene_bag(tmp_path / "no_tf.bag", tf=None)
+    c, cfg = client
+    login(c)
+    job_id = c.put("/api/upload", params={"name": "no_tf.bag"}, content=bag.read_bytes()).json()["id"]
+    J = cfg.runs / job_id
+    assert wait(c, job_id, "ready", "failed")["status"] == "ready"
+    url, yaml = f"/api/jobs/{job_id}/calibration", calibration_yaml(T_CAM_LIDAR)
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=yaml).status_code == 200
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": False,
+                                                  "agent": "none", "lidar": {"topic": POINTS}})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "review", "failed")
+    assert job["status"] == "review" and job["lidar_current"] is True, job["error"]
+    out = c.get(f"/api/jobs/{job_id}/selection").json()["candidates"][-1]["name"]
+
+    assert c.delete(url).status_code == 200
+    why = "the bag's TF does not link camera_optical_frame to lidar; upload the calibration"
+    for ov in ({"excluded": [out]}, {"instance": {out: "none"}}):  # from select, and from masks
+        r = c.post(f"/api/jobs/{job_id}/overrides", json={"locked": [], "excluded": [], "instance": {}, **ov})
+        assert (r.status_code, r.json()["detail"]) == (400, why), ov
+    job = c.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "review" and job["stages"]["select"]["status"] == "done", job["error"]
+    assert (J / "selection.json").is_file() and (J / "run").is_dir()
+
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=yaml).status_code == 200
+    r = c.post(f"/api/jobs/{job_id}/overrides", json={"locked": [], "excluded": [out], "instance": {}})
+    assert r.json() == {"status": "queued", "from": "select"}, r.text
+    job = wait(c, job_id, "review", "failed")
+    assert job["status"] == "review" and job["lidar_current"] is True, job["error"]
+    assert c.get(f"/api/jobs/{job_id}/selection").json()["overrides"]["excluded"] == [out]
+
+
+def test_calibration_changes_take_turns(client, tmp_path, monkeypatch):
+    """A calibration upload checks that the job is idle again and writes the file and job.json in one step, under the
+    runner's lock; the file is parsed before. Two uploads at once (two tabs) then leave job.json naming the file that
+    the folder holds, and an upload whose first check passed before a Start answers 409. Before, job.json could name
+    a file that the other upload deleted, and the upload changed the calibration of the queued job."""
+    import threading
+
+    from gator.stage_a import lidar_scale
+    from test_webapp_lidar import POINTS, T_CAM_LIDAR
+
+    bag = scene_bag(tmp_path / "scene.bag")
+    c, cfg = client
+    login(c)
+    job_id = c.put("/api/upload", params={"name": "scene.bag"}, content=bag.read_bytes()).json()["id"]
+    J = cfg.runs / job_id
+    assert wait(c, job_id, "ready", "failed")["status"] == "ready"
+    url, yaml, out = f"/api/jobs/{job_id}/calibration", calibration_yaml(T_CAM_LIDAR), {}
+
+    def put(name, extra=""):
+        out[name] = c.put(url, params={"name": name, "lidar_topic": POINTS}, content=yaml + extra)
+
+    def held():
+        return jobs.load(J)["calibration"]["name"], sorted(p.name for p in (J / "lidar" / "calibration").iterdir())
+
+    # a.yaml's job.json write waits; b.yaml comes meanwhile.
+    update, inside, go = jobs.update, threading.Event(), threading.Event()
+
+    def slow_update(job_dir, **fields):
+        if (fields.get("calibration") or {}).get("name") == "a.yaml":
+            inside.set()
+            go.wait(10)
+        return update(job_dir, **fields)
+
+    monkeypatch.setattr(jobs, "update", slow_update)
+    a = threading.Thread(target=put, args=("a.yaml",))
+    a.start()
+    assert inside.wait(10)
+    b = threading.Thread(target=put, args=("b.yaml", "# b\n"))
+    b.start()
+    b.join(1.0)  # without the lock, b is done by now
+    go.set()
+    a.join(10)
+    b.join(10)
+    monkeypatch.setattr(jobs, "update", update)
+    assert (out["a.yaml"].status_code, out["b.yaml"].status_code) == (200, 200)
+    assert held() == ("b.yaml", ["b.yaml"])
+
+    # An upload whose first check passed, then a Start in another tab: the check under the lock refuses the upload.
+    read, parsing, started = lidar_scale.read_calibration, threading.Event(), threading.Event()
+
+    def slow_read(data, name):
+        if name == "late.yaml":
+            parsing.set()
+            started.wait(10)
+        return read(data, name)
+
+    monkeypatch.setattr(lidar_scale, "read_calibration", slow_read)
+    late = threading.Thread(target=put, args=("late.yaml", "# late\n"))
+    late.start()
+    assert parsing.wait(10)
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": False,
+                                                  "agent": "none", "lidar": {"topic": POINTS}})
+    assert r.status_code == 200, r.text
+    started.set()
+    late.join(10)
+    assert out["late.yaml"].status_code == 409 and out["late.yaml"].json()["detail"] in ("the job is queued",
+                                                                                         "the job is running")
+    assert held() == ("b.yaml", ["b.yaml"])
+    job = wait(c, job_id, "review", "failed")
+    assert job["status"] == "review" and job["calibration"]["name"] == "b.yaml", job["error"]
+
+
 def test_fake_rosbag_job_with_lidar_end_to_end(client, tmp_path):
     """A bag whose /tf_static links the camera to the LiDAR and whose camera_info is rectified: the
     LiDAR scale undoes the fake DA3's 0.8, and every later stage works in meters."""
@@ -2179,6 +2291,46 @@ def test_app_js_part_list_panel():
     assert out["build"] == steps.NAMES[steps.NAMES.index("extract"):] == jobs.BUILD  # lidar after da3
 
 
+def test_app_js_part_list_says_when_the_scale_is_stale():
+    """A job that waits for its part list while its scale is stale (lidar_current false, here because an older
+    estimator made the record): the server refuses to confirm the list (409), so the panel's first warning says so
+    and what to do, by the cause (lidar_stale; a Stray capture's is the estimator), and so does the line under the
+    status. Before, the page said nothing until Build was refused. A current scale, or a job without LiDAR, adds no
+    line."""
+    proposal = {"source": "vlm", "agent": "opus", "base": "body", "warnings": ["a warning"],
+                "parts": [{"name": "body", "parent": None, "joint": "fixed", "count": 1, "axis_hint": None},
+                          {"name": "lid", "parent": "body", "joint": "revolute", "count": 1, "axis_hint": None}]}
+    replies = {"/api/jobs/j/parts": {"articulated": True, "noun": "wooden box", "waiting": True, "proposal": proposal,
+                                     "parts": {"mode": "vlm_edit", "list": [], "confirmed": False}, "checks": [], "photo": None}}
+    bag = {"kind": "rosbag", "lidar": {"kind": "rosbag", "topic": "/lidar/points"}}
+    jobs_ = [{**bag, "lidar_current": False, "lidar_stale": "estimator"},
+             {"kind": "stray", "lidar": {"kind": "stray"}, "lidar_current": False, "lidar_stale": "estimator"},
+             {**bag, "lidar_current": False, "lidar_stale": "calibration"},
+             {**bag, "lidar_current": True, "lidar_stale": None},
+             {"kind": "video", "lidar": None, "lidar_current": None, "lidar_stale": None}]
+    out = run_form_js(f"""
+        (async () => {{
+          const lines = Object.values(SCALE_STALE).map((x) => x.parts), shown = [];
+          for (const job of {json.dumps(jobs_)}) {{
+            V = {{ id: "j", job: {{ ...job, video: {{ name: "box" }} }} }};
+            texts.length = 0;
+            await loadParts();
+            const stages = ["frames", ...BUILD].map((name) => ({{ name, status: BUILD.indexOf(name) < 7 ? "done" : "pending" }}));
+            renderState({{ status: "review", stages, agent: "opus", key_ok: true, warnings: [], articulated: true,
+              parts_mode: "vlm_edit", parts_review: true }});
+            shown.push([texts.filter((t) => lines.includes(t)), texts.includes("a warning"), $("#jnext").textContent]);
+          }}
+          console.log(JSON.stringify(shown));
+        }})()
+        """, replies)
+    todo = " so Build cannot confirm this list. Cancel the job, then press Retry from lidar. The job finds the scale " \
+           "again, and the VLM lists the parts again."
+    new_way = "The app now finds the scale in a new way," + todo
+    stale, build = "The scale is out of date: cancel the job, then Retry from lidar.", "Check the part list, then Build."
+    assert out == [[[new_way], True, stale], [[new_way], True, stale],
+                   [["The calibration changed after the scale was found," + todo], True, stale], [[], True, build], [[], True, build]]
+
+
 def test_app_js_results_of_an_articulated_job():
     """The split parts and the agent's parts with joints side by side, the links, base and joints of the MJCF,
     the agent's joint count, the mass of every link and the parts the split missed; the new files are in the
@@ -2267,7 +2419,8 @@ EYE = np.eye(4).tolist()
 
 def camera_entry(links):
     return {"topic": CAM, "type": "CompressedImage", "format": "jpeg", "count": 48, "rate_hz": 10.0, "width": 192,
-            "height": 128, "rectified": True, "frame_id": "camera_optical_frame", "camera_axes": "optical", "tf_links": links}
+            "height": 128, "rectified": True, "frame_id": "camera_optical_frame", "camera_axes": "optical",
+            "camera_axes_from": "name", "tf_links": links}
 
 
 def frames_meta(**video):
@@ -2275,6 +2428,23 @@ def frames_meta(**video):
     return {"times": [round(0.1 * i, 1) for i in range(20)], "rel": [1.0] * 20, "candidates": [3, 9, 15], "thumbs": [3, 9, 15],
             "thumb_size": [32, 18], "video": {"n_frames": 20, "duration_s": 2.0, "fps": 10, "width": 192, "height": 128,
                                               "codec": "h264", "bit_depth": 8, "hdr": None, **video}}
+
+
+def test_app_js_lidar_link_of_an_old_listing():
+    """A listing made before the camera topics had camera_axes_from read only the bag's first 5 s of /tf. Its
+    missing TF link is not final, since Start reads all of /tf then (jobs.lidar_settings), so the line asks for
+    no calibration."""
+    new = camera_entry({"/lidar/points": None})
+    old = {k: v for k, v in new.items() if k != "camera_axes_from"}
+    found = [{"lidar": [CLOUD], "tf": [], "topics": [t]} for t in (new, old)]
+    out = run_form_js("""
+        (async () => {
+          const found = """ + json.dumps(found) + """;
+          console.log(JSON.stringify(found.map((f) => lidarLink(f, """ + json.dumps(CAM) + """, "/lidar/points", null))));
+        })()
+        """)
+    assert out == [["No TF link: upload a calibration", True],
+                   ["No TF link in the bag's first 5 s: Start checks the whole bag", False]]
 
 
 def test_app_js_calibration_summary_says_where_k_comes_from():
