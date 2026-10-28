@@ -293,7 +293,7 @@ def row_fields(view, queue_pos=None):
 def first_not_done(state, parts_confirmed=False, scale_stale=False):
     """app.js retryFrom: "frames" while the input is not analyzed, else the first build stage not done or
     skipped (None when all are, or before any build). A job stopped at an unconfirmed part list goes back to
-    propose, and a LiDAR scale found with another calibration (scale_stale) to lidar."""
+    propose, and a stale LiDAR scale (scale_stale: another calibration or an older estimator) to lidar."""
     stage = {s["name"]: s for s in state["stages"]}
     if stage["frames"]["status"] != "done":
         return "frames"

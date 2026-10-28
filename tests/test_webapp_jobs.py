@@ -17,6 +17,7 @@ import pytest
 from PIL import Image
 
 from gator.fileio import write_json
+from gator.stage_a import lidar_scale
 from gator.webapp import agent_step, jobs, steps
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -380,8 +381,13 @@ def test_lidar_stage_done_skip_guard_and_derived(tmp_path):
     assert not steps.done("lidar", J) and steps.guard("lidar", J) == f"LiDAR scale: {why}"
     (J / "pool" / "lidar.json").write_text(json.dumps({"ok": "true", "s": 1.25}))
     assert not steps.done("lidar", J) and steps.guard("lidar", J) == "LiDAR scale: no reason given"
-    (J / "pool" / "lidar.json").write_text(json.dumps({"ok": True, "s": 1.25, "reason": None}))
+    ok = {"version": lidar_scale.VERSION, "ok": True, "s": 1.25, "reason": None}
+    (J / "pool" / "lidar.json").write_text(json.dumps(ok))
     assert steps.done("lidar", J) and steps.guard("lidar", J) is None
+    # A record of an older estimator, or one without a version, is not done: the lidar stage runs again.
+    for old in ({**ok, "version": lidar_scale.VERSION - 1}, {k: v for k, v in ok.items() if k != "version"}):
+        (J / "pool" / "lidar.json").write_text(json.dumps(old))
+        assert not steps.done("lidar", J) and steps.guard("lidar", J) is None
     (J / "pool" / "lidar.json").write_text("[]")
     assert not steps.done("lidar", J) and steps.guard("lidar", J) is None
     assert steps.NAMES.index("lidar") == steps.NAMES.index("da3") + 1 == steps.NAMES.index("select") - 1
@@ -505,14 +511,20 @@ def test_lidar_settings_and_the_build_that_stores_them(make_runner, tmp_path, mo
 
 def test_lidar_settings_of_a_stray_capture(tmp_path):
     """A Stray Scanner capture takes {"kind": "stray"} or no LiDAR; a bag's setting is refused for it, and
-    Stray's setting for a bag or a video. Its topics stage is skipped."""
-    job_id, _ = jobs.create_job(tmp_path, "capture.zip")
+    Stray's setting for a bag or a video. Its topics stage is skipped. An export that is gone from the server
+    is refused with the lidar stage's reason, so a run again from lidar keeps the results."""
+    job_id, path = jobs.create_job(tmp_path, "capture.zip")
+    path.write_bytes(b"PK")
     J = tmp_path / job_id
     job = jobs.load(J)
     on = {"kind": "stray"}
     assert jobs.lidar_settings(J, job, on) == jobs.lidar_settings(J, job, {"kind": "stray", "x": 1}) == on
     assert jobs.lidar_settings(J, job, None) is None and jobs.lidar_settings(J, job, False) is None
     assert jobs.lidar_settings(J, job, on, read_bag=False) == on
+    path.unlink()
+    with pytest.raises(ValueError, match="^the uploaded export capture.zip is not on the server; upload it again$"):
+        jobs.lidar_settings(J, job, on, read_bag=False)
+    assert jobs.lidar_settings(J, job, None) is None
     for bad in ({"topic": "/lidar/points"}, {"kind": "rosbag", "topic": "/lidar/points"}, "stray", True, {}):
         with pytest.raises(ValueError) as e:
             jobs.lidar_settings(J, job, bad)
@@ -1055,15 +1067,16 @@ def test_runner_failures_select_review_and_resume(make_runner, monkeypatch):
 
 
 def test_resume_starts_from_a_lidar_stage_that_is_not_current(make_runner, monkeypatch):
-    """A LiDAR job whose lidar stage failed, or whose calibration was uploaded or deleted since the stage
-    ran, starts from lidar when a retry or Build names a later stage, and stops at the review again."""
+    """A LiDAR job whose lidar stage failed, whose calibration was uploaded or deleted since the stage ran, or
+    whose scale an older estimator found, starts from lidar when a retry or Build names a later stage, and stops
+    at the review again."""
     runner, cfg = make_runner()
     real_done, fail = steps.done, {"lidar"}
 
     def command(stage, job, cfg, key_file=None):
         J = cfg.runs / job["id"]
         if stage == "lidar":  # the record of the real stage, with the calibration it ran with
-            rec = {"ok": stage not in fail, "s": 1.25, "reason": "no points",
+            rec = {"version": lidar_scale.VERSION, "ok": stage not in fail, "s": 1.25, "reason": "no points",
                    "extrinsic": {"calibration_sha256": (job.get("calibration") or {}).get("sha256")}}
             script = f"mkdir -p pool && echo '{json.dumps(rec)}' > pool/lidar.json && echo lidar >> ran"
             return ["bash", "-c", script], str(J), {}
@@ -1105,12 +1118,57 @@ def test_resume_starts_from_a_lidar_stage_that_is_not_current(make_runner, monke
     assert runner.resume(job_id, "agent") == "lidar"
     assert wait(J, "review") and ran(J) == ["lidar", "select"]
 
+    # A scale that an older estimator found, with the job's calibration: Build finds it again first.
+    rec = json.loads((J / "pool" / "lidar.json").read_text())
+    (J / "pool" / "lidar.json").write_text(json.dumps({**rec, "version": lidar_scale.VERSION - 1}))
+    assert not steps.done("lidar", J)
+    (J / "ran").unlink()
+    assert runner.resume(job_id, "sam3d") == "lidar"
+    assert wait(J, "review") and ran(J) == ["lidar", "select"] and steps.done("lidar", J)
+
     # A part list waiting for its confirmation cannot be confirmed past a stale scale.
     jobs.update(J, calibration={"name": "c.yaml", "sha256": "2" * 64})
     monkeypatch.setattr(steps, "waits_for_parts", lambda J, job=None: True)
     with pytest.raises(ValueError, match="the LiDAR scale is not current"):
         runner.resume(job_id, "parts", confirm_parts=True)
     assert jobs.load(J)["status"] == "review"
+
+
+def test_a_stale_scale_says_why(tmp_path):
+    """GET /api/jobs/{id} gives why a done lidar stage's scale is stale as lidar_stale, and the selection's LiDAR
+    record gives it as calibration_changed and estimator_changed. "calibration": the calibration was uploaded or
+    deleted since the scale was found. "estimator": an older lidar_scale.VERSION found it with the job's
+    calibration, so the page must not say that the calibration changed."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from gator.webapp import server
+
+    token = "tok-" + secrets.token_hex(16)
+    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=True)
+    job_id, _ = jobs.create_job(cfg.runs, "scan.bag")
+    J = cfg.runs / job_id
+    cal = {"name": "c.yaml", "bytes": 300, "sha256": "1" * 64, "T_cam_lidar": np.eye(4).tolist(), "lidar_topic": "/points"}
+    jobs.update(J, status="review", prompt="box", slug="box", lidar={"kind": "rosbag", "topic": "/points"}, calibration=cal)
+    jobs.update_stage(J, "lidar", status="done")
+    (J / "pool").mkdir()
+    (J / "selection.json").write_text(json.dumps({"ok": True}))
+    rec = {"version": lidar_scale.VERSION, "ok": True, "s": 1.25, "reason": None, "extrinsic": {"calibration_sha256": "1" * 64}}
+
+    with TestClient(server.make_app(cfg, token, key_dir=tmp_path / "keys")) as c:
+        assert c.get(f"/?token={token}", follow_redirects=False).status_code == 303
+
+        def seen(**over):
+            (J / "pool" / "lidar.json").write_text(json.dumps({**rec, **over}))
+            job, lid = c.get(f"/api/jobs/{job_id}").json(), c.get(f"/api/jobs/{job_id}/selection").json()["lidar"]
+            return job["lidar_current"], job["lidar_stale"], lid["calibration_changed"], lid["estimator_changed"]
+
+        assert seen() == (True, None, False, False)
+        assert seen(version=lidar_scale.VERSION - 1) == (False, "estimator", False, True)
+        assert seen(extrinsic={"calibration_sha256": None}) == (False, "calibration", True, False)
+        # Both changed: the calibration is named, since the user changed it.
+        assert seen(version=None, extrinsic={"calibration_sha256": "2" * 64}) == (False, "calibration", True, False)
+        assert seen(ok=False, reason="no points") == (False, None, False, False)  # not stale: failed
 
 
 def test_cancel_stops_the_stage_group_and_the_queue(make_runner, tmp_path, monkeypatch):

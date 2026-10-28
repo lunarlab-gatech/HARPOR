@@ -8,6 +8,7 @@ import json
 import os
 import re
 import struct
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +21,7 @@ from test_webapp_rosbag import CI, IMG, PC2, TFM, matrix, write_bag  # noqa: E40
 from gator.stage_a import lidar_scale, mvsam3d  # noqa: E402
 from gator.webapp import fake_steps as F  # noqa: E402
 from gator.webapp import lidar as L  # noqa: E402
-from gator.webapp import rosbag, steps  # noqa: E402
+from gator.webapp import jobs, rosbag, steps  # noqa: E402
 
 S0 = 1_749_907_120 * 10**9
 LAG = 50_000_000  # every message is logged 50 ms after its stamp
@@ -76,12 +77,13 @@ def behind(i, T, n):
 
 def write_scene_bag(path, n=10, size=SIZE, dt=0.5, kind="points", tf="static", info=True, topic=CAMERA,
                     model="plumb_bob", lidar_clock_s=0.0, lidar_late_s=0.0, between=False, step=1, info_r=None,
-                    around=0, restamped=False):
+                    around=0, restamped=False, cam=CAM, tf_late_s=0.0):
     """A ROS1 bag of fake_steps' scene: n rgb8 frames of topic at 1/dt Hz (frame i at the angle
     fake_steps.frame_angle gives it), the camera_info of the topic (K and P of fake_steps.intrinsics;
     D all zero for plumb_bob, else one coefficient of model; R info_r, else the identity) unless info
-    is False, TF from base_link to the camera's and the LiDAR's frames (tf "static": /tf_static;
-    "dynamic": the LiDAR's link on /tf at every frame, turned TURN_DEG further at each; None: none),
+    is False, TF from base_link to the camera's frame cam (optical axes) and the LiDAR's frame (tf
+    "static": /tf_static; "dynamic": the LiDAR's link on /tf at every frame from tf_late_s on, turned
+    TURN_DEG further at each; None: none),
     and one LiDAR scan per frame, stamped as the frame (plus lidar_clock_s on the LiDAR's clock) and
     logged as it (plus lidar_late_s): the points the camera sees, in the LiDAR's frame. kind "points":
     a PointCloud2 without per-point times (between: another scan halfway to the next frame, of points
@@ -107,15 +109,15 @@ def write_scene_bag(path, n=10, size=SIZE, dt=0.5, kind="points", tf="static", i
             P = np.hstack([K, np.zeros((3, 1))])
             r = np.eye(3) if info_r is None else info_r
             out.append(("/cam/camera_info", CI, S0, m.info(S0, d, K, P, model=model, r=r, size=size)))
-        links = [("base_link", CAM, *T_BASE_CAM), ("base_link", LIDAR, *T_BASE_LIDAR)]
+        links = [("base_link", cam, *T_BASE_CAM), ("base_link", LIDAR, *T_BASE_LIDAR)]
         if tf == "static":
             out.append(("/tf_static", TFM, S0, m.tf(S0, links)))
         elif tf == "dynamic":
             out.append(("/tf_static", TFM, S0, m.tf(S0, links[:1])))
         for i in range(n):
             ns = S0 + round(i * dt * 1e9)
-            out.append((topic, IMG, ns + LAG, m.image(ns, picture(i, size), "rgb8", frame=CAM)))
-            if tf == "dynamic":
+            out.append((topic, IMG, ns + LAG, m.image(ns, picture(i, size), "rgb8", frame=cam)))
+            if tf == "dynamic" and i * dt >= tf_late_s:
                 out.append(("/tf", TFM, ns + LAG, m.tf(ns, [("base_link", LIDAR, *lidar_link(i, turn))])))
             head, log = ns + round(lidar_clock_s * 1e9), ns + LAG + round(lidar_late_s * 1e9)
             T = cam_lidar(i, turn)
@@ -260,8 +262,8 @@ def test_tf_gives_the_scale_and_the_record(points_bag, tmp_path, capsys):
     assert rec["source"] == {"kind": "rosbag", "file": "points.bag", "camera_topic": CAMERA, "topic": POINTS,
                              "type": "PointCloud2", "frame_id": LIDAR, "scans": 19, "cache": "miss"}
     ext = rec["extrinsic"]
-    assert (ext["source"], ext["file"], ext["link"], ext["camera_axes"], ext["calibration_sha256"]) == \
-        ("tf", None, "static", "optical", None)
+    assert (ext["source"], ext["file"], ext["link"], ext["camera_axes"], ext["camera_axes_from"],
+            ext["calibration_sha256"]) == ("tf", None, "static", "optical", "name", None)
     assert ext["chain"] == [CAM, "base_link", LIDAR] and np.allclose(ext["T_cam_lidar"], T_CAM_LIDAR, atol=1e-6)
     intr = rec["intrinsics"]
     assert intr["source"] == "/cam/camera_info: P (rectified)" and np.allclose(intr["K"], F.intrinsics(*SIZE))
@@ -273,7 +275,7 @@ def test_tf_gives_the_scale_and_the_record(points_bag, tmp_path, capsys):
     assert rec["time"] == {"base": "header", "window_ms": 100.0, "offset_ms": 0.0,
                            "log_minus_header_ms": {"camera": 50.0, "lidar": 50.0}, "log_minus_last_point_ms": None,
                            "scan_period_ms": 250.0, "scan_period_from": "scans", "point_times": False}
-    assert rec["warnings"] == [] and rec["version"] == 1 and rec["seconds"] > 0
+    assert rec["warnings"] == [] and rec["version"] == lidar_scale.VERSION and rec["seconds"] > 0
     out = capsys.readouterr().out
     assert "PROGRESS 0.000" in out and "PROGRESS 1.000" in out and f"metric scale {rec['s']:.4f}" in out
     assert f"{names[0]}: used, " in out and "extrinsic from tf (camera_optical_frame <- base_link <- lidar, static)" in out
@@ -291,8 +293,8 @@ def test_tf_gives_the_scale_and_the_record(points_bag, tmp_path, capsys):
     assert cal["s"] == pytest.approx(rec["s"], rel=1e-6) and cal["source"]["cache"] == "miss"
     ext = cal["extrinsic"]
     sha = json.loads((J / "job.json").read_text())["calibration"]["sha256"]
-    assert (ext["source"], ext["file"], ext["chain"], ext["link"], ext["camera_axes"], ext["calibration_sha256"]) == \
-        ("calibration", "calib.json", None, None, "optical", sha)
+    assert (ext["source"], ext["file"], ext["chain"], ext["link"], ext["camera_axes"], ext["camera_axes_from"],
+            ext["calibration_sha256"]) == ("calibration", "calib.json", None, None, "optical", "calibration", sha)
     assert np.allclose(ext["T_cam_lidar"], T_CAM_LIDAR, atol=1e-6) and steps.done("lidar", J)
     # Another calibration (or none) makes the record stale; the stage then makes a current one.
     upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist(), "time_offset_s": 0.0})
@@ -374,6 +376,56 @@ def test_a_dynamic_tf_link_and_a_livox_window(tmp_path):
             seen = depth[lidar_scale.pixel(uvz[:, 1]), lidar_scale.pixel(uvz[:, 0])]
             assert np.allclose(uvz[:, 2], seen, rtol=1e-4), n
 
+
+def test_optical_axes_from_tf(tmp_path):
+    """A camera frame named cam0 (Kalibr or EuRoC style) has no "optical" in its name, but its link from
+    base_link is the standard body-to-optical rotation: the listing and the stage take optical axes from
+    TF, and every view gets its points."""
+    J = make_job(tmp_path, write_scene_bag(tmp_path / "cam0.bag", n=8, cam="cam0"))
+    found = json.loads((J / "frames" / "topics.json").read_text())["topics"][0]
+    assert (found["frame_id"], found["camera_axes"], found["camera_axes_from"], found["tf_links"]) == (
+        "cam0", "optical", "tf", {POINTS: "static"})
+    rec = scaled(J)
+    assert rec["ok"] and rec["s"] == pytest.approx(1 / F.FAKE_DA3_SCALE, rel=0.01), rec["reason"]
+    assert rec["combine"]["views_used"] == len(rec["views"]) == 8
+    ext = rec["extrinsic"]
+    assert (ext["camera_axes"], ext["camera_axes_from"]) == ("optical", "tf")
+    assert ext["chain"] == ["cam0", "base_link", LIDAR] and np.allclose(ext["T_cam_lidar"], T_CAM_LIDAR, atol=1e-6)
+
+
+def test_a_late_tf_link_is_listed(tmp_path):
+    """The LiDAR's link is on /tf only from 5.5 s on. The listing reads all of /tf, so it lists the link
+    that the stage finds, and Start passes (jobs.lidar_settings)."""
+    bag = write_scene_bag(tmp_path / "late.bag", n=12, dt=1.0, tf="dynamic", tf_late_s=5.5)
+    J = make_job(tmp_path, bag, frames=list(range(6, 12)))
+    found = json.loads((J / "frames" / "topics.json").read_text())
+    assert found["topics"][0]["tf_links"] == {POINTS: "dynamic"}
+    assert [(e["parent"], e["child"], e["static"]) for e in found["tf"]] == [("base_link", CAM, True),
+                                                                             ("base_link", LIDAR, False)]
+    assert np.allclose(found["tf"][1]["T_parent_child"], matrix(*lidar_link(6, TURN_DEG)), atol=1e-6)  # its first value
+    job = json.loads((J / "job.json").read_text())
+    assert jobs.lidar_settings(J, job, {"topic": POINTS}) == {"kind": "rosbag", "topic": POINTS}
+    rec = scaled(J)
+    assert rec["ok"] and rec["s"] == pytest.approx(1 / F.FAKE_DA3_SCALE, rel=0.01), rec["reason"]
+    assert (rec["extrinsic"]["link"], rec["warnings"]) == ("dynamic", [])
+
+
+
+def test_a_tf_link_only_far_from_the_frames(tmp_path, monkeypatch):
+    """The LiDAR's link is on /tf only from 5.5 s on, and the chosen frames are at 0 to 4 s, so their read
+    windows hold no value of it. The listing lists the link, Start passes, and the stage takes the nearest
+    value of all of /tf, with the warning that names how far it is. Before, the stage said that TF does not
+    link the frames, against the listing."""
+    monkeypatch.setattr(sys.modules[__name__], "TURN_DEG", 0.0)  # the link holds still, so its far value is right
+    bag = write_scene_bag(tmp_path / "late.bag", n=12, dt=1.0, tf="dynamic", tf_late_s=5.5)
+    J = make_job(tmp_path, bag, frames=list(range(5)))
+    assert json.loads((J / "frames" / "topics.json").read_text())["topics"][0]["tf_links"] == {POINTS: "dynamic"}
+    assert jobs.lidar_settings(J, json.loads((J / "job.json").read_text()), {"topic": POINTS})["topic"] == POINTS
+    rec = scaled(J)
+    assert rec["ok"] and rec["s"] == pytest.approx(1 / F.FAKE_DA3_SCALE, rel=0.01), rec["reason"]
+    assert rec["extrinsic"]["link"] == "dynamic" and len(rec["warnings"]) == 1
+    assert rec["warnings"][0].startswith(f"TF links {CAM} to {LIDAR} on /tf, and 5 of the 5 frames have no /tf value of "
+                                         f"that link within {L.READ_S:g} s of their stamp (up to 6.00 s away)")
 
 def test_a_dynamic_link_far_from_a_frame(monkeypatch):
     """A dynamic link is taken from the /tf values logged within each frame's read windows, nearest to its
@@ -672,7 +724,7 @@ def test_the_samples_cache(points_bag, tmp_path, monkeypatch):
     with np.load(J / "lidar" / "clouds.npz") as f:
         assert sorted(f.files) == sorted(f"{n}_{k}" for n in frames for k in ("xyz", "scan"))
         assert all(len(f[f"{n}_xyz"]) == meta["points"][n] for n in frames)
-    assert meta["key"] == {"version": 4, "kind": "rosbag",
+    assert meta["key"] == {"version": 5, "kind": "rosbag",
                            "input": {"name": "points.bag", "bytes": points_bag.stat().st_size,
                                      "mtime_ns": points_bag.stat().st_mtime_ns},
                            "topics": {"camera": CAMERA, "lidar": POINTS}, "calibration_sha256": None,
@@ -900,7 +952,7 @@ def test_a_stray_capture_gives_the_scale_and_its_cache(tmp_path, capsys, monkeyp
 
     meta = json.loads((J / "lidar" / "samples.json").read_text())
     zipped = J / "video" / "capture.zip"
-    assert meta["key"] == {"version": 4, "kind": "stray",
+    assert meta["key"] == {"version": 5, "kind": "stray",
                            "input": {"name": "capture.zip", "bytes": zipped.stat().st_size,
                                      "mtime_ns": zipped.stat().st_mtime_ns},
                            "turns": 1, "frame_sizes": [[240, 320]], "min_confidence": 2, "z_range_m": [0.1, 5.0]}

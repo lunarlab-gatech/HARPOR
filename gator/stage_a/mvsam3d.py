@@ -334,11 +334,17 @@ def fit_pose(x_w, faces, cams, masks, size=384, max_evals=400, shift_limit=0.25,
 
     Coordinate descent over log scale, the shift (in box diagonals) and an axis-angle rotation
     (degrees). Steps start at 0.05, 0.05 and 5 and halve when no single move helps, while they stay
-    at or above 0.003, 0.003 and 0.3. Shift and rotation are coupled, so a descent over all seven
-    at once can trade a missing shift for a false rotation. The search therefore runs twice: first
-    with the rotation held at 0, then with it free from that result. The rotation is kept only when
-    it raises the mean IoU by rot_gain. Bounds: shift_limit diagonals and rot_limit degrees per axis,
-    scale within scale_limits of the start; at most max_evals evaluations in all. Returns (k, R_w,
+    at or above 0.003, 0.003 and 0.3. One more move, tried first in each sweep, scales the mesh
+    about view 0's camera, with the same steps in log scale as the scale. It keeps view 0's
+    silhouette and changes size and distance together, and it is taken only within the bounds.
+    With narrow views the IoU is nearly flat along it and drops to both sides, so moves of one
+    coordinate cannot follow it: without it, a box 5% too large and 5% too far (views at 0 and +-10
+    degrees) stopped 3.4% too large and 1.2 cm too far. Shift and rotation are coupled, so a descent over all seven coordinates at once can trade a
+    missing shift for a false rotation. The search therefore runs twice: first with the rotation
+    held at 0, then with it free from that result. The second run leaves out the camera move, which
+    costs evaluations there and gained little in tests. The rotation is kept only when it raises
+    the mean IoU by rot_gain. Bounds: shift_limit diagonals and rot_limit degrees per axis, scale
+    within scale_limits of the start; at most max_evals evaluations in all. Returns (k, R_w,
     shift_w, rotation vector in degrees), the center, the per-view IoUs at the start and at the
     result, the number of evaluations, and whether the result sits on a bound.
     """
@@ -356,18 +362,34 @@ def fit_pose(x_w, faces, cams, masks, size=384, max_evals=400, shift_limit=0.25,
     lo = np.array([np.log(scale_limits[0]), -shift_limit, -shift_limit, -shift_limit, -rot_limit, -rot_limit, -rot_limit])
     hi = -lo
     hi[0] = np.log(scale_limits[1])
+    T0 = np.asarray(cams[0]["w2c"], dtype=float)
+    o = (-T0[:3, :3].T @ T0[:3, 3] - c) / diag  # view 0's camera, as a shift in box diagonals
+
+    def moved(p, i, h):
+        """p moved by h along axis i, or for i = 7 scaled by exp(h) about view 0's camera: that
+        multiplies the scale by exp(h) and gives the shift o + exp(h) * (shift - o). A camera move
+        that leaves the bounds gives p: clipped, it would not keep view 0's silhouette. Its shift
+        part is about h times the camera's distance in box diagonals, so a far object takes it at
+        the smaller steps only."""
+        q = p.copy()
+        if i < 7:
+            q[i] += h
+        else:
+            q[0], q[1:4] = q[0] + h, o + np.exp(h) * (q[1:4] - o)
+            if (q < lo).any() or (q > hi).any():
+                return p
+        return np.clip(q, lo, hi)
 
     def descend(p, free):
         best = ious(p).mean()
-        steps = np.array([0.05, 0.05, 0.05, 0.05, 5.0, 5.0, 5.0]) * free
-        floor = np.array([0.003, 0.003, 0.003, 0.003, 0.3, 0.3, 0.3])
+        steps = np.array([0.05, 0.05, 0.05, 0.05, 5.0, 5.0, 5.0, 0.05]) * free
+        floor = np.array([0.003, 0.003, 0.003, 0.003, 0.3, 0.3, 0.3, 0.003])
         while (steps >= floor).any() and len(seen) < max_evals:
             improved = False
-            for i in np.flatnonzero(steps >= floor):
+            for i in [i for i in (7, 0, 1, 2, 3, 4, 5, 6) if steps[i] >= floor[i]]:
                 for sign in (1.0, -1.0):
-                    q = p.copy()
-                    q[i] = np.clip(q[i] + sign * steps[i], lo[i], hi[i])
-                    if q[i] == p[i] or len(seen) >= max_evals:
+                    q = moved(p, i, sign * steps[i])
+                    if (q == p).all() or len(seen) >= max_evals:
                         continue
                     v = ious(q).mean()
                     if v > best + 1e-6:
@@ -378,8 +400,8 @@ def fit_pose(x_w, faces, cams, masks, size=384, max_evals=400, shift_limit=0.25,
         return p
 
     p0 = np.zeros(7)
-    p_shift = descend(p0, np.array([1, 1, 1, 1, 0, 0, 0]))
-    p_rot = descend(p_shift, np.ones(7))
+    p_shift = descend(p0, np.array([1, 1, 1, 1, 0, 0, 0, 1]))
+    p_rot = descend(p_shift, np.array([1, 1, 1, 1, 1, 1, 1, 0]))
     p = p_rot if ious(p_rot).mean() - ious(p_shift).mean() >= rot_gain else p_shift
     at_bound = bool(np.any(np.isclose(p, lo) | np.isclose(p, hi)))
     return (float(np.exp(p[0])), rotation_from_vector(p[4:]), p[1:4] * diag, p[4:].copy()), c, ious(p0), ious(p), len(seen), at_bound
@@ -435,8 +457,9 @@ def place(out, samples=300000, fit="pose", min_gain=0.005):
                     "mean_iou_before": round(float(before.mean()), 4), "candidate_mean_iou": round(float(after.mean()), 4),
                     "min_gain": min_gain, "evaluations": evals, "at_bound": at_bound, "fit_px": 384,
                     "search": "coordinate descent on log scale, shift (box diagonals) and rotation (degrees) about the box "
-                              "center, first with the rotation held at 0, then free (kept if it gains 0.005); steps "
-                              "0.05/0.05/5 halving while at or above 0.003/0.003/0.3; bounds 0.5 to 2 x, 0.25 diag, 20 deg"}
+                              "center, first with the rotation held at 0 and a scale about view 0's camera tried first in "
+                              "each sweep, then with the rotation free (kept if it gains 0.005); steps 0.05/0.05/5 halving "
+                              "while at or above 0.003/0.003/0.3; bounds 0.5 to 2 x, 0.25 diag, 20 deg"}
         if at_bound:
             pose_fit["warning"] = "the fitted pose sits on a search bound"
         if applied:

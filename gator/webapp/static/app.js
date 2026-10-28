@@ -42,11 +42,27 @@ const NEXT = { ready: "Name the object, then Start.", queued: "You can close thi
   lidar_cal: "In Settings, replace the calibration and Retry, or turn LiDAR off and build again.",
   // A Stray capture takes no calibration, and a retry reads the same depth and masks again.
   lidar_stray: "In Settings, turn LiDAR off or change the views, then build again.",
-  // A done job whose scale was found with another calibration (V.scaleStale): Retry runs again from lidar.
+  // A done job whose scale is stale (V.scaleStale: another calibration or an older estimator): Retry runs again from lidar.
   stale: "Run lidar and later stages again to update them. It runs the lidar stage and every stage after it, GPU stages " +
     "included." };
-// The warning of a done job whose scale was found with another calibration (V.scaleStale), and its Retry button's label.
-const SCALE_STALE = "The calibration changed after this build, so the scale and the masses are out of date.";
+// Why a scale is stale, by its cause (staleBy): the warning of a done job (V.scaleStale), the line when the server
+// starts from lidar, and the line in the review.
+const SCALE_STALE = {
+  calibration: { done: "The calibration changed after this build, so the scale and the masses are out of date.",
+    start: "Starting from lidar (calibration changed).",
+    review: "Calibration changed. Build finds the scale again, then stops here." },
+  estimator: { done: "The app now finds the LiDAR scale in a new way, so this build's scale and masses are out of date.",
+    start: "Starting from lidar (the app now finds the scale in a new way).",
+    review: "The app now finds the scale in a new way. Build finds the scale again, then stops here." },
+  unknown: { done: "The scale and the masses of this build are out of date.",
+    start: "Starting from lidar (the scale is out of date).",
+    review: "The scale is out of date. Build finds the scale again, then stops here." } };
+// The cause the server gives (job.lidar_stale): "calibration", or "estimator" when an older version of the app found
+// the scale. A Stray capture has no calibration. A page that does not know the cause (the server was updated while a
+// stopped job's page was open) names none.
+const staleBy = () => !V.job ? "unknown" : V.job.kind === "stray" ? "estimator"
+  : ["calibration", "estimator"].includes(V.job.lidar_stale) ? V.job.lidar_stale : "unknown";
+// The Retry button's label of a done job whose scale is stale.
 const RERUN_LIDAR = "Run lidar and later stages again";
 const KIND_LABEL = { video: "video", rosbag: "rosbag", stray: "Stray capture" };  // job.json source kind, in the jobs list
 // How the page reaches its data: the server itself (tunnel mode), or Supabase (static/supa.js, on the public site).
@@ -100,7 +116,7 @@ const FILES_STOPPED = "Build stopped before results.zip.";
 const RESULTS_UNREAD = "Could not read the results: ";  // a result file that does not parse (drawJob)
 const NO_VIEWS = "No views selected yet.";
 // The open job page: id, job, meta, picks, view0, sel, ov and ov0 (the review's overrides as edited and as saved),
-// cards (the review cards: renderCards), es, state, scaleStale (the LiDAR scale ran with another calibration); tab (the
+// cards (the review cards: renderCards), es, state, scaleStale (the LiDAR scale is stale: scaleStale()); tab (the
 // tab shown), pick (the tab the user picked), tabPhase (the phase of the status that the tab follows) and hashTab (the
 // hash's tab when the page opened); logAtEnd and logTop (where the log was left); and input, inputKey, videoKey, video,
 // selected, inputPlaced, inputAsked, placeAsked and overlay (the Inputs tab: renderInput); spin, spinKey and spinOn (the
@@ -363,7 +379,8 @@ async function refresh() {
   fill($("#jtitle"), job.video.name, job.prompt ? [" ", h("span", { class: "jobobj" }, job.prompt)] : null);
   $("#jid").textContent = "job " + job.id + (job.where ? ", " + job.where : "");
   if (T.live.includes(job.status)) openStream();
-  // A scale found with another calibration: Retry then starts from lidar (retryFrom), also on a done job.
+  // A stale scale (another calibration, or an older estimator): Retry then starts from lidar (retryFrom), also on a
+  // done job.
   V.scaleStale = ["failed", "cancelled", "done"].includes(job.status) && scaleStale(job);
   renderState({ status: job.status, current: job.current, error: job.error, warnings: job.warnings, key_ok: job.key_ok,
     agent: job.agent, articulated: job.articulated, parts_mode: job.parts_mode, parts_review: job.parts_review,
@@ -579,7 +596,7 @@ function renderState(st, follow) {
   fill($("#jstatus"), badge(st.status, stText || sum), overall, st.error ? h("div", { class: "msg errbox" }, st.error, " ",
     h("a", { href: "help.html#troubleshooting", target: "_blank", rel: "noopener" }, "Help")) : null);
   const from = retryFrom(st);
-  // A done job whose scale was found with another calibration (V.scaleStale) runs again from lidar.
+  // A done job whose scale is stale (V.scaleStale) runs again from lidar.
   const rerun = st.status === "done" && from === "lidar";
   let next = ["failed", "cancelled"].includes(st.status) && from === null ? "Build again from the Settings tab."
     : rerun ? NEXT.stale + (V.job && V.job.auto_continue === false ? " It pauses for your review." : "")
@@ -594,7 +611,8 @@ function renderState(st, follow) {
   $("#jnext").textContent = next;
   const said = sum + (st.error ? ". " + st.error : "");
   if (said !== V.said) { V.said = said; $("#announce").textContent = said; }
-  $("#jwarn").replaceChildren(...[rerun ? SCALE_STALE : null, ...(st.warnings || [])].filter(Boolean).map((w) => h("li", {}, w)));
+  $("#jwarn").replaceChildren(...[rerun ? SCALE_STALE[staleBy()].done : null, ...(st.warnings || [])].filter(Boolean)
+    .map((w) => h("li", {}, w)));
   const name = V.job ? V.job.video.name : V.id || "";
   $("#where").replaceChildren(h("span", { class: "crumb" }, "/ " + name));  // the status shows once, under the title
   document.title = ({ running: `${cur || "running"} ${Math.min(nDone + 1, build.length)}/${build.length}`, queued: "Queued",
@@ -657,7 +675,7 @@ function retryFrom(st) {  // "frames" analyzes the input again (no key needed); 
   const unconfirmed = st.articulated === true && st.parts_mode === "vlm_edit" && (stage("propose") || {}).status === "done"
     && !(V.job && V.job.parts && V.job.parts.confirmed === true);
   const name = x.name === "parts" && unconfirmed ? "propose" : x.name;
-  // A scale found with another calibration (V.scaleStale): the server starts from lidar (Runner.resume).
+  // A stale scale (V.scaleStale): the server starts from lidar (Runner.resume).
   return V.scaleStale === true && BUILD.indexOf(name) > BUILD.indexOf("lidar") ? "lidar" : name;
 }
 // The clocks of running stages, without drawing the list again. They only set text, so a hidden tab costs no layout.
@@ -762,7 +780,7 @@ $("#retry").onclick = () => {
       $("#log").textContent = "";
       // The server may start earlier than the page asked: say where the run starts.
       if (r && r.from && r.from !== from) say($("#runmsg"), r.from === "lidar"
-        ? "Starting from lidar (calibration changed)." : `Starting from ${r.from}.`, true);
+        ? SCALE_STALE[staleBy()].start : `Starting from ${r.from}.`, true);
     });
 };
 
@@ -927,9 +945,12 @@ function lidarLink(found, camTopic, lidarTopic, cal) {
   return tf ? ["Linked by " + tf, false] : ["No TF link: upload a calibration", true];
 }
 // job.json "calibration" in short (server.calibration_summary): the LiDAR's distance from the camera and its turn. A
-// time_offset_s of 0 is a given offset (the two header clocks are one); null means that the file gives none.
-const calText = (c) => [`${c.name}: ${(100 * c.translation_m).toFixed(1)} cm, ${Number(c.rotation_deg).toFixed(1)}°.`,
-  c.has_intrinsics ? "K from file." : "K from camera_info.", c.camera_axes === "body" ? "Body axes." : null,
+// time_offset_s of 0 is a given offset (the two header clocks are one); null means that the file gives none. info is
+// the camera topic's camera_info in topics.json: null when the bag has none, so K must come from the file
+// (jobs.lidar_settings refuses the start); undefined in a listing from before it was listed.
+const calText = (c, info) => [`${c.name}: ${(100 * c.translation_m).toFixed(1)} cm, ${Number(c.rotation_deg).toFixed(1)}°.`,
+  c.has_intrinsics ? "K from file." : info === null ? "No K: the bag has no camera_info, so give K in the file."
+    : "K from camera_info.", c.camera_axes === "body" ? "Body axes." : null,
   c.time_offset_s != null ? `Offset ${c.time_offset_s} s.` : null].filter(Boolean).join(" ");
 function lidarSetup(job) {  // the job's own setting, each time the frames load: a Stray capture starts with LiDAR on
   const list = V.topics && Array.isArray(V.topics.lidar) ? V.topics.lidar : [];
@@ -963,7 +984,8 @@ function lidarToggle() {  // the LiDAR box follows the input kind, the checkbox,
   $("#lidarlink").className = act ? "warn" : "hint";
   $("#lidarskipped").textContent = skipped ? "Not usable: " + skipped : "";
   $("#calsum").hidden = !cal;
-  $("#calsum").textContent = cal ? calText(cal) : "";
+  const camera = (found.topics || []).find((t) => t.topic === (job.source && job.source.topic));
+  $("#calsum").textContent = cal ? calText(cal, camera ? camera.camera_info : undefined) : "";
   $("#calbtn").textContent = cal ? "Replace calibration" : "Upload calibration";
   $("#calremove").hidden = !cal;
 }
@@ -978,9 +1000,11 @@ function lidarChoice() {
   if (typeof topic !== "string" || !topic) throw new Error("choose a LiDAR topic, or turn LiDAR off");
   return { topic };
 }
-// Whether a rosbag job's done lidar stage ran with another calibration than the job's now: the job's lidar_current
-// (steps.done("lidar"), which compares the calibrations' sha256) is false. The server then retries from lidar.
-function scaleStale(job) { return job.kind === "rosbag" && !!job.lidar && job.lidar_current === false; }
+// Whether a job's done lidar stage is stale: the job's lidar_current (steps.done("lidar"), which compares the
+// calibrations' sha256 and wants the record of the current estimator) is false. A rosbag's scale goes stale when its
+// calibration changes, and any scale, a Stray capture's too, when an older version of the app found it
+// (job.lidar_stale). The server then retries from lidar.
+function scaleStale(job) { return !!job.lidar && job.lidar_current === false; }
 // Upload a calibration file at once (PUT, with the LiDAR topic it is for: the server checks and summarises it), or
 // remove it (f null). The summary or the server's reason shows in the box. A review shows again whether the scale is
 // current; after a stop (failed, cancelled or done), Retry names lidar when the scale is stale.
@@ -1005,7 +1029,10 @@ async function calibrate(f) {
   if (done !== null && V.sel && $("#review").hidden === false) {
     try { V.sel.lidar = (await api(`/api/jobs/${V.id}/selection`)).lidar; renderSelLidar(); } catch (e) { /* the old summary stays */ }
   } else if (done !== null && V.job && ["failed", "cancelled", "done"].includes(V.job.status)) {
-    try { V.job.lidar_current = (await api(`/api/jobs/${V.id}`)).lidar_current; } catch (e) { /* the old value stays */ }
+    try {  // the cause (lidar_stale) can change with the upload too
+      const j = await api(`/api/jobs/${V.id}`);
+      Object.assign(V.job, { lidar_current: j.lidar_current, lidar_stale: j.lidar_stale });
+    } catch (e) { /* the old values stay */ }
     V.scaleStale = scaleStale(V.job);
     if (V.state) renderState(V.state);  // the Retry button names the stage it starts from; a done job's warning shows
   }
@@ -1158,14 +1185,16 @@ function lidarViewText(v) {
   return v.s != null ? `×${Number(v.s).toFixed(2)} (${pts}${st ? ", " + st : ""})`
     : (st || "no scale") + (v.points_used ? ` (${pts})` : "");
 }
-// The scale (or why there is none), a changed calibration, the warnings, and the check images folded. head false leaves
-// out the first line: the panel of a failed lidar stage, whose reason the status line gives.
+// The scale (or why there is none), why it is stale (a changed calibration, or an older estimator), the warnings, and the
+// check images folded. head false leaves out the first line: the panel of a failed lidar stage, whose reason the status
+// line gives.
 function lidarView(lid, head) {
   const c = lid.counts || {}, views = lid.views || [], dir = lid.check_dir || "lidar/check";
   return [head === false ? null : lid.ok ? h("p", { class: "lidarhead" }, `LiDAR scale ×${Number(lid.s).toFixed(3)} ` +
       `(${c.views_used}/${c.views} views, spread ${pct(lid.spread_rel)})`)
     : h("p", { class: "msg" }, "No metric scale from LiDAR: " + (lid.reason || "no reason given")),
-  lid.calibration_changed ? h("p", { class: "warn" }, "Calibration changed. Build finds the scale again, then stops here.") : null,
+  lid.calibration_changed ? h("p", { class: "warn" }, SCALE_STALE.calibration.review)
+    : lid.estimator_changed ? h("p", { class: "warn" }, SCALE_STALE.estimator.review) : null,
   (lid.warnings || []).length ? h("ul", { class: "warnings" }, lid.warnings.map((w) => h("li", {}, w))) : null,
   views.length ? h("details", { class: "sub", open: V.lidarOpen === true, ontoggle: (e) => { V.lidarOpen = e.target.open; } },
     h("summary", {}, `LiDAR check images (${views.length})`),

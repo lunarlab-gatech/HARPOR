@@ -6,7 +6,8 @@ agent, unless it was skipped):
     python -m gator.webapp.physics_auto align --job J
 
 align takes the GLB for physics (steps.next_glb: the agent's delivery, or run/posed.glb when the
-agent was skipped or delivered nothing usable, run/parts.glb for an articulated job) and runs
+agent was skipped or delivered nothing usable, run/parts.glb for an articulated job; pick_glb also
+refuses a delivery whose size is not that of the GLB the agent started from) and runs
 gator.physics.align on it with --up-near at the up hint and --x footprint, plus --opaque when the GLB
 has transparent or transmissive materials, which VoMP rejects. It writes J/physics/up.json {hint,
 info, glb, glb_rule, opaque} and J/physics/aligned.glb with aligned.json. For an articulated job
@@ -144,7 +145,12 @@ def sim_name(prompt):
 
 def pick_glb(job_dir):
     """(path, why) of the GLB for physics, by steps.next_glb: the agent's delivery, else run/parts.glb (an
-    articulated job) or run/posed.glb."""
+    articulated job) or run/posed.glb.
+
+    The agent started from that other GLB (agent_step.mode). Its delivery is used only when it keeps that
+    GLB's size (controller.check_size); else physics takes that GLB, and why gives the reason.
+    """
+    from gator.agent import controller
     from gator.webapp import steps
 
     job_dir = Path(job_dir)
@@ -152,6 +158,12 @@ def pick_glb(job_dir):
     f = job_dir / "agent" / "result.json"
     r = json.loads(f.read_text()) if f.is_file() else {}
     if glb == steps.agent_glb(job_dir):
+        jf, parts = job_dir / "job.json", job_dir / "run" / "parts.glb"
+        job = json.loads(jf.read_text()) if jf.is_file() else {}
+        start = parts if steps.articulated(job) and parts.is_file() else job_dir / "run" / "posed.glb"
+        bad = controller.check_size(glb, start)
+        if bad:
+            return start, f"the agent's {r.get('source')} GLB is not used: {bad}"
         return glb, f"the agent's {r.get('source')} GLB, verdict {r.get('verdict')}"
     return glb, steps.skip("agent", job_dir) or (f"the agent gave no usable GLB (verdict {r.get('verdict')})"
                                                  if r else "no agent result")

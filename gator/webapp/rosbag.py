@@ -52,7 +52,8 @@ LIVOX_PACKAGES = ("livox_ros_driver", "livox_ros_driver2", "livox_interfaces")  
 LIDAR = {"sensor_msgs/msg/PointCloud2": "PointCloud2",
          **{f"{pkg}/msg/CustomMsg": "CustomMsg" for pkg in LIVOX_PACKAGES}}
 TF = ("tf2_msgs/msg/TFMessage", "tf/msg/tfMessage")
-TF_LISTING_S = 5  # the topics pass reads /tf from the bag's first 5 s
+AXES_TOL_DEG = 20  # camera_axes_from: a TF link this close to the body-to-optical rotation shows optical axes, so a
+# tilted camera passes; every other turn between axis conventions is 90 deg or more from it
 RATE_MESSAGES = 11  # the topics pass times a LiDAR topic's rate by the log times of its first 11 messages
 POINT_TIME_S = 0.5  # per-point times further than this from the stamp are not used (a scan of a 2 Hz LiDAR fits)
 TIMEBASE_S = 0.2  # a Livox timebase further than this from a set header stamp is on another clock
@@ -316,23 +317,30 @@ def preview(r, msgs, side):
 
 def image_topics(path, previews=None, side=320, progress=None):
     """{"topics": [...], "skipped": [...], "lidar": [...], "lidar_skipped": [...], "tf": [...]} of the
-    bag (topics.json in video.py without "preview"), from one pass over the camera topics, the first
-    message of each LiDAR topic and the TF of the bag's first 5 s (build_plan.md note 12, Rosbag source 2). Topics
-    are sorted rectified first, then by message count, highest first; LiDAR topics by message count.
+    bag (topics.json in video.py without "preview"), from one pass over the camera topics and all of
+    /tf_static and /tf, and the first message of each LiDAR topic (build_plan.md note 12, Rosbag source 2).
+    The stage reads /tf near any frame, so the listing reads all of it, and keeps one value of each link.
+    Topics are sorted rectified first, then by message count, highest first; LiDAR topics by message count.
     previews: a dict that gets {topic: the middle message (else the first or the last that decodes) as
     RGB uint8 with long side `side`, never enlarged}. progress: called with the share of the bag read,
     0 to 1."""
     with open_bag(path) as r:
-        conns = [c for c in r.connections if c.msgtype in TYPES or c.msgtype == INFO]
+        conns = [c for c in r.connections if c.msgtype in TYPES or c.msgtype == INFO or tf_static(c) is not None]
         kinds = {c.topic: TYPES[c.msgtype] for c in conns if c.msgtype in TYPES}
         count = Counter()
         for c in conns:
             count[c.topic] += c.msgcount
         first, mid, last, infos, seen, stamps, frame_ids = {}, {}, {}, {}, Counter(), {}, {}
+        links = {}  # (parent, child, static): the edge that tf_listing lists, so a long bag's /tf takes little memory
         start, total, shown = r.start_time, max(r.end_time - r.start_time, 1), 0.0
-        for c, t, raw in (r.messages(connections=conns) if kinds else ()):  # no connections would mean all
+        for c, t, raw in (r.messages(connections=conns) if conns else ()):  # no connections would mean all
             if c.msgtype == INFO:
                 infos.setdefault(c.topic, (c, raw))
+                continue
+            if c.msgtype in TF:  # a message that cannot be decoded is skipped: TF problems never fail the listing
+                for e in tf_edges(r, c, t, raw):
+                    if e[3] or (e[0], e[1], False) not in links:  # the last static value, the first dynamic one
+                        links[(e[0], e[1], e[3])] = e
                 continue
             k = seen[c.topic]
             seen[c.topic] += 1
@@ -350,11 +358,7 @@ def image_topics(path, previews=None, side=320, progress=None):
                 progress(shown)
 
         lidar, lidar_skipped = lidar_topics(r)
-        try:
-            edges = transforms(r, [(r.start_time, r.start_time + TF_LISTING_S * 10**9)])
-        except Exception as e:  # TF problems never fail the listing
-            print(f"warning: cannot read /tf_static and /tf ({e}); no TF links are listed", flush=True)
-            edges = []
+        edges = list(links.values())
         topics, skipped = [], []
         for topic in sorted(kinds):
             if not seen[topic]:
@@ -382,10 +386,11 @@ def image_topics(path, previews=None, side=320, progress=None):
                 dist = {"model": ci.distortion_model, "max_abs_d": round(float(d.max(initial=0)), 6)}
                 if rect is None and d.size and k.any():  # an uncalibrated camera_info has no D or a zero K
                     rect = dist["max_abs_d"] == 0
+            axes, axes_from = camera_axes_from(frame_ids[topic], edges)
             topics.append({"topic": topic, "type": kinds[topic], "count": seen[topic], "duration_s": duration,
                            "rate_hz": rate, "width": w, "height": h, "format": fmt, "rectified": rect,
                            "camera_info": itopic if itopic in infos else None, "distortion": dist,
-                           "frame_id": frame_ids[topic], "camera_axes": camera_axes(frame_ids[topic]),
+                           "frame_id": frame_ids[topic], "camera_axes": axes, "camera_axes_from": axes_from,
                            "tf_links": tf_links(edges, frame_ids[topic], lidar)})
             if previews is not None:
                 previews[topic] = small
@@ -648,11 +653,44 @@ def lidar_topics(r):
     return lidar, skipped
 
 
-def camera_axes(frame_id):
-    """"optical" (x right, y down, z forward) when the camera's frame name has "optical", else "body"
-    (x forward, y left, z up). None for an empty frame name."""
+def camera_axes(frame_id, edges=()):
+    """The axes of camera_axes_from alone: "optical", "body" or None."""
+    return camera_axes_from(frame_id, edges)[0]
+
+
+def camera_axes_from(frame_id, edges=()):
+    """(axes, rule) of a camera's frame: "optical" (x right, y down, z forward) or "body" (x forward, y
+    left, z up), and the rule that decided. "name": the frame's name has "optical". "tf": the name does
+    not, but one of the frame's TF links (edges, see transforms) is the standard body-to-optical rotation
+    (lidar_scale.R_OPT_LINK) within AXES_TOL_DEG, as a Kalibr or EuRoC cam0 under base_link is; or the
+    frame hangs by a static link within AXES_TOL_DEG of no turn from a frame that has optical axes by its
+    name or by such a static link, as Kalibr's cam1 under cam0 does. Only that one step is taken, on
+    static links, so the values of a moving link (odom to base_link) say nothing about a mount. A sibling
+    sensor mounted at exactly R_OPT_LINK from the camera's parent still makes a body camera optical.
+    "default": neither, so body axes. (None, None) for an empty frame name. edges may hold many values of
+    one link: each neighbour is looked at once."""
     name = frame_name(frame_id)
-    return None if not name else "optical" if "optical" in name.lower() else "body"
+    if not name:
+        return None, None
+    if "optical" in name.lower():
+        return "optical", "name"
+    least = 1 + 2 * np.cos(np.radians(AXES_TOL_DEG))  # the trace of a turn by AXES_TOL_DEG
+
+    def turns(f, static_only=False):  # (the other frame, R that maps its points into f's) of f's links
+        for parent, child, T, static, _ in edges:
+            if f in (parent, child) and (static or not static_only):
+                R = np.asarray(T, float)[:3, :3]
+                yield (child, R) if f == parent else (parent, R.T)
+
+    def by_link(f, static_only=False):
+        return any(np.trace(lidar_scale.R_OPT_LINK.T @ R) >= least for _, R in turns(f, static_only))
+
+    if by_link(name):
+        return "optical", "tf"
+    near = {other for other, R in turns(name, True) if np.trace(R) >= least}
+    if any("optical" in other.lower() or by_link(other, True) for other in near):
+        return "optical", "tf"
+    return "body", "default"
 
 
 def tf_links(edges, frame_id, lidar):
@@ -840,23 +878,36 @@ def transforms(r, windows=None):
     else the log time. Transforms with a zero quaternion and those to their own frame are left out; a
     message that cannot be decoded is skipped with a warning."""
     out = []
-    for name, static in (("tf_static", True), ("tf", False)):
-        cs = [c for c in r.connections if c.topic.rstrip("/").rsplit("/", 1)[-1] == name and c.msgtype in TF]
+    for static in (True, False):
+        cs = [c for c in r.connections if tf_static(c) is static]
         if not cs:
             continue
         for a, b in [(None, None)] if static or windows is None else merge_windows(windows):
             for c, t, raw in r.messages(connections=cs, start=a, stop=b):
-                try:
-                    msg = r.deserialize(raw, c.msgtype)
-                except Exception as e:
-                    print(f"warning: cannot decode the {c.topic} message at log time {t} ns ({e})", flush=True)
-                    continue
-                for x in msg.transforms:
-                    parent, child, T = frame_name(x.header.frame_id), frame_name(x.child_frame_id), \
-                        transform_matrix(x.transform)
-                    if T is not None and parent and child and parent != child:
-                        out.append((parent, child, T, static, stamp(x) or t))
+                out += tf_edges(r, c, t, raw)
     return out
+
+
+def tf_static(c):
+    """True for a connection of /tf_static, False for one of /tf (namespaced ones too: /robot/tf), else None."""
+    if c.msgtype not in TF:
+        return None
+    return {"tf_static": True, "tf": False}.get(c.topic.rstrip("/").rsplit("/", 1)[-1])
+
+
+def tf_edges(r, c, t, raw):
+    """The TF edges (see transforms) of one /tf or /tf_static message logged at t (ns); none, with a
+    warning, when it cannot be decoded."""
+    try:
+        msg = r.deserialize(raw, c.msgtype)
+        got = [(frame_name(x.header.frame_id), frame_name(x.child_frame_id), transform_matrix(x.transform), stamp(x))
+               for x in msg.transforms]
+    except Exception as e:  # also a TF type of another definition
+        print(f"warning: cannot decode the {c.topic} message at log time {t} ns ({e})", flush=True)
+        return []
+    static = tf_static(c)
+    return [(parent, child, T, static, s or t) for parent, child, T, s in got
+            if T is not None and parent and child and parent != child]
 
 
 def tf_chain(edges, target, source, t_ns=None):
@@ -908,17 +959,18 @@ def _path(links, target, source):
     return T, frames[::-1]
 
 
-def camera_to_lidar(cam_frame, lidar_frame, edges, t_ns=None):
+def camera_to_lidar(cam_frame, lidar_frame, edges, t_ns=None, axes=None):
     """{"T_cam_lidar": 4x4, "chain": frames, "link": "static" or "dynamic", "camera_axes": "optical" or
-    "body"} from TF, or None without a path (tf_chain). T_cam_lidar maps LiDAR points to the camera's
-    optical axes (x right, y down, z forward): a camera frame with body axes (camera_axes) gets
-    lidar_scale.R_OPT_LINK on the left."""
+    "body", "camera_axes_from": its rule} from TF, or None without a path (tf_chain). T_cam_lidar maps
+    LiDAR points to the camera's optical axes (x right, y down, z forward): a camera frame with body axes
+    gets lidar_scale.R_OPT_LINK on the left. axes: (camera_axes, its rule) to use; None decides them by
+    camera_axes_from on the edges."""
     got = tf_chain(edges, cam_frame, lidar_frame, t_ns)
     if got is None:
         return None
     T, frames, link = got
-    axes = camera_axes(frame_name(cam_frame))
+    axes, rule = axes or camera_axes_from(cam_frame, edges)
     if axes == "body":
         T = T.copy()
         T[:3, :] = lidar_scale.R_OPT_LINK @ T[:3, :]
-    return {"T_cam_lidar": T, "chain": frames, "link": link, "camera_axes": axes}
+    return {"T_cam_lidar": T, "chain": frames, "link": link, "camera_axes": axes, "camera_axes_from": rule}

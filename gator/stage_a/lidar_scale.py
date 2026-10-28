@@ -15,13 +15,16 @@ The estimate (estimate()) runs on the pool after da3:
               noise passes), the pool mask is eroded by about 1% of the grid diagonal, DA3's depth must
               be valid and its conf at least the 30th percentile in the mask. r = z / depth; points
               beyond max(3 x 1.4826 MAD, ln 1.02) of the median ln r are trimmed, and the view's scale
-              s_i is the median r of the rest. Status few_points (under 30 valid points), scattered
-              (IQR of the valid points over 25% of s_i), no_mask, no_samples, else a candidate.
-  combine     the weighted median of ln s_i (weights sqrt(min(points, 2000))); views beyond
-              max(3 x 1.4826 MAD, ln 1.05) of it are outliers, the others are used; s is the weighted
-              median of the used views. It fails when fewer than 3 views have points, fewer than 3
-              or under half of them agree, the spread is over 8%, or s is outside 0.5 to 2.
-The record is pool/lidar.json (version 1); check images show the points coloured by r / s on the
+              s_i is the median r of the rest (the used points). Status few_points (under 30 valid
+              points), scattered (the IQR of the used points over 25% of s_i, or the trim drops more
+              than 40% of the valid points, or more than 10% below the median r: hidden points are
+              never nearer), no_mask, no_samples, else a candidate.
+  combine     the weighted median of ln s_i (weights sqrt(min(points, 2000)), and no view weighs more
+              than the median view); views beyond max(3 x 1.4826 MAD, ln 1.05) of it are outliers, the
+              others are used; s is the weighted median of the used views. It fails when fewer than 3
+              views have points, fewer than 3 or under half of them agree, the spread is over 8%, or s
+              is outside 0.5 to 2.
+The record is pool/lidar.json (version 2); check images show the points coloured by r / s on the
 prep image, to spot calibration and timing errors. estimate(points_out=...) also gives each view's
 points with their rows in the samples ("index"), so the lidar stage can show which points the scale
 used. read_calibration() reads the LiDAR-camera calibration file (YAML or JSON).
@@ -40,7 +43,10 @@ import numpy as np
 from gator.fileio import write_json
 
 SCALED = ("depth", "pointmaps", "pointmaps_sam3d")  # scaled whole; the extrinsics' translation column too
-VERSION = 1  # of pool/lidar.json
+# Of pool/lidar.json. steps.done("lidar") takes only a record of this version, so the scale is found again when the
+# estimator changes. Version 2 came with the samples' time window and time base of lidar.CACHE_VERSION 4,
+# ZBUFFER_ABS, the trim, the scatter rule on the used points, and the weights capped at the median view's.
+VERSION = 2
 
 # Projection.
 MIN_Z = 0.1  # m; nearer points are dropped
@@ -57,12 +63,14 @@ ERODE_FRAC = 0.01  # the mask is eroded by this share of the DA3 grid's diagonal
 ERODE_KEEP = 0.3  # ... less while the eroded mask keeps under this share of the mask
 CONF_PERCENTILE = 30  # DA3 conf must be at least this percentile of conf in the mask
 MIN_POINTS = 30  # fewer used points: few_points
-MAX_IQR_REL = 0.25  # a wider IQR of r over s_i: scattered
+MAX_IQR_REL = 0.25  # a wider IQR of the used points' r over s_i: scattered
 TRIM_MADS = 3.0  # used points lie within max(TRIM_MADS x 1.4826 MAD, ln(1 + TRIM_MIN_REL)) of the median ln r
 TRIM_MIN_REL = 0.02
+MAX_TRIM_REL = 0.4  # the trim drops more of the valid points: scattered (two groups of about the same size)
+MAX_TRIM_NEAR_REL = 0.1  # ... more of them below the median r, where no hidden point lies: scattered
 
 # Combine.
-WEIGHT_CAP = 2000  # a view's weight is sqrt(min(points, WEIGHT_CAP))
+WEIGHT_CAP = 2000  # a view's weight is sqrt(min(points, WEIGHT_CAP)), and at most the median view's
 OUTLIER_MADS = 3.0  # outliers lie beyond max(OUTLIER_MADS x 1.4826 MAD, ln(1 + OUTLIER_MIN_REL))
 OUTLIER_MIN_REL = 0.05
 MIN_VIEWS = 3
@@ -81,7 +89,7 @@ MAX_YAML_DEPTH = 16  # lists and maps in lists and maps; real calibration files 
 R_OPT_LINK = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]])
 
 VIEW_KEYS = ("zbuffer_tol", "zbuffer_abs", "erode_frac", "erode_keep", "conf_percentile", "min_points", "max_iqr_rel",
-             "trim_mads", "trim_min_rel")
+             "trim_mads", "trim_min_rel", "max_trim_rel", "max_trim_near_rel")
 COMBINE_KEYS = ("weight_cap", "outlier_mads", "outlier_min_rel", "min_views", "max_spread_rel", "s_min", "s_max")
 
 
@@ -106,7 +114,8 @@ def thresholds(**overrides):
     """Every threshold of the estimate by name (the module constants in lower case), with overrides."""
     t = {"zbuffer_tol": ZBUFFER_TOL, "zbuffer_abs": ZBUFFER_ABS, "erode_frac": ERODE_FRAC, "erode_keep": ERODE_KEEP,
          "conf_percentile": CONF_PERCENTILE, "min_points": MIN_POINTS, "max_iqr_rel": MAX_IQR_REL,
-         "trim_mads": TRIM_MADS, "trim_min_rel": TRIM_MIN_REL,
+         "trim_mads": TRIM_MADS, "trim_min_rel": TRIM_MIN_REL, "max_trim_rel": MAX_TRIM_REL,
+         "max_trim_near_rel": MAX_TRIM_NEAR_REL,
          "weight_cap": WEIGHT_CAP, "outlier_mads": OUTLIER_MADS, "outlier_min_rel": OUTLIER_MIN_REL,
          "min_views": MIN_VIEWS, "max_spread_rel": MAX_SPREAD_REL, "s_min": S_MIN, "s_max": S_MAX}
     unknown = sorted(set(overrides) - set(t))
@@ -268,7 +277,8 @@ def trim(r, mads=TRIM_MADS, min_rel=TRIM_MIN_REL):
 
 def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, zbuffer_abs=ZBUFFER_ABS, erode_frac=ERODE_FRAC,
                erode_keep=ERODE_KEEP, conf_percentile=CONF_PERCENTILE, min_points=MIN_POINTS, max_iqr_rel=MAX_IQR_REL,
-               trim_mads=TRIM_MADS, trim_min_rel=TRIM_MIN_REL):
+               trim_mads=TRIM_MADS, trim_min_rel=TRIM_MIN_REL, max_trim_rel=MAX_TRIM_REL,
+               max_trim_near_rel=MAX_TRIM_NEAR_REL):
     """One view's ratio of LiDAR depth to DA3 depth. uvz: the frame's samples; crop: prep's crop box
     of the frame; depth, conf: DA3's (h, w) arrays; mask: the pool mask at any size.
 
@@ -276,10 +286,14 @@ def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, zbuffer_ab
     points_grid: inside DA3's grid, points_visible: after the z-buffer, points_mask: inside the eroded
     mask, points_valid: with valid DA3 depth and conf, points_used: also within the trim of ln r) and
     gives erode_px, conf_min, s (the median of the used points' r = z / depth), iqr_rel (the IQR of
-    the valid points' r over s) and status: no_mask, no_samples, few_points (under min_points valid
+    the used points' r over s) and status: no_mask, no_samples, few_points (under min_points valid
     points: the trim must not turn a scattered view into one that combine leaves out of its counts),
-    scattered or candidate (combine makes it used or outlier). points holds the visible points for the check image: u, v
-    (source pixels), r (NaN without valid depth), used, and index: each point's row in uvz."""
+    scattered or candidate (combine makes it used or outlier). The view is scattered when iqr_rel is over
+    max_iqr_rel, or the trim drops more than max_trim_rel of the valid points, or more than
+    max_trim_near_rel of them below their median r. Hidden points that the z-buffer missed always lie
+    farther. The trim may drop them, up to max_trim_rel of the valid points, and the view keeps its s,
+    since the IQR is that of the points that give s. points holds the visible points for the check
+    image: u, v (source pixels), r (NaN without valid depth), used, and index: each point's row in uvz."""
     from scipy.ndimage import distance_transform_edt
 
     from gator.webapp.views import at_size
@@ -313,10 +327,13 @@ def view_ratio(uvz, crop, depth, conf, mask, zbuffer_tol=ZBUFFER_TOL, zbuffer_ab
     used[fit] = trim(r[fit], trim_mads, trim_min_rel)
     ru = r[used]
     s = float(np.median(ru)) if len(ru) else None
-    iqr = float(np.subtract(*np.percentile(r[fit], [75, 25])) / s) if len(ru) else None
+    iqr = float(np.subtract(*np.percentile(ru, [75, 25])) / s) if len(ru) else None
+    rf, dropped = r[fit], ~used[fit]  # the valid points' r, and which of them the trim dropped
+    near = int((dropped & (rf < np.median(rf))).sum()) if len(rf) else 0
     status = ("no_mask" if not m.any() else "no_samples" if not len(uvz)
               else "few_points" if fit.sum() < max(1, min_points) or not len(ru)
-              else "scattered" if iqr > max_iqr_rel else "candidate")
+              else "scattered" if iqr > max_iqr_rel or dropped.sum() > max_trim_rel * len(rf)
+              or near > max_trim_near_rel * len(rf) else "candidate")
     rec = {"points": int(len(uvz)), "points_grid": int(g.sum()), "points_visible": int(vis.sum()),
            "points_mask": int(inner[iv, iu].sum()), "points_valid": int(fit.sum()), "points_used": int(used.sum()),
            "erode_px": int(e),
@@ -342,7 +359,9 @@ def combine(views, weight_cap=WEIGHT_CAP, outlier_mads=OUTLIER_MADS, outlier_min
             min_views=MIN_VIEWS, max_spread_rel=MAX_SPREAD_REL, s_min=S_MIN, s_max=S_MAX):
     """The scale from view_ratio's records (see the module docstring). Every candidate's status
     becomes used or outlier, in place. Returns ok, s (None when no view is a candidate), reason
-    (None when ok), spread_rel, the outlier cut and the counts."""
+    (None when ok), spread_rel, the outlier cut and the counts. A view's weight is at most the median
+    view's. Else a view with more than half the weight is the median alone and its MAD is 0, so every
+    other view becomes an outlier, and one point more or less in the other views can flip the result."""
     cand = [v for v in views if v["status"] == "candidate"]
     with_points = sum(v["status"] in ("candidate", "scattered") for v in views)
     s = spread = mad = cut = None
@@ -350,6 +369,7 @@ def combine(views, weight_cap=WEIGHT_CAP, outlier_mads=OUTLIER_MADS, outlier_min
     if cand:
         x = np.log([v["s"] for v in cand])
         wt = np.sqrt(np.minimum([v["points_used"] for v in cand], weight_cap))
+        wt = np.minimum(wt, np.median(wt))
         m = weighted_median(x, wt)
         mad = weighted_median(np.abs(x - m), wt)
         cut = max(outlier_mads * 1.4826 * mad, float(np.log1p(outlier_min_rel)))

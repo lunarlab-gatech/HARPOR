@@ -2,8 +2,9 @@
 
 Prepares the session folder, runs the agent under a watchdog with a 600 s budget (the caller passes
 900 s for the articulation mode, build_plan.md note 11), serves the helper commands from the host,
-checks GLBs as paper A.4 describes and picks the deliverable with the fallback order. The agent is
-one of two, chosen per session in prepare_session and recorded in control/agent.json:
+checks GLBs as paper A.4 describes and against the original's size, and picks the deliverable with the
+fallback order. The agent is one of two, chosen per session in prepare_session and recorded in
+control/agent.json:
 
   codex    GPT-6-Astra through the Codex CLI, as in the paper. The CLI runs in an Apptainer
            container that holds the API key (apptainer_command).
@@ -75,6 +76,13 @@ NETWORK = re.compile(
     r"(?:^|(?<=[\s;&|(`\"']))(?:(?:pip3|pipx|pip|conda|mamba|micromamba|apt-get|apt|npm|pnpm|yarn|poetry|uv)\s+"
     r"(?:install|add|download|i)\b|(?:curl|wget|aria2c)\s+(?:-|https?://|ftp://)|git\s+(?:clone|fetch|pull|ls-remote"
     r"|submodule)\b)|urllib\.request|urlopen\(|urlretrieve\(|requests\.(?:get|post)\(|http\.client", re.M)
+# The bounds of a delivered GLB's size change (check_size): a GLB whose box grew by more than the upper bound on
+# every side, or shrank below the lower bound on every side, is not delivered. The prompts ask the agent to keep
+# the original's numeric scale. A unit slip in Blender (2.54 for inches, or more) scales every side by the same
+# factor. A repair seldom changes every side that much: in synthetic tests in the tilted frame W (view pitch up to
+# 30 deg), legs under a desk or stool top, splayed stool legs and a long pan handle changed the shortest side by at
+# most 1.4 times, and a window of 0.8 to 1.25 refused them. The teddy run of note 5 changed the sides by under 1.5%.
+SIZE_RATIO = (0.5, 2.0)
 CODEX_EXIT = {0: "success", 1: "error_or_interrupted", 130: "cancelled", 143: "terminated"}
 CLAUDE_EXIT = {0: "ended", 2: "refusal", 3: "api_error", 130: "interrupted"}
 KEY_NAMES = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
@@ -412,6 +420,38 @@ def check_glb(path):
     return None
 
 
+def box_extents(path):
+    """The sides of a GLB's bounding box after its node transforms, in the GLB's own axes and units. The
+    file is read without following a symlink."""
+    scene = trimesh.load(io.BytesIO(tools.read_file(path)), file_type="glb", force="scene", process=False)
+    return np.asarray(scene.extents, dtype=float)
+
+
+def check_size(path, original):
+    """None when the GLB keeps the original's size, else the reason. It does not when every side of its box
+    is more than SIZE_RATIO's upper bound times the original's side, or every side is less than the lower
+    bound times it (see SIZE_RATIO: a repair leaves at least one side as it was).
+
+    original is the GLB the agent started from (root/original.glb, a copy of posed.glb or of the split
+    parts.glb). Both are in frame W with glTF axes and in the same units, so their sides compare one to one.
+    A side under 1% of the original's longest is left out: a flat original's thin side says nothing.
+    """
+    try:
+        new, old = box_extents(path), box_extents(original)
+        keep = old > 0.01 * old.max()
+        ratio = new[keep] / old[keep]
+    except Exception as e:
+        return f"size not checked: {e!r}"
+    lo, hi = SIZE_RATIO
+    if not len(ratio) or not np.isfinite(ratio).all():  # check_glb gives the reason of a GLB that is not finite
+        return "size not checked: its box or the original's has no finite size"
+    if ratio.min() > hi:
+        return f"wrong size: every side of its box is at least {ratio.min():.3g} times the original's (over {hi})"
+    if ratio.max() < lo:
+        return f"wrong size: every side of its box is at most {ratio.max():.3g} times the original's (under {lo})"
+    return None
+
+
 def joint_count(glb):
     """Number of joints in a GLB (gator.parts.joints); None without a GLB or when they cannot be read."""
     try:
@@ -425,7 +465,8 @@ def select_deliverable(root, mode):
     original. Returns (pick, rejected).
 
     Candidates come from the helpers' host-side events, and each GLB must still have the sha256 logged
-    there. Files that the agent wrote into work/ by other means are never delivered.
+    there. Files that the agent wrote into work/ by other means are never delivered. Each GLB must also
+    pass check_glb and keep the size of root/original.glb (check_size).
     """
     root = Path(root)
     work = root / "work"
@@ -440,7 +481,7 @@ def select_deliverable(root, mode):
                 why = None if tools.sha256(glb) == e["sha256"] else f"changed after {label}"
             except OSError:
                 why = f"missing or not a regular file after {label}"
-        why = why or check_glb(glb)
+        why = why or check_glb(glb) or check_size(glb, root / "original.glb")
         if why:
             rejected.append({"from": label, "glb": os.path.relpath(glb, root), "why": why})
         return why is None

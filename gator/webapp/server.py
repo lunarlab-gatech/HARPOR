@@ -52,8 +52,10 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       calibration's summary, calibration_summary, or null), "lidar_current"
                                       (steps.done("lidar") for a job with LiDAR whose lidar stage is done:
                                       false when the calibration was uploaded or deleted after the scale
-                                      was found; else null) and "preview" (the input's preview video and
-                                      where each view is in it, preview_of)
+                                      was found, or an older estimator found it; else null), "lidar_stale"
+                                      (why it is false: "calibration" or "estimator", lidar_stale; else
+                                      null) and "preview" (the input's preview video and where each view
+                                      is in it, preview_of)
   DELETE /api/jobs/{id}               the job folder, unless the job is uploading, analyzing, queued or
                                       running
   GET    /api/jobs/{id}/frames        frames/meta.json, with frames/pool.json as "pool" once extracted
@@ -96,7 +98,8 @@ Routes (JSON unless said otherwise; {id} is a job id):
   GET    /api/jobs/{id}/selection     selection.json with "sam3": the SAM 3 instances of every pool frame,
                                       and "lidar": the metric scale's record in short (lidar_compact) for a
                                       job with LiDAR, else null; its calibration_changed is true when the
-                                      calibration was uploaded or deleted after the scale was found
+                                      calibration was uploaded or deleted after the scale was found, and its
+                                      estimator_changed when an older estimator found it (lidar_stale)
   POST   /api/jobs/{id}/overrides     {locked, excluded, instance, view0, agent?, api_key?}: select again
                                       (masks first when an instance changed); the job stops in review
   GET    /api/jobs/{id}/parts         run/proposal.json ("proposal"), the job's parts settings, "waiting"
@@ -111,8 +114,8 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       waits for its part list, a continue without "from" confirms the
                                       VLM's list as it is; a retry of a job that was cancelled at its
                                       part list stops at the list again (it answers "from": "propose"). A
-                                      run that starts at or before select (or from lidar, when the
-                                      calibration changed after the scale was found) needs the API key when
+                                      run that starts at or before select (or from lidar, when the scale
+                                      is stale: another calibration or estimator) needs the API key when
                                       the agent stage is done, since a done job has dropped it, and answers
                                       400 when the job's LiDAR would fail the lidar stage's checks
                                       (jobs.lidar_settings), before anything is deleted
@@ -281,18 +284,32 @@ def calibration_summary(cal, J=None):
             "lidar_topic": cal.get("lidar_topic")}
 
 
-def lidar_compact(rec, stale=False):
+def lidar_stale(J):
+    """Why the scale in J/pool/lidar.json is no longer the job's, or None (no record, not ok, or current):
+    "calibration" when the calibration was uploaded or deleted since the scale was found, else
+    "estimator" (steps.done also wants the record of the current lidar_scale.VERSION). The page names the
+    cause, so a scale that an older estimator found does not say that the calibration changed."""
+    rec = read_json(Path(J) / "pool" / "lidar.json")
+    if not isinstance(rec, dict) or rec.get("ok") is not True or steps.done("lidar", J):
+        return None
+    cal = (jobs.load(J).get("calibration") or {}).get("sha256")
+    return "calibration" if (rec.get("extrinsic") or {}).get("calibration_sha256") != cal else "estimator"
+
+
+def lidar_compact(rec, stale=None):
     """pool/lidar.json in short for the review page, or None: ok, s, reason, the view counts, spread_rel,
-    source, the extrinsic's source, calibration_changed (stale: the record is ok but steps.done says the
-    calibration changed since), warnings, every view's name, s, points_used and status, and the folder
-    of the check images (lidar/check/<view>.jpg)."""
+    source, the extrinsic's source, calibration_changed and estimator_changed (stale, lidar_stale's cause:
+    the record is ok but steps.done says that the calibration changed since, or that an older estimator
+    made it), warnings, every view's name, s, points_used and status, and the folder of the check images
+    (lidar/check/<view>.jpg)."""
     if not isinstance(rec, dict):
         return None
     c = rec.get("combine") or {}
     return {"ok": rec.get("ok") is True, "s": rec.get("s"), "reason": rec.get("reason"),
             "counts": {k: c.get(k) for k in LIDAR_COUNTS}, "spread_rel": c.get("spread_rel"),
             "source": rec.get("source"), "extrinsic": (rec.get("extrinsic") or {}).get("source"),
-            "calibration_changed": bool(stale and rec.get("ok") is True), "warnings": rec.get("warnings") or [],
+            "calibration_changed": stale == "calibration", "estimator_changed": stale == "estimator",
+            "warnings": rec.get("warnings") or [],
             "views": [{k: v.get(k) for k in ("name", "s", "points_used", "status")} for v in rec.get("views") or []],
             "check_dir": "lidar/check"}
 
@@ -616,9 +633,11 @@ def make_app(cfg, token, key_dir=None):
                    articulated=steps.articulated(job), parts_mode=steps.parts_mode(job),
                    parts_review=steps.waits_for_parts(J, job), lidar=lidar_of(job),
                    calibration=calibration_summary(job.get("calibration"), J), preview=preview_of(J))
-        # The scale was found with the job's calibration as it is now (steps.done compares their sha256).
+        # The scale was found with the job's calibration as it is now (steps.done compares their sha256), and by
+        # this estimator (lidar_scale.VERSION); lidar_stale says which of the two changed.
         ran = (job["stages"].get("lidar") or {}).get("status") == "done"
         job["lidar_current"] = steps.done("lidar", J) if job["lidar"] and ran else None
+        job["lidar_stale"] = lidar_stale(J) if job["lidar_current"] is False else None
         job["progress"] = jobs.progress(J)
         found = {f: resolve(J, f) for f in OUTPUTS}
         found.update(lidar_points(J))
@@ -746,8 +765,7 @@ def make_app(cfg, token, key_dir=None):
                                    "warnings": v.get("warnings") or []} for v in sam["views"]}
         sel["check_dir"] = f"scene/sam3_{job['slug']}/check"
         sel["overrides"], sel["view0"] = job["overrides"], job["view0"]
-        sel["lidar"] = lidar_compact(read_json(J / "pool" / "lidar.json"), not steps.done("lidar", J)) \
-            if lidar_of(job) else None
+        sel["lidar"] = lidar_compact(read_json(J / "pool" / "lidar.json"), lidar_stale(J)) if lidar_of(job) else None
         return sel
 
     def calibration_job(J, job_id):
@@ -930,12 +948,15 @@ def make_app(cfg, token, key_dir=None):
             raise Bad(400, f"from is frames or one of {jobs.BUILD}")
         changed = agent != steps.agent(job)  # the other agent's stage runs anew (Runner.resume)
         # Runner.resume runs every stage again from a start at or before select, also from lidar when the
-        # calibration changed after the scale was found. A done agent stage then needs the key, and the job's
-        # LiDAR must pass the lidar stage's checks: the run deletes the results before that stage could fail.
+        # scale is stale (the calibration or the estimator changed after the scale was found). A done agent
+        # stage then needs the key, and the job's LiDAR must pass the lidar stage's checks: the run deletes
+        # the results before that stage could fail.
+        # The checks include the camera_info, read from the bag when the calibration has no K. They run here,
+        # outside the runner's lock, as Start's do.
         stale = lidar_of(job) is not None and not steps.done("lidar", J)
         if lidar_of(job) is not None and (stale or steps.NAMES.index(first) <= steps.NAMES.index("lidar")):
             try:
-                jobs.lidar_settings(J, job, job.get("lidar"), read_bag=False)
+                jobs.lidar_settings(J, job, job.get("lidar"))
             except ValueError as e:
                 raise Bad(400, str(e)) from None
         again = steps.NAMES.index(first) <= steps.NAMES.index(steps.REVIEW_AFTER) or stale

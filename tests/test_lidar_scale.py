@@ -150,6 +150,13 @@ def test_view_ratio_registers_samples_on_the_da3_grid():
 
 
 def test_view_ratio_takes_the_median_and_the_relative_iqr():
+    """s is the median r of the used points, and iqr_rel is their IQR over s. The trim gives two more signs of
+    scatter. Hidden points that the z-buffer missed always lie on the far side (r high), so the trim may drop up to
+    40% of the valid points there and the view stays a candidate, with the right s. The view is scattered when the
+    trim drops more than 10% of them on the near side (hidden points are never nearer), or more than 40% in all
+    (two groups of about the same size, and the median could lie in either). The old rule took the IQR of all
+    valid points before the trim. A view with more than about 25% hidden points was then scattered, although its
+    trimmed s was right (the second mode of 12 in 40 below, and test_near_views_with_many_hidden_points_agree)."""
     r = 1.25 * (1 + 0.4 * np.linspace(0, 1, 100) ** 3)  # skewed: the mean is above the median
     i = np.arange(100)
     uvz = np.stack([10 + i % 40, 10 + i // 40, 2.0 * r], 1)
@@ -158,21 +165,36 @@ def test_view_ratio_takes_the_median_and_the_relative_iqr():
     p25, p50, p75 = np.percentile(r, [25, 50, 75])
     assert rec["points_used"] == rec["points_valid"] == 100 and np.isclose(rec["s"], p50) and np.mean(r) > p50 + 0.01
     assert np.isclose(rec["iqr_rel"], (p75 - p25) / p50, atol=1e-4)
-    # The trim drops the tail beyond 3 x 1.4826 MAD of ln r; the IQR stays the valid points'.
+    # The trim drops the tail beyond 3 x 1.4826 MAD of ln r; the IQR is the used points'.
     rec, pts = L.view_ratio(uvz, (0, 0, W, H), np.full((H, W), 2.0), None, np.ones((H, W), bool), zbuffer_tol=10.0)
     keep = L.trim(r)
     assert (rec["points_valid"], rec["points_used"]) == (100, keep.sum()) and 85 < keep.sum() < 100 and keep[:85].all()
     assert pts["used"].tolist() == keep.tolist() and np.isclose(rec["s"], np.median(r[keep]))
-    assert np.isclose(rec["iqr_rel"], (p75 - p25) / rec["s"], atol=1e-4)
+    assert np.isclose(rec["iqr_rel"], np.subtract(*np.percentile(r[keep], [75, 25])) / rec["s"], atol=1e-4)
+    assert rec["iqr_rel"] < (p75 - p25) / rec["s"] - 0.01 and rec["status"] == "candidate"
     # Without scatter (MAD 0) the cut is ln 1.02; mads inf keeps every point, also then.
     assert L.trim([1.0] * 6 + [1.019, 1.021, 0.981, 0.979]).tolist() == [True] * 7 + [False, True, False]
     assert L.trim([1.25] * 10 + [1.5], mads=np.inf).all() and L.trim([]).tolist() == []
-    # A view of 40 valid points with a second mode of 12: the trim drops the mode, leaving 28, but the view is
-    # scattered by its valid points, not few_points, so combine still counts it among the views with points.
-    r2 = 1.25 * np.r_[np.ones(28), np.full(12, 1.32)] * np.exp(np.random.default_rng(1).normal(0, 0.01, 40))
-    uvz2 = np.stack([10 + i[:40] % 40, 10 + i[:40] // 40, 2.0 * r2], 1)
-    rec, _ = L.view_ratio(uvz2, (0, 0, W, H), np.full((H, W), 2.0), None, np.ones((H, W), bool), zbuffer_tol=10.0)
-    assert (rec["points_valid"], rec["points_used"], rec["status"]) == (40, 28, "scattered") and rec["iqr_rel"] > 0.25
+
+    def second_mode(n, k):  # 40 valid points, n of them at k x the others' r
+        r2 = 1.25 * np.r_[np.ones(40 - n), np.full(n, k)] * np.exp(np.random.default_rng(1).normal(0, 0.01, 40))
+        uvz2 = np.stack([10 + i[:40] % 40, 10 + i[:40] // 40, 2.0 * r2], 1)
+        return L.view_ratio(uvz2, (0, 0, W, H), np.full((H, W), 2.0), None, np.ones((H, W), bool), zbuffer_tol=10.0)[0]
+
+    # 12 points farther, as hidden points are: the trim drops them (30%), and the 28 give the right s.
+    rec = second_mode(12, 1.32)
+    assert (rec["points_valid"], rec["points_used"], rec["status"]) == (40, 28, "candidate") and rec["iqr_rel"] < 0.05
+    assert abs(rec["s"] / 1.25 - 1) < 0.005
+    # The same 12 nearer: no hidden point lies there. 18 farther: the trim drops 45%. Both are scattered, not
+    # few_points, so combine still counts them among the views with points.
+    for n, k in ((12, 1 / 1.32), (18, 1.32)):
+        rec = second_mode(n, k)
+        assert (rec["points_valid"], rec["points_used"], rec["status"]) == (40, 40 - n, "scattered"), (n, k)
+    # A wide spread that the trim keeps whole: scattered by the IQR of the used points.
+    r3 = 1.25 * np.exp(np.linspace(-0.4, 0.4, 40))
+    rec, _ = L.view_ratio(np.stack([10 + i[:40], np.full(40, 10), 2.0 * r3], 1), (0, 0, W, H), np.full((H, W), 2.0), None,
+                          np.ones((H, W), bool), zbuffer_tol=10.0)
+    assert rec["points_used"] == 40 and rec["iqr_rel"] > 0.25 and rec["status"] == "scattered"
 
 
 def test_view_ratio_resists_range_noise_and_hidden_points():
@@ -202,6 +224,58 @@ def test_view_ratio_resists_range_noise_and_hidden_points():
     rec, pts = L.view_ratio(sparse, (0, 0, w, h), depth, None, mask)
     assert rec["points_visible"] == u.size and not pts["used"][hidden[pts["index"]]].any()
     assert rec["points_valid"] - rec["points_used"] < 1.02 * hidden.sum()  # the trim drops few points of the plane
+
+
+def near_field_view(yaw, seed, z=0.4, size=(0.3, 0.2, 0.2), wall=2.0, baseline=0.15, noise=0.03, density=3500):
+    """view_ratio's record of one view of note 12's near case: a box of size (m) at z, turned by yaw about the
+    vertical, before a wall at z = wall. A 640x480 camera (f 500) at the origin; DA3's depth on a 504x378 grid is the
+    true depth / 1.25. A sparse random LiDAR (density beams per sr, as a Mid-360) baseline m to the camera's right,
+    with range noise (m)."""
+    Wc, Hc, w, h, f = 640, 480, 504, 378, 500.0
+    Kc = np.array([[f, 0, Wc / 2 - 0.5], [0, f, Hc / 2 - 0.5], [0, 0, 1]])
+    c, half = np.array([0.0, 0.0, z]), np.asarray(size) / 2
+    R = np.array([[np.cos(yaw), 0, np.sin(yaw)], [0, 1, 0], [-np.sin(yaw), 0, np.cos(yaw)]])
+
+    def cast(o, d):  # the distance to the first hit along the rays, and whether it is the box
+        ol, dl = (o - c) @ R, d @ R
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t1, t2 = (-half - ol) / dl, (half - ol) / dl
+            tw = (wall - o[2]) / d[:, 2]
+        tmin, tmax = np.nanmax(np.minimum(t1, t2), -1), np.nanmin(np.maximum(t1, t2), -1)
+        tb = np.where((tmax >= tmin) & (tmin > 0), tmin, np.inf)
+        tw = np.where(tw > 0, tw, np.inf)
+        return np.minimum(tb, tw), tb <= tw
+
+    v, u = np.mgrid[0:h, 0:w].astype(float)
+    us, vs = (u + 0.5) * Wc / w - 0.5, (v + 0.5) * Hc / h - 0.5
+    d = np.stack([(us - Kc[0, 2]) / f, (vs - Kc[1, 2]) / f, np.ones_like(us)], -1).reshape(-1, 3)
+    t, on = cast(np.zeros(3), d)
+    rng = np.random.default_rng(seed)
+    n = int(density * np.radians(140) * 2 * np.sin(np.radians(40)))  # az +-70 deg, el +-40 deg
+    az = rng.uniform(-np.radians(70), np.radians(70), n)
+    el = np.arcsin(rng.uniform(-np.sin(np.radians(40)), np.sin(np.radians(40)), n))
+    dl = np.stack([np.sin(az) * np.cos(el), np.sin(el), np.cos(az) * np.cos(el)], -1)
+    o = np.array([baseline, 0.0, 0.0])
+    tl, _ = cast(o, dl)
+    hit = np.isfinite(tl)
+    X = o + dl[hit] * (tl[hit] + rng.normal(0, noise, hit.sum()))[:, None]
+    uu, vv, zz, ok = L.project(X, Kc, None, None, (Wc, Hc))
+    return L.view_ratio(np.stack([uu[ok], vv[ok], zz[ok]], 1), (0, 0, Wc, Hc), (t * d[:, 2]).reshape(h, w) / 1.25, None,
+                        on.reshape(h, w))[0]
+
+
+def test_near_views_with_many_hidden_points_agree():
+    """Note 12's near case: a 30 x 20 x 20 cm box at 0.4 m before a wall at 2 m, seen by a sparse LiDAR 15 cm beside
+    the camera with 3 cm of range noise. About 30% of each view's valid points are wall points that the camera
+    cannot see and the z-buffer misses. The trim drops them, all on the far side, so each view is a candidate with
+    the right s. With the IQR of all valid points every view was scattered, and combine failed with a reason that
+    blamed the calibration."""
+    views = [{"name": f"f{i:05d}", **near_field_view(a, i)} for i, a in enumerate(np.radians([-50, -20, 0, 20, 50]))]
+    for v in views:
+        assert v["status"] == "candidate" and 0.2 < 1 - v["points_used"] / v["points_valid"] < 0.4, v
+        assert abs(v["s"] / 1.25 - 1) < 0.03 and v["iqr_rel"] < 0.25, v
+    c = L.combine(views)
+    assert c["ok"] and c["views_used"] == 5 and abs(c["s"] / 1.25 - 1) < 0.01, c
 
 
 def test_rot90_points_matches_np_rot90():
@@ -365,10 +439,31 @@ def test_combine_weights_are_capped_square_roots():
     def views(*pairs):
         return [{"s": s, "points_used": n, "status": "candidate"} for s, n in pairs]
 
-    # Weights sqrt(2000), sqrt(1000), sqrt(1000): 1.03 is the median. Without the cap 1.0 would be, and with
-    # weights n instead of sqrt(n) the two would tie.
+    # Weights sqrt(min(n, 2000)): 10, 20, 20 and 30, then at most the median weight (20): 10, 20, 20, 20. 1.03 is
+    # their median; with equal weights it would lie between 1.02 and 1.03.
+    c = L.combine(views((1.0, 100), (1.02, 400), (1.03, 400), (1.04, 900)))
+    assert c["ok"] and np.isclose(c["s"], 1.03) and c["views_used"] == 4
+    assert np.isclose(L.combine(views((1.0, 400), (1.02, 400), (1.03, 400), (1.04, 400)))["s"], np.sqrt(1.02 * 1.03))
+    # Weights sqrt(2000), sqrt(1000), sqrt(1000), then at most sqrt(1000) each: 1.03 is the median.
     c = L.combine(views((1.0, 8000), (1.03, 1000), (1.04, 1000)))
     assert c["ok"] and np.isclose(c["s"], 1.03) and c["views_used"] == 3
+
+
+def test_combine_one_dense_view_cannot_outvote_the_others():
+    """A view with many points (a near view of a rosbag) weighs no more than the median view. Before, a view with
+    more than half the weight was the median alone and its MAD was 0, so every other view became an outlier: one
+    view of 2000 points at 1.0 against five of 79 points at 1.06 failed, with 80 points s was 1.03 and with 81 it
+    was 1.06. Within the 5% cut the dense view's s won over the five that agree."""
+    def views(*pairs):
+        return [{"s": s, "points_used": n, "status": "candidate"} for s, n in pairs]
+
+    for n in (79, 80, 81):
+        vs = views((1.0, 2000), *[(1.06, n)] * 5)
+        c = L.combine(vs)
+        assert c["ok"] and np.isclose(c["s"], 1.06) and [v["status"] for v in vs] == ["outlier"] + ["used"] * 5, n
+        vs = views((1.0, 2000), *[(1.04, n)] * 5)
+        c = L.combine(vs)
+        assert c["ok"] and np.isclose(c["s"], 1.04) and c["views_used"] == 6, n
 
 
 def test_combine_needs_half_of_the_views_with_points():
@@ -379,7 +474,9 @@ def test_combine_needs_half_of_the_views_with_points():
     c = L.combine(vs)
     assert not c["ok"] and c["reason"].startswith("the per-view scales disagree: 3 of the 7 views with LiDAR points "
                                                   "agree (4 scattered, 0 outliers) and at least 4 must")
-    vs = views(*[(1.0, 2000)] * 4, (1.5, 30), (0.6, 30), (1.4, 30), (0.7, 30), (2.0, 30))
+    # Four dense views agree; the other five disagree, four of them with few points (the median weight is a dense
+    # view's, so the four dense views outweigh the rest).
+    vs = views(*[(1.0, 2000)] * 4, (1.5, 2000), (0.6, 30), (1.4, 30), (0.7, 30), (2.0, 30))
     c = L.combine(vs)
     assert not c["ok"] and c["reason"].startswith("the per-view scales disagree: 4 of the 9 views with LiDAR points "
                                                   "agree (0 scattered, 5 outliers) and at least 5 must")
@@ -398,9 +495,9 @@ def test_combine_weights_and_checks():
     def views(*pairs):
         return [{"s": s, "points_used": n, "status": "candidate"} for s, n in pairs]
 
-    vs = views((1.0, 10000), (1.02, 100), (1.03, 100))  # weights sqrt(2000), 10, 10
+    vs = views((1.0, 10000), (1.02, 100), (1.03, 100))  # weights sqrt(2000), 10, 10, then at most 10 each
     c = L.combine(vs)
-    assert c["ok"] and c["s"] == 1.0 and c["views_used"] == 3 and [v["status"] for v in vs] == ["used"] * 3
+    assert c["ok"] and np.isclose(c["s"], 1.02) and c["views_used"] == 3 and [v["status"] for v in vs] == ["used"] * 3
     vs = views((1.0, 100), (1.01, 100), (0.99, 100), (1.3, 100))
     c = L.combine(vs)
     assert c["ok"] and np.isclose(c["s"], 1.0) and vs[3]["status"] == "outlier" and c["cut_rel"] == 0.05
@@ -413,7 +510,7 @@ def test_estimate_recovers_the_scale(tmp_path):
     pool, samples = lidar_pool(tmp_path)
     rec = L.estimate(pool, samples, check_dir=tmp_path / "check")
     assert rec["ok"] and rec["reason"] is None and abs(rec["s"] / 1.25 - 1) < 0.005
-    assert rec["version"] == 1 and rec["da3"] == {"process_res": 504, "grid": [W, H]} and rec["warnings"] == []
+    assert rec["version"] == L.VERSION == 2 and rec["da3"] == {"process_res": 504, "grid": [W, H]} and rec["warnings"] == []
     assert [v["status"] for v in rec["views"]] == ["used"] * 8 and [v["frame"] for v in rec["views"]] == list(range(0, 80, 10))
     assert min(v["points_used"] for v in rec["views"]) > 300 and rec["combine"]["views_used"] == 8
     assert rec["combine"]["spread_rel"] < 0.005 and rec["combine"]["thresholds"]["min_points"] == 30
@@ -441,7 +538,8 @@ def test_estimate_leaves_out_outliers_and_odd_views(tmp_path):
     rec = L.estimate(pool, samples)
     st = [v["status"] for v in rec["views"]]
     assert st == ["used"] * 5 + ["no_mask", "outlier", "outlier", "scattered", "no_samples"]
-    assert rec["ok"] and abs(rec["s"] / 1.25 - 1) < 0.005 and rec["views"][8]["iqr_rel"] > 0.25
+    step = rec["views"][8]  # two halves of about the same size: the trim drops one, about half the valid points
+    assert rec["ok"] and abs(rec["s"] / 1.25 - 1) < 0.005 and 0.4 < 1 - step["points_used"] / step["points_valid"] <= 0.5
     c = rec["combine"]
     assert (c["views_with_points"], c["views_used"], c["outliers"], c["scattered"]) == (8, 5, 2, 1)
     assert any("f00060: its scale 1.87" in w and "+50%" in w for w in rec["warnings"])

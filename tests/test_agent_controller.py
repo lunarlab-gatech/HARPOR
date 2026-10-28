@@ -35,7 +35,8 @@ REPO = Path(__file__).resolve().parents[1]
 FAST = {"poll_s": 0.02, "kill_after_s": 0.5, "finish_wait_s": 0.5}
 FAKE_BLENDER = [sys.executable, "-m", "gator.agent.fake_agent", "--blender"]
 LONG = 20.0
-ORIGINAL_SIZE = 3.0
+# The fake original's edge. Every GLB a session below delivers keeps its size (C.SIZE_RATIO: 0.725 to 2.9).
+ORIGINAL_SIZE = 1.45
 PROMPT = "Prompt 1 text, byte for byte: é\n"
 
 
@@ -88,15 +89,15 @@ SESSIONS = {
     "finish_refine": ("refinement", LONG, [{"do": "read_prompt"}, edit(1.2), REVIEW,
                                            finish("complete", "seam on the back", "thin lid")]),
     "finish_unchanged": ("refinement", LONG, [edit(ORIGINAL_SIZE), REVIEW, finish("unchanged")]),
-    "finish_limitations": ("refinement", LONG, [edit(0.8), REVIEW, finish("needs_review", "a", "b", "c", "d"),
+    "finish_limitations": ("refinement", LONG, [edit(1.35), REVIEW, finish("needs_review", "a", "b", "c", "d"),
                                                 finish("needs_review", "a", "b", "c")]),
-    "finish_bad_verdict": ("refinement", LONG, [edit(0.9), REVIEW, finish("articulated")]),
+    "finish_bad_verdict": ("refinement", LONG, [edit(1.55), REVIEW, finish("articulated")]),
     "finish_then_hang": ("refinement", LONG, [edit(1.2), REVIEW, finish("complete"), SLEEP]),
     "checkpoint_fallback": ("refinement", LONG, [edit(1.5), REVIEW, checkpoint("spout still missing"),
-                                                 edit(2.5), EXPORT, CRASH]),
+                                                 edit(1.75), EXPORT, CRASH]),
     "checkpoint_deadline": ("refinement", 1.5, [edit(1.6), REVIEW, checkpoint("lid gap"), SLEEP]),
     "export_fallback": ("refinement", LONG, [edit(1.7), EXPORT, CRASH]),
-    "newest_valid_export": ("refinement", LONG, [edit(1.1), EXPORT,
+    "newest_valid_export": ("refinement", LONG, [edit(1.65), EXPORT,
                                                  {"do": "glb", "path": "exports/002.glb", "kind": "garbage"}, CRASH]),
     "original_fallback": ("refinement", LONG, [{"do": "glb", "path": "original/original.glb", "kind": "garbage"},
                                                CRASH]),
@@ -105,8 +106,8 @@ SESSIONS = {
     "deadline_kill": ("refinement", 1.0, [{"do": "ignore_sigint"}, SLEEP]),
     "budget_tamper": ("refinement", 1.0, [{"do": "write", "path": "run_budget.json",
                                            "text": '{"deadline": 99999999999}'}, SLEEP]),
-    "deadline_extension": ("refinement", 1.5, [edit(1.9, seconds=2.0), EXPORT, REVIEW, finish("complete")]),
-    "export_cache": ("refinement", LONG, [edit(2.2), EXPORT, EXPORT, REVIEW, finish("complete")]),
+    "deadline_extension": ("refinement", 1.5, [edit(1.75, seconds=2.0), EXPORT, REVIEW, finish("complete")]),
+    "export_cache": ("refinement", LONG, [edit(1.25), EXPORT, EXPORT, REVIEW, finish("complete")]),
     "nan_finish": ("refinement", LONG, [edit(1.3), EXPORT, edit(1.3, "nan"), REVIEW, finish("complete")]),
     "no_material_checkpoint": ("refinement", LONG, [edit(1.4), REVIEW, checkpoint("old"), edit(1.4, "no_material"),
                                                     REVIEW, checkpoint("new"), CRASH]),
@@ -230,7 +231,7 @@ def test_articulation_verdict_rejected_in_refinement(runs):
     root, r = runs["finish_bad_verdict"]
     assert "unknown verdict 'articulated' for refinement" in agent_log(root)
     assert not (root / "work" / "finish.json").exists()
-    assert (r["source"], r["verdict"]) == ("export", "needs_review") and edge(root / r["glb"]) == 0.9
+    assert (r["source"], r["verdict"]) == ("export", "needs_review") and edge(root / r["glb"]) == 1.55
 
 
 def test_controller_ends_session_after_finish(runs):
@@ -261,7 +262,7 @@ def test_export_fallback(runs):
 
 def test_glb_written_without_export_glb_is_never_delivered(runs):
     root, r = runs["newest_valid_export"]
-    assert r["glb"] == "work/exports/001.glb" and edge(root / r["glb"]) == 1.1
+    assert r["glb"] == "work/exports/001.glb" and edge(root / r["glb"]) == 1.65
     assert r["rejected"] == [] and (root / "work" / "exports" / "002.glb").exists()
 
 
@@ -534,6 +535,61 @@ def test_files_the_agent_writes_are_not_trusted(tmp_path):
                 blend_sha256="b", glb_sha256="0" * 64)
     pick, rejected = C.select_deliverable(root, "refinement")
     assert pick["glb"] == ex / "001.glb" and rejected[0]["why"] == "missing or not a regular file after export"
+
+
+def test_a_glb_of_another_size_is_not_delivered(tmp_path, monkeypatch):
+    """A GLB whose box, after the node transforms, grew past SIZE_RATIO of root/original.glb's on every side,
+    or shrank below it on every side, is not delivered (a unit slip in Blender): finish refuses it, so the
+    agent sees why, and select_deliverable rejects it, and the fallback order goes on. A repair that
+    lengthens only some sides, such as legs under a bare top, keeps the size."""
+    work = prepare(tmp_path, "refinement")
+    root, control, ex = work.parent, work.parent / "control", work / "exports"
+    for n, size in ((1, 1.2 * ORIGINAL_SIZE), (2, 10 * ORIGINAL_SIZE)):
+        write_glb(ex / f"00{n}.glb", size=size)
+        sha = T.sha256(ex / f"00{n}.glb")
+        T.log_event(control, "export_done", export=n, seconds=1.0, ok=True, glb=f"exports/00{n}.glb",
+                    blend_sha256="b", glb_sha256=sha)
+        T.log_event(control, "review", receipt=f"r00{n}-{sha[:12]}", glb=f"exports/00{n}.glb", sha256=sha)
+    why = "wrong size: every side of its box is at least 10 times the original's (over 2.0)"
+    with pytest.raises(SystemExit, match=re.escape(f"exports/002.glb cannot be delivered: {why}")):
+        T.finish(work, control, f"r002-{sha[:12]}", "complete", "fixed the handle")
+    with monkeypatch.context() as m:  # a finish that skipped the check: the controller still rejects it
+        m.setattr(C, "check_size", lambda *a: None)
+        T.finish(work, control, f"r002-{sha[:12]}", "complete", "fixed the handle")
+    pick, rejected = C.select_deliverable(root, "refinement")
+    assert (pick["source"], pick["glb"]) == ("export", ex / "001.glb")
+    assert rejected == [{"from": "finish", "glb": "work/exports/002.glb", "why": why},
+                        {"from": "export", "glb": "work/exports/002.glb", "why": why}]
+
+    original = root / "original.glb"
+    for ratio, ok in ((0.49, False), (0.51, True), (1.99, True), (2.01, False)):
+        write_glb(tmp_path / "x.glb", size=ratio * ORIGINAL_SIZE)
+        assert (C.check_size(tmp_path / "x.glb", original) is None) == ok, ratio
+
+    def scaled(*k):  # the original's mesh, scaled through its node
+        def edit(g):
+            g["nodes"][0]["scale"] = list(k)
+            return g
+        return edit
+
+    glb_json(original, tmp_path / "node.glb", scaled(10.0, 10.0, 10.0))
+    assert C.check_glb(tmp_path / "node.glb") is None and C.check_size(tmp_path / "node.glb", original) == why
+    for k, ok in (((1.0, 3.0, 5.0), True), ((2.54, 2.54, 2.54), False), ((1.4, 3.0, 4.0), True),
+                  ((0.3, 0.3, 0.3), False), ((0.3, 1.0, 0.3), True)):
+        glb_json(original, tmp_path / "node.glb", scaled(*k))
+        assert (C.check_size(tmp_path / "node.glb", original) is None) == ok, k
+    glb_json(original, tmp_path / "node.glb", scaled(0.3, 0.4, 0.45))
+    assert C.check_size(tmp_path / "node.glb", original) == (
+        "wrong size: every side of its box is at most 0.45 times the original's (under 0.5)")
+    assert C.check_size(tmp_path / "missing.glb", original).startswith("size not checked")
+
+    # The articulation mode compares with its own original, the split parts.
+    work = prepare(tmp_path / "a", "articulation")
+    write_glb(work / "exports" / "001.glb", "parts", 3 * PARTS_SIZE)
+    assert C.check_size(work / "exports" / "001.glb", work.parent / "original.glb").startswith(
+        "wrong size: every side of its box is at least 3 times")
+    write_glb(work / "exports" / "001.glb", "parts", PARTS_SIZE, {"lid": lid_joint(HINGE)})
+    assert C.check_size(work / "exports" / "001.glb", work.parent / "original.glb") is None
 
 
 def test_export_timeout_counts_exactly_the_timeout(tmp_path, monkeypatch):

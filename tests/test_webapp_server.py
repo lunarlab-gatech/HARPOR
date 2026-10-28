@@ -715,6 +715,58 @@ def test_a_run_again_from_lidar_needs_the_key(client, tmp_path):
     assert job["status"] == "done" and job["lidar_current"] is True and job["warnings"] == [], job
 
 
+def test_a_run_from_lidar_checks_the_intrinsics_first(client, tmp_path):
+    """A bag without camera_info, whose calibration gave K. When the calibration is replaced by one without K,
+    the review's Build and a run again from lidar answer 400 with the reason, before anything is deleted. Before,
+    they skipped the camera_info check: the run deleted the results, and then the lidar stage failed on it. A bag
+    that is gone from the server is refused too, also when the calibration gives K."""
+    from gator.webapp import fake_steps as F
+    from test_webapp_lidar import POINTS, T_CAM_LIDAR
+
+    bag = scene_bag(tmp_path / "no_info.bag", info=False)
+    c, cfg = client
+    login(c)
+    job_id = c.put("/api/upload", params={"name": "no_info.bag"}, content=bag.read_bytes()).json()["id"]
+    J = cfg.runs / job_id
+    assert wait(c, job_id, "ready", "failed")["status"] == "ready"
+    url, K = f"/api/jobs/{job_id}/calibration", F.intrinsics(192, 128)
+    with_k = calibration_yaml(T_CAM_LIDAR, f"K: {K.tolist()}\nimage_size: [192, 128]\n")
+    without_k = calibration_yaml(T_CAM_LIDAR)
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=with_k).status_code == 200
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": False,
+                                                  "agent": "none", "lidar": {"topic": POINTS}})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "review", "failed")
+    assert job["status"] == "review" and job["lidar_current"] is True, job["error"]
+    why = "/cam/image_rect has no usable camera_info (/cam/camera_info); give K (and D) in the calibration"
+
+    # The review's Build: the stale scale moves the start back to lidar (Runner.resume).
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=without_k).status_code == 200
+    r = c.post(f"/api/jobs/{job_id}/continue", json={})
+    assert r.status_code == 400 and r.json()["detail"] == why, r.text
+    job = c.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "review" and job["stages"]["select"]["status"] == "done" and (J / "selection.json").is_file()
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=with_k).status_code == 200
+    assert c.post(f"/api/jobs/{job_id}/continue", json={}).json() == {"status": "queued", "from": "sam3d"}
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "done" and job["lidar_current"] is True, job["error"]
+
+    # A done job's run again from lidar (Retry): the results stay.
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=without_k).status_code == 200
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "lidar"})
+    assert r.status_code == 400 and r.json()["detail"] == why, r.text
+    job = c.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "done" and "results.zip" in job["files"]
+    assert (J / "results.zip").is_file() and (J / "run").is_dir()
+
+    # The bag is gone: the lidar stage's own reason, without the server's path.
+    assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS}, content=with_k).status_code == 200
+    Path(jobs.load(J)["video"]["path"]).unlink()
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "lidar"})
+    assert (r.status_code, r.json()["detail"]) == (400, "the uploaded bag no_info.bag is not on the server; upload it again")
+    assert (J / "results.zip").is_file() and (J / "run").is_dir()
+
+
 def test_fake_rosbag_job_with_lidar_end_to_end(client, tmp_path):
     """A bag whose /tf_static links the camera to the LiDAR and whose camera_info is rectified: the
     LiDAR scale undoes the fake DA3's 0.8, and every later stage works in meters."""
@@ -2225,6 +2277,23 @@ def frames_meta(**video):
                                               "codec": "h264", "bit_depth": 8, "hdr": None, **video}}
 
 
+def test_app_js_calibration_summary_says_where_k_comes_from():
+    """The summary names the source of K: the file, or the camera topic's camera_info. When the bag has no
+    camera_info for the camera (topics.json camera_info null), a calibration without K is not enough, and the
+    summary says so; a listing from before camera_info was listed keeps the old text."""
+    cal = {"name": "c.yaml", "translation_m": 0.1, "rotation_deg": 90, "has_intrinsics": False, "camera_axes": "optical",
+           "time_offset_s": None}
+    out = run_form_js("""
+        (async () => {
+          const cal = """ + json.dumps(cal) + """;
+          console.log(JSON.stringify([calText(cal, "/cam/camera_info"), calText(cal, null), calText(cal, undefined),
+                                      calText({ ...cal, has_intrinsics: true }, null)]));
+        })()
+        """)
+    assert out == ["c.yaml: 10.0 cm, 90.0°. K from camera_info.",
+                   "c.yaml: 10.0 cm, 90.0°. No K: the bag has no camera_info, so give K in the file.",
+                   "c.yaml: 10.0 cm, 90.0°. K from camera_info.", "c.yaml: 10.0 cm, 90.0°. K from file."]
+
 def test_app_js_upload_kinds_and_the_jobs_list():
     """A .zip is a Stray Scanner upload; another suffix is refused (help.html names the kinds). The jobs list names
     each job's kind, and the stage list has the lidar stage after da3."""
@@ -2880,16 +2949,18 @@ def test_app_js_changed_calibration_retries_from_lidar():
           V = { id: "c", picks: [], view0: null };
           await refresh();
           out.reload = page();
-          // The page asked for sam3d, but the server starts from lidar (it knew better): the reply says so.
+          // The page asked for sam3d, but the server starts from lidar (it knew better): the reply says so, without a
+          // cause, which the page does not know.
           stale = false;
           await refresh();
           posts.length = 0;
           await $("#retry").onclick();
           out.asked = [posts[0].body.from, $("#runmsg").textContent];
-          // Only a bag job with LiDAR whose lidar_current is false is stale; null means that the stage is not done.
+          // Only a job with LiDAR whose lidar_current is false is stale; null means that the stage is not done. A Stray
+          // capture's scale goes stale too, when an older estimator found it (lidar_stale "estimator").
           out.bystate = [true, false, null, undefined].map((current) => scaleStale({ ...J, lidar_current: current }));
-          out.never = [scaleStale({ ...J, kind: "stray", lidar: { kind: "stray" }, lidar_current: false }),
-            scaleStale({ ...J, lidar: null, lidar_current: false })];
+          out.never = [scaleStale({ ...J, lidar: null, lidar_current: false })];
+          out.stray = scaleStale({ ...J, kind: "stray", lidar: { kind: "stray" }, lidar_current: false, lidar_stale: "estimator" });
           console.log(JSON.stringify(out));
         })()
         """, replies)
@@ -2898,8 +2969,8 @@ def test_app_js_changed_calibration_retries_from_lidar():
     assert out["sent"] == "lidar" and out["runmsg"] == ""  # the server started where the page said
     assert out["removed"] == [*out["current"], "Removed."]
     assert out["reload"] == out["upload"][:2]
-    assert out["asked"] == ["sam3d", "Starting from lidar (calibration changed)."]
-    assert out["bystate"] == [False, True, False, False] and out["never"] == [False, False]
+    assert out["asked"] == ["sam3d", "Starting from lidar (the scale is out of date)."]
+    assert out["bystate"] == [False, True, False, False] and out["never"] == [False] and out["stray"] is True
 
 
 def test_app_js_done_job_with_a_stale_scale_runs_again_from_lidar():
@@ -2924,11 +2995,12 @@ def test_app_js_done_job_with_a_stale_scale_runs_again_from_lidar():
                "/api/jobs/d/continue": {"status": "queued", "from": "lidar"}}
     out = run_form_js("""
         (async () => {
-          // The job as the server has it now: lidar_current is false while the scale is stale.
-          let stale = false, answer = false;
+          // The job as the server has it now: lidar_current is false while the scale is stale, and lidar_stale says why.
+          let stale = false, answer = false, cause = "calibration";
           const J = """ + json.dumps(job) + """, asked = [];
           const fetch0 = fetch, reply = (x) => Promise.resolve({ ok: true, status: 200, json: async () => x });
-          globalThis.fetch = (url, opt) => url === "/api/jobs/d" ? reply({ ...J, lidar_current: !stale }) : fetch0(url, opt);
+          globalThis.fetch = (url, opt) => url === "/api/jobs/d"
+            ? reply({ ...J, lidar_current: !stale, lidar_stale: stale ? cause : null }) : fetch0(url, opt);
           globalThis.confirm = (text) => { asked.push(text); return answer; };
           const page = () => ({ retry: $("#retry").hidden ? null : $("#retry").textContent, next: $("#jnext").textContent,
             key: $("#keyrow").hidden, warn: texts.filter((t) => t.includes("out of date")) });
@@ -2961,6 +3033,21 @@ def test_app_js_done_job_with_a_stale_scale_runs_again_from_lidar():
           out.none = page().key;
           renderState(st({ agent: "astra", stages: J.progress.map((x) => x.name === "turntable" ? { ...x, status: "failed" } : x) }));
           out.turntable = page().retry;
+          // An upload can change the cause: the build's calibration again, while an older estimator found the scale.
+          renderState(st({ agent: "astra" }));
+          cause = "estimator";
+          texts.length = 0;
+          await $("#calfile").onchange({ target: { files: [{ name: "c.yaml" }], value: "c.yaml" } });
+          out.cause = page().warn;
+          // A done Stray capture whose scale an older estimator found: the same button, and the estimator's warning.
+          const S = { ...J, kind: "stray", video: { name: "cap.zip" }, lidar: { kind: "stray" }, calibration: null,
+            source: { kind: "stray", topic: null } };
+          globalThis.fetch = (url, opt) => url === "/api/jobs/d" ? reply({ ...S, lidar_current: false, lidar_stale: "estimator" })
+            : fetch0(url, opt);
+          V = { id: "d", picks: [], view0: null };
+          texts.length = 0;
+          await refresh();
+          out.stray = page();
           console.log(JSON.stringify(out));
         })()
         """, replies)
@@ -2973,6 +3060,9 @@ def test_app_js_done_job_with_a_stale_scale_runs_again_from_lidar():
     assert out["sent"] == [["/api/jobs/d/continue", {"from": "lidar", "api_key": "sk-test-key"}]]
     assert out["reload"] == {"retry": "Run lidar and later stages again", "next": hint, "key": False, "warn": [warn]}
     assert out["none"] is True and out["turntable"] == "Run lidar and later stages again"
+    new_way = "The app now finds the LiDAR scale in a new way, so this build's scale and masses are out of date."
+    assert out["cause"] == [new_way]
+    assert out["stray"] == {"retry": "Run lidar and later stages again", "next": hint, "key": False, "warn": [new_way]}
 
 
 def test_app_js_results_show_the_metric_scale():

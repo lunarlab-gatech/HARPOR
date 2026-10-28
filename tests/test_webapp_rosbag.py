@@ -4,6 +4,7 @@ import json
 import shutil
 import sqlite3
 import struct
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -267,7 +268,7 @@ def test_image_topics(bag):
     assert png == {"topic": "/png/image/compressed", "type": "CompressedImage", "count": N + 2, "duration_s": 0.8,
                    "rate_hz": 10.0, "width": W, "height": H, "format": "png", "rectified": True,
                    "camera_info": "/png/camera_info", "distortion": {"model": "plumb_bob", "max_abs_d": 0.0},
-                   "frame_id": "cam", "camera_axes": "body",
+                   "frame_id": "cam", "camera_axes": "body", "camera_axes_from": "default",
                    "tf_links": {"/livox/lidar": None, "/points": None, "/radar/points": None}}
     assert rect["format"] == "jpeg" and rect["rectified"] is True and rect["distortion"]["max_abs_d"] == 0.3
     assert raw["rectified"] is False and raw["distortion"]["max_abs_d"] == 0.1 and raw["camera_info"] == "/raw/camera_info"
@@ -506,7 +507,8 @@ def test_lidar_and_tf_listing(bag):
     assert np.allclose(out["tf"][2]["T_parent_child"], matrix((0, 0.5, 0), (0, 0, 0, 1)))  # the first /tf value
     got = {t["topic"]: t for t in out["topics"]}
     front = got["/front/image_raw"]
-    assert (front["frame_id"], front["camera_axes"], front["rectified"]) == ("camera_optical_frame", "optical", True)
+    assert (front["frame_id"], front["camera_axes"], front["camera_axes_from"], front["rectified"]) == (
+        "camera_optical_frame", "optical", "name", True)
     assert front["tf_links"] == {"/livox/lidar": "static", "/points": "static", "/radar/points": "dynamic"}
     assert all(t["tf_links"] == dict.fromkeys(front["tf_links"]) for k, t in got.items() if k != "/front/image_raw")
 
@@ -527,9 +529,10 @@ def test_lidar_and_tf_listing(bag):
     assert (frames, link) == (["base_link", "radar"], "dynamic") and np.allclose(T[:3, 3], [0, 0.9, 0])
 
 
-def test_tf_listing_reads_the_first_5_s(tmp_path, capsys):
-    """The topics pass reads /tf from the bag's first 5 s; transforms reads only the given windows. A
-    zero quaternion and a link to its own frame are left out; a zero stamp takes the log time."""
+def test_tf_listing_reads_all_of_tf(tmp_path, monkeypatch):
+    """The topics pass reads every /tf message, in its one pass over the camera topics, and lists each link
+    once; transforms reads only the given windows. A zero quaternion and a link to its own frame are left
+    out; a zero stamp takes the log time."""
     def make(m):
         out = [("/cam/image_rect", IMG, S0, m.image(S0, picture(0), "rgb8", frame="cam_optical"))]
         out += [("/tf", TFM, S0 + k * 10**9, m.tf(S0 + k * 10**9, [("base", f"f{k}", (k, 0, 0), (0, 0, 0, 1))]))
@@ -541,10 +544,14 @@ def test_tf_listing_reads_the_first_5_s(tmp_path, capsys):
         return sorted(out, key=lambda x: x[2])
 
     bag = write_bag(tmp_path / "tf.bag", make=make)
+    passes, messages = [], AnyReader.messages
+    monkeypatch.setattr(AnyReader, "messages", lambda self, connections=(), **kw: passes.append(
+        sorted({c.topic for c in connections})) or messages(self, connections=connections, **kw))
     out = R.image_topics(bag)
     assert [(e["child"], e["static"]) for e in out["tf"]] == [("cam_optical", True), ("ns_lidar", True)] + [
-        (f"f{k}", False) for k in range(5)]
+        (f"f{k}", False) for k in range(8)]
     assert out["topics"][0]["tf_links"] == {} and out["lidar"] == out["lidar_skipped"] == []
+    assert passes == [["/cam/image_rect", "/robot/tf_static", "/tf", "/tf_static"]]  # the bag is read once
     with R.open_bag(bag) as r:
         edges = R.transforms(r, [(S0 + 6 * 10**9, S0 + 7 * 10**9 + 1)])
         assert [(e[1], e[3], e[4]) for e in edges] == [("ns_lidar", True, S0), ("cam_optical", True, S0 + 7 * 10**9),
@@ -728,6 +735,52 @@ def test_tf_chain():
     assert opt["camera_axes"] == "optical" and np.allclose(opt["T_cam_lidar"] @ ahead, [0, 0, 2, 1])
     assert R.camera_to_lidar("camera_link", "nowhere", body) is None
     assert (R.camera_axes("/cam_optical"), R.camera_axes("camera_link"), R.camera_axes(" ")) == ("optical", "body", None)
+    assert (ext["camera_axes_from"], opt["camera_axes_from"]) == ("default", "name")
+
+    # A frame without "optical" in its name has optical axes when one of its TF links is the standard
+    # body-to-optical rotation, as a Kalibr or EuRoC cam0 under base_link: from either end of the link,
+    # and also with the camera tilted by less than AXES_TOL_DEG. A name with "optical" decides alone.
+    cam0 = [("base_link", "cam0", Tc, True, 0), edges[1]]
+    kal = R.camera_to_lidar("cam0", "livox_frame", cam0)
+    assert (kal["camera_axes"], kal["camera_axes_from"], kal["link"]) == ("optical", "tf", "static")
+    assert np.allclose(kal["T_cam_lidar"], opt["T_cam_lidar"]) and R.camera_axes("cam0", cam0) == "optical"
+    assert R.camera_axes_from("cam0", [("cam0", "imu", R.invert(Tc), False, 0)]) == ("optical", "tf")  # cam0 the parent
+
+    def tilted(deg):  # the optical camera turned down by deg about its x axis
+        return [("base_link", "cam0", Tc @ matrix((0, 0, 0), Rotation.from_euler("x", deg, degrees=True).as_quat()),
+                 True, 0)]
+
+    assert R.camera_axes_from("cam0", tilted(R.AXES_TOL_DEG - 5)) == ("optical", "tf")
+    assert R.camera_axes_from("cam0", tilted(R.AXES_TOL_DEG + 5)) == ("body", "default")
+    # camera_link's links go to base_link (the same axes) and to its optical frame camera_lens (the rotation the
+    # other way), so it keeps body axes; TF shows camera_lens to be optical.
+    tree = body + [("camera_link", "camera_lens", Tc, True, 0)]
+    assert R.camera_axes_from("camera_link", tree) == ("body", "default")
+    assert R.camera_axes_from("camera_lens", tree) == ("optical", "tf")
+    assert R.camera_axes_from("camera_optical_frame", body) == ("optical", "name")
+    # A stereo pair as Kalibr gives it: cam1 hangs from cam0 by a near-identity link, so it has cam0's axes, from
+    # cam0's TF link or from its name. Under a body camera it keeps body axes; one step only.
+    near = matrix((0.1, 0, 0), Rotation.from_euler("y", 2, degrees=True).as_quat())
+    assert R.camera_axes_from("cam1", cam0 + [("cam0", "cam1", near, True, 0)]) == ("optical", "tf")
+    assert R.camera_axes_from("cam1", [("cam0_optical", "cam1", near, True, 0)]) == ("optical", "tf")
+    assert R.camera_axes_from("cam1", body + [("camera_link", "cam1", near, True, 0)]) == ("body", "default")
+    assert R.camera_axes_from("cam2", cam0 + [("cam0", "cam1", near, True, 0), ("cam1", "cam2", near, True, 0)]) == (
+        "body", "default")
+    # Only static links count in that step: a moving odom link of the parent, turned near R_OPT_LINK at some
+    # moment, says nothing about the camera's mount.
+    odom = [("odom", "base_link", Tc, False, 0)]
+    assert R.camera_axes_from("camera_link", body + odom) == ("body", "default")
+    assert R.camera_axes_from("camera_link", body + [(p, c, T, True, t) for p, c, T, _, t in odom]) == ("optical", "tf")
+    # Many values of one link: each neighbour is looked at once.
+    many = [("base_link", "camera_link", body[0][2], True, k) for k in range(3000)]
+    many += [("base_link", f"s{i}", body[0][2], True, k) for i in range(4) for k in range(3000)]
+    t0 = time.perf_counter()
+    assert R.camera_axes_from("camera_link", many) == ("body", "default") and time.perf_counter() - t0 < 2.0
+    assert R.camera_axes_from("cam0", []) == ("body", "default") and R.camera_axes_from("", cam0) == (None, None)
+    # The axes given to camera_to_lidar are used: the record's axes hold for every frame.
+    forced = R.camera_to_lidar("cam0", "livox_frame", cam0, axes=("body", "default"))
+    assert (forced["camera_axes"], forced["camera_axes_from"]) == ("body", "default")
+    assert np.allclose(forced["T_cam_lidar"][:3], lidar_scale.R_OPT_LINK @ R.tf_chain(cam0, "cam0", "livox_frame")[0][:3])
 
 
 def test_scans_reads_only_the_windows(bag, monkeypatch):

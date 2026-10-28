@@ -11,9 +11,9 @@ lines, with G=$(readlink -f ~/scratch)/gator and the job folder J under G/webapp
   masks    envs/sam3seg sam3_masks              scene/sam3_<slug>/sam3.json, >= 2 frames masked
   prep     envs/sam3d   mvsam3d prep            pool/prep.json
   da3      envs/da3     mvsam3d da3             pool/da3_output.npz with every pool view
-  lidar    envs/web     lidar scale             pool/lidar.json "ok", made with the job's calibration
-                                                (skipped without LiDAR); the metric scale from LiDAR,
-                                                which select applies
+  lidar    envs/web     lidar scale             pool/lidar.json "ok", made with the job's calibration and
+                                                this lidar_scale.VERSION (skipped without LiDAR); the
+                                                metric scale from LiDAR, which select applies
   select   envs/web     views select            selection.json "ok" and run/da3_output.npz
            (the job pauses here for review unless auto_continue)
   sam3d    envs/sam3d   mvsam3d sam3d           run/pose.json
@@ -246,9 +246,11 @@ def done(stage, job_dir):
         with np.load(f) as da:
             seen = {Path(str(p)).stem for p in da["image_files"]}
         return {p.stem for p in (J / "pool" / "input" / "images").glob("*.png")} <= seen
-    if stage == "lidar":  # a calibration uploaded or deleted since the record was made makes it stale
+    if stage == "lidar":  # an upload or delete of the calibration since the record, or an older estimator, makes it stale
+        from gator.stage_a.lidar_scale import VERSION
+
         rec = _json(J / "pool" / "lidar.json")
-        if not isinstance(rec, dict) or rec.get("ok") is not True:
+        if not isinstance(rec, dict) or rec.get("ok") is not True or rec.get("version") != VERSION:
             return False
         cal = _json(J / "job.json").get("calibration") or {}
         return (rec.get("extrinsic") or {}).get("calibration_sha256") == cal.get("sha256")

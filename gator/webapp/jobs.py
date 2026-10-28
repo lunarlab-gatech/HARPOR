@@ -27,7 +27,8 @@ LiDAR-camera calibration file the user uploaded for a bag, or null: {name, bytes
 and the fields that lidar_scale.read_calibration parsed from J/lidar/calibration/<name>. lidar_topic
 is the LiDAR topic that the upload named, or null (older jobs lack it): lidar_settings then refuses
 another LiDAR topic. An upload or a delete of the calibration makes the lidar stage's record stale
-(steps.done), so the next Build or retry starts from lidar (Runner.resume). A Stray Scanner capture
+(steps.done), and so does a record of an older estimator (lidar_scale.VERSION), so the next Build or
+retry starts from lidar (Runner.resume). A Stray Scanner capture
 needs no calibration: its depth is aligned with the color camera. Older jobs lack both (no LiDAR);
 their lidar stage shows as skipped.
 
@@ -57,9 +58,9 @@ holder_alive); a file it cannot check counts as stale.
 
     python -m gator.webapp.jobs package --job J
 
-writes J/results.zip: posed.glb, refined.glb (the agent's GLB, if physics used it), parts.glb and
-parts.json (an articulated job's split parts), aligned.glb, turntable.mp4 (the 360 video, when the job
-asked for it), summary.json, mjcf/, usd/, urdf/, placement.json, selection.json, lidar.json (the metric
+writes J/results.zip: posed.glb, refined.glb (the agent's GLB; physics/up.json glb_rule says whether
+physics used it), parts.glb and parts.json (an articulated job's split parts), aligned.glb,
+turntable.mp4 (the 360 video, when the job asked for it), summary.json, mjcf/, usd/, urdf/, placement.json, selection.json, lidar.json (the metric
 scale from LiDAR) and agent_result.json, without any file that the agent result lists in key_found_in
 (agent_result.json too, when the session's result.json is listed).
 """
@@ -227,6 +228,7 @@ def lidar_settings(job_dir, job, value, read_bag=True):
       - the bag's TF does not link the camera topic's frame to T's frame (tf_links), and no
         calibration was uploaded;
       - the calibration's K is for images of another aspect ratio than the camera topic's;
+      - the uploaded bag, or a Stray job's export, is not on the server;
       - neither the calibration's K nor the camera topic's camera_info (rosbag.camera_model) gives the
         intrinsics.
     A bag listed before LiDAR topics were (topics.json without "lidar") must be listed again
@@ -237,9 +239,12 @@ def lidar_settings(job_dir, job, value, read_bag=True):
     from gator.webapp import lidar
 
     input_kind = steps.source(job)["kind"]
-    if input_kind == "stray":  # its depth is aligned with the color camera: nothing else to check
+    if input_kind == "stray":  # its depth is aligned with the color camera: only the export must be there
         if not isinstance(value, dict) or value.get("kind") != "stray":
             raise ValueError('lidar is null or {"kind": "stray"} for a Stray Scanner capture')
+        export = Path(job["video"]["path"])
+        if not (export if export.is_absolute() else Path(job_dir) / export).is_file():  # as lidar.stray_samples
+            raise ValueError(f"the uploaded export {export.name} is not on the server; upload it again")
         return {"kind": "stray"}
     if input_kind != "rosbag":
         raise ValueError(f"LiDAR needs a rosbag or a Stray Scanner input; this job's input is "
@@ -269,11 +274,14 @@ def lidar_settings(job_dir, job, value, read_bag=True):
                              lidar.calibration_source(cal, cal.get("name")))
         except lidar.Failed as e:
             raise ValueError(str(e)) from None
+    bag = Path(job["video"]["path"])
+    if not bag.is_file():  # the lidar stage's own reason (lidar.rosbag_samples), without the server's path
+        raise ValueError(f"the uploaded bag {bag.name} is not on the server; upload it again")
     if read_bag and not (cal and cal.get("K")):
         from gator.webapp import rosbag
 
         try:  # its ValueError (an unknown distortion model, another aspect ratio) passes on
-            model = rosbag.camera_model(Path(job["video"]["path"]), cam)
+            model = rosbag.camera_model(bag, cam)
         except SystemExit as e:
             raise ValueError(f"cannot read the intrinsics of {cam}: {e}") from None
         if model is None:
@@ -648,8 +656,9 @@ class Runner:
         A job that was cancelled or failed while its part list waited (steps.pause_after propose) starts
         from propose when from_stage is later, so it stops at the part list again.
 
-        A job with LiDAR whose lidar stage is not done (it failed or was cancelled, or the calibration
-        was uploaded or deleted since it ran: steps.done) starts from lidar when from_stage is later, as
+        A job with LiDAR whose lidar stage is not done (it failed or was cancelled, the calibration was
+        uploaded or deleted since it ran, or an older estimator made its record: steps.done) starts from
+        lidar when from_stage is later, as
         a run from a stage up to select does: the new scale is shown in the review before the build
         goes on. A confirm_parts then raises ValueError, since the run from lidar would drop the list.
         """
@@ -679,8 +688,8 @@ class Runner:
             li = steps.NAMES.index("lidar")
             if i > li and _lidar_on({**job, **fields}) and not steps.done("lidar", J):
                 if confirm_parts:
-                    raise ValueError("the LiDAR scale is not current (the calibration changed since it ran); "
-                                     "retry from the lidar stage")
+                    raise ValueError("the LiDAR scale is not current (the calibration or the app's scale estimate "
+                                     "changed since it ran); cancel the job, then retry from the lidar stage")
                 from_stage, i = "lidar", li  # failed, cancelled or stale: the scale first
             if confirm_parts:
                 from gator.parts import propose

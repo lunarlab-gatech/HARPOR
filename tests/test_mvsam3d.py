@@ -200,6 +200,50 @@ def test_fit_pose_recovers_a_rotated_mesh():
     assert best.mean() >= truth - 0.015 and start.mean() < 0.6 and not at_bound and evals <= 400
 
 
+def valley_views(spread, extents=(0.2, 0.1, 0.15), dist=0.6, f=300.0, wh=(320, 240)):
+    """The box at the origin, view 0's camera dist in front of it, and two more views at +-spread degrees
+    about the box, all dist away, with focal length f and images of wh."""
+    import trimesh
+
+    from gator.stage_a.place import silhouette
+
+    box = trimesh.creation.box(extents=extents)
+    K = np.array([[f, 0, wh[0] / 2 - 0.5], [0, f, wh[1] / 2 - 0.5], [0, 0, 1]])
+    cams, masks = [], []
+    for a in np.radians([0.0, -spread, spread]):
+        T = look_at_w2c(dist * np.array([np.sin(a), 0.0, -np.cos(a)]))
+        cams.append({"K": K.tolist(), "w2c": T.tolist(), "width": wh[0], "height": wh[1]})
+        masks.append(silhouette(box.vertices @ T[:3, :3].T + T[:3, 3], box.faces, K, wh, wh))
+    return box.vertices, box.faces, cams, masks
+
+
+@pytest.mark.parametrize("spread", [10, 20])
+def test_fit_pose_recovers_a_mesh_too_large_and_too_far(spread):
+    # Scaled 5% about view 0's camera, the mesh is 5% too large and 5% too far. View 0's silhouette is
+    # unchanged and the other narrow views change little, so size and distance must move together.
+    x_true, faces, cams, masks = valley_views(spread)
+    o = np.array([0.0, 0.0, -0.6])  # view 0's camera
+    x_fit, R, rv, start, best, evals, at_bound = fit_both(o + 1.05 * (x_true - o), faces, cams, masks)
+    assert np.abs(np.ptp(x_fit, 0) / np.ptp(x_true, 0) - 1).max() < 0.01
+    assert np.abs(x_fit.min(0) + x_fit.max(0)).max() / 2 < 0.01  # the box center within 1 cm of the origin
+    assert not at_bound and evals <= 400
+
+
+def test_fit_pose_keeps_a_far_small_mesh_off_the_bounds():
+    # A 6 cm box 1.2 m away, about 15 box diagonals from view 0's camera, 0.5% large about that camera. A scale
+    # about the camera by the first step would move the shift past its bound; clipped, it would no longer keep
+    # view 0's silhouette, and the fit would end on the bound (mean IoU 0.966, 2% small). It is not taken.
+    x_true, faces, cams, masks = valley_views(5, (0.06, 0.03, 0.045), 1.2, 600.0, (640, 480))
+    o = np.array([0.0, 0.0, -1.2])
+    x0 = o + 1.005 * (x_true - o)
+    k, cs, before, after, _ = M.fit_scale(x0, faces, cams, masks)
+    x = cs + k * (x0 - cs) if after.mean() - before.mean() >= 0.005 else x0  # as place() applies it
+    (k2, R, d, rv), c2, start, best, evals, at_bound = M.fit_pose(x, faces, cams, masks)
+    x_fit = c2 + d + k2 * (x - c2) @ R.T
+    assert best.mean() > 0.99 and not at_bound and evals <= 400
+    assert np.abs(np.ptp(x_fit, 0) / np.ptp(x_true, 0) - 1).max() < 0.01
+
+
 def test_place_rejects_an_unknown_fit(tmp_path):
     import pytest as _pytest
 

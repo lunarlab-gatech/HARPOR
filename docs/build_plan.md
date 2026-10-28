@@ -345,6 +345,15 @@ video `table.MOV` at 1920 x 1080 (prep: 1024 x 576), SAM 3 web-demo masks.
   twice, first with the rotation held at 0 and then with it free, and keeps the rotation only if
   it gains 0.005 mean IoU, because a one-pass search traded a missing shift for a false rotation.
   The whole fit is applied only if it gains `min_gain` (0.005).
+  Since 2026-10-28 the first run also has a move that scales the mesh about view 0's camera. Each
+  sweep tries it first, with the same steps as the scale. It keeps view 0's silhouette and changes
+  size and distance together. With narrow views the IoU is nearly flat along that move, and moves
+  of one coordinate could not follow it: a box 5% too large and 5% too far, seen from 0 and +-10
+  degrees, stopped 3.4% too large and 1.2 cm too far. It now ends 0.06% small. The move is taken only
+  when it stays within the bounds: for an object far from view 0's camera, its shift part is many
+  times its step, and a clipped move would no longer keep the silhouette. The second run, with the
+  rotation free, leaves the move out. In the two older `fit_pose` tests the move costs about 17% more
+  evaluations (177 to 207, 193 to 226). In the two valley tests it needs fewer (122 to 113, 136 to 82).
   `placement.json` gets `pose_fit` with the applied `scale`, `shift_W` and `rotation_deg` (1 and
   zeros when not applied), the `candidate_*` values, the IoUs, `evaluations` and `at_bound`.
   `similar_pose` writes the pose that reproduces `posed.glb`. `place` now takes 2 to 4 min. With
@@ -401,7 +410,15 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
   copy of the manifest and `events.jsonl`, the record of every export, review, checkpoint and
   finish with the GLB's sha256. The deadline and the deliverable come only from these events, and
   a GLB must still match its logged hash. A hand-written `finish.json`, receipt or GLB in `work/`
-  is never delivered. Blender for the helpers runs in a second container that sees only the work
+  is never delivered. A GLB whose box grew more than 2 times on every side, or shrank below 0.5
+  times on every side, against `root/original.glb` is not delivered either (`controller.check_size`,
+  `SIZE_RATIO`). A unit slip in Blender (2.54 or more) changes every side by the same factor. A
+  repair seldom changes every side that much: in synthetic tests with view tilts up to 30 deg, legs
+  under a desk or stool top, splayed stool legs and a long pan handle changed the shortest side by at
+  most 1.4 times. A narrower window refused those repairs. The check misses a slip whose GLB also
+  has a repair that lengthens a side by more than the slip's inverse, and a rescale under 2 times.
+  `finish` refuses such a GLB, so the agent sees the reason while it can still fix it. `result.json`
+  lists one under `rejected`, and the fallback order goes on. Blender for the helpers runs in a second container that sees only the work
   folder (at its host path and at `/work`) and the Blender scripts, with auto-run of scripts in the
   `.blend` off. When the session ends, the server stops and kills a running helper and its Blender
   before the deliverable is picked.
@@ -916,7 +933,9 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    `posed.glb`, and when the agent is off or skipped, physics uses `posed.glb`. For an articulated
    object it sets the joints of `parts.glb` within a 900 s budget (note 11). When the agent is off or
    skipped, or gives no usable GLB, physics uses `parts.glb`, and parts without joints become one
-   body. `align` takes up from a plane fitted under the object in view 0's DA3 points, or
+   body. Physics also uses `posed.glb` or `parts.glb` when the agent's GLB does not keep the size of
+   the GLB it started from (`physics_auto.pick_glb`, `controller.check_size`). `physics/up.json`
+   "glb_rule" gives the reason. `results.zip` still holds the agent's GLB as `refined.glb`. `align` takes up from a plane fitted under the object in view 0's DA3 points, or
    from the mean camera up when no plane fits, uses `--x footprint`, and adds `--opaque` when the GLB
    has transmission or alpha. For an articulated object, `align` also writes one GLB per link. Then
    VoMP (once per link for an articulated object), MJCF, USD, URDF, then the 360 video when the job
@@ -1043,17 +1062,22 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
     points. For a bag the page has "Change the calibration", which opens the Settings tab at the
     calibration upload.
     After a calibration change, the page says that Build finds the scale again first and then stops
-    in review.
+    in review. For a record of an older estimator it says "The app now finds the scale in a new way.
+    Build finds the scale again, then stops here."
   - A done job whose calibration changed after the build (GET /api/jobs/{id} `lidar_current` is
     false) shows the warning "The calibration changed after this build, so the scale and the masses
-    are out of date." It also shows the button "Run lidar and later stages again". The button asks
+    are out of date." When an older estimator found the scale (`lidar_stale` is `estimator`), the job
+    shows "The app now finds the LiDAR scale in a new way, so this build's scale and masses are
+    out of date." instead. It also shows the button "Run lidar and later stages again". The button asks
     first, since it replaces the results. It posts `/continue {from: "lidar"}` with the API key
     field, since the agent stage runs again. It reruns lidar and every stage after it, GPU stages
     included, and stops in review when "Review views before building" is on.
   - `POST /continue` checks two things before a run that clears stages. A run from select or earlier
     (or from lidar, when the scale is stale) runs every later stage again, so it needs the API key
     when the agent stage is done: a finished job has dropped its key. A run that includes the lidar
-    stage first checks the job's LiDAR topic and its TF link or calibration (`jobs.lidar_settings`),
+    stage first checks that the bag is still on the server, the job's LiDAR topic, its TF link or
+    calibration, and the intrinsics (the calibration's K, else the bag's camera_info)
+    (`jobs.lidar_settings`),
     and answers 400 with the reason when the stage would fail, because `Runner.resume` deletes the
     results before the stage runs. From sam3d on, the stages that are done are skipped, so no key is
     needed.
@@ -1579,7 +1603,7 @@ Decisions (2026-10-21, user):
     checks of `place` and the up hint of `align`.
   - The `lidar` stage sits before `select`, so no build can skip a missing or stale scale. Build from
     review resumes at `sam3d`, but `Runner.resume` starts from `lidar` when that stage is not done (it
-    failed, was cancelled, or ran with another calibration).
+    failed, was cancelled, ran with another calibration, or an older estimator made its record).
   - Phase 0 on ICE (2026-10-21, job 6432672, `$G/dev_tests/scale_eq`) ran MV-SAM3D and `place` on
     copies of the user's office chair run (5 views) with DA3's output scaled by s = 1, 1.25 and 2.
     MV-SAM3D took about 170 s per run.
@@ -1603,9 +1627,13 @@ Decisions (2026-10-21, user):
 2. **Listing.** The `topics` stage lists the LiDAR topics in `frames/topics.json` under `lidar`, from
    the first message of each: type, `frame_id`, points, fields, `point_time` (per-point times found),
    count and `rate_hz` (from the log times of the first 11 messages). A topic that cannot be used goes
-   under `lidar_skipped` with the reason. `tf` lists the links of every `/tf_static` message and of
-   the `/tf` messages in the bag's first 5 s. Each camera topic gains `frame_id`, `camera_axes` and
-   `tf_links` (`static`, `dynamic` or null for each LiDAR topic). LiDAR and TF problems never fail the
+   under `lidar_skipped` with the reason. `tf` lists the links of every `/tf_static` and `/tf`
+   message. The listing reads them in the same pass as the camera topics, and it keeps one value of each
+   link: the last value of a static link and the first value of a dynamic link. The stage reads all of
+   `/tf` when the frames' windows hold no path (step 4), so the listing reads all of it too, and the two
+   agree. On a synthetic bag, 20,000 `/tf` messages of 2 links added about 0.5 s to the listing. Each
+   camera topic gains `frame_id`, `camera_axes`, `camera_axes_from` (the rule that decided the axes,
+   step 5) and `tf_links` (`static`, `dynamic` or null for each LiDAR topic). LiDAR and TF problems never fail the
    listing. A bag listed by an older version, whose `frames/topics.json` has no `lidar` key, is
    listed again when the user chooses its camera topic. A job in review or done cannot choose a
    topic, so its bag must be uploaded again. Choosing another camera topic deletes the calibration,
@@ -1625,14 +1653,28 @@ Decisions (2026-10-21, user):
    search, and it inverts the edges that it walks backwards. A path of static links wins. For a
    dynamic link, each frame takes the `/tf` value nearest its camera stamp, from the values logged in
    its own read windows (step 8). A frame whose windows hold no value of the link takes the nearest
-   value from all the windows. When the nearest value of a frame lies more than 0.4 s from its stamp, a
-   warning counts those frames and gives the largest gap in s.
-5. **The optical-axes fix.** `T_cam_lidar` maps LiDAR points to the camera's optical axes (x right,
-   y down, z forward). The code takes the axes from the frame's name. A camera frame whose name has
-   "optical" is taken to have those axes. Any other name is taken to have body axes (x forward, y
-   left, z up), so `camera_to_lidar` puts `R_OPT_LINK` on the left of the TF transform. A frame that
-   has optical axes without "optical" in its name gets a wrong `T_cam_lidar`. For such a frame,
-   upload the calibration.
+   value from all the windows. When no window holds a path, the stage reads all of `/tf`, as the
+   listing does, and each frame takes the nearest value. When the nearest value of a frame lies more
+   than 0.4 s from its stamp, a warning counts those frames and gives the largest gap in s.
+5. **The camera's axes.** `T_cam_lidar` maps LiDAR points to the camera's optical axes (x right,
+   y down, z forward). `rosbag.camera_axes_from` decides the axes of the camera's frame by three rules,
+   in this order. `frames/topics.json` and `pool/lidar.json` record the rule as `camera_axes_from`.
+   - `name`: the frame's name has "optical". The frame has optical axes.
+   - `tf`: one of the frame's TF links, to its parent or to a child, is the standard body-to-optical
+     rotation (`R_OPT_LINK`) within 20 deg (`AXES_TOL_DEG`). A Kalibr or EuRoC `cam0` under
+     `base_link` is such a frame. Or the frame hangs by a static link within 20 deg of no turn from
+     a frame with optical axes by its name or by such a static link, as Kalibr's `cam1` under `cam0`
+     does. That is one step only, and on static links only: the values of a moving link, such as
+     `odom` to `base_link`, say nothing about a mount. A sibling sensor mounted at exactly
+     `R_OPT_LINK` from the camera's parent still makes a body camera optical. The 20 deg let a tilted
+     camera pass. Every other turn between axis conventions is 90 deg or more from that rotation.
+   - `default`: neither rule applies. The frame has body axes (x forward, y left, z up).
+   For body axes, `camera_to_lidar` puts `R_OPT_LINK` on the left of the TF transform. The stage
+   decides the axes once, from the edges it takes the path from (the frames' windows, or all of `/tf`
+   when those hold no path), and that decision holds for every frame. A calibration's `camera_axes` replaces all three rules, and the record then says
+   `calibration`. A frame with optical axes that no rule finds still gets a wrong `T_cam_lidar`. An
+   example is a camera that looks backward and has no "optical" in its name. For such a frame, upload
+   the calibration.
 6. **Intrinsics.** The calibration's `K`, `D` and `distortion_model` come first. That `K` is for the
    calibration's `image_size`, or for the frames' size when the file gives none, and it is scaled to
    the frames when the aspect ratios agree within 1%. A calibration `K` for another aspect ratio
@@ -1695,10 +1737,12 @@ Decisions (2026-10-21, user):
      `rate_hz`, else 100 ms.
 9. **Samples cache.** The stage samples every frame that `extract` wrote, not only the pool views,
    and writes `lidar/samples.npz` and `lidar/clouds.npz` (the points for the Inputs tab, below) with
-   `lidar/samples.json`, the key, last. The cache key holds the version (`CACHE_VERSION` 4), the
+   `lidar/samples.json`, the key, last. The cache key holds the version (`CACHE_VERSION` 5), the
    input file (name, bytes, `mtime_ns`), the camera and LiDAR topics, the calibration's sha256 and
    the point window's bounds in ms (`window_ms`: [50, 100]). Version 4 came with the last-point rule
-   of the log base and the window that follows the scan period. A rerun with the same key, for
+   of the log base and the window that follows the scan period. Version 5 came with the TF rule for the
+   camera's axes (step 5). That decision depends only on the bag and the code, so the input file and the
+   version hold it. A rerun with the same key, for
    example after a mask change, reads no scans. A cache without `clouds.npz`, or without a frame
    that `samples.json` lists in it, is a miss.
 
@@ -1834,12 +1878,23 @@ not turn them. For a Stray capture, `stray.depth_points` has already turned them
    used points. A sparse LiDAR such as a Mid-360 often has no foreground point next to a hidden one,
    so the z-buffer cannot drop it. With a 10 to 15 cm baseline, 3 cm of noise and an object at 0.4 m,
    those hidden points moved s up by 1.2% to 2.3% (synthetic). With the trim the bias is at most 0.16%.
-   The view's scale `s_i` is the median of the used points' r, and `iqr_rel` is the IQR of the valid
+   The view's scale `s_i` is the median of the used points' r, and `iqr_rel` is the IQR of the used
    points' r over `s_i`. The view's status is `no_mask`, `no_samples`, `few_points` (under 30
    valid points, counted before the trim, so that the trim cannot turn a scattered view into one that
-   the combination leaves out of its counts), `scattered` (`iqr_rel` over 25%) or `candidate`.
+   the combination leaves out of its counts), `scattered` or `candidate`. A view is `scattered` when
+   `iqr_rel` is over 25%, when the trim drops more than 40% of the valid points (two groups of about the
+   same size, and the median could lie in either), or when it drops more than 10% of them below their
+   median r. Hidden points always lie farther, so the trim may drop them, and the view keeps its s.
+   The old rule took the IQR of all valid points before the trim. In the case above (a 30 x 20 x 20 cm
+   box at 0.4 m before a wall at 2 m, 15 cm baseline, 3 cm noise, about 3,500 beams per sr), about 30%
+   of each view's valid points were hidden. All 9 views of an orbit were then scattered and the stage
+   failed. Now all 9 are used and s is 0.55% high (synthetic).
 6. **Combination.** The stage takes the weighted median m of `ln s_i` over the candidates, with the
-   weights `sqrt(min(points_used, 2000))`. MAD is the weighted median of |ln s_i - m|. A candidate
+   weights `sqrt(min(points_used, 2000))`, and no view weighs more than the median view. Without that
+   cap, one dense view (a near view of a bag) could hold more than half the weight. It was then the
+   median alone, MAD was 0, and every other view became an outlier. One point more in five agreeing
+   views flipped the result from failed to ok and moved s by 6% (synthetic). MAD is the weighted median
+   of |ln s_i - m|. A candidate
    farther than max(3 x 1.4826 x MAD, ln 1.05) from m is an `outlier`, and the other candidates are
    `used`. `s` is e to the weighted median of the used views' `ln s_i`. `spread_rel` is exp(RMS) - 1,
    where RMS is the weighted RMS of the used views' `ln s_i` about `ln s`.
@@ -1868,13 +1923,14 @@ not turn them. For a Stray capture, `stray.depth_points` has already turned them
    white. Points without a valid DA3 depth are not drawn. The JPEG keeps full color resolution
    (quality 90, no chroma subsampling). The images help to spot calibration and timing errors.
 
-**`pool/lidar.json`** (version 1). The stage writes it last. With `ok: true` and the job's current
-calibration (see the last bullet), it is the stage's done marker.
+**`pool/lidar.json`** (version 2). The stage writes it last. With `ok: true`, the current version and
+the job's current calibration (see the last bullet), it is the stage's done marker.
 - `ok`, `s` and `reason`.
 - `source`: for a bag `{kind, file, camera_topic, topic, type, frame_id, scans, cache}`, and for a
   Stray capture `{kind, file, depth_size, frames, cache}`. `cache` is `hit` or `miss`.
-- `extrinsic`: `{source, file, calibration_sha256, chain, link, camera_axes, T_cam_lidar}`, with the
-  source `calibration` or `tf`. A Stray capture has only `source` and `calibration_sha256` (null).
+- `extrinsic`: `{source, file, calibration_sha256, chain, link, camera_axes, camera_axes_from,
+  T_cam_lidar}`, with the source `calibration` or `tf`. `camera_axes_from` is `name`, `tf` or `default`
+  (Rosbag source 5), or `calibration`. A Stray capture has only `source` and `calibration_sha256` (null).
 - `intrinsics`: `{source, K, D, model, R, size, frame_size}`, and for a Stray capture `{source,
   depth_size, frame_size, turns, min_confidence, z_range_m, K_from}`. `K_from` is where the points of
   the Inputs tab took K: `odometry.csv`, `camera_matrix.csv` or null.
@@ -1890,11 +1946,17 @@ calibration (see the last bullet), it is the stage's done marker.
   `scattered`, `few_points`, `no_mask`, `no_samples`), `spread_rel`, `mad_rel`, `cut_rel` and
   `thresholds` (every threshold by name).
 - `da3` (`process_res`, `grid`), `warnings` and `seconds`.
-- `steps.done("lidar")` is true only when `ok` is true and `extrinsic.calibration_sha256` equals the
-  sha256 of the job's calibration (both are null without one). So an upload or a delete of the
-  calibration makes the record stale. GET /api/jobs/{id} gives this value as `lidar_current` once the
-  lidar stage is done. It is null before that and for a job without LiDAR. The page uses it to tell a
-  stale scale, so a file of the same name with new content counts as a change.
+- `steps.done("lidar")` is true only when `ok` is true, `version` equals `lidar_scale.VERSION` (2),
+  and `extrinsic.calibration_sha256` equals the sha256 of the job's calibration (both are null without
+  one). So an upload or a delete of the calibration makes the record stale, and so does a record of an
+  older estimator. Version 2 came with the time window and time base of `CACHE_VERSION` 4, the 9 cm
+  z-buffer term, the trim, the scatter rule on the used points and the weight cap. A version 1 record,
+  or one without a version, runs the lidar stage again. GET /api/jobs/{id} gives this value as
+  `lidar_current` once the lidar stage is done. It is null before that and for a job without LiDAR.
+  `lidar_stale` says why it is false: `calibration` when the calibration's sha256 differs, else
+  `estimator`. The selection's `lidar` gives the same as `calibration_changed` and `estimator_changed`.
+  The page uses them to tell a stale scale and its cause. A file of the same name with new content
+  counts as a change, and a scale of an older estimator never says that the calibration changed.
 
 **Points for the Inputs tab.** The Inputs tab shows each view's LiDAR points in 3D (note
 10): the view's whole scan, and the points that the scale used.
@@ -1975,6 +2037,9 @@ and in `physics/aligned.json`.
   The log base takes the middle of the sweep, but the header base cannot know where the stamp is.
 - A Livox Mid-360 sees from -7 to 52 degrees vertically, so a low object near the sensor may get no
   points. The stage then fails with the coverage reason.
-- The listing reads `/tf` only in the bag's first 5 s. A dynamic TF link that starts later shows as no
-  link, and Start then asks for a calibration.
+- A camera frame with optical axes that neither its name nor its TF links show still needs the
+  calibration. An example is a camera that looks backward.
+- A bag listed before 2026-10-28 keeps the listing of the `/tf` messages in its first 5 s. A dynamic
+  TF link that starts later still shows as no link there, and Start asks for a calibration. Upload the
+  bag again to list it anew.
 

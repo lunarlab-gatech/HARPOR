@@ -709,7 +709,9 @@ def _articulated(control, rec, data):
 def finish(work, control, receipt, verdict, reason, limitations=()):
     """Log the hand-off and write work/finish.json for the agent. The controller then ends the session.
 
-    Verdict articulated needs a GLB with a valid joint set that review_articulation reviewed."""
+    Verdict articulated needs a GLB with a valid joint set that review_articulation reviewed. A GLB must
+    also keep the size of the controller's original.glb (controller.check_size), so the agent sees a unit
+    slip here, while it can still fix it."""
     work = Path(work).resolve()
     mode = manifest(control)["mode"]
     allowed = VERDICTS[mode]
@@ -720,6 +722,15 @@ def finish(work, control, receipt, verdict, reason, limitations=()):
     rec, data = _receipt(work, control, receipt)
     if verdict == "articulated":
         _articulated(control, rec, data)
+    if verdict != "unchanged":
+        from gator.agent.controller import check_size  # the controller imports this module
+
+        # root/original.glb, not work/original/original.glb, which the agent can write. A GLB whose size cannot
+        # be read is left to the controller, whose check_glb names what is wrong with it.
+        why = check_size(work / rec["glb"], Path(control).parent / "original.glb")
+        if why and why.startswith("wrong size"):
+            sys.exit(f"{rec['glb']} cannot be delivered: {why}. A unit slip in Blender changes every side by the "
+                     "same factor; undo it")
     out = {"receipt": receipt, "verdict": verdict, "reason": reason, "limitations": list(limitations),
            "glb": "original/original.glb" if verdict == "unchanged" else rec["glb"],
            "sha256": None if verdict == "unchanged" else rec["sha256"], "time": time.time()}

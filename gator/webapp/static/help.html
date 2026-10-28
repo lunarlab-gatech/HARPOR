@@ -411,7 +411,9 @@ drawer x3 &gt; cabinet body : prismatic</pre>
   <dt>outlier</dt>
   <dd>Its scale is more than 5% from the others' (or more, when the views spread more).</dd>
   <dt>scattered</dt>
-  <dd>Its ratios spread too much: the middle half of them spans over 25% of its scale.</dd>
+  <dd>Its ratios disagree too much. The view first leaves out the ratios far from its median, such as points behind
+    the object that the camera cannot see. It is scattered when it leaves out more than 40% of its points, or more
+    than 10% on the near side, or when the middle half of the ratios it keeps spans over 25% of its scale.</dd>
   <dt>few points</dt>
   <dd>The view has under 30 points in its mask with a confident DA3 depth.</dd>
   <dt>no mask</dt>
@@ -458,19 +460,21 @@ drawer x3 &gt; cabinet body : prismatic</pre>
 camera_axes: optical
 time_offset_s: 0.0</pre>
 <p>Once the file is saved, the line under the button gives its name, the LiDAR's distance and turn from the camera,
-  where K comes from (the file or camera_info), Body axes when the file uses them, and the time offset when the file
-  gives one (0 too). Replace calibration and Remove change it.</p>
+  where K comes from (the file or camera_info, or No K when the file gives none and the bag has no camera_info),
+  Body axes when the file uses them, and the time offset when the file gives one (0 too). Replace calibration and Remove change it.</p>
 <p>The calibration is for the LiDAR topic that was chosen when you uploaded it. When you then choose another LiDAR
   topic, the line under the topic says so, and Start is refused. Choose the calibration's topic, or upload a
   calibration for the new topic.</p>
 <p>When you change the calibration after the scale was found, Retry starts from the lidar stage. In review, the panel
   says Calibration changed, and Build finds the scale again, then stops in review. On a done job, a warning says that
-  the scale and the masses are out of date. Run lidar and later stages again runs the lidar stage and every stage
+  the scale and the masses are out of date. The same happens after an update that changes how the app finds the
+  scale. The panel and the warning then say that the app now finds the scale in a new way. Run lidar and later stages again runs the lidar stage and every stage
   after it, GPU stages included, and replaces the results, so it asks first. With Review views before building on, it
   stops in review after the views are selected.</p>
 <p>While a job with LiDAR waits for its part list, the calibration cannot change. Confirm the list (Build) or cancel
-  the job first. Run lidar and later stages again, and Retry from lidar, first check the job's LiDAR topic and its link
-  or calibration, and refuse to start when the lidar stage would fail, so the results stay.</p>
+  the job first. Run lidar and later stages again, Retry from lidar, and Build after a calibration change first check
+  the job's LiDAR topic, its link or calibration, and the intrinsics (K in the calibration, else the bag's camera_info).
+  They refuse to start when the lidar stage would fail, so the results stay.</p>
 
 <h3>When the scale fails</h3>
 <p>The LiDAR scale failed panel shows the lidar record with its check images, and LiDAR settings opens the LiDAR
@@ -738,10 +742,10 @@ time_offset_s: 0.0</pre>
   <dt>Retry</dt>
   <dd>On a failed or cancelled job. It continues from the first stage that is not done, and its label names that
     stage, such as Retry from sam3d. Read input again means that the input was not read yet. Back to part list means
-    that the job stopped before you confirmed its part list. After a change of the calibration, Retry starts from
-    lidar. A done job whose 360 video failed shows Retry from turntable. It makes the video again and then
-    results.zip. A done job whose calibration changed after the build shows Run lidar and later stages again: see
-    <a href="#lidar">Metric scale and LiDAR</a>.</dd>
+    that the job stopped before you confirmed its part list. After a change of the calibration, or an update that
+    changes how the app finds the scale, Retry starts from lidar. A done job whose 360 video failed shows Retry from
+    turntable. It makes the video again and then results.zip. A done job whose scale is out of date shows Run lidar
+    and later stages again: see <a href="#lidar">Metric scale and LiDAR</a>.</dd>
   <dt>Cancel job</dt>
   <dd>Stops the running stage. For the API key, see <a href="#agent">The agent and API keys</a>.</dd>
   <dt>Build again</dt>

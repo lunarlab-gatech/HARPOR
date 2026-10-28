@@ -17,10 +17,10 @@ build_plan.md note 12 (Rosbag source, Stray Scanner source, Points for the Input
 
 The estimate is lidar_scale.estimate, with the check images in J/lidar/check. The record,
 pool/lidar.json, gains source, extrinsic {source, file, calibration_sha256, chain, link, camera_axes,
-T_cam_lidar}, intrinsics {source, K, D, model, R, size, frame_size}, time {base, window_ms, offset_ms,
-log_minus_header_ms {camera, lidar}, log_minus_last_point_ms, scan_period_ms, scan_period_from, point_times}
-and the warnings of both steps (a Stray capture's fields: build_plan.md note 12, pool/lidar.json), and is
-written last.
+camera_axes_from, T_cam_lidar}, intrinsics {source, K, D, model, R, size, frame_size}, time {base, window_ms,
+offset_ms, log_minus_header_ms {camera, lidar}, log_minus_last_point_ms, scan_period_ms, scan_period_from,
+point_times} and the warnings of both steps (a Stray capture's fields: build_plan.md note 12, pool/lidar.json),
+and is written last.
 extrinsic.calibration_sha256 (null without a calibration) lets steps.done see a record that an upload or a
 delete of the calibration made stale. When the samples cannot be made (no TF link, no intrinsics, ...), the
 record has ok false and the reason. The stage prints PROGRESS lines while it reads scans, then one line per
@@ -50,8 +50,9 @@ CLOCK_TOL_S = 0.2  # the camera's and the LiDAR's log-minus-stamp offsets agree 
 # A bag whose topics.json is older than the LiDAR listing (Runner.submit_analyze lists it again on a topic choice).
 OLD_TOPICS = ("the bag was listed before LiDAR topics were; choose its camera topic again to list them (for a job in "
               "review or done: upload the bag again)")
-CACHE_VERSION = 4  # of lidar/samples.json; another version is a miss (3: the clouds in lidar/clouds.npz; 4: the
-# log base moves point times by each scan's last point, and the window grows with the scan period)
+CACHE_VERSION = 5  # of lidar/samples.json; another version is a miss (3: the clouds in lidar/clouds.npz; 4: the
+# log base moves point times by each scan's last point, and the window grows with the scan period; 5: the camera's
+# axes can come from TF, rosbag.camera_axes_from, so the key's bag and version hold that decision)
 SCAN_POINTS = 60_000  # the most points of a view's whole scan in its cloud (lidar/cloud/<view>.glb)
 SCAN_KEEP = 20_000  # while reading, each scan also keeps a random subset of its points, at most this many, for the clouds
 NO_K = ("the export has no intrinsics (fx, fy, cx, cy in odometry.csv, or camera_matrix.csv), so the Inputs tab has "
@@ -211,36 +212,45 @@ def intrinsics(path, topic, info_topic, cal, cal_name, frame_size, warnings):
 
 def extrinsic(path, cam_frame, lidar_frame, lidar_topic, cal, cal_name, cal_sha, wins, times, warnings):
     """(the extrinsic record, {frame name: T_cam_lidar 4x4}). From the calibration, else from the bag's
-    TF: the static edges and /tf within the frames' read windows (wins: {name: [(start_ns, stop_ns)]}).
-    A dynamic link is taken at each frame's camera stamp (times: {name: ns}) from the /tf values logged
-    within that frame's own windows, so a TF publisher on another clock than the camera's cannot give a
-    frame another frame's value; a frame whose windows hold none takes the nearest of all. A warning
-    names the frames whose value is more than READ_S from their stamp (link_gaps). Failed when TF has
-    no path."""
+    TF: the static edges and /tf within the frames' read windows (wins: {name: [(start_ns, stop_ns)]}),
+    or all of /tf when those hold no path, as the topic listing reads it all (each frame then takes the
+    nearest value, with the warning below). A dynamic link is taken at each frame's camera stamp (times:
+    {name: ns}) from the /tf values logged within that frame's own windows, so a TF publisher on another
+    clock than the camera's cannot give a frame another frame's value; a frame whose windows hold none
+    takes the nearest of all. The camera's
+    axes are decided once, from all the edges (rosbag.camera_axes_from), and hold for every frame. A
+    warning names the frames whose value is more than READ_S from their stamp (link_gaps). Failed when
+    TF has no path."""
     from gator.webapp import rosbag
 
     if cal is not None:
         T = np.asarray(cal["T_cam_lidar"], float)
         return ({"source": "calibration", "file": cal_name, "calibration_sha256": cal_sha, "chain": None,
-                 "link": None, "camera_axes": cal["camera_axes"], "T_cam_lidar": np.round(T, 6).tolist()},
-                dict.fromkeys(times, T))
+                 "link": None, "camera_axes": cal["camera_axes"], "camera_axes_from": "calibration",
+                 "T_cam_lidar": np.round(T, 6).tolist()}, dict.fromkeys(times, T))
     edges, first, own = [], None, {}
     if cam_frame and lidar_frame:
         with rosbag.open_bag(path) as r:
             edges = rosbag.transforms(r, [w for n in times for w in wins[n]])
             first = rosbag.camera_to_lidar(cam_frame, lidar_frame, edges) if edges else None
+            if first is None:  # the link may be on /tf only away from the frames; the listing reads all of /tf
+                whole = rosbag.transforms(r)
+                first = rosbag.camera_to_lidar(cam_frame, lidar_frame, whole) if whole else None
+                if first is not None:  # the frames need only the values of the chain's links
+                    pairs = set(zip(first["chain"], first["chain"][1:]))
+                    edges = [e for e in whole if (e[0], e[1]) in pairs or (e[1], e[0]) in pairs]
             if first is not None and first["link"] == "dynamic":
                 static = [e for e in edges if e[3]]
                 own = {n: static + [e for e in rosbag.transforms(r, wins[n]) if not e[3]] for n in times}
     if first is None:
         raise Failed(tf_reason(cam_frame, lidar_frame, lidar_topic))
-    per, gaps = {}, {}
+    per, gaps, axes = {}, {}, (first["camera_axes"], first["camera_axes_from"])
     for n, t in times.items():
         got, used = first, edges
         if first["link"] == "dynamic":
-            got = rosbag.camera_to_lidar(cam_frame, lidar_frame, own[n], t)
+            got = rosbag.camera_to_lidar(cam_frame, lidar_frame, own[n], t, axes)
             if got is None or got["link"] != "dynamic" or got["chain"] != first["chain"]:
-                got = rosbag.camera_to_lidar(cam_frame, lidar_frame, edges, t)  # none in its windows
+                got = rosbag.camera_to_lidar(cam_frame, lidar_frame, edges, t, axes)  # none in its windows
             else:
                 used = own[n]
             gaps[n] = link_gaps(used, first["chain"], {n: t})[n]
@@ -253,7 +263,7 @@ def extrinsic(path, cam_frame, lidar_frame, lidar_topic, cal, cal_name, cal_sha,
                         "their check images, or upload the calibration")
     T0 = per[min(per)] if per else np.asarray(first["T_cam_lidar"], float)
     return ({"source": "tf", "file": None, "calibration_sha256": None, "chain": first["chain"], "link": first["link"],
-             "camera_axes": first["camera_axes"], "T_cam_lidar": np.round(T0, 6).tolist()}, per)
+             "camera_axes": axes[0], "camera_axes_from": axes[1], "T_cam_lidar": np.round(T0, 6).tolist()}, per)
 
 
 def link_gaps(edges, chain, times):

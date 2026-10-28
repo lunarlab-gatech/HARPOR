@@ -57,9 +57,9 @@ def write_run(run, P, mask, view1=np.eye(3)):
              image_files=np.array(files), process_res=504)
 
 
-def box_glb(path, center_w=(0.0, 0.4, 2.0), alpha=255):
-    """A 0.3 x 0.1 x 0.2 box whose thin side lies along UP, in frame W, saved as glTF."""
-    b = trimesh.creation.box((0.3, 0.1, 0.2))
+def box_glb(path, center_w=(0.0, 0.4, 2.0), alpha=255, scale=1.0):
+    """A 0.3 x 0.1 x 0.2 box (times scale) whose thin side lies along UP, in frame W, saved as glTF."""
+    b = trimesh.creation.box(np.multiply((0.3, 0.1, 0.2), scale))
     x_w = b.vertices @ TILT.T + center_w
     mat = trimesh.visual.material.PBRMaterial(baseColorFactor=[200, 100, 50, alpha])
     trimesh.Trimesh(frames.w_to_gltf(x_w), b.faces, visual=trimesh.visual.TextureVisuals(material=mat)).export(path)
@@ -177,6 +177,43 @@ def test_align_job_picks_the_glb_and_aligns_it(tmp_path, capsys):
     (j / "run" / "placement.json").write_text(json.dumps({"check": {"mean_mask_iou": 0.3}}))
     g, rule = A.pick_glb(j)
     assert g == j / "run" / "posed.glb" and "below 0.5" in rule
+
+
+def test_align_job_refuses_an_agent_glb_of_another_size(tmp_path, capsys):
+    """The agent's GLB goes to physics only when it keeps the size of the GLB the agent started from (posed.glb,
+    or parts.glb for an articulated job; controller.check_size). Else physics uses that GLB."""
+    from gator.agent.fake_agent import write_glb
+
+    j = tmp_path / "job"
+    write_run(j / "run", *plane_view())
+    box_glb(j / "run" / "posed.glb")
+    (j / "run" / "placement.json").write_text(json.dumps({"metric_scale": 1.25, "check": {"mean_mask_iou": 0.9}}))
+    exp = j / "agent" / "s" / "work" / "exports"
+    exp.mkdir(parents=True)
+    (j / "agent" / "result.json").write_text(json.dumps({"source": "finish", "verdict": "complete",
+                                                         "glb": "work/exports/001.glb"}))
+    box_glb(exp / "001.glb", scale=10)  # a unit slip in Blender
+    A.align_job(j)
+    up = json.loads((j / "physics" / "up.json").read_text())
+    assert up["glb"] == str(j / "run" / "posed.glb")
+    assert up["glb_rule"] == ("the agent's finish GLB is not used: wrong size: every side of its box is at least 10 "
+                              "times the original's (over 2.0)")
+    assert "is not used: wrong size" in capsys.readouterr().out
+    assert np.allclose(json.loads((j / "physics" / "aligned.json").read_text())["extent_s"], [0.3, 0.2, 0.1], atol=1e-3)
+    for scale, used in ((0.45, False), (0.55, True), (1.9, True), (2.1, False)):
+        box_glb(exp / "001.glb", scale=scale)
+        assert (A.pick_glb(j)[0] == exp / "001.glb") == used, scale
+
+    # An articulated job compares with the split parts, and falls back to them.
+    (j / "job.json").write_text(json.dumps({"articulated": True}))
+    write_glb(j / "run" / "parts.glb", "parts", 0.2)
+    write_glb(exp / "001.glb", "parts", 2.0)
+    (j / "agent" / "result.json").write_text(json.dumps({"source": "finish", "verdict": "articulated",
+                                                         "glb": "work/exports/001.glb"}))
+    g, rule = A.pick_glb(j)
+    assert g == j / "run" / "parts.glb" and "wrong size: every side of its box is at least 10 times" in rule
+    write_glb(exp / "001.glb", "parts", 0.2)
+    assert A.pick_glb(j)[0] == exp / "001.glb"
 
 
 def test_align_job_needs_a_glb(tmp_path):
