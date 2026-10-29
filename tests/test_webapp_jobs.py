@@ -16,9 +16,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from gator.fileio import write_json
-from gator.stage_a import lidar_scale
-from gator.webapp import agent_step, jobs, steps
+from harpor.fileio import write_json
+from harpor.stage_a import lidar_scale
+from harpor.webapp import agent_step, jobs, steps
 
 ROOT = Path(__file__).resolve().parents[1]
 KEY = "sk-fake-" + secrets.token_hex(16)
@@ -89,40 +89,40 @@ def test_commands_have_the_ice_environment():
         assert env == {"PYTHONUNBUFFERED": "1"} and KEY not in argv[2]
     sc = {s: v[0][2] for s, v in scripts.items()}
     assert sc["masks"].endswith("\nexport HF_HOME=$G/.cache/huggingface\nrm -f \"$J/scene/sam3_coffee_cup/sam3.json\"\n"
-                                "cd $G/gator_clone && $G/envs/sam3seg/bin/python -m gator.stage_a.sam3_masks --scene "
+                                "cd $G/gator_clone && $G/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks --scene "
                                 "\"$J/scene\" --prompt='coffee cup' --overwrite --pick f00012=1 --pick f00020=none")
-    assert sc["prep"].endswith('cd $G/gator_clone && $G/envs/sam3d/bin/python -m gator.stage_a.mvsam3d prep '
+    assert sc["prep"].endswith('cd $G/gator_clone && $G/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d prep '
                                '--scene "$J/scene" --mask-prompt sam3_coffee_cup --out "$J/pool"')
-    assert sc["da3"].endswith('$G/envs/da3/bin/python -m gator.stage_a.mvsam3d da3 --da3-root $G/Depth-Anything-3 --out "$J/pool"')
-    assert sc["sam3d"].endswith("$G/envs/sam3d/bin/python -m gator.stage_a.mvsam3d sam3d --mv-root $G/MV-SAM3D "
+    assert sc["da3"].endswith('$G/envs/da3/bin/python -m harpor.stage_a.mvsam3d da3 --da3-root $G/Depth-Anything-3 --out "$J/pool"')
+    assert sc["sam3d"].endswith("$G/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d sam3d --mv-root $G/MV-SAM3D "
                                 '--sam3d-root $G/sam-3d-objects --out "$J/run"')
-    assert sc["agent"].endswith('-m gator.webapp.agent_step --job "$J" --sif $G/sif/gator-agent.sif '
+    assert sc["agent"].endswith('-m harpor.webapp.agent_step --job "$J" --sif $G/sif/gator-agent.sif '
                                 "--key-file /dev/shm/gator-webapp-1/k.env --agent astra")
     opus = steps.command("agent", {**JOB, "agent": "opus"}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
     assert opus == sc["agent"][:-len("astra")] + "opus"
     assert "\n".join(VOMP) in sc["vomp"] and sc["vomp"].endswith(
-        'cd $G/VoMP && python $G/gator_clone/gator/physics/vomp_run.py --glb "$J/physics/aligned.glb" --out "$J/physics"')
-    assert sc["topics"].endswith('$G/envs/web/bin/python -m gator.webapp.video topics --job "$J"')
-    assert sc["frames"].endswith('$G/envs/web/bin/python -m gator.webapp.video analyze --job "$J"')
-    assert sc["package"].endswith('$G/envs/web/bin/python -m gator.webapp.jobs package --job "$J"')
+        'cd $G/VoMP && python $G/gator_clone/harpor/physics/vomp_run.py --glb "$J/physics/aligned.glb" --out "$J/physics"')
+    assert sc["topics"].endswith('$G/envs/web/bin/python -m harpor.webapp.video topics --job "$J"')
+    assert sc["frames"].endswith('$G/envs/web/bin/python -m harpor.webapp.video analyze --job "$J"')
+    assert sc["package"].endswith('$G/envs/web/bin/python -m harpor.webapp.jobs package --job "$J"')
     # The 360 video: Blender renders the frames in the SIF (envs/sam3d), and envs/web encodes them.
     assert sc["turntable"].endswith(
         f'\nrm -rf "$J/turntable"\nexport {STAGE_A}\n'
-        'cd $G/gator_clone && $G/envs/sam3d/bin/python -m gator.webapp.turntable render --job "$J" '
-        '--sif $G/sif/gator-agent.sif\ncd $G/gator_clone && $G/envs/web/bin/python -m gator.webapp.turntable encode --job "$J"')
+        'cd $G/gator_clone && $G/envs/sam3d/bin/python -m harpor.webapp.turntable render --job "$J" '
+        '--sif $G/sif/gator-agent.sif\ncd $G/gator_clone && $G/envs/web/bin/python -m harpor.webapp.turntable encode --job "$J"')
     assert sc["lidar"] == ('set -eo pipefail\nG=/storage/ice1/5/0/ali497/gator\n'
                            'J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n'
-                           'cd $G/gator_clone && $G/envs/web/bin/python -m gator.webapp.lidar scale --job "$J"')
+                           'cd $G/gator_clone && $G/envs/web/bin/python -m harpor.webapp.lidar scale --job "$J"')
     with pytest.raises(ValueError):
         steps.command("agent", JOB, ICE)
     fake_cfg = steps.Config(G=ICE.G, runs=ICE.runs, fake=True)
     fake = steps.command("agent", JOB, fake_cfg, key_file="/k/x.env")
-    assert fake[0][2] == (f"exec {sys.executable} -m gator.webapp.fake_steps agent --job "
+    assert fake[0][2] == (f"exec {sys.executable} -m harpor.webapp.fake_steps agent --job "
                           "/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef --key-file /k/x.env --agent astra")
     assert fake[1] == str(ROOT)
 
     # The parts stages. propose takes the key file only when the VLM lists the parts.
-    assert sc["propose"].endswith('\ncd $G/gator_clone && $G/envs/sam3d/bin/python -m gator.parts.stage propose --job "$J"')
+    assert sc["propose"].endswith('\ncd $G/gator_clone && $G/envs/sam3d/bin/python -m harpor.parts.stage propose --job "$J"')
     vlm = steps.command("propose", {**ART, "agent": "opus"}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
     assert vlm == sc["propose"] + " --key-file /dev/shm/gator-webapp-1/k.env --agent opus"
     with pytest.raises(ValueError, match="the propose stage needs the key file"):
@@ -135,10 +135,10 @@ def test_commands_have_the_ice_environment():
     assert steps.command("propose", ART, fake_cfg, key_file="/k/x.env")[0][2].endswith(
         "fake_steps propose --job /storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef "
         "--key-file /k/x.env --agent astra")
-    stage = 'cd $G/gator_clone && $G/envs/sam3d/bin/python -m gator.parts.stage '
+    stage = 'cd $G/gator_clone && $G/envs/sam3d/bin/python -m harpor.parts.stage '
     assert sc["parts"].endswith(
         '\nrm -f "$J/run/parts.json" "$J/run/parts.glb"\nexport HF_HOME=$G/.cache/huggingface\n'
-        'cd $G/gator_clone && $G/envs/sam3seg/bin/python -m gator.stage_a.part_masks --run "$J/run" '
+        'cd $G/gator_clone && $G/envs/sam3seg/bin/python -m harpor.stage_a.part_masks --run "$J/run" '
         '--proposal "$J/run/proposal.json" --out "$J/run/parts/sam3"\n'
         f'export {STAGE_A}\n{stage}vote --job "$J"\n{stage}split --job "$J" --sif $G/sif/gator-agent.sif\n'
         f'{stage}finish --job "$J"')
@@ -151,27 +151,27 @@ def test_commands_have_the_ice_environment():
 def test_masks_command_takes_a_noun_that_starts_with_a_dash(monkeypatch):
     import shlex
 
-    from gator.stage_a import sam3_masks
+    from harpor.stage_a import sam3_masks
 
     ran = []
     monkeypatch.setattr(sam3_masks, "run", lambda scene, prompts, picks, threshold, overwrite: ran.append(prompts))
     for noun in ("-cup", "--mug", "coffee cup"):
         script = steps.command("masks", {**JOB, "prompt": noun}, ICE)[0][2]
-        sam3_masks.main(shlex.split(script.split("-m gator.stage_a.sam3_masks ", 1)[1]))
+        sam3_masks.main(shlex.split(script.split("-m harpor.stage_a.sam3_masks ", 1)[1]))
         assert ran[-1] == [noun]
 
 
 def test_physics_commands_name_the_object():
-    pytest.importorskip("gator.webapp.physics_auto")
+    pytest.importorskip("harpor.webapp.physics_auto")
     mjcf, usd = (steps.command(s, JOB, ICE)[0][2] for s in ("mjcf", "usd"))
-    assert mjcf.endswith('rm -rf "$J/physics/mjcf"\ncd $G/gator_clone && $G/envs/mujoco/bin/python -m gator.physics.mjcf '
+    assert mjcf.endswith('rm -rf "$J/physics/mjcf"\ncd $G/gator_clone && $G/envs/mujoco/bin/python -m harpor.physics.mjcf '
                          '--glb "$J/physics/aligned.glb" --summary "$J/physics/summary.json" --name coffee_cup '
                          '--out "$J/physics/mjcf"')
-    assert usd.endswith('$G/envs/mujoco/bin/python -m gator.physics.usd --glb "$J/physics/aligned.glb" --summary '
+    assert usd.endswith('$G/envs/mujoco/bin/python -m harpor.physics.usd --glb "$J/physics/aligned.glb" --summary '
                         '"$J/physics/summary.json" --name coffee_cup --mjcf "$J/physics/mjcf" --out "$J/physics/usd"')
     for job in (JOB, ART):  # one link for a rigid object
         assert steps.command("urdf", job, ICE)[0][2].endswith(
-            'cd $G/gator_clone && $G/envs/mujoco/bin/python -m gator.physics.urdf --glb "$J/physics/aligned.glb" '
+            'cd $G/gator_clone && $G/envs/mujoco/bin/python -m harpor.physics.urdf --glb "$J/physics/aligned.glb" '
             '--summary "$J/physics/summary.json" --name coffee_cup --mjcf "$J/physics/mjcf" --out "$J/physics/urdf"')
 
 
@@ -207,13 +207,13 @@ def test_stage_scripts_set_their_environment(tmp_path):
 
     env, (ran, pwd) = run("prep")
     G = G.resolve()
-    assert ran == f"ran {G}/envs/sam3d/bin/python -m gator.stage_a.mvsam3d prep --scene {J}/scene " \
+    assert ran == f"ran {G}/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d prep --scene {J}/scene " \
                   f"--mask-prompt sam3_coffee_cup --out {J}/pool" and pwd == f"pwd {G}/gator_clone"
     assert env["CONDA_PREFIX"] == f"{G}/envs/sam3d" and env["TORCH_CUDA_ARCH_LIST"] == "8.9;9.0"
     assert env["PATH0"] == f"{G}/envs/sam3d/bin" and env["TORCH_EXTENSIONS_DIR"] == f"{G}/.cache/torch_extensions"
     assert env["LIBRARY_PATH"] == f"{G}/envs/sam3d/targets/x86_64-linux/lib:{G}/envs/sam3d/lib"
     env, (ran, pwd) = run("vomp")
-    assert ran == f"ran {G}/envs/vomp11/bin/python {G}/gator_clone/gator/physics/vomp_run.py " \
+    assert ran == f"ran {G}/envs/vomp11/bin/python {G}/gator_clone/harpor/physics/vomp_run.py " \
                   f"--glb {J}/physics/aligned.glb --out {J}/physics" and pwd == f"pwd {G}/VoMP"
     assert env["CUDA_HOME"] == env["CONDA_PREFIX"] == f"{G}/envs/vomp11"
     assert env["TORCH_EXTENSIONS_DIR"] == f"{G}/.cache/torch_extensions_vomp11"
@@ -225,8 +225,8 @@ def test_stage_scripts_set_their_environment(tmp_path):
     assert p.returncode == 0, p.stderr
     out = p.stdout.splitlines()
     ran = [line for line in out if line.startswith("ran ")]
-    sam3d = f"ran {G}/envs/sam3d/bin/python -m gator.parts.stage"
-    assert ran == [f"ran {G}/envs/sam3seg/bin/python -m gator.stage_a.part_masks --run {J}/run --proposal "
+    sam3d = f"ran {G}/envs/sam3d/bin/python -m harpor.parts.stage"
+    assert ran == [f"ran {G}/envs/sam3seg/bin/python -m harpor.stage_a.part_masks --run {J}/run --proposal "
                    f"{J}/run/proposal.json --out {J}/run/parts/sam3", f"{sam3d} vote --job {J}",
                    f"{sam3d} split --job {J} --sif {G}/sif/gator-agent.sif", f"{sam3d} finish --job {J}"]
     blocks = [dict(line.split("=", 1) for line in out[k + 2:k + 10]) for k, line in enumerate(out) if line.startswith("ran ")]
@@ -437,7 +437,7 @@ def test_lidar_settings_and_the_build_that_stores_them(make_runner, tmp_path, mo
     pytest.importorskip("rosbags")
     from test_webapp_lidar import CAMERA, LIVOX, POINTS, T_CAM_LIDAR, upload, write_scene_bag
 
-    from gator.webapp import fake_steps, lidar, rosbag
+    from harpor.webapp import fake_steps, lidar, rosbag
 
     runner, cfg = make_runner()
 
@@ -543,7 +543,7 @@ def test_lidar_settings_of_a_listing_that_read_only_the_start_of_tf(tmp_path, mo
     pytest.importorskip("rosbags")
     from test_webapp_lidar import POINTS, write_scene_bag
 
-    from gator.webapp import rosbag
+    from harpor.webapp import rosbag
 
     def job_for(bag, old):
         """A rosbag job whose listing says that TF does not link the LiDAR; old: as an old listing writes it."""
@@ -1219,7 +1219,7 @@ def test_a_stale_scale_says_why(tmp_path):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
-    from gator.webapp import server
+    from harpor.webapp import server
 
     token = "tok-" + secrets.token_hex(16)
     cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=True)
@@ -1493,7 +1493,7 @@ def test_runner_json_keeps_a_second_server_off_the_runs_folder(make_runner, monk
 
     job_id, J = ready_job(cfg)
     jobs.update(J, status="running", current="extract")
-    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-m", "gator.webapp"])
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-m", "harpor.webapp"])
     try:
         f.write_text(json.dumps({"pid": other.pid, "host": socket.gethostname(), "slurm_job": "1234568"}))
         with pytest.raises(SystemExit) as e:
@@ -1518,7 +1518,7 @@ def test_holder_alive_asks_slurm_about_another_host(monkeypatch, capsys):
     gone = subprocess.Popen(["true"])
     gone.wait()
     here = {"host": socket.gethostname()}
-    server_ = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-m", "gator.webapp"])
+    server_ = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-m", "harpor.webapp"])
     other_program = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         assert jobs.holder_alive({**here, "pid": server_.pid}) is True
@@ -1611,7 +1611,7 @@ def test_runner_builds_without_a_key_and_asks_for_it_later(make_runner, monkeypa
 
 
 def glb_file(path, size=0.2):
-    from gator.agent.fake_agent import write_glb
+    from harpor.agent.fake_agent import write_glb
 
     write_glb(path, size=size)
     return path
@@ -1674,13 +1674,13 @@ def run_folder(J, n=2):
     return J
 
 
-FAKE_BLENDER = [sys.executable, "-m", "gator.agent.fake_agent", "--blender"]
+FAKE_BLENDER = [sys.executable, "-m", "harpor.agent.fake_agent", "--blender"]
 
 
 def test_agent_step_runs_a_fresh_refinement_session(tmp_path, monkeypatch):
     import tempfile
 
-    from gator.agent import controller as C
+    from harpor.agent import controller as C
 
     J = run_folder(tmp_path)
     (J / "agent" / "s" / "work").mkdir(parents=True)
@@ -1714,8 +1714,8 @@ def test_agent_step_runs_an_articulation_session(tmp_path, monkeypatch, capsys):
     original, run/parts.json as input/parts.json, and 900 s."""
     import tempfile
 
-    from gator.agent import controller as C
-    from gator.agent.fake_agent import write_glb
+    from harpor.agent import controller as C
+    from harpor.agent.fake_agent import write_glb
 
     J = run_folder(tmp_path)
     job = {**json.loads((J / "job.json").read_text()), "articulated": True}
@@ -1755,7 +1755,7 @@ def test_agent_step_runs_an_articulation_session(tmp_path, monkeypatch, capsys):
 def test_agent_step_runs_a_claude_session_for_opus(tmp_path, monkeypatch, capsys):
     import tempfile
 
-    from gator.agent import controller as C
+    from harpor.agent import controller as C
 
     J = run_folder(tmp_path)
     (J / "key.env").write_text(f"ANTHROPIC_API_KEY={OPUS_KEY}\n")
@@ -1784,7 +1784,7 @@ def test_agent_step_runs_a_claude_session_for_opus(tmp_path, monkeypatch, capsys
 
 
 def test_fake_agent_stage_stands_in_for_both_agents(tmp_path):
-    from gator.webapp import fake_steps
+    from harpor.webapp import fake_steps
 
     J = run_folder(tmp_path)
     key = J / "fake.env"
@@ -1804,7 +1804,7 @@ def test_fake_agent_stage_stands_in_for_both_agents(tmp_path):
 def test_agent_step_scrubs_the_key_from_the_result(tmp_path, monkeypatch, capsys):
     """The agent can read the key, so it may write it into its finish text or run a command with it.
     Neither the stage log (stdout), agent/result.json, nor results.zip may hold it."""
-    from gator.agent import controller as C
+    from harpor.agent import controller as C
 
     J = run_folder(tmp_path)
 
@@ -1838,7 +1838,7 @@ def test_agent_step_scrubs_the_key_from_the_result(tmp_path, monkeypatch, capsys
 def test_agent_step_scrubs_every_key_of_a_shared_env_file(tmp_path, monkeypatch, capsys):
     """With both keys in the env file (the Anthropic one first), neither may reach the stage log or
     agent/result.json, and find_key reports the files that hold either."""
-    from gator.agent import controller as C
+    from harpor.agent import controller as C
 
     J = run_folder(tmp_path)
     (J / "key.env").write_text(f"ANTHROPIC_API_KEY={OPUS_KEY}\nOPENAI_API_KEY={KEY}\n")
@@ -1868,8 +1868,8 @@ def test_agent_step_sigterm_stops_the_agent(tmp_path):
     J = run_folder(tmp_path)
     wrapper = textwrap.dedent(f"""\
         import sys, tempfile
-        from gator.agent import controller as C
-        from gator.webapp import agent_step
+        from harpor.agent import controller as C
+        from harpor.webapp import agent_step
         AGENT = [sys.executable, "-c", "import os, time; f = open('agent.pid', 'w'); f.write(str(os.getpid())); "
                  "f.close(); time.sleep(120)"]
         C.run_container_session = lambda root, sif, key_file, budget_s: C.run_session(
@@ -1893,7 +1893,7 @@ def test_agent_step_sigterm_stops_the_agent(tmp_path):
 
 
 def test_fake_build_end_to_end(make_runner, tmp_path):
-    for m in ("av", "trimesh", "gator.webapp.video", "gator.webapp.views", "gator.webapp.physics_auto"):
+    for m in ("av", "trimesh", "harpor.webapp.video", "harpor.webapp.views", "harpor.webapp.physics_auto"):
         pytest.importorskip(m)
     from test_webapp_server import write_video
 
@@ -1962,11 +1962,11 @@ def test_fake_build_end_to_end(make_runner, tmp_path):
 def test_fake_articulated_build_end_to_end(make_runner, tmp_path, mode, agent):
     """The fake box with a lid, per parts mode: "vlm" runs through, "vlm_edit" stops for the list after
     propose, and "user" (here without an agent) takes the typed list, whose parts get no joints."""
-    for m in ("av", "trimesh", "mujoco", "gator.webapp.video", "gator.webapp.views", "gator.webapp.physics_auto"):
+    for m in ("av", "trimesh", "mujoco", "harpor.webapp.video", "harpor.webapp.views", "harpor.webapp.physics_auto"):
         pytest.importorskip(m)
-    from gator.parts import joints as joint_spec
-    from gator.parts.stage import mesh_nodes
-    from gator.physics.align import read_glb
+    from harpor.parts import joints as joint_spec
+    from harpor.parts.stage import mesh_nodes
+    from harpor.physics.align import read_glb
     from test_webapp_server import write_video
 
     runner, cfg = make_runner()

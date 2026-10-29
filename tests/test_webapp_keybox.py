@@ -8,7 +8,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from fake_supabase import seal, sealed
 
-from gator.webapp import keybox
+from harpor.webapp import keybox
 
 JOB, USER = "6f1c0d2e-0000-4000-8000-000000000001", "9a7e0d2e-0000-4000-8000-000000000002"
 WORKER, REF = "3b2a1c0d-0000-4000-8000-000000000003", "c4d5e6f7-0000-4000-8000-000000000004"

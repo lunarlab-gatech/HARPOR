@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from gator.stage_a import mvsam3d as M
+from harpor.stage_a import mvsam3d as M
 
 
 def scene(tmp_path, names=("10", "2", "1"), size=(400, 300)):
@@ -85,7 +85,7 @@ def look_at_w2c(eye):
 def box_views():
     import trimesh
 
-    from gator.stage_a.place import silhouette
+    from harpor.stage_a.place import silhouette
 
     box = trimesh.creation.box(extents=(0.2, 0.1, 0.15))
     x_true, faces = box.vertices + [0.02, -0.01, 0.0], box.faces
@@ -115,7 +115,7 @@ def test_fit_scale_without_overlap_keeps_scale_1():
 
 
 def test_scaled_pose_reproduces_the_fitted_mesh():
-    from gator.stage_a.place import canonical_glb_to_w
+    from harpor.stage_a.place import canonical_glb_to_w
 
     rng = np.random.default_rng(1)
     pose = {"rotation_wxyz": rng.normal(size=4).tolist(), "scale": [0.3, 0.3, 0.3], "translation": [0.01, 0.02, 0.5]}
@@ -126,7 +126,7 @@ def test_scaled_pose_reproduces_the_fitted_mesh():
 
 
 def test_load_mask_reads_alpha_and_opaque_exports(tmp_path):
-    from gator.stage_a.sam3d import load_mask
+    from harpor.stage_a.sam3d import load_mask
 
     obj = np.zeros((40, 50), bool)
     obj[10:30, 15:35] = True
@@ -151,7 +151,7 @@ def test_load_mask_reads_alpha_and_opaque_exports(tmp_path):
 
 
 def test_matrix_to_quat_inverts_quat_to_matrix():
-    from gator.stage_a.place import quat_wxyz_to_matrix
+    from harpor.stage_a.place import quat_wxyz_to_matrix
 
     rng = np.random.default_rng(2)
     for q in [rng.normal(size=4) for _ in range(20)] + [[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]]:
@@ -160,7 +160,7 @@ def test_matrix_to_quat_inverts_quat_to_matrix():
 
 
 def test_similar_pose_reproduces_the_moved_mesh():
-    from gator.stage_a.place import canonical_glb_to_w
+    from harpor.stage_a.place import canonical_glb_to_w
 
     rng = np.random.default_rng(3)
     pose = {"rotation_wxyz": rng.normal(size=4).tolist(), "scale": [0.3, 0.3, 0.3], "translation": [0.01, 0.02, 0.5]}
@@ -205,7 +205,7 @@ def valley_views(spread, extents=(0.2, 0.1, 0.15), dist=0.6, f=300.0, wh=(320, 2
     about the box, all dist away, with focal length f and images of wh."""
     import trimesh
 
-    from gator.stage_a.place import silhouette
+    from harpor.stage_a.place import silhouette
 
     box = trimesh.creation.box(extents=extents)
     K = np.array([[f, 0, wh[0] / 2 - 0.5], [0, f, wh[1] / 2 - 0.5], [0, 0, 1]])
@@ -310,7 +310,7 @@ def test_sam3d_pose_names_the_units_of_the_run(tmp_path, monkeypatch):
 def test_place_records_the_metric_scale(tmp_path):
     import trimesh
 
-    from gator.stage_a.place import canonical_glb_to_w, silhouette
+    from harpor.stage_a.place import canonical_glb_to_w, silhouette
 
     out = tmp_path / "run"
     for d in ("input/images", "masks"):

@@ -1,11 +1,11 @@
-"""The shared file helpers (gator/fileio.py): JSON read and write, replace, and the private files."""
+"""The shared file helpers (harpor/fileio.py): JSON read and write, replace, and the private files."""
 
 import os
 import stat
 
 import pytest
 
-from gator import fileio
+from harpor import fileio
 
 
 def test_write_json_is_atomic_with_plain_or_private_permissions(tmp_path):

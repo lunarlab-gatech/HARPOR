@@ -1,6 +1,6 @@
 import numpy as np
 
-from gator.agent.blender.crop import crop_camera, crop_window, project
+from harpor.agent.blender.crop import crop_camera, crop_window, project
 
 
 def test_window_holds_mask_and_points_with_margin():

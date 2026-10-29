@@ -4,10 +4,10 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from gator import frames
-from gator.physics.align import (gltf_matrix, make_opaque, read_glb, up_frame, up_from_normals, up_near, wrap_scene,
+from harpor import frames
+from harpor.physics.align import (gltf_matrix, make_opaque, read_glb, up_frame, up_from_normals, up_near, wrap_scene,
                                  write_glb)
-from gator.physics.mass import mass_properties
+from harpor.physics.mass import mass_properties
 
 
 def box_mesh(size):
@@ -132,7 +132,7 @@ def test_mjcf_round_trip_through_mujoco(tmp_path):
     mujoco = pytest.importorskip("mujoco")
     from PIL import Image
 
-    from gator.physics.mjcf import build, check
+    from harpor.physics.mjcf import build, check
 
     box = trimesh.creation.box([1.2, 0.8, 0.5])
     box.apply_translation([0, 0, 0.25])
@@ -177,8 +177,8 @@ def test_usd_round_trip(tmp_path):
     from PIL import Image
     from pxr import Usd, UsdGeom, UsdPhysics
 
-    from gator.physics.mjcf import build as build_mjcf
-    from gator.physics.usd import build, check
+    from harpor.physics.mjcf import build as build_mjcf
+    from harpor.physics.usd import build, check
 
     box = trimesh.creation.box([1.2, 0.8, 0.5])
     box.apply_translation([0, 0, 0.25])
@@ -226,7 +226,7 @@ def box_objects(tmp_path, sizes, com=None, usd=False):
     """A box per name of sizes {name: [x, y, z]}, bottom at z = 0: tmp_path/<name>.glb and <name>.json (1 kg, its
     COM at com, else at the box's centre), built into tmp_path/root/<name>/mjcf, and usd/ when usd is true."""
     trimesh = pytest.importorskip("trimesh")
-    from gator.physics.mjcf import build as build_mjcf
+    from harpor.physics.mjcf import build as build_mjcf
 
     for name, size in sizes.items():
         box = trimesh.creation.box(size)
@@ -237,7 +237,7 @@ def box_objects(tmp_path, sizes, com=None, usd=False):
         d = tmp_path / "root" / name
         build_mjcf(tmp_path / f"{name}.glb", tmp_path / f"{name}.json", d / "mjcf", name, decompose=hull_parts)
         if usd:
-            from gator.physics.usd import build as build_usd
+            from harpor.physics.usd import build as build_usd
 
             build_usd(tmp_path / f"{name}.glb", tmp_path / f"{name}.json", d / "mjcf", d / "usd", name)
 
@@ -245,7 +245,7 @@ def box_objects(tmp_path, sizes, com=None, usd=False):
 def test_combine_mjcf_places_objects_apart(tmp_path):
     mujoco = pytest.importorskip("mujoco")
 
-    from gator.physics.combine_mjcf import combine
+    from harpor.physics.combine_mjcf import combine
 
     box_objects(tmp_path, {"big": [1.0, 0.8, 0.5], "small": [0.2, 0.1, 0.05]}, com=[0, 0, 0.1])
     layout = combine(tmp_path / "root", tmp_path / "root" / "all.xml", front="small", gap=0.3)
@@ -257,7 +257,7 @@ def test_combine_mjcf_places_objects_apart(tmp_path):
 def test_stack_mode_starts_a_falling_column_with_no_contacts(tmp_path):
     mujoco = pytest.importorskip("mujoco")
 
-    from gator.physics.combine_mjcf import stack
+    from harpor.physics.combine_mjcf import stack
 
     box_objects(tmp_path, STACK)
     stack(tmp_path / "root", tmp_path / "root" / "stack.xml", "table", ["pan", "cup"], clearance=0.04, tilt=8)
@@ -282,8 +282,8 @@ def test_usd_scene_matches_the_mujoco_stack(tmp_path):
     pytest.importorskip("pxr")
     from pxr import Usd, UsdGeom, UsdPhysics
 
-    from gator.physics.combine_mjcf import stack
-    from gator.physics.usd_scene import build
+    from harpor.physics.combine_mjcf import stack
+    from harpor.physics.usd_scene import build
 
     box_objects(tmp_path, STACK, usd=True)
     stack(tmp_path / "root", tmp_path / "root" / "stack.xml", "table", ["pan", "cup"])
@@ -326,8 +326,8 @@ def two_box_hinge(tmp_path, rho=(600.0, 300.0)):
     trimesh = pytest.importorskip("trimesh")
     from PIL import Image
 
-    from gator.parts.joints import write_joints
-    from gator.physics.vomp_run import combine_links
+    from harpor.parts.joints import write_joints
+    from harpor.physics.vomp_run import combine_links
 
     hinge = {"version": 1, "frame": "S", "parent": "body", "type": "revolute", "origin": [0.0, 0.2, 0.3],
              "axis": [-1.0, 0.0, 0.0], "lower": 0.0, "upper": 1.5}
@@ -373,7 +373,7 @@ def two_lid_chest(tmp_path):
     lid_left's node without a joint. summary.json has no links, so every link gets a hull inertial at
     500 kg/m^3. Returns (glb, summary)."""
     trimesh = pytest.importorskip("trimesh")
-    from gator.parts.joints import write_joints
+    from harpor.parts.joints import write_joints
 
     scene = trimesh.Scene()
     for name, size, center, parent in (("body", [0.6, 0.4, 0.3], [0, 0, 0.15], None),
@@ -397,7 +397,7 @@ def two_lid_chest(tmp_path):
 
 def test_combine_moves_each_inertia_to_the_common_com():
     # Two voxel boxes of different density: their combined body equals the mass properties of the union.
-    from gator.physics.mass import combine
+    from harpor.physics.mass import combine
 
     rng = np.random.default_rng(3)
     a = (np.array(np.meshgrid(range(5), range(3), range(4), indexing="ij")).reshape(3, -1).T + 0.5) * 0.1
@@ -426,9 +426,9 @@ def test_vomp_combine_links_sums_the_links(tmp_path):
 
 def test_align_carries_the_joints_to_s_and_writes_one_glb_per_link(tmp_path, monkeypatch):
     trimesh = pytest.importorskip("trimesh")
-    from gator.parts import joints as J
-    from gator.physics import align
-    from gator.physics.align import load_w
+    from harpor.parts import joints as J
+    from harpor.physics import align
+    from harpor.physics.align import load_w
 
     glb_s, _, hinge, _ = two_box_hinge(tmp_path)
     # The same parts posed in W by a camera pitched 20 deg down and yawed, with the joint in W.
@@ -473,7 +473,7 @@ def test_align_carries_the_joints_to_s_and_writes_one_glb_per_link(tmp_path, mon
 def test_articulated_mjcf_nests_the_lid_on_a_hinge(tmp_path):
     pytest.importorskip("trimesh")
     mujoco = pytest.importorskip("mujoco")
-    from gator.physics.mjcf import build, check
+    from harpor.physics.mjcf import build, check
 
     glb, summary, hinge, _ = two_box_hinge(tmp_path)
     s = json.loads(summary.read_text())
@@ -512,7 +512,7 @@ def test_articulated_mjcf_nests_the_lid_on_a_hinge(tmp_path):
 def test_a_link_without_vomp_voxels_gets_a_hull_inertial(tmp_path):
     pytest.importorskip("trimesh")
     pytest.importorskip("mujoco")
-    from gator.physics.mjcf import build, check
+    from harpor.physics.mjcf import build, check
 
     glb, summary, _, _ = two_box_hinge(tmp_path)
     s = json.loads(summary.read_text())
@@ -533,8 +533,8 @@ def test_articulated_usd_has_links_and_a_revolute_joint(tmp_path):
     pytest.importorskip("pxr")
     from pxr import Usd, UsdPhysics
 
-    from gator.physics.mjcf import build as build_mjcf
-    from gator.physics.usd import build, check
+    from harpor.physics.mjcf import build as build_mjcf
+    from harpor.physics.usd import build, check
 
     glb, summary, hinge, _ = two_box_hinge(tmp_path)
     s = json.loads(summary.read_text())
@@ -558,7 +558,7 @@ def test_articulated_usd_has_links_and_a_revolute_joint(tmp_path):
 def test_vomp_combine_links_weights_each_voxel_by_its_volume(tmp_path):
     # A wooden body on a 10 cm grid and a steel handle on a 1 mm grid give as many voxels each, but the
     # handle is a millionth of the volume: the object's median density is the wood's.
-    from gator.physics.vomp_run import combine_links
+    from harpor.physics.vomp_run import combine_links
 
     grid = np.array(np.meshgrid(range(10), range(10), range(10), indexing="ij")).reshape(3, -1).T + 0.5
     fake_vomp_link(tmp_path / "vomp" / "body", grid * 0.1, 600.0, 0.1)
@@ -568,7 +568,7 @@ def test_vomp_combine_links_weights_each_voxel_by_its_volume(tmp_path):
     assert s["voxels_occupied"] == 2000 and s["voxel_edge_m"] == 0.1
     assert s["rigid_body_covers"] == ["body", "handle"] and s["links_skipped"] == {"lid": "ValueError: no voxel"}
 
-    from gator.physics.vomp_run import weighted_percentile
+    from harpor.physics.vomp_run import weighted_percentile
 
     v = np.array([3.0, 1.0, 2.0, 4.0])
     assert weighted_percentile(v, np.ones(4), [0, 25, 50, 75, 100]).tolist() == [1, 1, 2, 3, 4]
@@ -581,8 +581,8 @@ def test_fixed_base_links_do_not_collide_with_their_parent_or_touching_neighbour
     mujoco = pytest.importorskip("mujoco")
     import re
 
-    from gator.parts import joints as J
-    from gator.physics.mjcf import _body_points, build, check, rest_contacts
+    from harpor.parts import joints as J
+    from harpor.physics.mjcf import _body_points, build, check, rest_contacts
 
     glb, summary = two_lid_chest(tmp_path)
     report = build(glb, summary, tmp_path / "mjcf", "chest", decompose=inflated_hull)
@@ -625,8 +625,8 @@ def test_fixed_base_links_do_not_collide_with_their_parent_or_touching_neighbour
 def test_articulated_usd_welds_the_knob_to_its_lid_and_filters_the_excluded_pairs(tmp_path):
     pytest.importorskip("trimesh")
     pytest.importorskip("pxr")
-    from gator.physics.mjcf import build as build_mjcf
-    from gator.physics.usd import build, check
+    from harpor.physics.mjcf import build as build_mjcf
+    from harpor.physics.usd import build, check
 
     glb, summary = two_lid_chest(tmp_path)
     mj = build_mjcf(glb, summary, tmp_path / "mjcf", "chest", decompose=inflated_hull)

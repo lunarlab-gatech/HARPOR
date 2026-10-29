@@ -14,7 +14,7 @@ pytest.importorskip("av")
 from fastapi.testclient import TestClient  # noqa: E402
 from PIL import Image  # noqa: E402
 
-from gator.webapp import jobs, relay, server, steps  # noqa: E402
+from harpor.webapp import jobs, relay, server, steps  # noqa: E402
 from test_webapp_server import run_app_js, wait, write_video  # noqa: E402
 
 TOKEN = "tok-" + secrets.token_hex(16)
@@ -533,6 +533,6 @@ def test_the_shape_scan_finds_a_key_the_worker_no_longer_holds(tmp_path):
 def test_relay_does_no_network_io_and_reads_no_secret():
     """relay.py imports no client and reads no key file or environment: it works on the job's files."""
     text = Path(relay.__file__).read_text()
-    assert not re.search(r"^\s*(import|from) (httpx|socket|subprocess|urllib\.request|gator\.webapp\.supa)", text, re.M)
+    assert not re.search(r"^\s*(import|from) (httpx|socket|subprocess|urllib\.request|harpor\.webapp\.supa)", text, re.M)
     for word in ("supabase.env", "openai.env", "anthropic.env", "os.environ", "getenv"):
         assert word not in text, word

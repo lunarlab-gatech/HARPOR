@@ -7,7 +7,7 @@ import pytest
 from PIL import Image
 from scipy.ndimage import gaussian_filter
 
-from gator.webapp import video as V
+from harpor.webapp import video as V
 
 H, W, N, BLUR = 96, 160, 64, 30
 TABLE = Path("~/Downloads/table.MOV").expanduser()
@@ -336,7 +336,7 @@ def test_rosbag_job(tmp_path, capsys):
 def test_rosbag_job_with_bad_stamps(tmp_path, capsys, monkeypatch):
     """A bag whose header stamps jump back is timed by log time; extract reads with the clock in meta.json."""
     pytest.importorskip("rosbags")
-    from gator.webapp import rosbag
+    from harpor.webapp import rosbag
 
     bag = write_bag(tmp_path / "b.bag", ("/cam/image_rect",), stamp=lambda i, ns: ns if i < N // 2 else ns - 10**9)
     j = job(tmp_path, bag, source={"kind": "rosbag", "topic": "/cam/image_rect"})

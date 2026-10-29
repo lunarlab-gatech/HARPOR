@@ -21,7 +21,7 @@ venv/
 *.pem
 *.key
 
-# The Supabase CLI's local state, and the public site that python -m gator.webapp.site build writes
+# The Supabase CLI's local state, and the public site that python -m harpor.webapp.site build writes
 supabase/.temp/
 supabase/.branches/
 /site/

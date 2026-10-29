@@ -406,7 +406,7 @@ The weights download is in build plan note 4, step 3.
 - Without `--model_path`, the script first tries local paths, including the raw HF cache folder `models--depth-anything--DA3NESTED-GIANT-LARGE` (`MV/scripts/run_da3.py#L137-L152`). Whether `from_pretrained` loads that folder is (unconfirmed).
 - DA3 resizes the long side to `process_res` (504) and rounds each side to a multiple of 14. All arrays are at that size, not the input size (`DA3/src/depth_anything_3/utils/io/input_processor.py#L316-L377`).
 
-Arrays saved in `da3_output.npz` (`MV/scripts/run_da3.py#L234`). `gator/stage_a/mvsam3d.py` writes the same layout. "Required for" names what MV-SAM3D reads each key for:
+Arrays saved in `da3_output.npz` (`MV/scripts/run_da3.py#L234`). `harpor/stage_a/mvsam3d.py` writes the same layout. "Required for" names what MV-SAM3D reads each key for:
 
 | Key | Shape | Content | Required for |
 |---|---|---|---|
@@ -854,14 +854,14 @@ The world frame W is defined in `build_plan.md` note 2.
 - In training, the structure target is rebuilt every step, so its frame can change per sample. The geometry and appearance targets are encoded once, so their frame is fixed. We encode two frames per scene, taken from two rendered cameras. 5.3.1 gives the reasoning.
 - Before any large data build, we check two things. The TRELLIS.2 512 codecs must reconstruct rotated shapes about as well as canonical shapes. The per-sample structure rebuild must match direct voxelization. If the codecs fail on rotated shapes, we switch to gravity-aligned frames (5.3.1).
 
-#### 5.1.3 Inputs and preprocessing (`gator/inference/`)
+#### 5.1.3 Inputs and preprocessing (`harpor/inference/`)
 
 - Pi3X comes from github.com/yyfz/Pi3 and HF `yyfz233/Pi3X`. Its code is BSD-3, and its weights are CC BY-NC 4.0. It returns camera-to-world poses in OpenCV convention, so preprocessing inverts them.
 - VGGT-Omega comes from github.com/facebookresearch/vggt-omega and HF `facebook/VGGT-Omega`. It outputs cameras and depth at relative scale. The paper does not say which checkpoint it used, so we run both `vggt_omega_1b_512.pt` and `vggt_omega_1b_416_reproduce.pt`. The second one needs `image_resolution=416`.
 - Every view is cropped around the target with a margin of 1.1. The structure flow uses 384 px crops that keep the scene context. The geometry and appearance flows use 512 px crops with the background masked out.
 - The anchor is the 2nd to 98th percentile box of the depth points inside the masks, times a margin m. The masks are eroded by 5 px first. Depth is valid where it is finite and positive. We pick m from a sweep of 1.0 to 1.5, as the smallest value that clips under 5% of training targets. 5.3.1 explains why the margin is needed.
 
-#### 5.1.4 Observation tokens and structure flow (`gator/models/structure_flow.py`)
+#### 5.1.4 Observation tokens and structure flow (`harpor/models/structure_flow.py`)
 
 The structure flow starts from TRELLIS.2 `ss_flow_img_dit_1_3B_64_bf16` (width 1536, 30 blocks, 12 heads, condition width 1024). Each block runs self-attention, then cross-attention to the condition, then the FFN. Each of the 16^3 latent cells is one token, so there are 4,096 tokens. The 8x16^3 latent decodes to the 64^3 occupancy.
 
@@ -888,14 +888,14 @@ Text enters through a pooled SigLIP2 embedding (1,152 dimensions) of a short cat
 
 Training target: we cache a 256^3 occupancy per placed object. Each step computes the anchor from the sampled views, rebuilds the 64^3 grid on the GPU, and runs the frozen structure encoder (5.3.1).
 
-#### 5.1.5 Re-alignment (`gator/inference/realign.py`)
+#### 5.1.5 Re-alignment (`harpor/inference/realign.py`)
 
 - Decode the 64^3 occupancy and drop small floating parts.
 - Fit the translation and scale of the structure to the observed points.
 - Recompute the normalization from the occupied bounding box. Max-pool to a 32^3 grid for the 512 flows, as the TRELLIS.2 512 pipeline does. Training targets use the same normalization function.
 - 5.3.2 gives the floater threshold, the fit and the re-voxelization in the new frame.
 
-#### 5.1.6 GatorProj, Eq. 2 (`gator/models/projection.py`)
+#### 5.1.6 GatorProj, Eq. 2 (`harpor/models/projection.py`)
 
 - Each voxel center is mapped to the world with s_g q + t_g and projected into every view, with that view's real intrinsics and pose. The features are averaged over the views where the point is in front of the camera and inside the crop. A voxel with no valid view gets a zero feature.
 - There is no occlusion test. Every voxel along a camera ray gets the feature of the pixel it projects to. The masked crops keep occluders and background out.
@@ -905,7 +905,7 @@ Training target: we cache a 256^3 occupancy per placed object. Each step compute
 - Eq. 6 adds the projected feature into every transformer block, between self-attention and the FFN: `x = x + CrossAttn(LN(x), G) + Linear(2048 -> 1536)(f)`. The weight shapes match Pixal3D's `SparseProjectAttention`, so Pixal3D's projection weights can start this layer.
 - In training, the projection uses perturbed or estimated cameras. We also jitter the ground-truth structure in translation and scale to imitate re-alignment error.
 
-#### 5.1.7 Geometry and appearance flows (`gator/models/slat_flow.py`)
+#### 5.1.7 Geometry and appearance flows (`harpor/models/slat_flow.py`)
 
 Both flows use the TRELLIS.2 512 codecs (sparse-conv VAEs, 32 latent channels on a 32^3 sparse grid). They take only masked RGB features, with no mask tokens, pointmap tokens or mixer.
 
@@ -920,13 +920,13 @@ Both flows use the TRELLIS.2 512 codecs (sparse-conv VAEs, 32 latent channels on
 - Both flows train on the ground-truth structure and use the predicted structure at inference. Their targets are the 512 shape and PBR latents of the complete placed object.
 - Pixal3D's "bf16" checkpoints are FP32 safetensors, and its `finetune_from` loads them with `torch.load`. We convert the files or patch the loader. Saving fine-tuned weights has its own dtype trap (5.2.1, issue #126).
 
-#### 5.1.8 Decode, export and placement (`gator/inference/`)
+#### 5.1.8 Decode, export and placement (`harpor/inference/`)
 
 - The TRELLIS.2 decoders output an O-Voxel grid. Meshes live in the cube [-0.5, 0.5]^3. Each voxel holds base color, metallic, roughness and alpha.
 - `to_glb` fills holes, simplifies, unwraps UVs, bakes PBR into textures with nvdiffrast and inpaints the atlas. The inpainting can stall on the CPU, so we use the export settings in 5.3.2.
 - Placement refinement optimizes only translation and log-scale (4 numbers) with Adam for about 200 iterations. Orientation and shape stay fixed. The losses are a soft silhouette IoU, a depth term, and a one-sided distance from the observed points to the mesh. Pixels hidden behind nearer objects get zero weight. The step keeps its result only if the multi-view IoU does not drop. 5.3.2 gives the parameterization, weights and schedule.
 
-#### 5.1.9 S3 training data (`gator/data/s3/`)
+#### 5.1.9 S3 training data (`harpor/data/s3/`)
 
 - Asset sources: TexVerse-1K (PBR subset), Objaverse 1.0, ABO, OmniObject3D, MolmoSpaces, RoboCasa, Articraft-10K, GSO and ArtVIP. SAGE-10k scenes, HSSD and 3D-FRONT are optional. HSSD is non-commercial, and 3D-FRONT probably is too. Section 4.3 gives sizes, licenses and access.
 - InternScenes is left out. Some of its textures came from Hunyuan3D, and the Hunyuan license forbids using its outputs to train other models.
@@ -941,7 +941,7 @@ Both flows use the TRELLIS.2 512 codecs (sparse-conv VAEs, 32 latent channels on
 - The TRELLIS.2 `data_toolkit/` dumps meshes and PBR with Blender. It was written for Blender 3.0.1, so we test it on 5.2.2 first. Its per-dataset `datasets/` module is missing (issue #83). 5.2.1 gives the workarounds.
 - The data is packed into WebDataset shards, because PACE limits each user to 1M files.
 
-#### 5.1.10 Training (`gator/trainers/`)
+#### 5.1.10 Training (`harpor/trainers/`)
 
 - All three flows use rectified flow with sigma_min = 1e-5 (Eq. 4). The noisy sample is z_t = (1 - t) z_0 + (sigma_min + (1 - sigma_min) t) eps, and the target velocity is (1 - sigma_min) eps - z_0. t = 1 is noise and t = 0 is data.
 - Shared settings: AdamW (weight decay 0.01, betas 0.9 and 0.95), bf16, adaptive gradient clipping (max norm 1.0, 95th percentile), EMA 0.9999, condition dropout 0.1 (text tokens included), effective batch 128, 1 to 4 views, constant learning rate.

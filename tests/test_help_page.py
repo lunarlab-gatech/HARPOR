@@ -1,4 +1,4 @@
-"""gator/webapp/static/help.html: the help page that the app's Help link opens. One section per part of the app, the
+"""harpor/webapp/static/help.html: the help page that the app's Help link opens. One section per part of the app, the
 method notes with the numbers of the code they explain, no script, and the local-only blocks that site.py swaps for
 the public site's text (HELP_PUBLIC)."""
 import html
@@ -7,14 +7,14 @@ import re
 from html.parser import HTMLParser
 from pathlib import Path
 
-from gator.agent import controller, tools
-from gator.parts import geometry, vote
-from gator.stage_a import lidar_scale, part_masks
-from gator.webapp import agent_step, jobs, site, steps, turntable, video, views
-from gator.webapp import lidar as lidar_stage
+from harpor.agent import controller, tools
+from harpor.parts import geometry, vote
+from harpor.stage_a import lidar_scale, part_masks
+from harpor.webapp import agent_step, jobs, site, steps, turntable, video, views
+from harpor.webapp import lidar as lidar_stage
 
 ROOT = Path(__file__).resolve().parents[1]
-STATIC = ROOT / "gator" / "webapp" / "static"
+STATIC = ROOT / "harpor" / "webapp" / "static"
 HELP = STATIC / "help.html"
 # The sections in order. The ids are stable: the app's Help links point to them, and the public page keeps them.
 SECTIONS = ("about", "capture", "add-job", "status", "topics", "settings", "review", "parts", "agent", "lidar",
@@ -110,7 +110,7 @@ def test_help_page_holds_the_method_numbers():
     seam_lines = inspect.signature(geometry.seams).parameters["max_lines"].default
     snap_s = num(inspect.signature(video.snap).parameters["window_s"].default)
     nviews = re.search(r'<input type="range" id="nviews" min="(\d+)" max="(\d+)"', (STATIC / "index.html").read_text())
-    upload = re.search(r"^MAX_UPLOAD = (\d+) << 30$", (ROOT / "gator" / "webapp" / "server.py").read_text(), re.M)
+    upload = re.search(r"^MAX_UPLOAD = (\d+) << 30$", (ROOT / "harpor" / "webapp" / "server.py").read_text(), re.M)
     assert nviews and upload
     prices = [f"{usd(controller.PRICES[k])} {w}" for k, w in (("input_tokens", "input"), ("output_tokens", "output"),
                                                                 ("cache_read_input_tokens", "cache read"),
@@ -182,9 +182,11 @@ def test_help_page_holds_the_method_numbers():
 
 def test_help_page_is_a_plain_page_with_every_section():
     """A page like privacy.html: the head that site.py rewrites (one charset meta, the stylesheet and the brand link
-    once each), the header with the brand alone, no script, no inline style and no event attribute (the public site's
-    CSP blocks them). Every section of the plan, in order, as <section id> with its <h2> first, and a contents list that
-    links to each. Every link goes to a section of the page, or home, or the stylesheet."""
+    once each), the header that the app and the demos page have too, with Help as the current page (tests/test_site.py
+    compares them), no script (the public copy adds the account menu's), no inline style and no event attribute (the
+    public site's CSP blocks them). Every section of the plan, in order, as <section id> with its <h2> first, and a
+    contents list that links to each. Every link goes to a section of the page, or home, the stylesheet, or the
+    header's Demos and Help pages."""
     page = HELP.read_text()
     p = parse(page)
     assert page.startswith("<!doctype html>\n<html lang=\"en\">")
@@ -193,8 +195,9 @@ def test_help_page_is_a_plain_page_with_every_section():
         assert page.count(once) == 1, once
     assert ("meta", {"name": "viewport", "content": "width=device-width, initial-scale=1"}) in p.tags
     assert ("meta", {"name": "color-scheme", "content": "light dark"}) in p.tags
-    head = re.search(r"<header>(.*?)</header>", page, re.S)[1].strip()
-    assert head == '<a href="/" class="brand">HARPOR</a>'
+    head = " ".join(re.search(r"<header>(.*?)</header>", page, re.S)[1].split())
+    assert head == ('<a href="/" class="brand">HARPOR</a> <a id="demolink" href="demos.html">Demos</a> '
+                    '<a id="helplink" href="help.html" aria-current="page">Help</a>')
     assert not [t for t, _ in p.tags if t in ("script", "style", "iframe", "form", "img")]
     assert not [(t, a) for t, a in p.tags if "style" in a or any(k.startswith("on") for k in a)]
     assert not p.stray and not p.open, (p.stray, p.open)
@@ -208,7 +211,8 @@ def test_help_page_is_a_plain_page_with_every_section():
     for _, a in p.tags:
         href = a.get("href")
         if href is not None:
-            assert href in ("/", "/static/style.css") or (href.startswith("#") and href[1:] in ids), href
+            assert (href in ("/", "/static/style.css", "demos.html", "help.html")
+                    or (href.startswith("#") and href[1:] in ids)), href
 
 
 def test_help_page_local_blocks_are_well_formed():

@@ -1,5 +1,5 @@
-"""gator/webapp/turntable.py, the 360 video of a web-app job: the GLB that physics used and its upright turn, the
-container's binds, the render with the fake Blender of gator.agent.fake_agent, and the PyAV encode."""
+"""harpor/webapp/turntable.py, the 360 video of a web-app job: the GLB that physics used and its upright turn, the
+container's binds, the render with the fake Blender of harpor.agent.fake_agent, and the PyAV encode."""
 import json
 import shlex
 import signal
@@ -13,12 +13,12 @@ pytest.importorskip("av")
 pytest.importorskip("trimesh")
 from test_webapp_physics_auto import box_glb, plane_view, write_run  # noqa: E402
 
-from gator.agent import tools  # noqa: E402
-from gator.physics.align import load_w  # noqa: E402
-from gator.webapp import physics_auto  # noqa: E402
-from gator.webapp import turntable as T  # noqa: E402
+from harpor.agent import tools  # noqa: E402
+from harpor.physics.align import load_w  # noqa: E402
+from harpor.webapp import physics_auto  # noqa: E402
+from harpor.webapp import turntable as T  # noqa: E402
 
-FAKE_BLENDER = [sys.executable, "-m", "gator.agent.fake_agent", "--blender"]
+FAKE_BLENDER = [sys.executable, "-m", "harpor.agent.fake_agent", "--blender"]
 
 
 def aligned_job(tmp_path):
@@ -64,7 +64,7 @@ def test_source_turns_the_physics_glb_upright(tmp_path, capsys):
 
 
 def test_blender_command_binds_only_the_folder_the_glb_and_the_scripts(tmp_path):
-    from gator.agent import controller
+    from harpor.agent import controller
 
     J = tmp_path / "job"
     glb = J / "agent" / "s" / "work" / "exports" / "003.glb"

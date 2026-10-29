@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from gator.eval import photo_match as P
+from harpor.eval import photo_match as P
 
 H, W = 48, 64  # the manifest's photo size
 WINDOW = (12, 6, 52, 42)  # u0, v0, u1, v1, end exclusive

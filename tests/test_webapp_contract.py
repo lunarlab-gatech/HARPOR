@@ -18,7 +18,7 @@ pytest.importorskip("cryptography")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import fake_supabase as fs  # noqa: E402
-from gator.webapp import jobs, relay, server, steps  # noqa: E402
+from harpor.webapp import jobs, relay, server, steps  # noqa: E402
 from test_webapp_server import HOSTILE_CONTINUE, hostile_overrides, hostile_start  # noqa: E402
 from test_webapp_server import calibration_yaml, scene_bag  # noqa: E402
 from test_webapp_worker import TOKEN, Server, machine, own_job, own_worker  # noqa: E402

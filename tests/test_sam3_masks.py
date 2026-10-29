@@ -4,9 +4,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from gator.stage_a import mvsam3d as M
-from gator.stage_a import sam3_masks as S
-from gator.stage_a.sam3d import load_mask
+from harpor.stage_a import mvsam3d as M
+from harpor.stage_a import sam3_masks as S
+from harpor.stage_a.sam3d import load_mask
 
 H, W = 120, 160
 

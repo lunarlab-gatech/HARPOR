@@ -1,4 +1,4 @@
-"""The personal worker's link to Supabase (gator/webapp/supa.py): the client with the publishable key and the
+"""The personal worker's link to Supabase (harpor/webapp/supa.py): the client with the publishable key and the
 user's access token, Storage, the sign-in, the token renewal and the Store. The private files are in
 test_fileio.py."""
 
@@ -19,7 +19,7 @@ import anyio
 import httpx
 import pytest
 
-from gator.webapp import supa
+from harpor.webapp import supa
 
 URL = "https://abcdefghijklmnop.supabase.co"
 SECRET = "sb_secret_" + "fakefakefake" * 3

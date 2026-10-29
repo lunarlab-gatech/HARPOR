@@ -118,12 +118,12 @@ def _call(src, start):
 
 
 def test_the_page_the_worker_and_the_fake_name_what_the_migrations_have(cluster):
-    """The tables, columns, functions and arguments that supa.js (the page), the worker (supa.py, worker.py,
-    session.py) and fake_supabase.py name are the ones the migrations make, read from the catalog. So a renamed
-    column or function fails here, and not first on the live site."""
+    """The tables, columns, functions and arguments that supa.js and account.js (the page), the worker (supa.py,
+    worker.py, session.py) and fake_supabase.py name are the ones the migrations make, read from the catalog. So a
+    renamed column or function fails here, and not first on the live site."""
     import fake_supabase as fs
 
-    from gator.webapp import supa
+    from harpor.webapp import supa
 
     db = cluster.project("names")
     cols = {}
@@ -159,7 +159,7 @@ def test_the_page_the_worker_and_the_fake_name_what_the_migrations_have(cluster)
         bad = {c for c in names if c != "*"} - cols[table]
         assert not bad, (where, table, bad)
 
-    js = (ROOT / "gator" / "webapp" / "static" / "supa.js").read_text()
+    js = "".join((ROOT / "harpor" / "webapp" / "static" / f).read_text() for f in ("supa.js", "account.js"))
     check_rpcs(js, {"relay", "withdraw_request", "delete_job", "request_access", "storage_used", "job_objects"})
     consts = dict(re.findall(r'const (\w+_COLS) = "([^"]+)"', js))
     reads = 0
@@ -168,13 +168,13 @@ def test_the_page_the_worker_and_the_fake_name_what_the_migrations_have(cluster)
         sel = re.match(r'\.select\(("([^"]*)"|(\w+))\)', chain)
         if sel:
             reads += 1
-            check_columns(m[1], (sel[2] if sel[2] is not None else consts[sel[3]]).split(","), "supa.js")
-        check_columns(m[1], re.findall(r'\.(?:eq|neq|in|gt|gte|lt|lte|is|order)\("(\w+)"', chain), "supa.js")
+            check_columns(m[1], (sel[2] if sel[2] is not None else consts[sel[3]]).split(","), "the page")
+        check_columns(m[1], re.findall(r'\.(?:eq|neq|in|gt|gte|lt|lte|is|order)\("(\w+)"', chain), "the page")
     assert reads >= 15
     for m in re.finditer(r'table: "(\w+)", filter: `(\w+)=', js):
-        check_columns(m[1], [m[2]], "supa.js Realtime")
+        check_columns(m[1], [m[2]], "the page's Realtime")
 
-    py = "".join((ROOT / "gator" / "webapp" / f).read_text() for f in ("supa.py", "worker.py", "session.py"))
+    py = "".join((ROOT / "harpor" / "webapp" / f).read_text() for f in ("supa.py", "worker.py", "session.py"))
     check_rpcs(py, {"own_machine_bind", "own_worker_start", "own_worker_beat", "own_worker_stop", "own_claim_request",
                     "own_answer", "own_job_create", "own_publish", "own_files", "own_logs", "own_job_delete",
                     "own_orphans", "job_objects", "storage_used"})
@@ -236,7 +236,7 @@ def test_migration_files():
 def test_job_files_takes_the_types_the_workers_send():
     """allowed_mime_types of job-files: every content type of relay.SITE_TYPES (what the workers upload), and the
     same list in the fake. No XML, HTML or SVG: a browser would run their scripts from the project's domain."""
-    from gator.webapp import relay
+    from harpor.webapp import relay
 
     import fake_supabase as fs
 

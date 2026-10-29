@@ -1,4 +1,4 @@
-"""gator/webapp/demos.py: the demos folder, its checks and private guard, the demos page, add from a finished fake
+"""harpor/webapp/demos.py: the demos folder, its checks and private guard, the demos page, add from a finished fake
 job, and the command line."""
 import json
 import os
@@ -20,7 +20,7 @@ pytest.importorskip("PIL")
 from fastapi.testclient import TestClient  # noqa: E402
 from test_webapp_server import ARTICULATED, TOKEN, login, run_app_js, uploaded, wait, write_video  # noqa: E402
 
-from gator.webapp import demos, server, steps  # noqa: E402
+from harpor.webapp import demos, server, steps  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 OPUS = "sk-ant-test-" + secrets.token_hex(16)
@@ -420,7 +420,7 @@ def test_placeholders_rules(tmp_path):
 def test_demos_template_is_a_plain_page():
     """static/demos.html: the head that site.py rewrites (each anchor once), the CDN model-viewer as index.html has it,
     demos.js as its one script of its own, no inline style, and one marker."""
-    from gator.webapp import site
+    from harpor.webapp import site
 
     for once in ('<meta charset="utf-8">', 'href="/static/style.css"', 'href="/"', demos.MARKER, site.MODEL_VIEWER):
         assert SRC.count(once) == 1, once
@@ -503,11 +503,11 @@ def test_mirrors_of_app_js():
 
 
 def test_command_line(job, tmp_path):
-    """add and check through python -m gator.webapp.demos: WEBAPP_DEMOS is the default folder, errors print one
+    """add and check through python -m harpor.webapp.demos: WEBAPP_DEMOS is the default folder, errors print one
     "error: " line and exit 1."""
     def run(*args, env=None):
         e = {k: v for k, v in os.environ.items() if k != "WEBAPP_DEMOS"}
-        return subprocess.run([sys.executable, "-m", "gator.webapp.demos", *args], cwd=ROOT, capture_output=True,
+        return subprocess.run([sys.executable, "-m", "harpor.webapp.demos", *args], cwd=ROOT, capture_output=True,
                               text=True, timeout=120, env={**e, **(env or {})})
     out = tmp_path / "demos"
     r = run("add", str(job[0]))

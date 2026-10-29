@@ -4,9 +4,9 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from gator import frames
-from gator.parts import joints as J
-from gator.physics.align import read_glb, write_glb
+from harpor import frames
+from harpor.parts import joints as J
+from harpor.physics.align import read_glb, write_glb
 
 HINGE = {"version": 1, "frame": "W", "parent": "body", "type": "revolute", "origin": [0.0, -0.3, 0.2],
          "axis": [-1.0, 0.0, 0.0], "lower": 0.0, "upper": 1.5}

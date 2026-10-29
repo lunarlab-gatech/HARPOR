@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from gator.stage_a import lidar_scale as L
-from gator.stage_a import mvsam3d as M
+from harpor.stage_a import lidar_scale as L
+from harpor.stage_a import mvsam3d as M
 
 
 def rigid(rng):

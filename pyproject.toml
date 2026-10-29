@@ -1,5 +1,5 @@
 [project]
-name = "gator"
+name = "harpor"
 version = "0.0.1"
 description = "HARPOR: a phone video, rosbag or Stray Scanner capture of one object to simulation-ready models."
 requires-python = ">=3.10"
@@ -7,7 +7,7 @@ license = {text = "MIT"}
 dependencies = ["numpy", "scipy", "trimesh"]
 
 [tool.setuptools.packages.find]
-include = ["gator*"]
+include = ["harpor*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

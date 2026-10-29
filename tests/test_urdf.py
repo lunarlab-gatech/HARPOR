@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from test_physics import hull_parts, inflated_hull, two_box_hinge, two_lid_chest
 
-from gator import frames
+from harpor import frames
 
 
 def xyz(element):
@@ -14,8 +14,8 @@ def xyz(element):
 
 def test_urdf_of_a_hinged_box(tmp_path):
     trimesh = pytest.importorskip("trimesh")
-    from gator.physics.mjcf import build as build_mjcf
-    from gator.physics.urdf import build, check
+    from harpor.physics.mjcf import build as build_mjcf
+    from harpor.physics.urdf import build, check
 
     glb, summary, hinge, _ = two_box_hinge(tmp_path)
     s = json.loads(summary.read_text())
@@ -50,8 +50,8 @@ def test_urdf_of_a_hinged_box(tmp_path):
 
 def test_urdf_of_a_rigid_box_and_of_a_fixed_base(tmp_path):
     trimesh = pytest.importorskip("trimesh")
-    from gator.physics.mjcf import build as build_mjcf
-    from gator.physics.urdf import build, check
+    from harpor.physics.mjcf import build as build_mjcf
+    from harpor.physics.urdf import build, check
 
     box = trimesh.creation.box([1.2, 0.8, 0.5])
     box.apply_translation([0, 0, 0.25])
@@ -78,8 +78,8 @@ def test_urdf_of_a_rigid_box_and_of_a_fixed_base(tmp_path):
 
 def test_urdf_welds_a_loose_part_to_its_parent_node(tmp_path):
     pytest.importorskip("trimesh")
-    from gator.physics.mjcf import build as build_mjcf
-    from gator.physics.urdf import build, check
+    from harpor.physics.mjcf import build as build_mjcf
+    from harpor.physics.urdf import build, check
 
     glb, summary = two_lid_chest(tmp_path)
     mj = build_mjcf(glb, summary, tmp_path / "mjcf", "chest", decompose=inflated_hull)

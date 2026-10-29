@@ -20,7 +20,7 @@ pytest.importorskip("fastapi")
 pytest.importorskip("av")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from gator.webapp import jobs, server, steps  # noqa: E402
+from harpor.webapp import jobs, server, steps  # noqa: E402
 
 TOKEN = "tok-" + secrets.token_hex(16)
 KEY = "sk-test-" + secrets.token_hex(16)
@@ -155,7 +155,7 @@ def test_demos_pages(tmp_path, capsys):
 
     from test_webapp_demos import hand_demo
 
-    from gator.webapp import demos
+    from harpor.webapp import demos
 
     def app(folder, runs="runs"):
         cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / runs, fake=True, demos=folder)
@@ -720,7 +720,7 @@ def test_a_run_from_lidar_checks_the_intrinsics_first(client, tmp_path):
     the review's Build and a run again from lidar answer 400 with the reason, before anything is deleted. Before,
     they skipped the camera_info check: the run deleted the results, and then the lidar stage failed on it. A bag
     that is gone from the server is refused too, also when the calibration gives K."""
-    from gator.webapp import fake_steps as F
+    from harpor.webapp import fake_steps as F
     from test_webapp_lidar import POINTS, T_CAM_LIDAR
 
     bag = scene_bag(tmp_path / "no_info.bag", info=False)
@@ -814,7 +814,7 @@ def test_calibration_changes_take_turns(client, tmp_path, monkeypatch):
     a file that the other upload deleted, and the upload changed the calibration of the queued job."""
     import threading
 
-    from gator.stage_a import lidar_scale
+    from harpor.stage_a import lidar_scale
     from test_webapp_lidar import POINTS, T_CAM_LIDAR
 
     bag = scene_bag(tmp_path / "scene.bag")
@@ -954,7 +954,7 @@ def test_lidar_points_are_listed_by_view(tmp_path):
 def test_pool_points_only_while_the_scale_has_failed(tmp_path):
     """server.pool_clouds lists lidar/cloud/<view>.glb by name while pool/lidar.json says ok false; resolve and the
     site's mirror (relay.mirror_plan) follow it, so a scale found later takes them away."""
-    from gator.webapp import relay
+    from harpor.webapp import relay
 
     J = tmp_path / "job"
     (J / "lidar" / "cloud").mkdir(parents=True)
@@ -1120,7 +1120,7 @@ TYPED = [{"name": "box body"}, {"name": "lid", "parent": "box body", "joint": "r
 
 def test_start_takes_the_parts_of_an_articulated_object(client, tmp_path):
     """articulated, parts_mode and parts of the start request, in each mode: the VLM modes keep no typed
-    list, agent none means "user", and a list that breaks a rule gives 400 with gator.parts.propose's
+    list, agent none means "user", and a list that breaks a rule gives 400 with harpor.parts.propose's
     reason before the key is checked."""
     c, cfg = client
     login(c)
@@ -1199,7 +1199,7 @@ def test_part_list_review_confirms_or_edits_the_list(client, tmp_path):
         r = c.post(f"/api/jobs/{job_id}/parts", json={"parts": wrong})
         assert r.status_code == 400 and r.json()["detail"] == why, wrong
     r = c.post(f"/api/jobs/{job_id}/parts", json={"parts": [{"name": "a" * 5000}]})  # the reason quotes the name
-    from gator.parts.propose import MAX_NAME
+    from harpor.parts.propose import MAX_NAME
     assert r.status_code == 400 and r.json()["detail"] == f"part name '{'a' * 37}...' is longer than {MAX_NAME} characters"
     assert server.part_reason(ValueError("x" * 500)) == "x" * (server.PART_REASON - 3) + "..."
     assert jobs.load(J)["status"] == "review" and "confirmed" not in json.loads((J / "run" / "proposal.json").read_text())
@@ -1366,7 +1366,7 @@ def test_sigterm_deletes_the_login_file(tmp_path):
     home = tmp_path / "home"
     info = home / ".config" / "gator" / "webapp.json"
     env = {**os.environ, "HOME": str(home), "TMPDIR": str(tmp_path), "PYTHONPATH": str(ROOT)}
-    p = subprocess.Popen([sys.executable, "-m", "gator.webapp", "--fake", "--runs", str(tmp_path / "runs"),
+    p = subprocess.Popen([sys.executable, "-m", "harpor.webapp", "--fake", "--runs", str(tmp_path / "runs"),
                           "--host", "127.0.0.1"], cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
         lines = _lines_until(p.stdout, b"Application startup complete")
@@ -1424,7 +1424,7 @@ def test_start_ice_reuses_only_a_server_of_the_same_job(tmp_path):
 
     def start(**recorded):
         info.write_text(json.dumps({"node": "127.0.0.1", "port": port, "token": "tok", **recorded}))
-        return subprocess.run(["bash", str(ROOT / "gator" / "webapp" / "start_ice.sh"), "222"], capture_output=True,
+        return subprocess.run(["bash", str(ROOT / "harpor" / "webapp" / "start_ice.sh"), "222"], capture_output=True,
                               text=True, timeout=60, env={**os.environ, "HOME": str(home), "PATH": f"{bin_}:{os.environ['PATH']}"})
 
     try:
@@ -1674,13 +1674,15 @@ def test_agent_of_and_key_later_at_module_level():
 
 
 def test_the_tunnel_page_stays_as_it_was(client):
-    """The tunnel page loads no Supabase script and still offers the agent "none"."""
+    """The tunnel page loads no Supabase script and still offers the agent "none"; the server serves none of the public
+    site's scripts."""
     c, _ = client
     login(c)
     page = c.get("/").text
     assert "supabase" not in page.lower() and "supa.js" not in page and "config.js" not in page
     assert 'name="agent" value="none"' in page
-    assert c.get("/static/supa.js").status_code == 404 and c.get("/static/config.js").status_code == 404
+    for name in ("supa.js", "account.js", "config.js"):
+        assert c.get(f"/static/{name}").status_code == 404, name
 
 
 def test_help_page_is_served_with_or_without_the_login(client):
@@ -3519,7 +3521,7 @@ def test_app_js_reads_the_lidar_points_file():
     is empty, a node of another name (also "constructor") is not read, and a file that is not one, or whose
     accessor runs past its data, throws. orbitStart puts the eye at the origin (the view's camera), looking at the
     median of the used points, else of the scan's points in front of the camera, else 1 m ahead."""
-    from gator.webapp import lidar
+    from harpor.webapp import lidar
 
     scan, used = [[0.0, 0.0, 1.0], [1.0, 2.0, 3.0]], [[0.5, 0.25, 2.0]]
     both = lidar.cloud_glb({"scan": scan, "used": used})
@@ -3577,7 +3579,7 @@ def test_app_js_lidar_points_in_the_inputs_tab():
     before the canvas has a size; a view's file is fetched once. A job without LiDAR draws no section; one without
     points says so; without WebGL a line offers the file. clearInput frees the viewer, and new point files draw it
     again. A job whose scale failed has no views used: the picker holds the pool's views (server.pool_clouds)."""
-    from gator.webapp import lidar
+    from harpor.webapp import lidar
 
     rng = np.random.default_rng(0)
     glbs = {f"/api/jobs/j/file/run/lidar/{i}.glb": list(lidar.cloud_glb({"scan": rng.normal(size=(n, 3)) + [0, 0, 2],
@@ -4316,7 +4318,7 @@ def test_app_js_help_link_follows_the_screen():
     css = (server.STATIC / "style.css").read_text()
     rule = lambda sel: re.search(r"(?:^|\n)" + re.escape(sel) + r" \{([^}]*)\}", css).group(1)  # noqa: E731
     assert all(x in rule("#demolink, #helplink") for x in ("margin-left: auto", "var(--muted)", "var(--t-s)"))
-    assert "margin-left: 0" in rule("#demolink + #helplink")  # the help and privacy pages have Help alone
+    assert "margin-left: 0" in rule("#demolink + #helplink")  # Help sits right after Demos
     assert "margin-left" not in rule(".conn") and "margin-left" not in rule("header .account")
     # The account menu's button is a person icon drawn in the text color, with no text to cut.
     assert all(x in rule(".account .person") for x in ("fill: none", "stroke: currentColor"))

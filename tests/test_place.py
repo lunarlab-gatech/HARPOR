@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from gator.stage_a.place import GLB_TURN, P3D_TO_CV, canonical_glb_to_w, quat_wxyz_to_matrix
+from harpor.stage_a.place import GLB_TURN, P3D_TO_CV, canonical_glb_to_w, quat_wxyz_to_matrix
 
 
 def test_quaternion_matches_scipy():

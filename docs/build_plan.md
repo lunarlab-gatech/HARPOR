@@ -51,7 +51,7 @@ Not verified yet:
 
 | File | Content |
 |---|---|
-| `LICENSE` | MIT, for HARPOR's own code. Third-party models and the vendored web libraries keep their own licenses (the Licenses bullet above, and `gator/webapp/static/vendor/licenses/`) |
+| `LICENSE` | MIT, for HARPOR's own code. Third-party models and the vendored web libraries keep their own licenses (the Licenses bullet above, and `harpor/webapp/static/vendor/licenses/`) |
 | `docs/build_plan.md` | This file: overview, design and build notes |
 | `docs/public_site.md` | The public HARPOR site on Supabase: personal workers on users' own GPU machines, the owner's setup and the live checks |
 | `docs/research.md` | Research findings with sources: the paper and every results table, MV-SAM3D and SAM 3D, Blender, SAM 3, datasets, baselines and metrics, VoMP and the simulators, and the deferred generator design |
@@ -87,7 +87,7 @@ flowchart TB
 | GPT-6-Astra | OpenAI API, model `gpt-6-astra` | API key | the default agent, and the VLM that lists the parts (note 11) |
 | Codex CLI 0.162.1 | npm `@openai/codex@0.162.1` | Apache-2.0 | runs GPT-6-Astra |
 | Claude Opus 5.5 | Anthropic API, model `claude-opus-5-5` | API key | the alternative agent, and the VLM that lists the parts (note 11) |
-| anthropic 1.15.0 | pip, in `envs/sam3d` and `envs/web` | MIT | runs Claude Opus 5.5 (`gator/agent/claude_agent.py`), the part list of `propose` (note 11) and the web app's key check |
+| anthropic 1.15.0 | pip, in `envs/sam3d` and `envs/web` | MIT | runs Claude Opus 5.5 (`harpor/agent/claude_agent.py`), the part list of `propose` (note 11) and the web app's key check |
 | Blender 5.2.2 LTS | blender.org | GPL | agent workspace and review renders |
 | trimesh, scipy | pip | open source | GLB handling, the part vote and the photo-match scores |
 | PyAV 19.0.1, rosbags 0.11.8 (with ruamel.yaml 0.19.1), FastAPI 0.143.2, uvicorn 0.54.0 | pip | BSD (the PyAV wheel bundles FFmpeg, LGPL), Apache-2.0, MIT, BSD | the web app: video and rosbag decoding, the calibration file (note 12), the server (note 10) |
@@ -98,7 +98,7 @@ flowchart TB
 
 ## Notes
 
-### 2. Coordinate frames (`gator/frames.py`)
+### 2. Coordinate frames (`harpor/frames.py`)
 
 - The world frame W is the OpenCV frame of input view 0 (x right, y down, z forward), in meters.
 - SAM 3D's pose (`pose.json` from note 4) and MV-SAM3D's `params.npz` give the pose from the
@@ -117,7 +117,7 @@ flowchart TB
 - SAM 3D and MV-SAM3D users report misaligned results, so the first run must check the overlay of the posed
   mesh on view 0.
 
-### 3. Inputs (`gator/stage_a/`)
+### 3. Inputs (`harpor/stage_a/`)
 
 - A scene folder holds `images/` with the photos (PNG or JPG) and one mask folder per object. The
   mask of photo `<name>` is `<folder>/<name>_mask.png` or `<folder>/<name>.png`, at the photo's
@@ -126,7 +126,7 @@ flowchart TB
 - `load_mask` (`sam3d.py`) takes the object from the alpha channel when alpha varies (SAM 3D's and
   MV-SAM3D's RGBA masks). Otherwise it takes the brightest channel above 127 (above 0 for a 0/1
   mask), as in the SAM 3 web demo's opaque white-on-black export.
-- **SAM 3 masks** (`gator/stage_a/sam3_masks.py`, env `envs/sam3seg`) make the masks from a text
+- **SAM 3 masks** (`harpor/stage_a/sam3_masks.py`, env `envs/sam3seg`) make the masks from a text
   prompt. Each prompt gets a folder `DIR/sam3_<prompt>/` with `<name>.png` (L mode, 0/255) for
   every photo where SAM 3 finds the object, one `sam3.json` (every instance's score, box and pixel
   count) and `check/<name>.jpg` for every photo (the mask in green, other instances outlined in
@@ -136,7 +136,7 @@ flowchart TB
 
   ```bash
   module purge; G=$(readlink -f ~/scratch)/gator; export HF_HOME=$G/.cache/huggingface
-  cd $G/gator_clone && $G/envs/sam3seg/bin/python -m gator.stage_a.sam3_masks \
+  cd $G/gator_clone && $G/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks \
     --scene DIR --prompt plate --prompt "coffee cup"
   # to fix one photo, rerun that prompt alone: --prompt plate --pick NAME=K --overwrite
   ```
@@ -178,7 +178,7 @@ flowchart TB
     "saucer" finds the same object at 0.97. When a photo gets no mask, try another noun first.
   - Times on the tabletop: 14 s to load the model, then 0.5 s per photo for six prompts.
 
-### 4. Stage A: SAM 3D Objects on ICE (`gator/stage_a/sam3d.py`)
+### 4. Stage A: SAM 3D Objects on ICE (`harpor/stage_a/sam3d.py`)
 
 Everything lives under `G=$(readlink -f ~/scratch)/gator`. Run the steps in a terminal of an ICE
 L40S session. The GPU is needed only for step 4, but SAM 3D's setup guide expects the build on a
@@ -235,7 +235,7 @@ GPU node.
      CPATH=$G/envs/sam3d/targets/x86_64-linux/include \
      LIBRARY_PATH=$G/envs/sam3d/targets/x86_64-linux/lib:$G/envs/sam3d/lib
    K=$G/sam-3d-objects/notebook/images/shutterstock_stylish_kidsroom_1640806567
-   cd $G/gator_clone && python -m gator.stage_a.sam3d --sam3d-root $G/sam-3d-objects \
+   cd $G/gator_clone && python -m harpor.stage_a.sam3d --sam3d-root $G/sam-3d-objects \
      --image $K/image.png --mask $K/14.png --out $G/runs/smoke_kidsroom14
    ```
 
@@ -256,7 +256,7 @@ What the run needs and why:
 - On ICE (2026-10-14), the first run took 4m26s, including the MoGe and DINOv2 downloads and the
   nvdiffrast build. SAM 3D itself took 150 s at a 25.6 GB peak, and the textured GLB looks right.
 
-### 4b. Stage A, multi-view: MV-SAM3D on ICE (`gator/stage_a/mvsam3d.py`)
+### 4b. Stage A, multi-view: MV-SAM3D on ICE (`harpor/stage_a/mvsam3d.py`)
 
 MV-SAM3D (`devinli123/MV-SAM3D` at abb04b5) fuses several photos of one object into one SAM 3D
 generation. It needs a pointmap per view, all in one frame, which Depth Anything 3 (DA3, at
@@ -370,20 +370,20 @@ video `table.MOV` at 1920 x 1080 (prep: 1024 x 576), SAM 3 web-demo masks.
   one side. DA3's cameras for this set do not agree with each other; a round table looks the same
   from every side, so DA3 has to register the views by the background alone.
 
-### 5. Stage B: agent (`gator/agent/`)
+### 5. Stage B: agent (`harpor/agent/`)
 
 The default agent is GPT-6-Astra through the Codex CLI (Decisions). Claude Opus 5.5 through our own
 Messages API loop is the alternative (`prepare_session(..., agent="claude")`; see the end of this
 note). Everything below that is not marked Claude applies to both.
 
-The controller (`gator/agent/controller.py`) keeps the watchdog, the GLB checks and the fallback
+The controller (`harpor/agent/controller.py`) keeps the watchdog, the GLB checks and the fallback
 order. `run_container_session` runs the agent once per object in its own Apptainer container on
 the ICE node, with `session/prompt.txt` on stdin and the JSONL events in `session/codex.jsonl`:
 
 ```bash
 apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
   --bind <root>/work:/work --bind <root>/session:/session \
-  --bind gator/agent/bin:/opt/gator/bin:ro --bind <socket dir>:/opt/gator/sock:ro \
+  --bind harpor/agent/bin:/opt/gator/bin:ro --bind <socket dir>:/opt/gator/sock:ro \
   --env-file ~/.config/gator/openai.env --env CODEX_HOME=/session/codex_home \
   --env GATOR_SOCKET=/opt/gator/sock/tools.sock --env PREPEND_PATH=/opt/gator/bin \
   --pwd /work gator-agent.sif \
@@ -392,8 +392,8 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
     -C /work -m gpt-6-astra -c 'model_reasoning_effort="xhigh"' --json -o /session/last_message.txt -
 ```
 
-- `prepare_session` writes `session/codex_home/config.toml` from `gator/agent/codex/config.toml`
-  and copies `gator/agent/codex/AGENTS.md` to `work/AGENTS.md`. `AGENTS.md` has the folder layout
+- `prepare_session` writes `session/codex_home/config.toml` from `harpor/agent/codex/config.toml`
+  and copies `harpor/agent/codex/AGENTS.md` to `work/AGENTS.md`. `AGENTS.md` has the folder layout
   and the helper syntax only, because the paper's prompts name the helpers but not their
   arguments. It tells the agent to look at PNGs with `view_image`.
 - Facts from the Codex CLI 0.162.1 source: `codex exec` reads the key only from `CODEX_API_KEY`, so
@@ -404,8 +404,8 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
 - `result.json` records the CLI exit code by name in `cli_exit`. Codex exits 1 on SIGINT, so a stop
   after `finish` shows as `error_or_interrupted`.
 - The helpers (`export_glb`, `review`, `checkpoint`, `finish`) run on the host, not in the agent's
-  container. All but `finish` end their output with the seconds left before the deadline. The commands on the agent's PATH are a small client (`gator/agent/bin/`) that sends the
-  command line over a Unix socket to the controller's tool server (`gator/agent/server.py`), which
+  container. All but `finish` end their output with the seconds left before the deadline. The commands on the agent's PATH are a small client (`harpor/agent/bin/`) that sends the
+  command line over a Unix socket to the controller's tool server (`harpor/agent/server.py`), which
   runs `tools.py` with `root/control/`. That folder is never mounted. It holds the clock record, a
   copy of the manifest and `events.jsonl`, the record of every export, review, checkpoint and
   finish with the GLB's sha256. The deadline and the deliverable come only from these events, and
@@ -454,7 +454,7 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
   agent had started with `setsid` was gone. A rerun gave the same GLB byte for byte, with
   `candidate.blend` built by the controller and a hidden 50 m cube that the agent added left out of
   the export.
-- The prompts are in `gator/agent/prompts/`, whose README gives the source, the license and the
+- The prompts are in `harpor/agent/prompts/`, whose README gives the source, the license and the
   recorded edits. `prepare_session` uses `prompts.load(mode)` when no prompt is given.
 - What the prompts expect from the helpers is now there. In refinement, the controller renders
   previews of the original (every input camera and 6 orbit views) into `original/previews/`
@@ -524,19 +524,19 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
   glass 0.907 / complete at 215 s (transparent glass, hammered surface relief);
   plate 0.497 / not run (just under the 0.5 guard; the cup hides much of it in both photos).
   No downloads in any run. Videos: `runs/videos/<object>_astra_progression.mp4`.
-- Videos: `gator/agent/blender/turntable.py` renders a 360-degree turntable of one or more GLBs in
+- Videos: `harpor/agent/blender/turntable.py` renders a 360-degree turntable of one or more GLBs in
   frame W, each asset with its own camera so all panels show the same view, joined with Blender's
   sequencer (6 s, 30 fps, H.264). Optional keys: an asset's `matrix` (4x4, row-major) maps
   the GLB's Blender world into W first, `label` may be left out, `elevation` lifts the cameras (degrees
   above the horizontal), and `frames_dir` (one asset) writes PNG frames instead of a video. The web
-  app's 360 video uses them (note 10). `python3 gator/agent/loop_trace.py RUN_DIR --turntable-args
+  app's 360 video uses them (note 10). `python3 harpor/agent/loop_trace.py RUN_DIR --turntable-args
   ARGS.json` prints a session's loop in order and writes turntable arguments for the original and
   every export. Videos so far are in `runs/videos/`.
 
 #### Agent setup and pilot checks on ICE
 
 Files: `containers/gator-agent.def` (Ubuntu 24.04, Node.js 24.21.0, Codex CLI 0.162.1, Blender
-5.2.2 and Blender's X and GL libraries) and `gator/agent/codex/config.toml`.
+5.2.2 and Blender's X and GL libraries) and `harpor/agent/codex/config.toml`.
 ICE allows unprivileged `--fakeroot` builds (tested 2026-10-14). The ICE `apptainer.conf` binds
 `/scratch` and `/storage` into every container, so the agent runs with `--containall` and both
 `--no-mount` flags, which keeps the rest of scratch (including other projects' data) out of its
@@ -570,7 +570,7 @@ reach.
 5. **Long sessions** can be launched with `nohup setsid srun ...` on the login node, so a dropped
    SSH connection does not stop them.
 
-**Claude Opus 5.5** (`gator/agent/claude_agent.py`, 2026-10-17):
+**Claude Opus 5.5** (`harpor/agent/claude_agent.py`, 2026-10-17):
 - The loop uses the `anthropic` SDK 1.15.0. It runs on the host as the session's agent process,
   with the controller's interpreter, under the same watchdog, tool server, deadline, deliverable
   check and fallback as Codex. `prepare_session` writes `control/agent.json` (agent, model
@@ -585,7 +585,7 @@ reach.
   `/work`, 300 s per command), the text editor (run on the host, confined to the work folder), and
   `view_image` (PNG or JPEG under `/work`, downscaled to at most 2576 px, the Opus 5.5 limit; a PNG
   stays lossless while its base64 fits 2.5 MB, a larger image goes as JPEG, and a session shows at
-  most 100 images and 24 MB). The system prompt is `gator/agent/claude/SYSTEM.md`, the work-folder
+  most 100 images and 24 MB). The system prompt is `harpor/agent/claude/SYSTEM.md`, the work-folder
   manual; the paper's prompt is the first user message. `--image-side N` and `--system PATH` (and
   `prepare_session(image_side=, system=)`) change the image cap and the manual for experiments.
 - The key stays in the host process's memory. The container never sees it, and the log replaces
@@ -607,7 +607,7 @@ reach.
   first manual is saved as `runs/opus_dig/system_v1.md`. Runs: `runs/<object>_mv_opus_v1b` (a repeat
   of the first harness) and `runs/<object>_mv_opus_v2`, both effort `xhigh` from the same Astra
   `original.glb` (`runs/opus_dig/run.py VARIANT OBJECT...`).
-- Photo-match scores (`gator/eval/photo_match.py`, candidate means; `runs/opus_dig/photo_match_round2.json`):
+- Photo-match scores (`harpor/eval/photo_match.py`, candidate means; `runs/opus_dig/photo_match_round2.json`):
 
   | Object | Agent | IoU | color ΔE | pixel ΔE | edge | wall s |
   |---|---|---|---|---|---|---|
@@ -696,9 +696,9 @@ reach.
   filed defect has no later edit and review would have caught neither v5 table session, because
   both fixed the defect they filed.
 
-### 6. Evaluation (`gator/eval/`)
+### 6. Evaluation (`harpor/eval/`)
 
-- `python -m gator.eval.photo_match ROOT... [--dino] [--json OUT]` scores a session's renders against
+- `python -m harpor.eval.photo_match ROOT... [--dino] [--json OUT]` scores a session's renders against
   its photos per view, with no reference mesh: mask IoU, colour ΔE inside the mask, pixel ΔE,
   gradient correlation (edge), and the same two over the photo's background (bg_de, bg_edge; the
   render is composited over the photo with the object area filled from nearby pixels).
@@ -721,7 +721,7 @@ semester. `~/.config/pip/pip.conf` (written by NVIDIA PyIndex) adds `pypi.ngc.nv
 not resolve, and pip retries it on every package, so the installs set `PIP_CONFIG_FILE=/dev/null` and
 leave the user's file as it is.
 
-### 9. Physical properties: VoMP v1.1 (`gator/physics/`)
+### 9. Physical properties: VoMP v1.1 (`harpor/physics/`)
 
 The agent's GLB is not ready for a simulator. MuJoCo 3.16.0 loads only STL, OBJ and MSH meshes and
 PNG textures, and it needs one mass and inertia per body. VoMP v1.1 takes the GLB directly and
@@ -729,7 +729,7 @@ predicts Young's modulus E (Pa), Poisson's ratio nu and density rho (kg/m^3) per
 grid. VoMP does not predict friction. Sources and the v1.1 changes are in `research.md` section 4.6.
 
 Steps for one object:
-1. **Align.** `python -m gator.physics.align --glb IN.glb --out aligned.glb [--up pca|normals | --up-near X,Y,Z] [--x pca|footprint] [--opaque]`
+1. **Align.** `python -m harpor.physics.align --glb IN.glb --out aligned.glb [--up pca|normals | --up-near X,Y,Z] [--x pca|footprint] [--opaque]`
    (in `envs/sam3d`). It writes a copy in frame S: z up, the footprint centred on the origin, the
    bottom at z = 0 and the long side on x. The BIN chunk is copied byte for byte, and the transform
    sits in one new root node. `--up pca` takes the thinnest principal axis of the surface (flat
@@ -741,15 +741,15 @@ Steps for one object:
    hint only picks the axis, so an object whose pose is a little off still rests on its base.
    `--opaque` drops transmission, volume and IOR from the materials,
    because VoMP rejects transmissive ones (the glass).
-2. **Predict.** `cd $G/VoMP && python $G/gator_clone/gator/physics/vomp_run.py --glb aligned.glb --out RUN`
+2. **Predict.** `cd $G/VoMP && python $G/gator_clone/harpor/physics/vomp_run.py --glb aligned.glb --out RUN`
    (in `envs/vomp11`, on a GPU node). It calls `get_mesh_materials` with
    `query_points="voxel_centers"` and `return_original_scale=True`, and writes `materials.npz`
    (VoMP's `save_materials` format), `voxels.npz` (every occupied voxel with the nearest
    prediction, the transform and the voxel edge) and `summary.json`.
 3. **Mass.** `summary.json` holds the mass, the COM and MuJoCo's `fullinertia` (Ixx Iyy Izz Ixy
-   Ixz Iyz about the COM), summed over all occupied voxels (`gator/physics/mass.py`). VoMP's
+   Ixz Iyz about the COM), summed over all occupied voxels (`harpor/physics/mass.py`). VoMP's
    prediction does not depend on size, but mass does, so the mesh must be in meters.
-4. **MJCF.** `python -m gator.physics.mjcf --glb aligned.glb --summary summary.json --out DIR --name NAME`
+4. **MJCF.** `python -m harpor.physics.mjcf --glb aligned.glb --summary summary.json --out DIR --name NAME`
    (in `envs/mujoco`). It writes `NAME.xml` (one free body with the `<inertial>` from
    `summary.json`, visual meshes that do not collide, and CoACD convex collision meshes),
    `scene.xml` (floor, light and the object; open it with `python -m mujoco.viewer --mjcf DIR/scene.xml`),
@@ -764,7 +764,7 @@ Steps for one object:
      scene floor, because MuJoCo uses the larger friction of two geoms with equal priority.
    - CoACD gets the welded mesh, a primitive with under 4 distinct vertices or no area is skipped,
      and the visual OBJs keep the glTF normals.
-5. **USD for Isaac Sim.** `python -m gator.physics.usd --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
+5. **USD for Isaac Sim.** `python -m harpor.physics.usd --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
    (in `envs/mujoco`, which has usd-core 26.8). It writes `NAME.usd` (RigidBodyAPI and MassAPI on the
    default prim; the full inertia as `diagonalInertia` plus `principalAxes`, because MassAPI has no
    full-tensor attribute; UsdPreviewSurface visuals with base-colour and metallicRoughness textures;
@@ -775,11 +775,11 @@ Steps for one object:
      without a texture gets the mean vertex colour. omni.physx re-cooks hulls with more than 64
      polygons (most CoACD hulls) into hulls 0.3 to 4 mm smaller, so USD and MJCF colliders differ by
      that much. Normal and occlusion maps are not exported.
-6. **Combined scenes.** `python -m gator.physics.combine_mjcf ROOT` lays all objects out on one floor
+6. **Combined scenes.** `python -m harpor.physics.combine_mjcf ROOT` lays all objects out on one floor
    (`all_objects.xml`); with `--stack-on table --stack pan,plate,coffeecup,glass,knife,fork` it puts
    the items in one column above the table, 4 cm apart, turned 40 degrees and tilted 8 degrees each, so
    they fall onto each other (`table_stack.xml`, 1 ms timestep, implicitfast). Nothing touches at the
-   start. `python -m gator.physics.usd_scene ROOT/<scene>.xml` writes the matching Isaac Sim scene with
+   start. `python -m harpor.physics.usd_scene ROOT/<scene>.xml` writes the matching Isaac Sim scene with
    the same body poses and `physxScene:timeStepsPerSecond` from the MuJoCo timestep.
 
 An articulated GLB (joints in its node extras) takes the same steps with links. Note 11 has the details.
@@ -791,7 +791,7 @@ An articulated GLB (joints in its node extras) takes the same steps with links. 
   joint when its joint is fixed or when it is a loose link welded to its holder. `--fixed-base` drops
   the root's free joint.
 - **USD:** an articulation root, one rigid body per link and one joint prim per joint.
-- **URDF:** `python -m gator.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
+- **URDF:** `python -m harpor.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
   (in `envs/mujoco`) writes `model.urdf` from the MJCF's meshes and inertials. A rigid object gives one
   link.
 
@@ -842,7 +842,7 @@ jobs, about 5 min per object; outputs in `runs/<name>_vomp11/` and `_vomp10/`, M
   and inertia (relative difference under 2e-6).
 - The batch MJCFs and USDs were not run in a simulator.
 
-### 10. Web app (`gator/webapp/`)
+### 10. Web app (`harpor/webapp/`)
 
 The app, HARPOR (High-fidelity Articulated sim-Ready Object Reconstruction), takes one phone video,
 one rosbag or one Stray Scanner capture of one object and runs the whole pipeline: frames, SAM 3
@@ -853,13 +853,13 @@ fit, the part list and the part split (for an articulated object only, note 11),
 **Start it.** Log in to ICE on the Mac so that the `cm-ice` socket is up, start an L40S job, then:
 
 ```bash
-bash gator/webapp/open_mac.sh JOBID
+bash harpor/webapp/open_mac.sh JOBID
 ```
 
 `open_mac.sh` runs `start_ice.sh` on the login node, which starts the server inside the job with
 `srun --overlap` in `envs/web`. It then forwards `localhost:8765` to the server's node and port on
 the socket and opens the login URL, which sets the login cookie. If the job already runs a
-server, `start_ice.sh` reuses it. `python -m gator.webapp --fake` runs every stage with stand-ins, so the UI
+server, `start_ice.sh` reuses it. `python -m harpor.webapp --fake` runs every stage with stand-ins, so the UI
 works on a Mac without GPUs. For an articulated job, the fake `parts` stage cuts the box at 75% of its
 height with `trimesh.intersections.slice_faces_plane` and caps the cut with a fan of triangles, because
 trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs/web` has no shapely.
@@ -879,7 +879,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
 2. The app measures the sharpness of every frame (variance of the Laplacian, relative to the
    frames within 0.5 s) and keeps up to 32 candidate frames: the sharpest frame in each time bin.
    In the same decode pass it writes `frames/preview.mp4`, a small H.264 preview of the input for the
-   results page; the `gator/webapp/video.py` docstring gives its format, its frame times and the
+   results page; the `harpor/webapp/video.py` docstring gives its format, its frame times and the
    `meta.json` "preview" record. When the encoder fails, the analysis goes on without a preview.
 3. Choose Auto (the app picks N views, default 6) or Manual (click the frames; each click snaps to
    the sharpest frame within 0.25 s). Type the object noun for SAM 3, and pick the agent:
@@ -947,7 +947,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    has transmission or alpha. For an articulated object, `align` also writes one GLB per link. Then
    VoMP (once per link for an articulated object), MJCF, USD, URDF, then the 360 video when the job
    asked for one (the `turntable` stage; a failure warns), then `results.zip`.
-8. The 360 video (`gator/webapp/turntable.py`): the GLB that physics used
+8. The 360 video (`harpor/webapp/turntable.py`): the GLB that physics used
    (`physics/up.json` "glb"), turned upright with `aligned.json` "T_s_from_w", so it shows aligned.glb's
    object and pose with all parts and the GLB's own materials. Blender renders `turntable.FRAMES` frames
    of `SIDE` x `SIDE` px (Cycles, `SAMPLES` samples, denoised) in the agent's SIF, one turn seen from
@@ -1144,13 +1144,16 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   review files (`relay.GLOBS`, owner `select`). Help explains the colors and the controls.
 - Help: the UI keeps its words short, and what the items mean and how they are found is in one
   static page, `static/help.html` (served at `/help.html`, also without the login cookie, so its
-  troubleshooting reads when the cookie is stale). The header has one Help link, which opens in a
-  new tab, so an upload or an edited list keeps going. Its section follows the screen (`HELP_AT` in
-  `app.js`): the jobs list, a waiting panel, else the tab shown. A failed job's error ends with a
-  Help link to the troubleshooting section. `tests/test_help_page.py` checks the page's numbers
-  against the code.
-- Demos: the header's Demos link opens `demos.html` in a new tab, a gallery of the finished jobs
-  that the owner picked (`gator/webapp/demos.py`). The server takes the demos folder from `--demos DIR` or
+  troubleshooting reads when the cookie is stale). The app, the help page, the demos page and the
+  public privacy page have one header: the brand (back to the app), Demos, Help and, on the public
+  site, the account menu. The link to the page itself is marked as current. From the app, Demos and
+  Help open in a new tab, so an upload or an edited list keeps going; on the other pages they open in
+  the same tab. The local help page's troubleshooting says that the app and Demos need the login. The
+  app's Help section follows the screen (`HELP_AT` in `app.js`): the jobs list, a waiting panel, else
+  the tab shown. A failed job's error ends with a Help link to the troubleshooting section.
+  `tests/test_help_page.py` checks the page's numbers against the code.
+- Demos: from the app, the header's Demos link opens `demos.html` in a new tab, a gallery of the finished jobs
+  that the owner picked (`harpor/webapp/demos.py`). The server takes the demos folder from `--demos DIR` or
   `WEBAPP_DEMOS` and serves `/demos.html` and `/demos/<name>/<file>`; `docs/public_site.md` (Demos) has the rest.
 - The node tests in `tests/test_webapp_server.py` and `tests/test_webapp_demos.py` load `app.js`.
   They need `node`, which ICE does not have, so run them on the Mac. Other tests there check the tabs
@@ -1191,7 +1194,7 @@ holds the points of the views used. A job that asked for the 360 video adds `tur
   0.28% of the diagonal from the mesh (97.5% within 2%). Upright extent 1.07 x 1.04 x 0.80 m.
   36 min in total.
 
-### 11. Articulated objects (`gator/parts/`)
+### 11. Articulated objects (`harpor/parts/`)
 
 Until 2026-10-20 the pipeline treated an object as one rigid body: SAM 3 masked the whole object,
 MV-SAM3D fused one mesh, the agent refined it, and physics exported one body. Doors, drawers and lids
@@ -1219,7 +1222,7 @@ Decisions (2026-10-20, user):
 - `run/proposal.json` (stage `propose`): `{source: vlm|user, agent, model, noun, base, parts: [{name,
   parent, joint, count, axis_hint}], warnings, seconds, mode}`. A VLM's proposal adds `attempts` and
   `answer`, and a list that the user confirmed adds `confirmed` and `edited`.
-  `gator.parts.propose.validate` checks every list: 1 to 12 entries with the base included (so at most
+  `harpor.parts.propose.validate` checks every list: 1 to 12 entries with the base included (so at most
   11 moving parts), unique slugs (`sam3_masks.slug`) that differ from the noun's and from `world`,
   every parent in the list, exactly one part without a parent (the base), and no loops. `joint` is
   revolute, prismatic, fixed or unknown. `count` (1 to 8) is the number of identical parts that one
@@ -1256,18 +1259,18 @@ Decisions (2026-10-20, user):
   leave out the origin, axis and range. `parent: "world"` with type fixed on the root marks a fixed
   base. A link other than the root without a joint is loose: physics welds it to its nearest glTF
   ancestor that holds a mesh, or else to the root. The spec is a string because Blender exports string
-  custom properties as extras reliably; readers accept a dict too. `gator/parts/joints.py` reads,
+  custom properties as extras reliably; readers accept a dict too. `harpor/parts/joints.py` reads,
   writes, checks and moves the joints. The joints live inside the GLB, so the receipts, checkpoints,
   `finish`, the deliverable and `results.zip` still deal with one GLB and one sha256.
 - Frames: every step up to the agent works in W, which is Blender's world after the stock glTF import.
-  Only `gator.physics.align` moves the joints to S, with `T_s_from_w`, and marks them `frame: "S"`.
-  `gator.physics.mjcf` refuses joints in W.
+  Only `harpor.physics.align` moves the joints to S, with `T_s_from_w`, and marks them `frame: "S"`.
+  `harpor.physics.mjcf` refuses joints in W.
 
 **Steps.** Each command runs from `$G/gator_clone`, with `G=$(readlink -f ~/scratch)/gator` and `J` the
 job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step 1 as the stage
 `propose`, steps 2 to 5 as the stage `parts`, and step 6 as its agent stage.
 
-1. **Propose** (`envs/sam3d`): `python -m gator.parts.stage propose --job "$J" [--key-file F] [--agent astra|opus|none]`
+1. **Propose** (`envs/sam3d`): `python -m harpor.parts.stage propose --job "$J" [--key-file F] [--agent astra|opus|none]`
    writes `run/proposal.json`. `--agent` defaults to the job's agent. In the mode user, or with agent
    none, it checks the typed list.
    Otherwise the VLM gets view 0's photo as a JPEG of at most 1024 px and a prompt that asks for one
@@ -1281,16 +1284,16 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
    `agent_step.scrub` with every key of the file, and an API error reports only its kind or HTTP
    status.
 2. **Part masks** (`envs/sam3seg`, with `export HF_HOME=$G/.cache/huggingface`):
-   `python -m gator.stage_a.part_masks --run "$J/run" --proposal "$J/run/proposal.json" --out "$J/run/parts/sam3"`.
+   `python -m harpor.stage_a.part_masks --run "$J/run" --proposal "$J/run/proposal.json" --out "$J/run/parts/sam3"`.
    It runs on the selected views in `run/input/images` (at most 12), not on the 32 candidates, and
    encodes each photo once for all prompts. The prompts are the part names. When the list has another
    part, the base is segmented too, first, because the vote uses the base masks. The lowest instance
    score is 0.4 (`--threshold`). There is no pick: the vote uses every instance. A rerun replaces the
    folder only after every photo is done.
-3. **Vote** (`envs/sam3d`): `python -m gator.parts.stage vote --job "$J"` writes `faces.npz` and
-   `vote.json` (`gator/parts/vote.py`) and prints one line per lost prompt, with counts per status.
+3. **Vote** (`envs/sam3d`): `python -m harpor.parts.stage vote --job "$J"` writes `faces.npz` and
+   `vote.json` (`harpor/parts/vote.py`) and prints one line per lost prompt, with counts per status.
    The rules, in short:
-   - Every view gets a face-id map of the posed mesh (`gator/parts/render.py`, painter's algorithm, at
+   - Every view gets a face-id map of the posed mesh (`harpor/parts/render.py`, painter's algorithm, at
      most 768 px on the long side). The face ids are 0-based, and -1 means no face. Only pixels inside
      the object mask, dilated by 1% of the long side, count.
    - Every SAM 3 instance is clipped to that mask. A base instance that covers more than 80% of the
@@ -1330,8 +1333,8 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
      area to the neighbour it shares the most edges with. A part left with less than 0.3% of the
      surface is `dropped_small`, and its faces go to their neighbours.
 4. **Split** (`envs/sam3d`; Blender 5.2.2 runs in the agent's SIF):
-   `python -m gator.parts.stage split --job "$J" --sif $G/sif/gator-agent.sif` runs
-   `gator/agent/blender/split_parts.py` in a container that sees only `$J/run` and the Blender scripts
+   `python -m harpor.parts.stage split --job "$J" --sif $G/sif/gator-agent.sif` runs
+   `harpor/agent/blender/split_parts.py` in a container that sees only `$J/run` and the Blender scripts
    (read-only), for at most 600 s, with the log in `run/parts/split.log`. The script imports
    `posed.glb`, bakes the transforms and joins the meshes. Each polygon gets its part by order when the
    polygon centers match the centroids in `faces.npz` in order, within 1e-4 of the centroids' diagonal.
@@ -1348,19 +1351,19 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
    part's name. The script exports with the exporter call of
    `export_glb.py` (`export_extras=True`), imports the GLB again, checks the node names and writes
    `run/parts/split_report.json`.
-5. **Finish** (`envs/sam3d`): `python -m gator.parts.stage finish --job "$J"` checks `parts.glb` with
+5. **Finish** (`envs/sam3d`): `python -m harpor.parts.stage finish --job "$J"` checks `parts.glb` with
    `controller.check_glb`, and checks that its mesh nodes are the found parts as flat root nodes
-   without transforms. It computes the boxes and the seams (`gator/parts/geometry.py`: up to 4 lines
+   without transforms. It computes the boxes and the seams (`harpor/parts/geometry.py`: up to 4 lines
    per seam, by greedy RANSAC on the cut edges) and writes `parts.json` last. A part's parent is the
    part that its proposal names. When that name was found more than once (two drawers), the parent is
    the one with the longest seam to the part. When that name was not found, the parent is the named
    part's own parent, and so on up to the base.
 6. **Agent, articulation mode** (`envs/sam3d`):
-   `python -m gator.webapp.agent_step --job "$J" --sif $G/sif/gator-agent.sif --key-file F --agent astra|opus`.
+   `python -m harpor.webapp.agent_step --job "$J" --sif $G/sif/gator-agent.sif --key-file F --agent astra|opus`.
    `agent_step` picks the mode `articulation` when the job is articulated and `run/parts.glb` exists.
    The original is `parts.glb`, `run/parts.json` becomes `work/input/parts.json`, and the budget is
    900 s (`agent_step.BUDGET_S`). Export time still moves the deadline by at most 600 s in total. The
-   prompt, `gator/agent/prompts/articulation_prompt.md`, is our own and has no recorded `CHANGES`. It
+   prompt, `harpor/agent/prompts/articulation_prompt.md`, is our own and has no recorded `CHANGES`. It
    tells the agent to compute every origin and axis in Python from the seam lines and the boxes, and
    never from an image. A door turns about the seam line on its hinged side, a lid about its back seam
    line, and a drawer slides along the thinnest axis of its obb. The agent chooses the sign of the axis
@@ -1405,13 +1408,13 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
      `articulation_reviews`, and `joints_delivered` is the number of joints in the delivered GLB.
 
 **Physics with links.** These are the steps of note 9 for a GLB with joints.
-- **Align** (`envs/sam3d`): `python -m gator.physics.align --glb IN.glb --out aligned.glb ... --links-out DIR`
+- **Align** (`envs/sam3d`): `python -m harpor.physics.align --glb IN.glb --out aligned.glb ... --links-out DIR`
   checks the joints, which must be in W, and moves them to S. `aligned.json` adds `joints` (in S),
   `links` and `fixed_base`. `--links-out` writes `DIR/<link>.glb` per mesh node: the aligned GLB with
   only that node's mesh, no joint and the same BIN chunk, so VoMP sees the textures. The web app
   passes `--links-out "$J/physics/links"` for an articulated job.
 - **VoMP** (`envs/vomp11`):
-  `cd $G/VoMP && python $G/gator_clone/gator/physics/vomp_run.py --glb aligned.glb --out RUN --links DIR`
+  `cd $G/VoMP && python $G/gator_clone/harpor/physics/vomp_run.py --glb aligned.glb --out RUN --links DIR`
   loads the model once and runs on every link GLB, each on its own 64^3 grid, into `RUN/vomp/<link>/`
   (the files of note 9). `RUN/summary.json` describes the whole object. Its `rigid_body` comes from
   `mass.combine` over the links that VoMP gave a result, and `rigid_body_covers` names those links.
@@ -1421,7 +1424,7 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
   occupied voxel). A skipped link is missing from `rigid_body`, and the MJCF gives it a hull inertial.
 - **Mass**: `mass.combine` adds the masses, weights the COM by mass and moves each inertia to the
   common COM (parallel axis theorem).
-- **MJCF** (`envs/mujoco`): `python -m gator.physics.mjcf ... [--fixed-base]`. The root link is the
+- **MJCF** (`envs/mujoco`): `python -m harpor.physics.mjcf ... [--fixed-base]`. The root link is the
   body `<name>`, with a free joint unless the GLB has a fixed base or `--fixed-base` is given. Every
   other link is the body `<name>_<link>`, nested under its parent at pos 0 (all links share frame S),
   with a `hinge` or `slide` joint at the joint's origin and axis, limited to [lower, upper], or with
@@ -1441,8 +1444,8 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
   `localPos1` at the joint's origin and the joint's x axis turned onto its axis. A loose link gets a
   fixed joint to the link that the MJCF welds it to. A fixed base is `/NAME/joints/world`, at the
   MJCF's start height. Every pair in `excluded_pairs` gets `FilteredPairsAPI`.
-- **URDF** (`envs/mujoco`, `gator/physics/urdf.py`):
-  `python -m gator.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
+- **URDF** (`envs/mujoco`, `harpor/physics/urdf.py`):
+  `python -m harpor.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
   writes `model.urdf`, `meshes/` (one OBJ per link with its MTL and textures, and the MJCF's collision
   OBJs) and `urdf.json` with `checked`. It reuses the MJCF's meshes and per-link inertials. Each part
   is a link. A part with a revolute or prismatic joint gets the joint `<child>_joint` with `<axis>`
@@ -1518,7 +1521,7 @@ after `propose` and the stages `propose`, `parts` and `urdf` are described in no
     around the gas column), with 4 lines. The first line that RANSAC found (the best fit) is 0.046 m
     long and holds 37% of the seam's length.
   - Agent: Opus 5.5, effort xhigh, mode articulation, 900 s budget, run with
-    `python -m gator.webapp.agent_step --agent opus`. It finished `articulated` after 208 s of wall
+    `python -m harpor.webapp.agent_step --agent opus`. It finished `articulated` after 208 s of wall
     time, in 8 turns, for about $0.24 (4,871 output tokens and 104,459 cache-read tokens). The first
     model turn ended 86 s after the session's clock started. A Blender script that inspected the scene
     took 4.3 s. `set_joint` at 138 s took 4.9 s. `review_articulation --states 5` took 53.3 s for 35
@@ -1577,7 +1580,7 @@ Measured times on ICE for the real chair (5 views, 10,268 faces, 2 parts):
 - No drawer, door or laptop has been tested yet, so the prompt's rules for drawers (the cavity and the
   tray), doors and lids have not met real data.
 
-### 12. Metric scale from LiDAR (`gator/stage_a/lidar_scale.py`, `gator/webapp/lidar.py`)
+### 12. Metric scale from LiDAR (`harpor/stage_a/lidar_scale.py`, `harpor/webapp/lidar.py`)
 
 The reconstruction's size comes from Depth Anything 3 Nested. DA3 Nested estimates metric depth, but
 it does not measure it. VoMP's masses grow with the size cubed, and its inertias grow with the size
@@ -1635,7 +1638,7 @@ Decisions (2026-10-21, user):
     not. The fit has a flat IoU optimum, steps of 0.0025 and ties. `place` has no thresholds that
     depend on units, only guards of 1e-6 and 1e-9.
 
-**Rosbag source** (`gator/webapp/rosbag.py`, and the stage's part in `lidar.py`):
+**Rosbag source** (`harpor/webapp/rosbag.py`, and the stage's part in `lidar.py`):
 1. **Types.** `rosbag.typestore()` is ROS 2 Humble plus the Livox `CustomMsg` and `CustomPoint` of the
    three Livox packages. A bag without its own message definitions is read with it. `open_bag` also
    adds the types that a bag lacks, so a db3 bag that defines Image but not Livox still decodes Livox.
@@ -1782,7 +1785,7 @@ Decisions (2026-10-21, user):
    example after a mask change, reads no scans. A cache without `clouds.npz`, or without a frame
    that `samples.json` lists in it, is a miss.
 
-**Stray Scanner source** (`gator/webapp/stray.py`):
+**Stray Scanner source** (`harpor/webapp/stray.py`):
 1. **The export.** Stray Scanner writes one folder per capture:
    - `rgb.mp4`: the color video (HEVC, 1920 x 1440 px on most phones), stored as the sensor sees it,
      in landscape whichever way the phone was held.
@@ -2154,14 +2157,14 @@ the job's current calibration (see the last bullet), it is the stage's done mark
   changed).
 
 **Steps** (`envs/web`, from `$G/gator_clone` on ICE, or from the repo root on the Mac).
-1. **Stage:** `python -m gator.webapp.lidar scale --job "$J"` gathers the samples (from the cache
+1. **Stage:** `python -m harpor.webapp.lidar scale --job "$J"` gathers the samples (from the cache
    first), runs the estimate, writes the check images and then `pool/lidar.json`, and prints one line
    per view. It exits 1 with the reason when the record is not ok.
-2. **Estimate alone:** `python -m gator.stage_a.lidar_scale estimate --pool P --samples S.npz --out F [--check DIR]`.
+2. **Estimate alone:** `python -m harpor.stage_a.lidar_scale estimate --pool P --samples S.npz --out F [--check DIR]`.
 
 **Web app:** note 10.
 
-**Fake mode.** `python -m gator.webapp --fake` runs the real `lidar` stage. For a job with LiDAR, the
+**Fake mode.** `python -m harpor.webapp --fake` runs the real `lidar` stage. For a job with LiDAR, the
 fake `da3` multiplies the depth, the pointmaps and the camera translations by 0.8
 (`FAKE_DA3_SCALE`), so the stage must find 1.25. The fake `place` sizes the box in the run's DA3 units
 (`run_scale`). So a scale that `select` did not apply shows as 0.8 times the size in `placement.json`

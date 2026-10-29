@@ -1334,7 +1334,7 @@ def seal(public_b64, key, aad):
     key."""
     from cryptography.hazmat.primitives.asymmetric import ec
 
-    from gator.webapp.keybox import aes, b64, peer, point, unb64
+    from harpor.webapp.keybox import aes, b64, peer, point, unb64
 
     eph = ec.generate_private_key(ec.SECP256R1())
     epk, iv = point(eph), os.urandom(12)
@@ -1345,7 +1345,7 @@ def seal(public_b64, key, aad):
 def sealed(worker, key, job, user, agent, ref=None):
     """relay()'s p_sealed for key sealed to a workers row ({"id", "public_key"}), as supa.js seal() makes it:
     {ref, worker_id, agent, epk, iv, ct}."""
-    from gator.webapp.keybox import aad
+    from harpor.webapp.keybox import aad
 
     ref = ref or str(uuid.uuid4())
     return {"ref": ref, "worker_id": worker["id"], "agent": agent,

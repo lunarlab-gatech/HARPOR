@@ -2,7 +2,7 @@
 
 The public site is a static page that talks only to Supabase. Users sign in with Google or GitHub. Every job
 runs on a user's own GPU machine. A personal worker runs inside the HARPOR server on that machine
-(`python -m gator.webapp --worker`). It signs in as the user and serves only that user's jobs on that machine.
+(`python -m harpor.webapp --worker`). It signs in as the user and serves only that user's jobs on that machine.
 Inputs stay on the machine. Jobs, views, logs and result files are copied to Supabase, so the site shows them.
 The site's owner can run a personal worker on any machine of theirs, like any other user.
 
@@ -22,9 +22,9 @@ Where the code is:
 | Part | Files |
 |---|---|
 | Database | `supabase/migrations/` (seven files), `supabase/seed.sql` and `supabase/config.toml` (local stack only) |
-| Worker | `gator/webapp/worker.py`, `relay.py`, `supa.py`, `keybox.py` and `session.py` (the worker's sign-in and commands) |
-| Page | `gator/webapp/static/supa.js`, the transport seam in `static/app.js`, `static/help.html` and `gator/webapp/site.py` |
-| Demos | `gator/webapp/demos.py` and `static/demos.html` (see Demos below) |
+| Worker | `harpor/webapp/worker.py`, `relay.py`, `supa.py`, `keybox.py` and `session.py` (the worker's sign-in and commands) |
+| Page | `harpor/webapp/static/supa.js`, `static/account.js` (the account menu), the transport seam in `static/app.js`, `static/help.html` and `harpor/webapp/site.py` |
+| Demos | `harpor/webapp/demos.py` and `static/demos.html` (see Demos below) |
 | Tests | `tests/test_supabase_sql.py` with `tests/pgcheck/`, `test_webapp_supa.py`, `test_webapp_keybox.py`, `test_webapp_relay.py`, `test_webapp_worker.py`, `test_webapp_session.py`, `test_webapp_contract.py`, `test_webapp_supa_js.py`, `test_site.py`, `test_help_page.py`, `test_webapp_demos.py` and `fake_supabase.py` |
 
 Help for users is in one file, `static/help.html` (build_plan.md note 10), and `site.py` builds the public
@@ -32,7 +32,12 @@ site's copy. The build puts the public text of `site.py`'s `HELP_PUBLIC` in plac
 marks `<!-- local:NAME -->`: the upload, the SSH tunnel, the `?token=` link and the agent "None" go, and the
 sections on the account, setting up a machine and the machines' status come in. On the public jobs list, the
 machines panel lists each machine with its state, and its "Set up a machine" link opens the setup steps on the
-help page. The banner under the header shows only the machines that are offline or stopping.
+help page. The banner under the header shows only the machines that are offline or stopping. The app, the help
+page, the demos page and the privacy page share one header with the account menu at its end. `static/account.js`
+fills the menu on each. It makes its client with the app's options, so it reads the session that the app's
+sign-in stored, and it shows the menu only while the user is signed in. A sign-in or sign-out in another tab
+shows or hides it. Sign out on a page other than the app hides the menu and stays on the page; it signs this
+browser out, so an open app tab goes back to the sign-in.
 
 ## What the worker does
 
@@ -120,17 +125,17 @@ Nothing below is done by the code. Do every account step and every git step your
    1 GB, so give each account a smaller Storage cap when you approve it (step 9). On Pro, set the project's
    global file limit first, then run the two update lines at the top of
    `supabase/migrations/20261101000400_harpor_storage.sql`.
-7. **The site config.** `python -m gator.webapp.site init --url https://<ref>.supabase.co --key
-   sb_publishable_...` writes `gator/webapp/site.json`. Add `--contact TEXT` to name a way to reach you on the
+7. **The site config.** `python -m harpor.webapp.site init --url https://<ref>.supabase.co --key
+   sb_publishable_...` writes `harpor/webapp/site.json`. Add `--contact TEXT` to name a way to reach you on the
    privacy page. The values are public by design, and the build refuses a secret key. Commit `site.json`:
-   personal machines get it with the repo, and `python -m gator.webapp.worker login` reads it (or pass
+   personal machines get it with the repo, and `python -m harpor.webapp.worker login` reads it (or pass
    `--site-config PATH`). Build the site with
-   `python -m gator.webapp.site build --demos ~/lunar_lab_research/harpor_demos`, which writes `site/` with the
+   `python -m harpor.webapp.site build --demos ~/lunar_lab_research/harpor_demos`, which writes `site/` with the
    demos (see Demos below).
 8. **The host.** The same `site/` folder works on Cloudflare Pages (upload `site/` in the dashboard, or
    `npx wrangler pages deploy site`) and on GitHub Pages. `.gitignore` leaves `site/` out of the main branch,
    so on GitHub Pages either push the contents of `site/` to a `gh-pages` branch and publish that branch, or
-   add an Actions workflow that runs `python -m gator.webapp.site build` and uploads `site/` with
+   add an Actions workflow that runs `python -m harpor.webapp.site build` and uploads `site/` with
    `actions/upload-pages-artifact`. Cloudflare also sets the security headers of `site/_headers`. Put the
    final URL into steps 2 to 4.
 9. **Approval.** Each account needs your approval, because its machines copy results into your Storage. Sign
@@ -197,12 +202,13 @@ Run these on the CLI's local stack first where possible, then on the cloud proje
 | The site under `/<repo>/` | sign in and open a job on GitHub Pages | a path that starts with `/` slipped in |
 | The demos' videos and GLBs on the host | signed out, open `demos.html` in Safari, open each card and see its video play and loop; open 3D view and watch the network list: the GLB loads only then; `curl -s -o /dev/null -D - -H "Range: bytes=0-1023" https://<site>/demos/<name>/turntable.mp4` (want 206 and `video/mp4`) | Range: Safari does not play the video; host the videos elsewhere and add that host to `media-src` |
 | The demos page under the CSP | open `demos.html` with the console open | add only what the console names, to both policies |
+| The account menu off the app | sign in on the app, then open Help and Demos: the menu shows the email and the Storage line; Sign out there hides it, the page stays and the app tab goes to the sign-in; sign in again on the app and see the menu come back on the Help tab without a reload | a menu that shows only after a reload means the other tab's event did not come (supabase-js sends it over a BroadcastChannel); no menu even then: check that both pages read the same `sb-<ref>-auth-token` key in localStorage |
 
 ## Run a personal worker on your own GPU machine
 
 The owner must approve your account before your machines can show jobs on the site.
 
-**What the machine needs.** The full HARPOR setup: the repo checkout with `gator/webapp/site.json` from the
+**What the machine needs.** The full HARPOR setup: the repo checkout with `harpor/webapp/site.json` from the
 site, the envs (`envs/web` for the server, and the stage envs), the containers and the model checkouts. The
 worker adds one package to the server's Python:
 
@@ -215,19 +221,19 @@ forward, below). It needs no open port: the worker only calls out.
 
 **Steps.**
 
-1. Sign in and add the machine: `python -m gator.webapp.worker login` (GitHub by default;
+1. Sign in and add the machine: `python -m harpor.webapp.worker login` (GitHub by default;
    `--provider google`, and `--name lab-box` for the machine's name on the site). It listens on
    127.0.0.1:8767 for the sign-in's return, so on a machine without a browser, forward the port first
    (`ssh -L 8767:127.0.0.1:8767 <machine>`), run `login --no-browser` there, and open the printed URL on your
    laptop. A code that someone else catches is useless without the verifier, which never leaves the login.
    Before the owner approves you, the login signs in, and the server adds the machine at its first start
    after the approval.
-2. Start the server with the worker: `python -m gator.webapp --worker`. It listens on 127.0.0.1 unless
+2. Start the server with the worker: `python -m harpor.webapp --worker`. It listens on 127.0.0.1 unless
    `--host` says otherwise, so the local UI stays on the machine. With `--local-keys opus` (or `astra`, or
    `astra,opus`) the worker uses the key in `~/.config/gator/anthropic.env` (or `openai.env`) when a job needs
    it, and the page sends no key. The server refuses to start when such a file is not 0600 in a 0700 folder.
 3. Open the site. The machine's jobs show there, with "on lab-box". New inputs go in through the local UI, or
-   with `python -m gator.webapp.worker add PATH`, which streams the file to the server on this machine.
+   with `python -m harpor.webapp.worker add PATH`, which streams the file to the server on this machine.
    Jobs made before your first login stay local. The server prints the local UI's URL with its login token. On
    a machine without a browser, forward the port from your laptop (`ssh -L PORT:127.0.0.1:PORT <machine>`)
    and open that URL there.
@@ -237,7 +243,7 @@ as a step of the job, from the login node, so that it shares the job's GPU and k
 
 ```bash
 nohup setsid srun --jobid=JOBID --overlap --ntasks=1 bash -lc \
-  'cd <repo> && exec <envs/web>/bin/python -m gator.webapp --worker --host 0.0.0.0' > worker.log 2>&1 < /dev/null &
+  'cd <repo> && exec <envs/web>/bin/python -m harpor.webapp --worker --host 0.0.0.0' > worker.log 2>&1 < /dev/null &
 ```
 
 - `--host 0.0.0.0` lets the login node reach the server. The login token still guards it, as in the tunnel
@@ -252,9 +258,9 @@ nohup setsid srun --jobid=JOBID --overlap --ntasks=1 bash -lc \
 
 `start_ice.sh` itself starts only the tunnel mode.
 
-`python -m gator.webapp.worker status` prints the account and the machine. While the server holds the session,
+`python -m harpor.webapp.worker status` prints the account and the machine. While the server holds the session,
 it says so; otherwise it also prints your approval, your agents and the Storage you use on the site.
-`python -m gator.webapp.worker logout` signs this machine out and takes the refresh token out of the session
+`python -m harpor.webapp.worker logout` signs this machine out and takes the refresh token out of the session
 file. The machine and its jobs stay on the site, and the file keeps the machine's id, so the next `login` on
 this machine uses the same machine on the site. Delete the file to start over as a new machine.
 
@@ -271,7 +277,7 @@ After that the folder stays on the machine, and you can delete it in the machine
 | `~/.config/gator/.harpor_session.lock` | 0600 | the lock of the one process that may use the session, with its pid |
 | `~/.config/gator/openai.env`, `anthropic.env` | 0600 | optional; read only with `--local-keys`, at the moment a job needs the key |
 | `~/.config/gator/webapp.json` | 0600 | as in the tunnel mode, plus `"worker"`: true while the worker runs in the server, else false |
-| `gator/webapp/site.json` (in the repo) | | the project's URL and publishable key, and the optional contact: public values |
+| `harpor/webapp/site.json` (in the repo) | | the project's URL and publishable key, and the optional contact: public values |
 
 No machine holds a secret key of the project. Do not copy the session file to another machine. Refresh tokens
 work once, so two machines with one file end the session for both. Run `login` on each machine.
@@ -309,11 +315,11 @@ demos are files of the site, not rows or Storage objects, so nothing in Supabase
   Each demo is a folder `<name>/` (a-z, 0-9 and -) with `demo.json` and the files it lists: `turntable.mp4`,
   `poster.jpg`, `aligned.glb` and `results.zip`. The module docstring of `demos.py` gives the format.
 - **Make a demo.** On the machine that holds the job (ICE for real jobs; `envs/web` has PyAV and Pillow):
-  `python -m gator.webapp.demos add <job folder> --out <dir>`. It takes the job's 360 video, so start the job with
+  `python -m harpor.webapp.demos add <job folder> --out <dir>`. It takes the job's 360 video, so start the job with
   "Make a 360 video" on, or give `--video`. Add `--title`, `--order` or `--fact LABEL=VALUE` (`LABEL=` removes a
   fact). A run folder without `job.json` needs `--video` and `--glb`. Copy the demo folder to the Mac's demos folder
-  with scp, then run `python -m gator.webapp.demos check`.
-- **Show it.** `python -m gator.webapp.site build --demos DIR` copies the demos into `site/`, and its second line
+  with scp, then run `python -m harpor.webapp.demos check`.
+- **Show it.** `python -m harpor.webapp.site build --demos DIR` copies the demos into `site/`, and its second line
   says how many, with the placeholders. A folder that is not there stops the build, and so does a build without a
   folder over an earlier build that had demos or placeholders: its deploy would drop the live gallery. Add `--no-demos` when that is what you want; it
   publishes "No demos yet.". A GitHub Actions build cannot see a folder outside the repo, so build on the Mac

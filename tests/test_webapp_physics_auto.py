@@ -6,9 +6,9 @@ import pytest
 import trimesh
 from PIL import Image
 
-from gator import frames
-from gator.physics.align import read_glb, write_glb
-from gator.webapp import physics_auto as A
+from harpor import frames
+from harpor.physics.align import read_glb, write_glb
+from harpor.webapp import physics_auto as A
 
 H, W = 120, 160
 K = np.array([[100.0, 0, 79.5], [0, 100.0, 59.5], [0, 0, 1]])
@@ -182,7 +182,7 @@ def test_align_job_picks_the_glb_and_aligns_it(tmp_path, capsys):
 def test_align_job_refuses_an_agent_glb_of_another_size(tmp_path, capsys):
     """The agent's GLB goes to physics only when it keeps the size of the GLB the agent started from (posed.glb,
     or parts.glb for an articulated job; controller.check_size). Else physics uses that GLB."""
-    from gator.agent.fake_agent import write_glb
+    from harpor.agent.fake_agent import write_glb
 
     j = tmp_path / "job"
     write_run(j / "run", *plane_view())
@@ -225,8 +225,8 @@ def test_align_job_needs_a_glb(tmp_path):
 def test_align_job_writes_the_links_of_an_articulated_job(tmp_path):
     """An articulated job aligns its split parts (no agent result) or the agent's GLB with joints, and
     writes one GLB per link for VoMP; the joints go to frame S. A rigid job writes no links."""
-    from gator.agent.fake_agent import write_glb
-    from gator.parts.joints import mesh_nodes
+    from harpor.agent.fake_agent import write_glb
+    from harpor.parts.joints import mesh_nodes
 
     j = tmp_path / "job"
     write_run(j / "run", *plane_view())

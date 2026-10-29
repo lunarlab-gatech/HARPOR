@@ -1,6 +1,6 @@
 """controller.NETWORK, the pattern behind result.json's network_commands (build_plan.md note 5)."""
 
-from gator.agent import controller as C
+from harpor.agent import controller as C
 
 # Known limit: text that literally says "pip install" or "curl -" is flagged, also in an echo.
 # Commands the agent ran or may run that must not be flagged. Its Blender and Python scripts use

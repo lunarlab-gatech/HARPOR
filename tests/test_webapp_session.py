@@ -1,4 +1,4 @@
-"""The personal worker's session and commands (gator/webapp/session.py): login against the fake Supabase's Auth
+"""The personal worker's session and commands (harpor/webapp/session.py): login against the fake Supabase's Auth
 through a real loopback on 127.0.0.1, the 0600 session file and its lock, the token renewal that saves first,
 status, logout, add, local keys, the server's real --worker start, and a real --worker server process that copies
 a job made with `worker add` to the fake site."""
@@ -21,7 +21,7 @@ import anyio
 import pytest
 
 import fake_supabase as fs
-from gator.webapp import server, session, supa
+from harpor.webapp import server, session, supa
 
 ROOT = Path(__file__).resolve().parents[1]
 URL = "https://abcdefghijklmnop.supabase.co"  # site.json's: the fake answers on any host
@@ -113,7 +113,7 @@ def test_login_binds_the_machine_and_writes_a_private_file(fake, home, tmp_path,
     assert re.fullmatch(r"http://127\.0\.0\.1:\d+/auth/callback", seen[0]["redirect_to"])
     out = capsys.readouterr().out
     assert "signed in as c@example.org; this machine is lab-box on the site. Start HARPOR with: python -m " \
-           "gator.webapp --worker\n" in out
+           "harpor.webapp --worker\n" in out
     assert not any(s in out for s in secrets_of(fake))
 
     # a login again keeps the machine and mirror_since (and may rename it); another account gets its own machine
@@ -188,7 +188,7 @@ def test_session_holds_the_lock_and_saves_each_new_token_first(fake, home, monke
         assert lock.read_text().strip() == str(os.getpid()) and stat.S_IMODE(lock.stat().st_mode) == 0o600
         with pytest.raises(SystemExit, match=rf"another HARPOR process holds .* \(pid {os.getpid()}\)"):
             session.Session(transport=fake.transport)
-        p = subprocess.run([sys.executable, "-c", "from gator.webapp import session; session.Session()"],
+        p = subprocess.run([sys.executable, "-c", "from harpor.webapp import session; session.Session()"],
                            capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(ROOT)})
         assert p.returncode == 1 and "another HARPOR process holds" in p.stderr
 
@@ -206,7 +206,7 @@ def test_session_holds_the_lock_and_saves_each_new_token_first(fake, home, monke
     s = session.Session(transport=fake.transport)  # free again after close()
     fake.refresh_tokens.clear()  # Supabase no longer takes the token
     try:
-        with pytest.raises(supa.SignedOut, match="run python -m gator.webapp.worker login"):
+        with pytest.raises(supa.SignedOut, match="run python -m harpor.webapp.worker login"):
             anyio.run(s.bearer)
     finally:
         s.close()
@@ -340,7 +340,7 @@ def test_add_streams_the_file_to_the_local_server_with_the_cookie(home, tmp_path
     src = tmp_path / "my clip.mp4"
     src.write_bytes(b"v" * 300_000)
     assert session.add(src) == 1
-    assert "webapp.json is missing); start it: python -m gator.webapp --worker\n" in capsys.readouterr().out
+    assert "webapp.json is missing); start it: python -m harpor.webapp --worker\n" in capsys.readouterr().out
     up = Upload()
     try:
         token = webapp_json(home, up.port)
@@ -402,7 +402,7 @@ def test_a_personal_worker_process_copies_a_job_added_with_worker_add(fake, home
     env.update(HOME=str(home), TMPDIR=str(tmp_path), PYTHONPATH=str(ROOT))
     log = tmp_path / "server.log"
     with open(log, "wb") as out:
-        p = subprocess.Popen([sys.executable, "-m", "gator.webapp", "--fake", "--worker", "--runs",
+        p = subprocess.Popen([sys.executable, "-m", "harpor.webapp", "--fake", "--worker", "--runs",
                               str(tmp_path / "runs")], cwd=ROOT, env=env, stdout=out,
                              stderr=subprocess.STDOUT)
     info = home / ".config" / "gator" / "webapp.json"

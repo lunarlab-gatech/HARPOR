@@ -5,9 +5,9 @@ import pytest
 import trimesh
 from PIL import Image
 
-from gator import frames
-from gator.parts import render
-from gator.parts import vote as V
+from harpor import frames
+from harpor.parts import render
+from harpor.parts import vote as V
 
 W, H = 200, 150
 K = np.array([[220.0, 0, 99.5], [0, 220.0, 74.5], [0, 0, 1]])

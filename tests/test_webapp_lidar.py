@@ -1,4 +1,4 @@
-"""The lidar stage (gator/webapp/lidar.py) on synthetic bags of fake_steps' scene: a box filmed by a
+"""The lidar stage (harpor/webapp/lidar.py) on synthetic bags of fake_steps' scene: a box filmed by a
 camera that circles it, with a LiDAR fixed to the camera. All data is made here."""
 
 import contextlib
@@ -18,10 +18,10 @@ from PIL import Image
 pytest.importorskip("rosbags")
 from test_webapp_rosbag import CI, IMG, PC2, TFM, matrix, write_bag  # noqa: E402
 
-from gator.stage_a import lidar_scale, mvsam3d  # noqa: E402
-from gator.webapp import fake_steps as F  # noqa: E402
-from gator.webapp import lidar as L  # noqa: E402
-from gator.webapp import jobs, rosbag, steps  # noqa: E402
+from harpor.stage_a import lidar_scale, mvsam3d  # noqa: E402
+from harpor.webapp import fake_steps as F  # noqa: E402
+from harpor.webapp import lidar as L  # noqa: E402
+from harpor.webapp import jobs, rosbag, steps  # noqa: E402
 
 S0 = 1_749_907_120 * 10**9
 LAG = 50_000_000  # every message is logged 50 ms after its stamp
@@ -1044,7 +1044,7 @@ def make_stray_job(root, portrait=0, n=24, **kw):
     fake_steps' masks, prep and the fake DA3 (FAKE_DA3_SCALE, since the job has LiDAR)."""
     from test_webapp_stray import write_stray
 
-    from gator.webapp import video
+    from harpor.webapp import video
 
     J = root / "job"
     (J / "video").mkdir(parents=True)
@@ -1068,7 +1068,7 @@ def make_stray_job(root, portrait=0, n=24, **kw):
 def test_a_stray_capture_gives_the_scale_and_its_cache(tmp_path, capsys, monkeypatch):
     """A portrait capture: its depth images, turned upright as the frames were, give the scale that the
     fake DA3 lacks; a rerun reads no depth image, and another zip does."""
-    from gator.webapp import stray
+    from harpor.webapp import stray
 
     J = make_stray_job(tmp_path, portrait=1)
     capsys.readouterr()
@@ -1158,7 +1158,7 @@ def test_stray_samples_without_depth_and_each_failure(tmp_path, monkeypatch):
     """Frames without a depth image, or with one but without its confidence image, get no samples, with
     a warning; a missing zip, a frames analysis that is not a capture's, or a bag's LiDAR setting on a
     capture fail with the reason, as does a disk too full to unpack the capture again."""
-    from gator.webapp import stray
+    from harpor.webapp import stray
 
     J = make_stray_job(tmp_path, n=24, n_depth=22, without_confidence=range(1, 22, 4))
     job = json.loads((J / "job.json").read_text())

@@ -1,4 +1,4 @@
-"""gator/webapp/site.py: the public site's static folder."""
+"""harpor/webapp/site.py: the public site's static folder."""
 import base64
 import functools
 import hashlib
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from gator.webapp import site
+from harpor.webapp import site
 
 ROOT = Path(__file__).resolve().parents[1]
 CFG = {"url": "https://abcdefghijklmnop.supabase.co", "publishableKey": "sb_publishable_AbCdEf_0123456789"}
@@ -96,9 +96,9 @@ def csp_of_headers(out):
 def test_build_writes_every_part_of_the_site(built):
     files = sorted(p.relative_to(built).as_posix() for p in built.rglob("*") if p.is_file())
     assert files == sorted([".nojekyll", "_headers", "demos.html", "help.html", "index.html", "privacy.html", "static/app.js",
-                            "static/config.js", "static/demos.js", "static/style.css", "static/supa.js"] +
-                           [f"static/vendor/{v}" for v in site.VENDOR])
-    for name in ("app.js", "style.css", "supa.js", "demos.js"):
+                            "static/config.js", "static/demos.js", "static/style.css", "static/supa.js",
+                            "static/account.js"] + [f"static/vendor/{v}" for v in site.VENDOR])
+    for name in ("app.js", "style.css", "supa.js", "account.js", "demos.js"):
         assert (built / "static" / name).read_bytes() == (site.STATIC / name).read_bytes()
     for rel in site.VENDOR:
         assert (built / "static/vendor" / rel).read_bytes() == (site.STATIC / "vendor" / rel).read_bytes()
@@ -161,7 +161,7 @@ def test_public_index_is_the_tunnel_page_made_public(built):
         assert not target or (built / target).is_file(), link
     scripts = [a["src"] for t, a in page.tags if t == "script"]
     assert scripts == ["static/vendor/model-viewer-4.4.0.min.js", "static/vendor/supabase-2.118.0.js", "static/config.js",
-                       "static/supa.js", "static/app.js"]
+                       "static/account.js", "static/supa.js", "static/app.js"]
     ids = {a.get("id") for _, a in page.tags}
     for i in ("harpor-account", "harpor-email", "harpor-who", "harpor-storage", "harpor-signout", "harpor-banner", "harpor-signin",
               "harpor-google", "harpor-github", "harpor-signinmsg", "harpor-waiting", "harpor-request", "harpor-note",
@@ -197,6 +197,47 @@ def test_public_index_is_the_tunnel_page_made_public(built):
     own = html[html.index('id="harpor-own"'):html.index("</section>", html.index('id="harpor-own"'))]
     assert '<a href="help.html#machine" target="_blank" rel="noopener">Set up a machine</a>' in own
     assert "<code>" not in own and "--worker" not in html  # the steps are on the help page
+
+
+def test_one_header_on_every_page(built):
+    """The app, the help page and the demos page have one header, on the tunnel and on the public site, and so does
+    the public privacy page: the brand (back to the app), Demos, Help and, on the public site only, the account menu
+    with its Privacy link, in that order. The link to the page itself is aria-current="page", which style.css shows as
+    current; the app's two links open in a new tab, the others in the same tab. The demos page's Help goes to the help
+    page's demos section. On the public pages other than the app account.js fills the menu, and the policy lets it
+    reach the project's API."""
+    def links(text):
+        header = text[text.index("<header>"):text.index("</header>")]
+        return [(dict(re.findall(r'([\w-]+)="([^"]*)"', attrs)), label)
+                for attrs, label in re.findall(r"<a ([^>]*)>([^<]*)</a>", header)]
+    pages = ("index.html", "help.html", "demos.html")
+    for public in (False, True):
+        for page in pages + (("privacy.html",) if public else ()):
+            text = (built / page if public else site.STATIC / page).read_text()
+            got = links(text)
+            assert [label for _, label in got] == ["HARPOR", "Demos", "Help"] + (["Privacy"] if public else []), page
+            (brand, _), (demo, _), (help_, _) = got[:3]
+            home = "#/" if page == "index.html" else "index.html" if public else "/"
+            assert brand == {"href": home, "class": "brand"}, page
+            assert (demo["id"], demo["href"]) == ("demolink", "demos.html"), page
+            assert (help_["id"], help_["href"]) == ("helplink", "help.html#demos" if page == "demos.html" else "help.html")
+            current = {"help.html": help_, "demos.html": demo}.get(page)
+            assert [a.get("aria-current") for a in (demo, help_)] == [("page" if a is current else None)
+                                                                      for a in (demo, help_)], page
+            tab = ("_blank", "noopener") if page == "index.html" else (None, None)
+            assert [(a.get("target"), a.get("rel")) for a in (demo, help_)] == [tab, tab], page
+            header = text[text.index("<header>"):text.index("</header>")]
+            assert ('id="harpor-account"' in header) is public, page
+            if public:
+                assert header.index('id="helplink"') < header.index('id="harpor-account"'), page
+                scripts = [a["src"] for t, a in parse(built / page).tags if t == "script"]
+                assert [s for s in scripts if s in site.ACCOUNT_SCRIPTS] == list(site.ACCOUNT_SCRIPTS), page
+    for page in ("help.html", "demos.html", "privacy.html"):
+        rules = dict(r.split(" ", 1) for r in csp_of_meta(built / page).split("; "))
+        assert rules["connect-src"] == "'self' blob: https://abcdefghijklmnop.supabase.co wss://abcdefghijklmnop.supabase.co"
+    css = (site.STATIC / "style.css").read_text()
+    rule = re.search(r"\n#demolink\[aria-current=page\], #helplink\[aria-current=page\] \{([^}]*)\}", css)[1]
+    assert "color: var(--fg)" in rule and "text-decoration: underline" in rule and "thickness: 1px" in rule
 
 
 def test_tunnel_index_is_unchanged_and_loads_no_supabase_script():
@@ -244,8 +285,9 @@ def test_privacy_page_says_where_data_lives_and_who_can_see_keys(built):
 
 
 def test_public_help_page(built):
-    """help.html on the public site: the CSP and referrer metas first, as on every page; no script, inline style or
-    event attribute; relative links only, each to a file of the site or a section of the page. It adds the sections
+    """help.html on the public site: the CSP and referrer metas first, as on every page; the account menu, hidden,
+    and only the site's own scripts that fill it (static/help.html has none); no inline script, inline style or event
+    attribute; relative links only, each to a file of the site or a section of the page. It adds the sections
     that only the public site has (the account, setting up a machine, the machines' status) after About, in the
     contents too, with the machine steps and the agents' network access, and holds none of the tunnel page's own
     text: the upload, the SSH tunnel, the ?token= link and the agent "None"."""
@@ -254,7 +296,8 @@ def test_public_help_page(built):
                              ("meta", {"http-equiv": "Content-Security-Policy", "content": csp_of_meta(built / "help.html")}),
                              ("meta", {"name": "referrer", "content": "no-referrer"})]
     assert ("a", {"href": "index.html", "class": "brand"}) in page.tags
-    assert not [t for t, _ in page.tags if t == "script"] and page.inline == []
+    assert [a["src"] for t, a in page.tags if t == "script"] == list(site.ACCOUNT_SCRIPTS) and page.inline == []
+    assert ("details", {"id": "harpor-account", "class": "account", "hidden": None}) in page.tags
     assert not any("style" in a or any(k.startswith("on") for k in a) for _, a in page.tags)
     ids = [a["id"] for _, a in page.tags if "id" in a]
     assert len(ids) == len(set(ids))
@@ -268,9 +311,9 @@ def test_public_help_page(built):
     nav = re.search(r'<nav class="toc" aria-label="Contents">(.*?)</nav>', source, re.S)[1]
     assert re.findall(r'href="#([\w-]+)"', nav) == sections
     text = html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", source)))
-    for want in ("pip install cryptography==50.0.2", "python -m gator.webapp.worker login",
-                 "ssh -L 8767:127.0.0.1:8767 <machine>", "python -m gator.webapp --worker. Add --local-keys opus",
-                 "python -m gator.webapp.worker add PATH", "offline or stopping",
+    for want in ("pip install cryptography==50.0.2", "python -m harpor.webapp.worker login",
+                 "ssh -L 8767:127.0.0.1:8767 <machine>", "python -m harpor.webapp --worker. Add --local-keys opus",
+                 "python -m harpor.webapp.worker add PATH", "offline or stopping",
                  "GPT-6-Astra runs the Codex CLI in a container that can reach the network.",
                  "These commands run on the GPU machine that runs the job.",
                  "Claude Opus 5.5 runs its shell with no network access.", "Signed out. Reload to sign in.",
@@ -309,7 +352,7 @@ def test_tunnel_help_page_and_its_public_blocks():
 def test_public_help_numbers_are_the_databases(built):
     """The public help page's own numbers come from the SQL: how long a request waits for its machine
     (settings.pending_days), how long a machine that has not run still shows (the workers' row policy), the length of
-    an access request and how often one can be sent. Its storage line has the form that supa.js writes."""
+    an access request and how often one can be sent. Its storage line has the form that account.js writes."""
     sql = "\n".join(p.read_text() for p in sorted((ROOT / "supabase" / "migrations").glob("*.sql")))
     pending = re.search(r"pending_days int not null default (\d+)", sql)[1]
     seen = re.search(r"last_seen > now\(\) - interval '(\d+) days'", sql)[1]
@@ -319,7 +362,7 @@ def test_public_help_numbers_are_the_databases(built):
     for want in (f"within {pending} days", f"in the last {seen} days", f"in {low} to {high} characters",
                  "one request a day", "Storage: 120 of 2,048 MB"):
         assert want in text, want
-    assert "`Storage: ${mib(r.data)} of ${mib(access.max_result_bytes)} MB`" in (site.STATIC / "supa.js").read_text()
+    assert "`Storage: ${mib(r.data)} of ${mib(access.max_result_bytes)} MB`" in (site.STATIC / "account.js").read_text()
 
 
 def served(built, tmp_path):
@@ -363,11 +406,11 @@ def test_site_with_demos_served_under_a_repo_path(tmp_path, demo_dir):
 
 
 def test_build_with_demos(tmp_path, demo_dir):
-    """demos.html: the CSP and referrer metas first, the site's own model-viewer and demos.js, no other script or inline style,
-    relative links that each go to a file of the site or to a section of the page (a card to its demo, a demo back to
-    the gallery), the placeholders' cards after the demo's, and the demo's files copied byte for byte. A demos folder
-    that breaks a rule, or that looks private, stops the build, and nothing is written. Without a folder the page says
-    "No demos yet."."""
+    """demos.html: the CSP and referrer metas first, the site's own model-viewer and demos.js, the account menu's own
+    scripts and no other script or inline style, relative links that each go to a file of the site or to a section of
+    the page (a card to its demo, a demo back to the gallery), the placeholders' cards after the demo's, and the
+    demo's files copied byte for byte. A demos folder that breaks a rule, or that looks private, stops the build, and
+    nothing is written. Without a folder the page says "No demos yet."."""
     out = tmp_path / "site"
     (demo_dir / "placeholders.json").write_text(json.dumps({"version": 1, "placeholders": ["Laptop", "Door"]}))
     written = site.build(out, write_cfg(tmp_path), demo_dir=demo_dir)
@@ -380,7 +423,8 @@ def test_build_with_demos(tmp_path, demo_dir):
     assert page.head[:3] == [("meta", {"charset": "utf-8"}),
                              ("meta", {"http-equiv": "Content-Security-Policy", "content": csp_of_meta(out / "demos.html")}),
                              ("meta", {"name": "referrer", "content": "no-referrer"})]
-    assert [a["src"] for t, a in page.tags if t == "script"] == ["static/vendor/model-viewer-4.4.0.min.js", "static/demos.js"]
+    assert [a["src"] for t, a in page.tags if t == "script"] == ["static/vendor/model-viewer-4.4.0.min.js", "static/demos.js",
+                                                                 *site.ACCOUNT_SCRIPTS]
     assert page.inline == [] and not any("style" in a or any(k.startswith("on") for k in a) for _, a in page.tags)
     assert ("a", {"href": "index.html", "class": "brand"}) in page.tags
     ids = {a["id"] for _, a in page.tags if "id" in a}
@@ -502,7 +546,7 @@ def test_config_checks(tmp_path):
     assert site.check_config({**CFG, "contact": "room 101"})["contact"] == "room 101"
     assert site.check_config({**CFG, "_comment": "a note"})["_comment"] == "a note"
     assert "_comment" not in site.config_js({**CFG, "_comment": "a note"})
-    with pytest.raises(site.SiteError, match="run python -m gator.webapp.site init"):
+    with pytest.raises(site.SiteError, match="run python -m harpor.webapp.site init"):
         site.load_config(tmp_path / "none.json")
 
 
@@ -535,9 +579,9 @@ def test_build_replaces_only_an_earlier_build(tmp_path, built):
 
 
 def run_site(*args):
-    """python -m gator.webapp.site with args, without WEBAPP_DEMOS."""
+    """python -m harpor.webapp.site with args, without WEBAPP_DEMOS."""
     env = {k: v for k, v in os.environ.items() if k != "WEBAPP_DEMOS"}
-    return subprocess.run([sys.executable, "-m", "gator.webapp.site", *args], cwd=ROOT, capture_output=True, text=True,
+    return subprocess.run([sys.executable, "-m", "harpor.webapp.site", *args], cwd=ROOT, capture_output=True, text=True,
                           timeout=60, env=env)
 
 

@@ -1,4 +1,4 @@
-"""The Claude Opus 5.5 agent loop (gator/agent/claude_agent.py) with fake clients (build_plan.md note 5).
+"""The Claude Opus 5.5 agent loop (harpor/agent/claude_agent.py) with fake clients (build_plan.md note 5).
 
 No test reaches the network. The scripted responses are the SDK's own beta types
 (BetaMessage.model_validate), so their content blocks behave like real ones; one test runs the real
@@ -25,7 +25,7 @@ anthropic = pytest.importorskip("anthropic")
 httpx2 = pytest.importorskip("httpx2")
 from anthropic.types.beta import BetaMessage  # noqa: E402
 
-from gator.agent import claude_agent as A  # noqa: E402
+from harpor.agent import claude_agent as A  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 PROMPT = "Prompt 1, byte for byte: é\n"
@@ -743,7 +743,7 @@ def test_cap_output():
 def test_container_mode_uses_controller_shell_command(tmp_path, monkeypatch):
     """Without --shell host the argv comes from controller.shell_command(root, sif, sock_dir), imported
     when the shell starts; PATH is left to the container."""
-    import gator.agent
+    import harpor.agent
 
     seen = []
 
@@ -752,8 +752,8 @@ def test_container_mode_uses_controller_shell_command(tmp_path, monkeypatch):
         return ["bash", "--noprofile", "--norc"]
 
     fake = SimpleNamespace(shell_command=shell_command)
-    monkeypatch.setitem(sys.modules, "gator.agent.controller", fake)
-    monkeypatch.setattr(gator.agent, "controller", fake, raising=False)
+    monkeypatch.setitem(sys.modules, "harpor.agent.controller", fake)
+    monkeypatch.setattr(harpor.agent, "controller", fake, raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
     (tmp_path / "work").mkdir()
     sh = A.ContainerShell(tmp_path, "agent.sif", "/tmp/sock")
@@ -1226,7 +1226,7 @@ AGENT_SCRIPT = r'''
 import sys, time
 from types import SimpleNamespace
 from anthropic.types.beta import BetaMessage
-from gator.agent import claude_agent as A
+from harpor.agent import claude_agent as A
 
 root, key_file, command = sys.argv[1:4]
 

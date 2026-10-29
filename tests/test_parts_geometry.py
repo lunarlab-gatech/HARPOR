@@ -2,7 +2,7 @@ import numpy as np
 import trimesh
 from scipy.spatial.transform import Rotation
 
-from gator.parts import geometry as G
+from harpor.parts import geometry as G
 
 
 def split_box(n=2):

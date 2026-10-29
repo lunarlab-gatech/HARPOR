@@ -1,5 +1,5 @@
-"""static/supa.js (the public site's transport) and app.js's seam, in node with a stand-in DOM and a stand-in supabase
-client. No network, no Supabase project."""
+"""static/supa.js (the public site's transport), static/account.js (the account menu) and app.js's seam, in node with
+a stand-in DOM and a stand-in supabase client. No network, no Supabase project."""
 import base64
 import json
 import re
@@ -11,9 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from gator.webapp import jobs, server, steps
+from harpor.webapp import jobs, server, steps
 
 SUPA = server.STATIC / "supa.js"
+ACCOUNT = server.STATIC / "account.js"
 APP = server.STATIC / "app.js"
 CONFIG = {"url": "https://abcdefghijklmnop.supabase.co", "publishableKey": "sb_publishable_test"}
 USER = "11111111-1111-4111-8111-111111111111"
@@ -32,11 +33,12 @@ MACHINES = ((MACHINE, "lab-box"), (MACHINE2, "desk-pc"))
 # The stand-in supabase client works on `db`: tables of rows, rpc handlers by name (job_objects lists a job's Storage
 # objects unless a test sets its own), Storage objects that can be signed and removed (db.fail.remove makes a remove
 # fail), Realtime channels that a test feeds with emit(table, event, row), and an auth session. Every call goes to
-# `calls`. The test's setup code runs before supa.js and app.js load, its code after; the code prints JSON last.
-# settle(promise) advances the clock until the promise settles (a relayed request waits on timers).
+# `calls`. The test's setup code runs before account.js, supa.js and app.js load, its code after; the code prints JSON
+# last. settle(promise) advances the clock until the promise settles (a relayed request waits on timers); loaded()
+# fires DOMContentLoaded, which a browser fires once it has run the page's scripts.
 HARNESS = r"""
 const fs = require("fs"), vm = require("vm"), { webcrypto } = require("crypto");
-const [supaPath, appPath, optsJson, setupCode, testCode] = process.argv.slice(2);
+const [accountPath, supaPath, appPath, optsJson, setupCode, testCode] = process.argv.slice(2);
 const opts = JSON.parse(optsJson);
 const ctx = vm.createContext({ console, URL, URLSearchParams, TextEncoder, TextDecoder, Response, Headers, Blob, atob, btoa,
   crypto: webcrypto, realImmediate: setImmediate, opts });
@@ -134,6 +136,7 @@ async function settle(p, ms = 200000) {
   for (let t = 0; t < ms && !done; t += 250) await advance(250);
   return p;
 }
+const loaded = () => docListeners.filter((l) => l.type === "DOMContentLoaded").forEach((l) => l.fn());
 globalThis.addEventListener = (type, fn) => winListeners.push({ type, fn });
 globalThis.matchMedia = () => ({ matches: false });
 globalThis.confirm = () => true;
@@ -255,20 +258,23 @@ const out = (x) => console.log(JSON.stringify(x));
 const run = (code, name) => vm.runInContext(code, ctx, { filename: name });
 try {
   run(setupCode, "setup");
-  run(fs.readFileSync(supaPath, "utf8"), "supa.js");
+  run(fs.readFileSync(accountPath, "utf8"), "account.js");
+  if (supaPath) run(fs.readFileSync(supaPath, "utf8"), "supa.js");
   if (appPath) run(fs.readFileSync(appPath, "utf8"), "app.js");
   Promise.resolve(run(testCode, "test")).catch((e) => { console.error(e.stack); process.exitCode = 1; });
 } catch (e) { console.error(e.stack); process.exitCode = 1; }
 """
 
 
-def run_js(code, setup="", config=CONFIG, app=True, href="https://x.pages.dev/", framed=False, agents=None):
-    """Load supa.js (with HARPOR_CONFIG unless config is None) and app.js in HARNESS after setup; run code, an async
-    function body; return the JSON it printed last."""
+def run_js(code, setup="", config=CONFIG, app=True, href="https://x.pages.dev/", framed=False, agents=None, supa=True):
+    """Load account.js, supa.js (with HARPOR_CONFIG unless config is None) and app.js in HARNESS after setup; run code,
+    an async function body; return the JSON it printed last. supa=False loads account.js alone, as help.html and
+    demos.html do."""
     if shutil.which("node") is None:
         pytest.skip("no node")
     opts = {"config": config, "href": href, "framed": framed, **({"agents": agents} if agents else {})}
-    p = subprocess.run(["node", "-e", HARNESS, "-", str(SUPA), str(APP) if app else "", json.dumps(opts),
+    p = subprocess.run(["node", "-e", HARNESS, "-", str(ACCOUNT), str(SUPA) if supa else "",
+                        str(APP) if app and supa else "", json.dumps(opts),
                         textwrap.dedent(setup), "(async () => {" + textwrap.dedent(code) + "})()"],
                        capture_output=True, text=True, timeout=60)
     assert p.returncode == 0, p.stderr
@@ -639,6 +645,164 @@ def test_page_in_a_frame_shows_nothing():
     assert out == {"hidden": True, "calls": [], "fetched": [], "pub": True, "routing": False,
                    "keys": sorted(["fetch", "url", "events", "live", "keyless", "noJobs", "ready", "liveLog", "offline",
                                    "unauthorized"])}
+
+
+# ---- account.js: the account menu on the app, the help page and the demos page ----
+
+# The menu as account.js left it: hidden, its lines, the client it made, what it read and whether the page reloaded.
+# q, not app.js's $: help.html and demos.html have no app.js.
+MENU = """((q) => ({ hidden: q("#harpor-account").hidden, open: q("#harpor-account").open,
+  email: q("#harpor-email").textContent, who: q("#harpor-who").textContent, storage: q("#harpor-storage").textContent,
+  clients: calls.filter((c) => c.createClient).map((c) => c.createClient), signOut: calls.filter((c) => c.signOut),
+  reads: calls.filter((c) => c.table).map((c) => [c.table, c.cols]), rpc: calls.filter((c) => c.rpc).map((c) => c.rpc),
+  reloads }))((sel) => document.querySelector(sel))"""
+
+
+def test_account_menu_on_the_app_comes_from_account_js():
+    """On the app supa.js takes account.js's client (one client, PKCE) and has it show the menu after its own sign-in:
+    the email twice and the storage line. The end of the page's parse starts nothing more (the help pages' path does
+    not run there). Sign out signs this browser out and reloads the page."""
+    out = run_js(f"""
+        await advance(0);
+        loaded();
+        await advance(0);
+        const before = {MENU};
+        await $("#harpor-signout").onclick();
+        out({{ before, after: {MENU} }});
+        """, setup=account())
+    before, after = out["before"], out["after"]
+    assert before["hidden"] is False and before["email"] == before["who"] == "ana@example.org"
+    assert before["storage"] == "Storage: 120 of 2,048 MB" and before["reloads"] == 0
+    assert len(before["clients"]) == 1 and before["clients"][0][2]["auth"]["flowType"] == "pkce"
+    assert [r for r in before["reads"] if r[0] == "access"] == [["access", "approved,agents,max_result_bytes,request_at"]]
+    assert before["rpc"] == ["storage_used"]
+    assert after["signOut"] == [{"signOut": {"scope": "local"}}] and after["reloads"] == 1
+
+
+def test_account_menu_on_the_help_and_demos_pages():
+    """account.js alone (help.html and demos.html have no supa.js): once the page is parsed it reads the stored session
+    with the app's client options, and so the app's sign-in. Signed in, it fills the menu as the app does (the email
+    twice, the storage line of an approved account) and shows it; a click elsewhere and Escape close it, a click in it
+    does not. Sign out signs this browser out, hides the menu and the page stays; a sign-out in another tab hides it
+    too. Nothing runs before the end of the parse."""
+    out = run_js(f"""
+        await advance(0);
+        const early = calls.length;
+        loaded();
+        await advance(0);
+        const $ = (sel) => document.querySelector(sel);
+        const shown = {MENU}, menu = $("#harpor-account"), inner = new Elem("p"), click = (target) =>
+          docListeners.filter((l) => l.type === "click").forEach((l) => l.fn({{ target }}));
+        menu.append(inner);
+        menu.open = true;
+        click(inner);
+        const inside = menu.open;
+        click(document.body);
+        const outside = menu.open;
+        menu.open = true;
+        docListeners.filter((l) => l.type === "keydown").forEach((l) => l.fn({{ key: "Escape" }}));
+        const escape = menu.open;
+        menu.open = true;
+        await $("#harpor-signout").onclick();
+        const gone = {MENU};
+        menu.hidden = false;
+        db.authCb("SIGNED_OUT");
+        out({{ early, shown, inside, outside, escape, gone, elsewhere: menu.hidden }});
+        """, setup=account(), supa=False)
+    shown, gone = out["shown"], out["gone"]
+    assert out["early"] == 0
+    assert shown["hidden"] is False and shown["email"] == shown["who"] == "ana@example.org"
+    assert shown["storage"] == "Storage: 120 of 2,048 MB"
+    assert shown["clients"] == [[CONFIG["url"], CONFIG["publishableKey"], {"auth": {
+        "flowType": "pkce", "persistSession": True, "autoRefreshToken": True, "detectSessionInUrl": True}}]]
+    assert shown["reads"] == [["access", "approved,max_result_bytes"]] and shown["rpc"] == ["storage_used"]
+    assert (out["inside"], out["outside"], out["escape"]) == (True, False, False)
+    assert gone["signOut"] == [{"signOut": {"scope": "local"}}] and gone["hidden"] is True and gone["open"] is False
+    assert gone["reloads"] == 0 and out["elsewhere"] is True
+
+
+def test_account_menu_stays_hidden_signed_out_and_in_a_frame():
+    """account.js alone: signed out the menu stays hidden and nothing is read; an account that waits for approval gets
+    the menu without the storage line; in a frame (a click trap) it makes no client and shows nothing; without
+    HARPOR_CONFIG (no site) it does nothing."""
+    code = f"loaded(); await advance(0); out({MENU});"
+    out = run_js(code, setup="db.session = null;", supa=False)
+    assert out["hidden"] is True and len(out["clients"]) == 1 and out["reads"] == [] and out["rpc"] == []
+    out = run_js(code, setup=account(approved=False), supa=False)
+    assert out["hidden"] is False and out["who"] == "ana@example.org" and out["storage"] == "" and out["rpc"] == []
+    for kw in ({"framed": True}, {"config": None}):
+        out = run_js(code, setup=account(), supa=False, **kw)
+        assert out["hidden"] is True and out["clients"] == [] and out["reads"] == [] and out["email"] == ""
+
+
+def test_account_menu_follows_a_sign_in_in_another_tab():
+    """account.js alone, signed out at first: a sign-in in another tab (supabase-js's SIGNED_IN) shows the menu, and
+    the storage line comes after the callback ends. A later SIGNED_IN (the tab gets the focus back) reads nothing
+    again. A sign-out hides the menu and takes the storage line away, and the next sign-in shows it again. The click
+    and Escape handlers are added once."""
+    out = run_js(f"""
+        loaded();
+        await advance(0);
+        const before = {MENU};
+        const session = {{ user: {{ id: "u2", email: "bo@example.org" }} }};
+        db.authCb("SIGNED_IN", session);
+        const at_once = {MENU};
+        await advance(0);
+        const shown = {MENU};
+        db.authCb("SIGNED_IN", session);
+        await advance(0);
+        const again = {MENU};
+        db.authCb("SIGNED_OUT", null);
+        const gone = {MENU};
+        db.authCb("SIGNED_IN", session);
+        db.authCb("TOKEN_REFRESHED", session);
+        await advance(0);
+        const back = {MENU};
+        const handlers = ["click", "keydown"].map((t) => docListeners.filter((l) => l.type === t).length);
+        out({{ before, at_once, shown, again, gone, back, handlers }});
+        """, setup=account() + "db.session = null;", supa=False)
+    assert out["before"]["hidden"] is True and out["before"]["reads"] == []
+    assert out["at_once"]["hidden"] is False and out["at_once"]["who"] == "bo@example.org"
+    assert out["at_once"]["reads"] == [] and out["at_once"]["storage"] == ""
+    assert out["shown"]["reads"] == [["access", "approved,max_result_bytes"]]
+    assert out["shown"]["storage"] == "Storage: 120 of 2,048 MB"
+    assert out["again"]["reads"] == out["shown"]["reads"] and out["again"]["rpc"] == ["storage_used"]
+    assert out["gone"]["hidden"] is True and out["gone"]["storage"] == ""
+    assert out["back"]["hidden"] is False and len(out["back"]["reads"]) == 2 and out["back"]["storage"] != ""
+    assert out["handlers"] == [1, 1] and out["back"]["reloads"] == 0
+
+
+def test_account_menu_keeps_the_keyboard_focus():
+    """Escape from a line of the open menu closes it and puts the focus on the person icon; Escape with the menu shut
+    does nothing, and Escape with the focus elsewhere closes the menu and leaves the focus there. Sign out on the help
+    or demos page moves the focus from the hidden menu to the Help link."""
+    out = run_js("""
+        loaded();
+        await advance(0);
+        const $ = (sel) => document.querySelector(sel), menu = $("#harpor-account"), btn = $("#harpor-signout");
+        const focused = [], esc = () =>
+          docListeners.filter((l) => l.type === "keydown").forEach((l) => l.fn({ key: "Escape" }));
+        $("#harpor-account > summary").focus = () => focused.push("icon");
+        $("#helplink").focus = () => focused.push("help");
+        menu.append(btn);
+        document.activeElement = btn;
+        esc();
+        const shut = [menu.open, [...focused]];
+        menu.open = true;
+        esc();
+        const closed = [menu.open, [...focused]];
+        menu.open = true;
+        document.activeElement = document.body;
+        esc();
+        const still = [menu.open, [...focused]];
+        menu.open = true;
+        document.activeElement = btn;
+        await btn.onclick();
+        out({ shut, closed, still, after: [...focused], hidden: menu.hidden });
+        """, setup=account(), supa=False)
+    assert out["shut"] == [False, []]
+    assert out["closed"] == [False, ["icon"]] and out["still"] == [False, ["icon"]]
+    assert out["after"] == ["icon", "help"] and out["hidden"] is True
 
 
 # ---- supa.js: reads and files ----

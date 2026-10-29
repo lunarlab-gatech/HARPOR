@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from gator.stage_a import mvsam3d as M
-from gator.webapp import views as V
+from harpor.stage_a import mvsam3d as M
+from harpor.webapp import views as V
 
 H, W = 48, 64
 K = np.array([[60.0, 0, 31.5], [0, 60.0, 23.5], [0, 0, 1]])

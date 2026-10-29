@@ -1,5 +1,5 @@
 """The parts stage on a hand-built run folder: propose (the user's list), part_masks with a stand-in for
-SAM 3, vote, split with the fake Blender of gator.agent.fake_agent, and finish."""
+SAM 3, vote, split with the fake Blender of harpor.agent.fake_agent, and finish."""
 
 import json
 import shlex
@@ -10,16 +10,16 @@ import pytest
 import trimesh
 from PIL import Image
 
-from gator import frames
-from gator.agent import tools
-from gator.parts import render
-from gator.parts import stage as S
-from gator.parts import vote as V
-from gator.physics.align import read_glb, write_glb
-from gator.stage_a import part_masks
+from harpor import frames
+from harpor.agent import tools
+from harpor.parts import render
+from harpor.parts import stage as S
+from harpor.parts import vote as V
+from harpor.physics.align import read_glb, write_glb
+from harpor.stage_a import part_masks
 from test_parts_vote import CENTER, look_at
 
-FAKE_BLENDER = [sys.executable, "-m", "gator.agent.fake_agent", "--blender"]
+FAKE_BLENDER = [sys.executable, "-m", "harpor.agent.fake_agent", "--blender"]
 W, H = 200, 150
 K = np.array([[220.0, 0, 99.5], [0, 220.0, 74.5], [0, 0, 1]])
 

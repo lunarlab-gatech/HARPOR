@@ -1,4 +1,4 @@
-"""Stray Scanner captures (gator/webapp/stray.py): unpacking the zip safely, the turn from gravity, the
+"""Stray Scanner captures (harpor/webapp/stray.py): unpacking the zip safely, the turn from gravity, the
 upright frames and the depth that lands on them. Every capture is made here from fake_steps' scene: a
 box filmed by a camera that circles it, stored as a phone's sensor stores it."""
 
@@ -18,10 +18,10 @@ from PIL import Image
 from scipy.spatial.transform import Rotation
 
 pytest.importorskip("av")
-from gator.stage_a import lidar_scale  # noqa: E402
-from gator.webapp import fake_steps as F  # noqa: E402
-from gator.webapp import stray  # noqa: E402
-from gator.webapp import video as V  # noqa: E402
+from harpor.stage_a import lidar_scale  # noqa: E402
+from harpor.webapp import fake_steps as F  # noqa: E402
+from harpor.webapp import stray  # noqa: E402
+from harpor.webapp import video as V  # noqa: E402
 
 SIZE = (320, 240)  # the video as stored: sensor landscape
 DEPTH = (256, 192)
@@ -643,7 +643,7 @@ def test_a_damaged_frame_costs_only_that_frame(tmp_path):
     pytest.importorskip("rosbags")
     from test_webapp_lidar import failed, make_stray_job, scaled
 
-    from gator.stage_a import mvsam3d
+    from harpor.stage_a import mvsam3d
 
     J = make_stray_job(tmp_path, portrait=1)
     names = mvsam3d.view_names(J / "pool")
@@ -696,7 +696,7 @@ def test_the_reason_of_a_stray_capture_names_its_causes(tmp_path):
     pytest.importorskip("rosbags")
     from test_webapp_lidar import failed, make_stray_job
 
-    from gator.stage_a import mvsam3d
+    from harpor.stage_a import mvsam3d
 
     J = make_stray_job(tmp_path, portrait=1)
     names = mvsam3d.view_names(J / "pool")

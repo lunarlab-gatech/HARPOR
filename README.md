@@ -18,7 +18,7 @@ sign in, wait for the owner's approval, and connect your GPU machine ([docs/publ
 ```bash
 git clone https://github.com/lunarlab-gatech/HARPOR.git && cd HARPOR
 python3.12 -m venv .venv && .venv/bin/pip install fastapi uvicorn httpx numpy scipy pillow av rosbags pyyaml trimesh cryptography
-.venv/bin/python -m gator.webapp --fake --runs ./runs --host 127.0.0.1 --port 8765
+.venv/bin/python -m harpor.webapp --fake --runs ./runs --host 127.0.0.1 --port 8765
 ```
 
 Open the "on this machine" link it prints, then add a short video.
@@ -26,7 +26,7 @@ Open the "on this machine" link it prints, then add a short video.
 **Real jobs:** you need Linux with an NVIDIA GPU, Apptainer, Hugging Face access to `facebook/sam3` and
 `facebook/sam-3d-objects`, the environments in [docs/build_plan.md](docs/build_plan.md) notes 4, 4b, 7 and 9, and
 an OpenAI or Anthropic key if you want the agent. Clone the repo to `$GATOR_ROOT/gator_clone` (by default
-`~/scratch/gator/gator_clone`) and run `python -m gator.webapp` there with the Python of `envs/web`.
+`~/scratch/gator/gator_clone`) and run `python -m harpor.webapp` there with the Python of `envs/web`.
 
 ## More
 

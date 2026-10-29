@@ -1,4 +1,4 @@
-"""The personal worker (gator/webapp/worker.py) end to end in fake mode: a real server app and Runner on tmp_path,
+"""The personal worker (harpor/webapp/worker.py) end to end in fake mode: a real server app and Runner on tmp_path,
 the fake Supabase of tests/fake_supabase.py, and the worker driven from the test's event loop (start, poll,
 sync_once, end) or in its own thread. Also the server's --worker flags."""
 
@@ -24,7 +24,7 @@ pytest.importorskip("cryptography")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import fake_supabase as fs  # noqa: E402
-from gator.webapp import jobs, relay, server, steps, supa, worker  # noqa: E402
+from harpor.webapp import jobs, relay, server, steps, supa, worker  # noqa: E402
 from test_webapp_server import write_video  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1220,7 +1220,7 @@ def test_main_starts_the_worker_it_is_asked_for(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(worker.Worker, "start_thread", lambda self: started.append(self))
     fake = fs.FakeSupabase()
     c = fake.add_user("c@example.org", approved=True)
-    from gator.webapp import session as sessions  # its Session, with the fake's session in its place
+    from harpor.webapp import session as sessions  # its Session, with the fake's session in its place
 
     monkeypatch.setattr(sessions, "Session", lambda: fake.session(c, machine_id=machine(fake, c)))
     args = ["--fake", "--runs", str(tmp_path / "runs")]

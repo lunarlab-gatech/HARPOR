@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from gator.stage_a import part_masks as PM
-from gator.stage_a.sam3d import load_mask
+from harpor.stage_a import part_masks as PM
+from harpor.stage_a.sam3d import load_mask
 from test_sam3_masks import FakeSegmenter
 
 H, W = 90, 120

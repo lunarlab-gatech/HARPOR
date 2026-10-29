@@ -3,8 +3,8 @@ import time
 import numpy as np
 import trimesh
 
-from gator.parts import render
-from gator.stage_a.place import silhouette
+from harpor.parts import render
+from harpor.stage_a.place import silhouette
 
 K = np.array([[200.0, 0, 79.5], [0, 200.0, 59.5], [0, 0, 1]])
 SIZE = (160, 120)

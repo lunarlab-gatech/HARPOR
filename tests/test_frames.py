@@ -1,6 +1,6 @@
 import numpy as np
 
-from gator import frames as F
+from harpor import frames as F
 
 rng = np.random.default_rng(0)
 

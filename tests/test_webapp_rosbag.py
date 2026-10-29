@@ -16,8 +16,8 @@ pytest.importorskip("rosbags")
 from rosbags.highlevel import AnyReader  # noqa: E402
 from rosbags.typesys import Stores, get_types_from_msg, get_typestore  # noqa: E402
 
-from gator.stage_a import lidar_scale  # noqa: E402
-from gator.webapp import rosbag as R  # noqa: E402
+from harpor.stage_a import lidar_scale  # noqa: E402
+from harpor.webapp import rosbag as R  # noqa: E402
 
 H, W, N = 48, 64, 6
 S0 = 1_749_907_120 * 10**9  # header stamps start here, as in the user's bags

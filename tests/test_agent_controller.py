@@ -22,18 +22,18 @@ import numpy as np
 import pytest
 import trimesh
 
-from gator import frames as F
-from gator.agent import controller as C
-from gator.agent import prompts as PR
-from gator.agent import tools as T
-from gator.agent.bin import gator_tool
-from gator.agent.fake_agent import write_glb
-from gator.agent.server import ToolServer
-from gator.parts import joints as J
+from harpor import frames as F
+from harpor.agent import controller as C
+from harpor.agent import prompts as PR
+from harpor.agent import tools as T
+from harpor.agent.bin import gator_tool
+from harpor.agent.fake_agent import write_glb
+from harpor.agent.server import ToolServer
+from harpor.parts import joints as J
 
 REPO = Path(__file__).resolve().parents[1]
 FAST = {"poll_s": 0.02, "kill_after_s": 0.5, "finish_wait_s": 0.5}
-FAKE_BLENDER = [sys.executable, "-m", "gator.agent.fake_agent", "--blender"]
+FAKE_BLENDER = [sys.executable, "-m", "harpor.agent.fake_agent", "--blender"]
 LONG = 20.0
 # The fake original's edge. Every GLB a session below delivers keeps its size (C.SIZE_RATIO: 0.725 to 2.9).
 ORIGINAL_SIZE = 1.45
@@ -164,7 +164,7 @@ def run_scripted(root, mode, budget_s, script):
     (root / "script.json").write_text(json.dumps(script))
     with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
         env = {**os.environ, "PYTHONPATH": str(REPO), "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
-        cmd = [sys.executable, "-m", "gator.agent.fake_agent", str(root / "script.json")]
+        cmd = [sys.executable, "-m", "harpor.agent.fake_agent", str(root / "script.json")]
         return C.run_session(root / "s", cmd, env, blender=FAKE_BLENDER, sock_dir=sock_dir, budget_s=budget_s, **FAST)
 
 
@@ -671,7 +671,7 @@ def test_note_5_command_is_the_controllers(tmp_path):
     block = text.split("### 5. Stage B", 1)[1].split("```bash\n", 1)[1].split("```", 1)[0]
     root, sock, key, sif = tmp_path / "s", "/tmp/gator-x", "/home/u/.config/gator/openai.env", "/sif/gator-agent.sif"
     doc = (block.replace("\\\n", " ").replace("<root>", str(root.resolve())).replace("<socket dir>", sock)
-           .replace("~/.config/gator/openai.env", key).replace(" gator/agent/bin:", f" {C.AGENT_DIR}/bin:")
+           .replace("~/.config/gator/openai.env", key).replace(" harpor/agent/bin:", f" {C.AGENT_DIR}/bin:")
            .replace(" gator-agent.sif", f" {sif}"))
     assert shlex.split(doc) == C.apptainer_command(root, sif, key, sock)
 
@@ -1208,7 +1208,7 @@ def test_claude_shell_commands_are_the_calls_that_ran(tmp_path):
     assert C.shell_commands(log) == ["ls", "pip install y"] and C.network_commands(log) == ["pip install y"]
 
 
-# ---- the claude agent: Claude Opus 5.5 through gator.agent.claude_agent ----
+# ---- the claude agent: Claude Opus 5.5 through harpor.agent.claude_agent ----
 
 ANTHROPIC_KEY = "sk-ant-TEST-" + "0123456789abcdef" * 3  # a stand-in; nothing here calls the API
 # claude_agent's own CLI with a scripted client instead of the Anthropic API, and bash on the host:
@@ -1218,7 +1218,7 @@ STAND_IN = '''
 import json, sys
 from types import SimpleNamespace
 from anthropic.types.beta import BetaMessage
-from gator.agent import claude_agent
+from harpor.agent import claude_agent
 
 script_file, requests_file, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
 script = json.load(open(script_file))
@@ -1292,7 +1292,7 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     client and a host shell, the helpers over the socket, the deliverable, the log readers, and the
     key in no file but its own (outside the session folder)."""
     pytest.importorskip("anthropic")  # the Claude client
-    from gator.agent import loop_trace
+    from harpor.agent import loop_trace
 
     monkeypatch.setenv("PYTHONPATH", str(REPO))
     root = prepare(tmp_path, "refinement", agent="claude").parent
@@ -1312,7 +1312,7 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     r = C.run_container_session(root, "/sif/agent.sif", key_file, **{**FAST, "finish_wait_s": 10.0})
 
     cmd = built[0]
-    assert cmd[:4] == [sys.executable, "-m", "gator.agent.claude_agent", str(root.resolve())]
+    assert cmd[:4] == [sys.executable, "-m", "harpor.agent.claude_agent", str(root.resolve())]
     assert cmd[cmd.index("--key-file") + 1] == str(key_file) and cmd[-2:] == ["--effort", "xhigh"]
     assert "--image-side" not in cmd and "--system" not in cmd  # claude_agent's defaults: 2576 px, SYSTEM.md
     assert (r["agent"], r["model"], r["effort"]) == ("claude", "claude-opus-5-5", "xhigh")
@@ -1521,7 +1521,7 @@ def test_claude_shell_and_agent_commands(tmp_path):
     assert "--env-file" not in shell and "/home/u/key.env" not in shell
     assert shell[-6:] == ["--pwd", "/work", "/sif/agent.sif", "bash", "--noprofile", "--norc"]
     cmd = C.claude_command("s", "agent.sif", "/tmp/gator-x", "key.env")
-    assert cmd == [sys.executable, "-m", "gator.agent.claude_agent", os.path.abspath("s"), "--sif", os.path.abspath("agent.sif"),
+    assert cmd == [sys.executable, "-m", "harpor.agent.claude_agent", os.path.abspath("s"), "--sif", os.path.abspath("agent.sif"),
                    "--sock-dir", "/tmp/gator-x", "--key-file", os.path.abspath("key.env"), "--effort", "xhigh"]
     assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "low")[-2:] == ["--effort", "low"]
     assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "low", 1568, "v1.md")[-6:] == \
@@ -1643,13 +1643,13 @@ def test_find_key_scans_big_files_in_chunks(tmp_path):
 
 def test_tool_server_does_not_import_from_the_work_folder(tmp_path):
     """The model can write any file into /work. The helper runs on the host, outside the agent's
-    container, so a json.py or a gator/ package there must never be imported."""
+    container, so a json.py or a harpor/ package there must never be imported."""
     work = prepare(tmp_path, "refinement")
     marker = tmp_path / "HOST_RAN.txt"
     plant = f"open({str(marker)!r}, 'a').write(__name__ + chr(10))\n"
     (work / "json.py").write_text(plant + "from json_real_is_gone import x\n")
-    (work / "gator" / "agent").mkdir(parents=True)
-    for f in ("gator/__init__.py", "gator/agent/__init__.py", "gator/agent/tools.py"):
+    (work / "harpor" / "agent").mkdir(parents=True)
+    for f in ("harpor/__init__.py", "harpor/agent/__init__.py", "harpor/agent/tools.py"):
         (work / f).write_text(plant)
     with tempfile.TemporaryDirectory(prefix="gator-") as d:
         server = ToolServer(os.path.join(d, "tools.sock"), work, work.parent / "control", FAKE_BLENDER)
