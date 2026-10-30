@@ -41,7 +41,7 @@ file_size_limit = "50MiB"
 enabled = true
 # The site served from the repo for local tests (python -m http.server 8766 in site/).
 site_url = "http://localhost:8766/"
-# The local site, and the loopback page of `python -m gator.webapp.worker login`.
+# The local site, and the loopback page of `python -m harpor.webapp.worker login`.
 additional_redirect_urls = ["http://localhost:8766/", "http://127.0.0.1:8767/auth/callback"]
 jwt_expiry = 3600
 enable_refresh_token_rotation = true
