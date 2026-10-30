@@ -208,6 +208,13 @@ GPU node.
    python -c "import torch, pytorch3d, kaolin, gsplat, nvdiffrast, flash_attn; print(torch.__version__, torch.version.cuda)"
    ```
 
+   `TORCH_CUDA_ARCH_LIST` sets the GPUs that pytorch3d, flash_attn and gsplat are built for. `8.9;9.0`
+   is ICE's mix of L40S and H100/H200. On another machine, set it to the output of
+   `nvidia-smi --query-gpu=compute_cap --format=csv,noheader` before this build, such as `8.6` for an
+   RTX 30xx. A build for the wrong GPU does not run, and changing the value means building the env
+   again. torch 2.5.1 accepts no value above 9.0, so a newer card such as an RTX 50xx does not fit
+   this recipe (not tested).
+
    `doc/setup.md` also lists `pypi.ngc.nvidia.com`, which did not resolve from lunarL40S and is
    not needed.
 
@@ -231,7 +238,7 @@ GPU node.
    module purge; G=$(readlink -f ~/scratch)/gator
    eval "$($G/tools/micromamba shell hook -s bash)"; micromamba activate $G/envs/sam3d
    export CONDA_PREFIX=$G/envs/sam3d HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch \
-     TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions TORCH_CUDA_ARCH_LIST="8.9;9.0" OMP_NUM_THREADS=16 \
+     TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions OMP_NUM_THREADS=16 \
      CPATH=$G/envs/sam3d/targets/x86_64-linux/include \
      LIBRARY_PATH=$G/envs/sam3d/targets/x86_64-linux/lib:$G/envs/sam3d/lib
    K=$G/sam-3d-objects/notebook/images/shutterstock_stylish_kidsroom_1640806567
@@ -246,7 +253,9 @@ What the run needs and why:
   `rendering_engine = "nvdiffrast"`.
 - nvdiffrast compiles its plugin on first use. It needs `CPATH` and `LIBRARY_PATH` pointing at the
   conda CUDA headers and libraries (on lunarL40S it failed with "cuda_runtime.h: No such file"
-  without them). `TORCH_EXTENSIONS_DIR` keeps the build out of the 30 GB home.
+  without them). `TORCH_EXTENSIONS_DIR` keeps the build out of the 30 GB home. nvdiffrast clears
+  `TORCH_CUDA_ARCH_LIST` before this build, so torch builds for the visible GPUs with PTX, and the
+  stages do not set the variable.
 - The bake renders 100 views of the Gaussians with backend `inria`, whose
   `diff_gaussian_rasterization` SAM 3D does not install. `sam3d.py` switches it to the `gsplat`
   backend.

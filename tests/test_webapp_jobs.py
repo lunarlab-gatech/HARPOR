@@ -28,12 +28,12 @@ JOB = {"id": "20261015-120000-abcdef", "prompt": "coffee cup", "slug": "coffee_c
 ART = {**JOB, "articulated": True, "parts": {"mode": "vlm", "list": [], "confirmed": False}}  # an articulated job
 # The spec's environment lines, copied from our ICE scripts.
 STAGE_A = ('HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions '
-           'TORCH_CUDA_ARCH_LIST="8.9;9.0" OMP_NUM_THREADS=16 CONDA_PREFIX=$G/envs/sam3d '
+           'OMP_NUM_THREADS=16 CONDA_PREFIX=$G/envs/sam3d '
            'CPATH=$G/envs/sam3d/targets/x86_64-linux/include '
            'LIBRARY_PATH=$G/envs/sam3d/targets/x86_64-linux/lib:$G/envs/sam3d/lib PATH=$G/envs/sam3d/bin:$PATH')
 VOMP = ('eval "$($G/tools/micromamba shell hook -s bash)"; micromamba activate $G/envs/vomp11',
         'export CUDA_HOME=$CONDA_PREFIX HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch '
-        'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 TORCH_CUDA_ARCH_LIST="8.9;9.0" OMP_NUM_THREADS=16 '
+        'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 OMP_NUM_THREADS=16 '
         'CPATH=$CONDA_PREFIX/targets/x86_64-linux/include LIBRARY_PATH=$CONDA_PREFIX/targets/x86_64-linux/lib:$CONDA_PREFIX/lib')
 
 
@@ -175,8 +175,9 @@ def test_physics_commands_name_the_object():
             '--summary "$J/physics/summary.json" --name coffee_cup --mjcf "$J/physics/mjcf" --out "$J/physics/urdf"')
 
 
-def test_stage_scripts_set_their_environment(tmp_path):
+def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
     """The scripts run as written: stand-in interpreters and micromamba report what they were given."""
+    monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
     G = tmp_path / "G"
     report = textwrap.dedent("""\
         #!/bin/bash
@@ -209,14 +210,14 @@ def test_stage_scripts_set_their_environment(tmp_path):
     G = G.resolve()
     assert ran == f"ran {G}/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d prep --scene {J}/scene " \
                   f"--mask-prompt sam3_coffee_cup --out {J}/pool" and pwd == f"pwd {G}/gator_clone"
-    assert env["CONDA_PREFIX"] == f"{G}/envs/sam3d" and env["TORCH_CUDA_ARCH_LIST"] == "8.9;9.0"
+    assert env["CONDA_PREFIX"] == f"{G}/envs/sam3d" and env["TORCH_CUDA_ARCH_LIST"] == ""  # no stage picks the GPU arch
     assert env["PATH0"] == f"{G}/envs/sam3d/bin" and env["TORCH_EXTENSIONS_DIR"] == f"{G}/.cache/torch_extensions"
     assert env["LIBRARY_PATH"] == f"{G}/envs/sam3d/targets/x86_64-linux/lib:{G}/envs/sam3d/lib"
     env, (ran, pwd) = run("vomp")
     assert ran == f"ran {G}/envs/vomp11/bin/python {G}/gator_clone/harpor/physics/vomp_run.py " \
                   f"--glb {J}/physics/aligned.glb --out {J}/physics" and pwd == f"pwd {G}/VoMP"
     assert env["CUDA_HOME"] == env["CONDA_PREFIX"] == f"{G}/envs/vomp11"
-    assert env["TORCH_EXTENSIONS_DIR"] == f"{G}/.cache/torch_extensions_vomp11"
+    assert env["TORCH_EXTENSIONS_DIR"] == f"{G}/.cache/torch_extensions_vomp11" and env["TORCH_CUDA_ARCH_LIST"] == ""
     assert env["CPATH"] == f"{G}/envs/vomp11/targets/x86_64-linux/include" and env["HF_HOME"] == f"{G}/.cache/huggingface"
 
     # The parts stage: part masks in envs/sam3seg with HF_HOME only, then three steps in envs/sam3d.

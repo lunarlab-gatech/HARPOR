@@ -61,15 +61,16 @@ PARTS_AFTER = "propose"  # an unconfirmed "vlm_edit" part list pauses the job he
 STAGES = [{"name": n, "gpu": n in GPU, "review_after": n == REVIEW_AFTER} for n in NAMES]
 CODE = Path(__file__).resolve().parents[2]  # the gator_clone that fake mode runs from
 
-# Copied from the ICE run scripts of Stage A and of VoMP; keep them exactly.
+# Copied from the ICE run scripts of Stage A and of VoMP; keep them exactly. The exception is TORCH_CUDA_ARCH_LIST,
+# which no stage sets: nvdiffrast, which builds its plugin at run time, clears it and builds for the visible GPUs.
 STAGE_A_ENV = ('HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions '
-               'TORCH_CUDA_ARCH_LIST="8.9;9.0" OMP_NUM_THREADS=16 CONDA_PREFIX=$G/envs/sam3d '
+               'OMP_NUM_THREADS=16 CONDA_PREFIX=$G/envs/sam3d '
                'CPATH=$G/envs/sam3d/targets/x86_64-linux/include '
                'LIBRARY_PATH=$G/envs/sam3d/targets/x86_64-linux/lib:$G/envs/sam3d/lib PATH=$G/envs/sam3d/bin:$PATH')
 SAM3_ENV = "HF_HOME=$G/.cache/huggingface"
 VOMP_ACTIVATE = 'eval "$($G/tools/micromamba shell hook -s bash)"; micromamba activate $G/envs/vomp11'
 VOMP_ENV = ('CUDA_HOME=$CONDA_PREFIX HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch '
-            'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 TORCH_CUDA_ARCH_LIST="8.9;9.0" OMP_NUM_THREADS=16 '
+            'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 OMP_NUM_THREADS=16 '
             'CPATH=$CONDA_PREFIX/targets/x86_64-linux/include LIBRARY_PATH=$CONDA_PREFIX/targets/x86_64-linux/lib:$CONDA_PREFIX/lib')
 MARKERS = {"topics": "frames/topics.json", "frames": "frames/meta.json", "prep": "pool/prep.json",
            "sam3d": "run/pose.json", "place": "run/placement.json", "propose": "run/proposal.json",
