@@ -194,14 +194,15 @@ class Session:
         self.lock.release()
 
 
-def local_key(agent):
-    """The machine's own API key for agent (--local-keys), read now: the OPENAI_API_KEY= line of
-    ~/.config/harpor/openai.env (astra) or the ANTHROPIC_API_KEY= line of anthropic.env (opus). The file must be
-    this user's with mode 0600 in a folder of mode 0700. An error names the file and the line, never the text."""
+def local_key(agent, path=None):
+    """The machine's own API key for agent (--local-keys, or the terminal command's agent), read now: the
+    OPENAI_API_KEY= line of ~/.config/harpor/openai.env (astra) or the ANTHROPIC_API_KEY= line of anthropic.env
+    (opus), or that line of the file path. The file must be this user's with mode 0600 in a folder of mode 0700. An
+    error names the file and the line, never the text."""
     if agent not in KEY_FILES:
         raise ValueError(f"no key file for the agent {agent!r}")
     var = steps.KEY_VAR[agent]
-    path = config_dir() / KEY_FILES[agent]
+    path = Path(path) if path else config_dir() / KEY_FILES[agent]
     for line in read_private(path).decode("utf-8", errors="replace").splitlines():
         k, sep, v = line.strip().removeprefix("export ").partition("=")
         if sep and k.strip() == var:

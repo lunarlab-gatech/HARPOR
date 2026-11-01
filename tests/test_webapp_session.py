@@ -297,6 +297,28 @@ def test_local_key_reads_one_line_now_and_never_quotes_it(home):
         session.local_key("none")
 
 
+def test_local_key_reads_the_file_it_is_given_by_the_same_rules(tmp_path):
+    """The terminal command's --key-file."""
+    d = tmp_path / "keys"
+    d.mkdir(mode=0o700)
+    key = "sk-ant-test-" + "k" * 30
+    f = d / "my.env"
+    f.write_text(f"ANTHROPIC_API_KEY={key}\n")
+    f.chmod(0o600)
+    assert session.local_key("opus", f) == key and session.local_key("opus", str(f)) == key
+    f.chmod(0o644)
+    with pytest.raises(SystemExit, match="mode 0600") as e:
+        session.local_key("opus", f)
+    assert key not in str(e.value)
+    f.chmod(0o600)
+    d.chmod(0o755)
+    with pytest.raises(SystemExit, match="mode 0700"):
+        session.local_key("opus", f)
+    d.chmod(0o700)
+    with pytest.raises(SystemExit, match="other.env is missing"):
+        session.local_key("opus", d / "other.env")
+
+
 class Upload:
     """A stand-in for the server on this machine: it keeps each PUT /api/upload (headers, query, body)."""
 
