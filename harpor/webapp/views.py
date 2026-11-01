@@ -1,6 +1,6 @@
 """Choose the views for MV-SAM3D from the pool of video frames (web app stage "select").
 
-Runs in envs/web, from the gator_clone root, after masks, prep and da3 ran on the pool:
+Runs in envs/web, from the repo root, after masks, prep and da3 ran on the pool:
 
     python -m harpor.webapp.views select --job J
 
@@ -23,8 +23,8 @@ picks are closer than 15 deg (and not both view 0 or locked), k-center runs agai
 fewer, down to 3 views. When over a third of the masked views are inconsistent, selection.json says
 "ok": false and the step exits with code 2, so the user can pick by hand. Manual mode takes the
 user's frames that have masks. Both modes honour job.json's view0 and its overrides: "locked" views
-are always in, "excluded" views never (pool names such as "f00012", or frame numbers). Picks that
-end up closer than 15 deg get a warning.
+are always in, "excluded" views never (pool names such as "f00012"). Picks that end up closer than
+15 deg get a warning.
 
 build_run() copies the picks into J/run as views 0..N-1 (view 0 = the anchor) with DA3's arrays
 sliced to them, so the mvsam3d sam3d and place steps run on it as on any run folder. With a LiDAR
@@ -282,9 +282,8 @@ def measure(job_dir, job, meta):
     from PIL import Image
 
     from harpor.stage_a import mvsam3d
-    from harpor.stage_a.sam3_masks import slug
 
-    sam = json.loads((job_dir / "scene" / f"sam3_{job.get('slug') or slug(job['prompt'])}" / "sam3.json").read_text())
+    sam = json.loads((job_dir / "scene" / f"sam3_{job['slug']}" / "sam3.json").read_text())
     scores = {v["name"]: max([v["instances"][k]["score"] for k in v.get("picked") or []], default=0.0)
               for v in sam["views"]}
     pool_dir = job_dir / "pool"
@@ -309,14 +308,14 @@ def measure(job_dir, job, meta):
 def select(job_dir):
     """Write J/selection.json and J/run (see the module docstring). Returns the selection dict."""
     job_dir = Path(job_dir)
-    job = json.loads((job_dir / "job.json").read_text())
+    job = steps.job(job_dir)
     metric = metric_scale(job_dir, job)  # first: a missing or failed LiDAR scale leaves the earlier outputs alone
     for stale in ("run", "agent", "physics"):
         shutil.rmtree(job_dir / stale, ignore_errors=True)
     (job_dir / "results.zip").unlink(missing_ok=True)
     meta = json.loads((job_dir / "frames" / "meta.json").read_text())
     pool = json.loads((job_dir / "frames" / "pool.json").read_text())
-    mode, prompt = job.get("mode", "auto"), job["prompt"]
+    mode, prompt = job["mode"], job["prompt"]
     over = job.get("overrides") or {}
     excluded = {pool_name(x) for x in over.get("excluded") or []}
     locked = [pool_name(x) for x in over.get("locked") or [] if pool_name(x) not in excluded]
@@ -382,7 +381,7 @@ def select(job_dir):
         if not whole:
             warn("every usable mask touches the image border; the object may be cut off")
         anchor = view0 if view0 in avail else max(whole or avail, key=lambda n: view[n]["q"])
-        n_req = int(job.get("n_views") or 6)
+        n_req = job["n_views"]
         fixed = [avail.index(n) for n in dict.fromkeys([anchor, *locked])]
         if len(fixed) > n_req:
             warn(f"view 0 and the locked views are {len(fixed)}, more than the {n_req} requested")
@@ -432,8 +431,8 @@ def record(out, status, picks=(), anchor=None):
                            out["center"])
         uv = dict(zip(with_dir, pts))
     covered = [near[n] for n in near if n in picks or status.get(n) == "available"]
-    return {"ok": bool(picks), "mode": job.get("mode", "auto"),
-            "n_requested": int(job.get("n_views") or 6) if job.get("mode", "auto") == "auto" else len(picks),
+    return {"ok": bool(picks), "mode": job["mode"],
+            "n_requested": job["n_views"] if job["mode"] == "auto" else len(picks),
             "picks": [{"name": n, "frame": frame_of(n), "time_s": times[frame_of(n)], "q": round(view[n]["q"], 4),
                        "q_terms": {k: round(x, 4) for k, x in view[n]["terms"].items()},
                        "consistency": round(view[n]["consistency"], 3),

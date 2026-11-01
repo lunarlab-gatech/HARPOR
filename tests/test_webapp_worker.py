@@ -13,6 +13,7 @@ import uuid
 import zipfile
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import anyio
 import httpx
@@ -833,9 +834,10 @@ def test_worker_arguments():
             runner = None
 
     cfg = steps.Config(G=Path("/G"), runs=Path("/runs"), fake=True)
+    session = SimpleNamespace(machine_name="")
     with pytest.raises(ValueError, match="local keys are for astra and opus"):
-        worker.Worker(App, cfg, ("none",), store=object())
-    w = worker.Worker(App, cfg, ["opus", "astra"], store=object())
+        worker.Worker(App, cfg, ("none",), store=object(), session=session)
+    w = worker.Worker(App, cfg, ["opus", "astra"], store=object(), session=session)
     assert w.local_keys == ("opus", "astra") and w.place == "your machine"
 
 
@@ -1231,9 +1233,12 @@ def test_main_starts_the_worker_it_is_asked_for(tmp_path, monkeypatch, capsys):
         assert e.value.code == 2 and why in capsys.readouterr().err
     assert ran == []
 
-    server.main(args)  # the tunnel as before
-    assert ran[-1][0] == "0.0.0.0" and ran[-1][1]["worker"] is False and started == []
-    assert "on the Mac: ssh -S ~/.ssh/cm-ice -O forward" in capsys.readouterr().out
+    server.main(args)  # no worker: by default only this machine reaches the server
+    assert ran[-1][0] == "127.0.0.1" and ran[-1][1]["worker"] is False and started == []
+    assert "from another computer: ssh -L" in capsys.readouterr().out
+    server.main(args + ["--host", "0.0.0.0"])  # as start_ice.sh starts it: the forward goes to the node
+    assert ran[-1][0] == "0.0.0.0" and started == []
+    assert re.search(r"from another computer: ssh -L (\d+):\S+:\1 <login node>", capsys.readouterr().out)
     server.main(args + ["--worker"])  # the local UI stays on the machine
     w = started[-1]
     assert ran[-1][0] == "127.0.0.1" and ran[-1][1]["worker"] is True and w.local_keys == ()

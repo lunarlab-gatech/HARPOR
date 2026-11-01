@@ -1,6 +1,6 @@
 """Object masks from a text prompt with SAM 3 (build_plan.md note 3).
 
-Runs in envs/sam3seg (transformers 5.20.0, weights facebook/sam3), from the gator_clone root:
+Runs in envs/sam3seg (transformers 5.20.0, weights facebook/sam3), from the repo root:
 
     python -m harpor.stage_a.sam3_masks --scene DIR --prompt chair [--prompt "coffee cup" ...]
     python -m harpor.stage_a.sam3_masks --scene DIR --prompt chair --pick img2=1 --overwrite
@@ -266,7 +266,7 @@ def run(scene, prompts, picks=None, threshold=0.5, mask_threshold=0.5, overwrite
         if n == 0:
             empty.append(p)
     if empty:
-        raise SystemExit(f"no mask for {empty}; check the prompt or lower --threshold")
+        raise SystemExit(f"no mask for {empty}; check the prompt")
 
 
 def main(argv=None):

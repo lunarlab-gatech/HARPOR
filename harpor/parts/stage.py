@@ -1,6 +1,6 @@
 """The steps of the parts stage of an articulated job (build_plan.md note 11).
 
-Runs in envs/sam3d from the gator_clone root; J is the job folder:
+Runs in envs/sam3d from the repo root; J is the job folder:
 
     python -m harpor.parts.stage propose --job J [--key-file F] [--agent astra|opus]
     python -m harpor.parts.stage vote --job J

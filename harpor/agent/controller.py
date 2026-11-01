@@ -66,9 +66,6 @@ HELPER_ENV = {"GATOR_SOCKET": "/opt/gator/sock/tools.sock", "PREPEND_PATH": "/op
 CODEX_MODEL, CLAUDE_MODEL, EFFORTS = tools.CODEX_MODEL, tools.CLAUDE_MODEL, tools.EFFORTS
 CLAUDE_EFFORT = "xhigh"  # the effort of the Astra comparison runs; Opus 5.5's own default is medium, so it is always sent
 LOGS = {"codex": "codex.jsonl", "claude": "claude.jsonl"}  # each agent's event log, in root/session
-# USD per million tokens of Claude Opus 5.5 (tools.OPUS_PRICES without the 1-hour cache write). claude_agent
-# prices each response itself (claude_agent.PRICES, by the model that ran it); these price a log line without that.
-PRICES = {k: v for k, v in tools.OPUS_PRICES.items() if k != "cache_creation_1h"}
 CONTAINER = ["apptainer", "exec", "--nv", "--containall", "--no-mount", "/scratch", "--no-mount", "/storage"]
 # Shell commands that reach the network. Nothing in the container blocks them, so result.json lists
 # the ones that ran.
@@ -116,12 +113,12 @@ def _env_flags(env):
     return [a for k, v in env.items() for a in ("--env", f"{k}={v}")]
 
 
-def apptainer_command(root, sif, key_file, sock_dir, agent=None, extra_env=None):
+def apptainer_command(root, sif, key_file, sock_dir, agent=None):
     """The codex agent's container (note 5): /work and /session writable, the helper client and the
     socket folder read-only, no /scratch or /storage, GPU for Blender. agent replaces the CLI command
-    in tests. extra_env adds variables."""
+    in tests."""
     return [*CONTAINER, *_mounts(root, sock_dir), "--env-file", str(key_file),
-            *_env_flags({**CODEX_ENV, **HELPER_ENV, **(extra_env or {})}), "--pwd", "/work", str(sif),
+            *_env_flags({**CODEX_ENV, **HELPER_ENV}), "--pwd", "/work", str(sif),
             *(agent or [*CODEX_KEY_WRAPPER, *codex_command()])]
 
 
@@ -177,11 +174,8 @@ def cli_exit(returncode, agent="codex"):
 
 def agent_info(root):
     """control/agent.json: agent, model, effort, and image_side and system when prepare_session got
-    them. Sessions prepared before it ran Codex."""
-    path = Path(root) / "control" / "agent.json"
-    if path.is_file():
-        return json.loads(path.read_text())
-    return {"agent": "codex", "model": CODEX_MODEL, "effort": "xhigh"}
+    them."""
+    return json.loads((Path(root) / "control" / "agent.json").read_text())
 
 
 def codex_config():
@@ -511,10 +505,9 @@ def select_deliverable(root, mode):
 
 def _claude_bash_calls(e):
     """(id, command) of the bash calls that claude_agent ran from one response line: none unless the
-    turn stopped for its tool calls (stop_reason tool_use; a line without a stop_reason counts, so a
-    log written by other means is not under-reported), and none before the last fallback block (the
-    declined model's calls; see claude_agent.echo_content)."""
-    if e.get("stop_reason") not in ("tool_use", None):
+    turn stopped for its tool calls (stop_reason tool_use), and none before the last fallback block
+    (the declined model's calls; see claude_agent.echo_content)."""
+    if e.get("stop_reason") != "tool_use":
         return []
     blocks = [b for b in e.get("blocks") or [] if isinstance(b, dict)]
     last = max((i for i, b in enumerate(blocks) if b.get("type") == "fallback"), default=0)
@@ -554,8 +547,8 @@ def claude_usage(log):
     """turns, tokens (the four usage totals), cost_usd and end_reason of a claude_agent log, from its
     "end" line. Without one (the agent was killed first) they are summed over its response lines:
     their billed tokens (every attempt of a turn with a refusal fallback, else usage) and their own
-    cost_usd (each attempt at its model's prices), or for a line without one its tokens at PRICES."""
-    totals, turns, cost = dict.fromkeys(PRICES, 0), 0, 0.0
+    cost_usd (each attempt at its model's prices)."""
+    totals, turns, cost = dict.fromkeys(tools.TOKENS, 0), 0, 0.0
     for e in tools.read_jsonl(log):
         if e.get("type") == "end":
             return {"turns": e.get("turns"), "tokens": e.get("totals"), "cost_usd": e.get("cost_usd"),
@@ -563,12 +556,11 @@ def claude_usage(log):
         if e.get("type") == "response":
             turns += 1
             usage = next((e[k] for k in ("billed", "usage") if isinstance(e.get(k), dict)), {})
-            tokens = {k: usage[k] if type(usage.get(k)) is int else 0 for k in totals}
             for k in totals:
-                totals[k] += tokens[k]
+                totals[k] += usage[k] if type(usage.get(k)) is int else 0
             line_cost = e.get("cost_usd")
-            cost += line_cost if type(line_cost) in (int, float) and math.isfinite(line_cost) else \
-                sum(tokens[k] * PRICES[k] for k in PRICES) / 1e6
+            if type(line_cost) in (int, float) and math.isfinite(line_cost):
+                cost += line_cost
     return {"turns": turns, "tokens": totals, "cost_usd": round(cost, 4), "end_reason": None}
 
 
@@ -643,22 +635,20 @@ def run_session(root, cmd, env=None, *, blender, sock_dir, **watchdog):
     return result
 
 
-def run_container_session(root, sif, key_file, agent=None, extra_env=None, **watchdog):
+def run_container_session(root, sif, key_file, agent=None, **watchdog):
     """Run one prepared session with the agent that control/agent.json names (note 5). key_file: the
     env file with OPENAI_API_KEY (codex) or ANTHROPIC_API_KEY (claude). agent replaces the agent's
     command, for tests of the launcher: for codex the CLI inside the container, for claude the whole
-    host command. extra_env adds variables: to the Codex container (see apptainer_command), or to
-    claude_agent's own environment."""
+    host command."""
     info = agent_info(root)
     sock_dir = tempfile.mkdtemp(prefix="gator-")  # short path: Unix socket paths are limited to 107 bytes
     try:
         if info["agent"] == "claude":
             cmd = agent or claude_command(root, sif, sock_dir, key_file, info["effort"], info.get("image_side"),
                                           info.get("system"))
-            env = {**os.environ, **extra_env} if extra_env else None
         else:
-            cmd, env = apptainer_command(root, sif, key_file, sock_dir, agent, extra_env), None
-        result = run_session(root, cmd, env, blender=blender_command(root, sif), sock_dir=sock_dir, **watchdog)
+            cmd = apptainer_command(root, sif, key_file, sock_dir, agent)
+        result = run_session(root, cmd, blender=blender_command(root, sif), sock_dir=sock_dir, **watchdog)
     finally:
         shutil.rmtree(sock_dir, ignore_errors=True)
     result["key_found_in"] = find_key(root, key_file)

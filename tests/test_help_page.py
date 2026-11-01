@@ -112,9 +112,9 @@ def test_help_page_holds_the_method_numbers():
     nviews = re.search(r'<input type="range" id="nviews" min="(\d+)" max="(\d+)"', (STATIC / "index.html").read_text())
     upload = re.search(r"^MAX_UPLOAD = (\d+) << 30$", (ROOT / "harpor" / "webapp" / "server.py").read_text(), re.M)
     assert nviews and upload
-    prices = [f"{usd(controller.PRICES[k])} {w}" for k, w in (("input_tokens", "input"), ("output_tokens", "output"),
-                                                                ("cache_read_input_tokens", "cache read"),
-                                                                ("cache_creation_input_tokens", "cache write"))]
+    prices = [f"{usd(tools.PRICES[tools.CLAUDE_MODEL][k])} {w}"
+              for k, w in (("input_tokens", "input"), ("output_tokens", "output"),
+                           ("cache_read_input_tokens", "cache read"), ("cache_creation_input_tokens", "cache write"))]
     size_err = 0.05  # mass goes with the size cubed
     mass_err = f"{size_err:.0%} size error gives about a {(1 + size_err) ** 3 - 1:.0%} mass error"
     src = inspect.getsource(jobs.package)
@@ -122,6 +122,7 @@ def test_help_page_holds_the_method_numbers():
     zipped += [d + "/" for d in re.findall(r'"(\w+)"', re.search(r"for d in \(([^)]*)\)", src)[1])]
     assert len(zipped) >= 13, zipped  # the package source still reads as it did; update the pattern when it changes
     L = lidar_scale
+    span_mm = re.search(r"DIFF_SPAN_MM = (\d+)", (STATIC / "app.js").read_text())[1]
     assert jobs.KEY.pattern.startswith("[A-Za-z0-9_-]{")  # #agent: "one word of letters, digits, - and _"
     facts = {"capture": [*jobs.VIDEOS, *jobs.BAGS, *jobs.STRAY, "HDR off"],
              "add-job": [f"up to {upload[1]} GB"],
@@ -147,7 +148,11 @@ def test_help_page_holds_the_method_numbers():
              "inputs": ["0.6 of that median", "16 to 32", "★", f"at most {lidar_stage.SCAN_POINTS:,}",
                         f"within {lidar_stage.WINDOW_S * 1000:g} to {lidar_stage.WINDOW_MAX_S * 1000:g} ms", "pinch", "Reset",
                         "outlier, scattered or few points",
-                        "every candidate view"],
+                        "every candidate view", "Compare with DA3", f"at most {lidar_stage.DA3_POINTS:,}",
+                        f"full at {span_mm} mm", f"A 1% gap is {span_mm} mm at {int(span_mm) / 10:g} m",
+                        f"within {L.RAY_SPAN:.0%} of the point's range", "the largest differences do not show",
+                        "Turn the box off to see the whole scan", "read the object's dots and the median",
+                        "outside the mask", "harpor.webapp.lidar clouds"],
              "results": [f"Below {iou}", "view 0's camera frame", "aligned.glb", "larger than", "mean over the views",
                          "360 video", "reduced motion"],
              "joints": ["A ? means", "With 0", "nearest part above it", "fixed to the world", "one rigid body"],

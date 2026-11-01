@@ -409,7 +409,7 @@
   }
   function keyKindError(key, agent) {  // jobs.key_kind_error: the key's provider by its prefix alone
     if (agent === "opus") return key.startsWith("sk-ant-") ? null : "Anthropic keys start with sk-ant-";
-    if (key.startsWith("sk-ant-")) return "this is an Anthropic key (sk-ant-); GPT-6-Astra needs an OpenAI key";
+    if (key.startsWith("sk-ant-")) return "this is an Anthropic key (sk-ant-); this agent needs an OpenAI key";
     return key.startsWith("sk-") ? null : "OpenAI keys start with sk-";
   }
   // Seal an API key to a worker's ECDH P-256 key: a one-time key pair, HKDF-SHA256 with the one-time public key as

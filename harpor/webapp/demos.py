@@ -25,12 +25,11 @@ add's .<name>.tmp):
 load checks every rule and says which one a demo breaks (DemoError): the folder holds demo.json and the files that
 it names, and nothing else; each is a regular file of a type in TYPES, at most MAX_FILE bytes (Cloudflare Pages'
 limit per file), that starts with its type's magic bytes. The files are served from the site's own origin, so no type
-that a browser runs as a page (HTML, SVG, XML) is allowed. deep=True (add, check, the server's start and the site
-build) also reads every file: nothing shaped like an API key, no path of a machine (MACHINE_PATH), a GLB with all its
-data inside and without Draco or KTX2 (the demos page loads no decoder, and the CSP blocks gstatic.com), and nothing
-that looks like private data (PRIVATE) in demo.json, the file names or the text inside results.zip. placeholders
-reads placeholders.json with the same guard. Both JSON files are checked as written and as read, so a JSON escape
-cannot hide a word.
+that a browser runs as a page (HTML, SVG, XML) is allowed. load also reads every file: nothing shaped like an API key,
+no path of a machine (MACHINE_PATH), a GLB with all its data inside and without Draco or KTX2 (the demos page loads no
+decoder, and the CSP blocks gstatic.com), and nothing that looks like private data (PRIVATE) in demo.json, the file
+names or the text inside results.zip. placeholders reads placeholders.json with the same guard. Both JSON files are
+checked as written and as read, so a JSON escape cannot hide a word.
 
 add makes a demo from a finished job folder, on the machine that holds the job: the 360 video
 (turntable/turntable.mp4, else --video), physics/aligned.glb (else --glb), results.zip packed again with every key
@@ -39,7 +38,7 @@ Results tab (facts_of). It refuses a job that is not done, a rosbag job without 
 are private, and a bag's name can look harmless), and anything that looks private. From a run folder (no job.json),
 --video and --glb are needed, and the facts come from the job-layout records that are there. It writes
 <out>/.<name>.tmp, checks it with load, then renames it to <out>/<name>; an existing demo stays unless --force.
-check runs load(deep=True) and placeholders on a demos folder.
+check runs load and placeholders on a demos folder.
 """
 
 import argparse
@@ -211,7 +210,7 @@ def _text(value, low, high, what):
     return value
 
 
-def demo(d, deep=True, name=None):
+def demo(d, name=None):
     """The Demo in folder d (named name, else d's own name), with every rule checked; DemoError otherwise."""
     name = name or d.name
     if d.is_symlink() or not d.is_dir():
@@ -272,14 +271,13 @@ def demo(d, deep=True, name=None):
         with open(p, "rb") as fh:
             if fh.read(at + len(magic))[at:] != magic:
                 raise DemoError(f"{what} is not a {Path(f).suffix} file inside")
-        if deep:  # the GLB's and the zip's own checks first: they say more
-            data = p.read_bytes()
-            if f.endswith(".glb"):
-                _glb(data, what)
-            elif f.endswith(".zip"):
-                _zip(p, what)
-            if relay.holds_key(data, [], shape=True) or MACHINE_BYTES.search(data):
-                raise DemoError(f"{what} holds a key shape or a machine path")
+        data = p.read_bytes()
+        if f.endswith(".glb"):  # the GLB's and the zip's own checks first: they say more
+            _glb(data, what)
+        elif f.endswith(".zip"):
+            _zip(p, what)
+        if relay.holds_key(data, [], shape=True) or MACHINE_BYTES.search(data):
+            raise DemoError(f"{what} holds a key shape or a machine path")
     for p in sorted(d.iterdir()):
         if not p.name.startswith(".") and p.name != "demo.json" and p.name not in listed:
             raise DemoError(f"{name}/{p.name} is not listed in demo.json")
@@ -287,7 +285,7 @@ def demo(d, deep=True, name=None):
                 tuple(downloads), sizes)
 
 
-def load(folder, deep=True):
+def load(folder):
     """The demos in folder (each entry but placeholders.json and the names that start with "."), sorted by
     (order, name): [] for None. DemoError names the first demo that breaks a rule, or says that folder is not a folder
     (a mistyped folder would show no demos, and a site build would take the live ones away)."""
@@ -295,7 +293,7 @@ def load(folder, deep=True):
         return []
     if not Path(folder).is_dir():
         raise DemoError(f"no demos folder {folder}")
-    shown = [demo(d, deep) for d in sorted(Path(folder).iterdir())
+    shown = [demo(d) for d in sorted(Path(folder).iterdir())
              if not d.name.startswith(".") and d.name != PLACEHOLDERS]
     return sorted(shown, key=lambda x: (x.order, x.name))
 
@@ -567,7 +565,7 @@ def add(source, out, name=None, title=None, video=None, glb=None, zip_=None, fac
             {"version": 1, "title": title, "order": order, "video": "turntable.mp4", "poster": "poster.jpg",
              "model": model_name, "facts": [[k, v] for k, v in have.items()], "downloads": downloads}, indent=1,
             ensure_ascii=False) + "\n")
-        made = demo(tmp, deep=True, name=name)
+        made = demo(tmp, name=name)
         if final.exists():
             old = out / f".{name}.old"
             shutil.rmtree(old, ignore_errors=True)

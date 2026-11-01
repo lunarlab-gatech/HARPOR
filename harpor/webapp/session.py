@@ -37,14 +37,15 @@ from pathlib import Path
 import anyio
 import httpx
 
+from harpor.fileio import config_dir, private_folder, read_private, write_private
 from harpor.webapp import jobs, steps, supa
 
-FILE = Path(".config") / "gator" / "harpor_session.json"  # under the home folder
+FILE = "harpor_session.json"  # in fileio.config_dir()
 LOCK = ".harpor_session.lock"  # next to the session file
 VERSION = 1
 FIELDS = ("url", "publishable_key", "user_id", "machine_name", "mirror_since")  # what login writes
 MACHINE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,59}")  # machines.name
-KEY_FILES = {"astra": "openai.env", "opus": "anthropic.env"}  # in ~/.config/gator, as the HARPOR CLI has them
+KEY_FILES = {"astra": "openai.env", "opus": "anthropic.env"}  # in ~/.config/gator
 LOGIN = "python -m harpor.webapp.worker login"
 START = "python -m harpor.webapp --worker"
 WAITS = ("Your account waits for approval. HARPOR adds this machine when the server starts after the owner "
@@ -53,12 +54,12 @@ ADD_TIMEOUT = httpx.Timeout(600, connect=10)  # the server answers once the whol
 
 
 def path_of(path=None):
-    return Path(path) if path else Path.home() / FILE
+    return Path(path) if path else config_dir() / FILE
 
 
-def machine_name(host=None):
+def machine_name():
     """This machine's name on the site by default: the host name's first label, cut to the allowed characters."""
-    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", (host or socket.gethostname()).split(".")[0]).lstrip("_.-")[:60]
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", socket.gethostname().split(".")[0]).lstrip("_.-")[:60]
     return name or "machine"
 
 
@@ -70,7 +71,7 @@ def read(path=None):
         raise SystemExit(f"this machine has no HARPOR session ({path}); run {LOGIN}")
     bad = f"{path} is not a HARPOR session file; run {LOGIN}"
     try:
-        data = json.loads(supa.read_private(path))
+        data = json.loads(read_private(path))
     except ValueError:
         raise SystemExit(bad) from None
     if not isinstance(data, dict) or data.get("version") != VERSION or not all(
@@ -83,7 +84,7 @@ def read(path=None):
 
 def write(data, path=None):
     """The session file: a 0600 temp file, then os.replace; makes the folder with mode 0700 when it is missing."""
-    supa.write_private(path_of(path), (json.dumps(data, indent=1) + "\n").encode())
+    write_private(path_of(path), (json.dumps(data, indent=1) + "\n").encode())
 
 
 class Lock:
@@ -97,7 +98,7 @@ class Lock:
         return f"Lock({self.path}, {'held' if self.fd is not None else 'free'})"
 
     def _open(self):
-        supa.private_folder(self.path.parent, make=True)
+        private_folder(self.path.parent, make=True)
         try:
             return os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         except OSError:  # a symlink, or a folder in its place
@@ -193,15 +194,15 @@ class Session:
         self.lock.release()
 
 
-def local_key(agent, folder=None):
+def local_key(agent):
     """The machine's own API key for agent (--local-keys), read now: the OPENAI_API_KEY= line of
     ~/.config/gator/openai.env (astra) or the ANTHROPIC_API_KEY= line of anthropic.env (opus). The file must be
     this user's with mode 0600 in a folder of mode 0700. An error names the file and the line, never the text."""
     if agent not in KEY_FILES:
         raise ValueError(f"no key file for the agent {agent!r}")
     var = steps.KEY_VAR[agent]
-    path = (Path(folder) if folder else Path.home() / ".config" / "gator") / KEY_FILES[agent]
-    for line in supa.read_private(path).decode("utf-8", errors="replace").splitlines():
+    path = config_dir() / KEY_FILES[agent]
+    for line in read_private(path).decode("utf-8", errors="replace").splitlines():
         k, sep, v = line.strip().removeprefix("export ").partition("=")
         if sep and k.strip() == var:
             key = v.strip().strip("\"'")
@@ -291,9 +292,9 @@ def login(provider="github", name=None, port=8767, browser=True, site_config=Non
     return 0
 
 
-def status(*, path=None, transport=None):
+def status(*, transport=None):
     """`worker status`: the account and this machine; while the server holds the session, only what the file says."""
-    path = path_of(path)
+    path = path_of()
     try:
         data = read(path)
         held = Lock(path).holder()
@@ -336,10 +337,10 @@ def status(*, path=None, transport=None):
     return 0
 
 
-def logout(*, path=None, transport=None):
+def logout(*, transport=None):
     """`worker logout`: ends the session at Supabase (scope local) and takes the refresh token out of the file. The
     machine and its jobs stay on the site, and the file keeps the machine's id for the next login."""
-    path = path_of(path)
+    path = path_of()
     try:
         if not read(path).get("refresh_token"):
             print("this machine is signed out already")
@@ -379,12 +380,12 @@ def add(path, name=None):
     if not src.is_file():
         print(f"{src} is not a file")
         return 1
-    info_path = Path.home() / ".config" / "gator" / "webapp.json"
+    info_path = config_dir() / "webapp.json"
     if not info_path.exists():
         print(f"no HARPOR server runs on this machine ({info_path} is missing); start it: {START}")
         return 1
     try:
-        info = json.loads(supa.read_private(info_path))
+        info = json.loads(read_private(info_path))
         port, token = int(info["port"]), str(info["token"])
     except SystemExit as e:
         print(f"{e}; start the server first: {START}")

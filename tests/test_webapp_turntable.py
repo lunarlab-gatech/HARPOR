@@ -4,7 +4,6 @@ import json
 import shlex
 import signal
 import sys
-from pathlib import Path
 
 import numpy as np
 import pytest

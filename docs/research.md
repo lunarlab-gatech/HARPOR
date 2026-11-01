@@ -11,7 +11,7 @@ design)" mark our own reasoning or choices. "(estimate)" marks a number we compu
 
 The paper is "GATOR: Generative and Agentic 3D Object Reconstruction From Casual Images" (arXiv 2610.11215v1, HTML https://arxiv.org/html/2610.11215v1, PDF https://arxiv.org/pdf/2610.11215v1). The project page is https://research.nvidia.com/labs/lpr/gator/. The GitHub repository kasvii/GATOR is not this project. It belongs to an unrelated 2023 human-mesh paper.
 
-Page references such as (p.5) are PDF pages. Table and figure numbers follow the PDF. The equations come from the MathML of the arXiv HTML, because the PDF text layer drops glyphs inside equations. Section 5.1 writes out Eq. 3 (5.1.2), Eq. 6 (5.1.6) and Eq. 4 (5.1.10). The metric code in section 4.5 implements Eq. 7 and Eq. 8. Section 1.3 gives Eq. 1, Eq. 2 and Eq. 5.
+Page references such as (p.5) are PDF pages. Table and figure numbers follow the PDF. The equations come from the MathML of the arXiv HTML, because the PDF text layer drops glyphs inside equations. Section 5.1 writes out Eq. 3 (5.1.2), Eq. 6 (5.1.6) and Eq. 4 (5.1.10). The metric code that section 4.5 describes implements Eq. 7 and Eq. 8. Section 1.3 gives Eq. 1, Eq. 2 and Eq. 5.
 
 The arXiv HTML labels the qualitative ablation grid (PDF Fig. 5) as "Table 5". From that grid on, HTML table numbers are one higher than PDF numbers, and HTML figure numbers are one lower. For example, PDF Table 6 is HTML Table 7, and PDF Fig. 12 is HTML Fig. 11. The running text of the HTML is shifted the same way.
 

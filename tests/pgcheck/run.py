@@ -5,12 +5,7 @@ and is deleted at the end. It never touches another Postgres on the machine. Eac
 supabase_stub.sql (a small stand-in for Supabase's auth, storage and Realtime), the migrations in
 supabase/migrations (without the pg_cron file: plain Postgres has no pg_cron) and helpers.sql.
 
-    python tests/pgcheck/run.py
-
-runs what tests/test_supabase_sql.py runs and prints a summary: the check files in an old project
-(with Supabase's old default grants) and in a new one (without them), the shared cases and
-supabase/seed.sql. HARPOR_PG_BIN names the folder of pg_ctl, initdb and psql when they are not in the
-usual places.
+HARPOR_PG_BIN names the folder of pg_ctl, initdb and psql when they are not in the usual places.
 """
 
 import importlib.util
@@ -19,14 +14,11 @@ import re
 import shutil
 import socket
 import subprocess
-import sys
-import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 MIGRATIONS = ROOT / "supabase" / "migrations"
-SEED = ROOT / "supabase" / "seed.sql"
 CHECKS = ("10_checks.sql", "20_own_checks.sql", "30_isolation_checks.sql")
 BIN_DIRS = ("/opt/homebrew/opt/postgresql@15/bin", "/usr/local/opt/postgresql@15/bin", "/usr/lib/postgresql/15/bin",
             "/opt/homebrew/opt/postgresql@17/bin", "/usr/lib/postgresql/17/bin")
@@ -164,44 +156,3 @@ def run_case(cluster, db, case):
 
 def cases_setup(cluster, db):
     cluster.psql(db, supabase_cases.base_sql())
-
-
-def main():
-    bindir = find_bin()
-    if bindir is None:
-        print("no Postgres 15 or newer found (set HARPOR_PG_BIN to the folder of pg_ctl, initdb and psql)")
-        return 2
-    cluster = Cluster(tempfile.mkdtemp(prefix="harpor_pg_"), bindir).start()
-    failed = 0
-    try:
-        print(f"Postgres from {bindir}, port {cluster.port}; the pg_cron migration is skipped")
-        for db, old in (("old_project", True), ("new_project", False)):
-            cluster.project(db, old_grants=old)
-            try:
-                for name, text, expected in run_checks(cluster, db):
-                    print(f"{db}: {name}: {passed(text)} of {expected} checks passed")
-            except PsqlError as e:
-                failed += 1
-                print(f"{db}: FAILED\n{e}")
-        cluster.project("cases")
-        cases_setup(cluster, "cases")
-        cases = supabase_cases.load()
-        n_ok = 0
-        for case in cases:
-            ok, text = run_case(cluster, "cases", case)
-            n_ok += ok
-            if not ok:
-                failed += 1
-                print(f"case {case['id']}: FAILED\n{text}")
-        print(f"cases: {n_ok} of {len(cases)} passed")
-        cluster.project("seed")
-        cluster.psql("seed", file=SEED)
-        print("seed: " + cluster.value("seed", "select string_agg(email || ' approved=' || approved, ', ' order by email) "
-                                       "from public.access"))
-    finally:
-        cluster.stop()
-    return 1 if failed else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -7,6 +7,7 @@
   --accent: #1e4f85; --accent-soft: #e9eef4;
   --primary: #1c1c1a; --primary-fg: #fbfbf9; --primary-hover: #3b3a37;
   --ok: #2d6a3a; --bad: #b03222; --warn: #8a5700; --cand: #d99a00;
+  --near: #2166ac; --far: #b2182b;  /* the LiDAR nearer or farther than DA3 (the check images' colors), in both themes */
   --log-bg: #f5f4f0; --log-fg: #1c1c1a; --log-muted: #62605a; --viewer-bg: #efeeea;
   --shadow: 0 4px 14px rgb(0 0 0 / 0.1);
   --r: 2px;
@@ -298,6 +299,11 @@ th { padding-block: 6px; font-size: var(--t-s); font-weight: 500; color: var(--m
 #stages progress, #stages .note { grid-column: 2 / -1; }
 #stages progress { max-width: none; height: 4px; margin-top: 4px; }
 #stages .note { color: var(--muted); font-size: var(--t-xs); overflow-wrap: anywhere; }
+#runtotal { display: grid; grid-template-columns: 1.5em minmax(0, 1fr) auto; column-gap: var(--s2); align-items: baseline;
+  margin: -1px 0 0; padding: 7px 4px 7px 6px; border-top: 1px solid var(--line-strong); }
+#runtotal[hidden] { display: none; }
+#runtotal > :first-child { grid-column: 2; font: 500 var(--t-ui) var(--mono); }
+#runtotalsecs { font: 600 var(--t-xs) var(--mono); font-variant-numeric: tabular-nums; }
 .loghead { display: flex; gap: var(--s3); align-items: baseline; margin: 0 0 6px; }
 #logname { font-family: var(--mono); }
 #log { margin: 0; background: var(--log-bg); color: var(--log-fg); font: var(--t-xs)/1.5 var(--mono); padding: 10px 12px;
@@ -451,9 +457,12 @@ canvas.cloud:active { cursor: grabbing; }
 .legend { display: flex; flex-wrap: wrap; gap: 0 var(--s3); margin: var(--s1) 0 0; font: var(--t-xs) var(--mono); color: var(--muted);
   font-variant-numeric: tabular-nums; }
 .legend .key { white-space: nowrap; }
+.legend .key.long { white-space: normal; }
 .sq { display: inline-block; width: 7px; height: 7px; margin-right: 6px; }
 .sq.scan { background: var(--line-strong); }
 .sq.used { background: var(--accent); }
+.sq.da3 { background: var(--line-strong); }
+.sq.diff { width: 28px; background: linear-gradient(90deg, var(--near), var(--fg), var(--far)); }
 
 /* the public site (static/supa.js and static/account.js draw into the markup that site.py adds): the account menu in
    the header of the app, help and demos pages, the banner of the user's machines under it, the sign-in and waiting
@@ -577,6 +586,7 @@ a.democard:hover, a.democard:focus-visible { border-color: var(--fg); }
   .drop > p:has(> .button) { grid-column: 1; grid-row: auto; margin-top: var(--s3); }
   /* the GPU mark and the clock take only their room, so the stage's name keeps some */
   #stages li { grid-template-columns: 1.6em minmax(0, 1fr) auto auto 4.2em; }
+  #runtotal { grid-template-columns: 1.6em minmax(0, 1fr) auto; }
   h2 { font-size: var(--t-xl); }
   html { scroll-padding-bottom: 50vh; }
   .tablewrap, .scroll { overflow: visible; padding: 0; }

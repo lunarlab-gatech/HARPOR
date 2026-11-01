@@ -21,7 +21,8 @@ umask 077  # server.log and webapp.json hold the login token; job folders stay p
 JOB=${1:?usage: start_ice.sh JOBID [PORT]}
 PORT=${2:-0}
 [[ $JOB =~ ^[0-9]+$ && $PORT =~ ^[0-9]+$ ]] || { echo "JOBID and PORT must be numbers" >&2; exit 2; }
-G=$(readlink -f ~/scratch)/gator
+G=${HARPOR_ROOT:-${GATOR_ROOT:-$(readlink -f ~/scratch)/gator}}
+CODE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 PY=$G/envs/web/bin/python
 INFO=~/.config/gator/webapp.json
 LOG=$G/webapp_runs/server.log
@@ -53,9 +54,10 @@ else
   mkdir -p "$G/webapp_runs"
   rm -f "$INFO"  # so that the file this start writes is the one read below
   # bash -l, so that module exists and purges what the login profile loaded; setsid -w keeps $!
-  # alive as long as srun runs, also if setsid has to fork.
+  # alive as long as srun runs, also if setsid has to fork. HARPOR_ROOT goes by name, because open_mac.sh
+  # runs this script without the login profile that the server's bash -l reads.
   nohup setsid -w srun --jobid="$JOB" --overlap --ntasks=1 \
-    bash -lc "module purge 2>/dev/null; cd $G/gator_clone && exec $PY -m harpor.webapp --port $PORT" \
+    bash -lc "module purge 2>/dev/null; cd $CODE && HARPOR_ROOT=$G exec $PY -m harpor.webapp --host 0.0.0.0 --port $PORT" \
     > "$LOG" 2>&1 < /dev/null &
   launcher=$!
   say "starting the server in job $JOB on ${state#RUNNING } (log: $LOG)"
@@ -72,7 +74,7 @@ else
   alive "$node" "$port" || say "warning: $node:$port does not answer yet; see $LOG"
   say "server running on $node:$port"
 fi
-say "forward: ssh -S ~/.ssh/cm-ice -O forward -L 8765:$node:$port ali497@login-ice.pace.gatech.edu"
+say "forward: ssh -L 8765:$node:$port <login node>"
 say "then open: http://localhost:8765/?token=$token"
 echo "NODE=$node"
 echo "PORT=$port"

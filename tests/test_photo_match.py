@@ -1,7 +1,5 @@
 import json
 import math
-import os
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,9 +11,6 @@ H, W = 48, 64  # the manifest's photo size
 WINDOW = (12, 6, 52, 42)  # u0, v0, u1, v1, end exclusive
 RH, RW = 54, 60  # the render: the 40 x 36 window at 1.5x
 SHA_A, SHA_B = "a" * 64, "b" * 64
-DEVDATA = Path(os.environ.get(
-    "GATOR_DEVDATA",
-    "/private/tmp/claude-501/-Users-andrewli-lunar-lab-research/60864a71-d343-43d1-9009-0a27ee1f6e39/scratchpad/devdata"))
 
 
 def photo_and_mask():
@@ -208,21 +203,6 @@ def test_cli_prints_rows_and_writes_json(tmp_path, capsys, monkeypatch):
     assert [s["name"] for s in data["sessions"]] == ["opus", "astra"]
     assert data["sessions"][0]["views"][0]["candidate"]["color_de"] is None
     assert data["sessions"][0]["delta"]["iou"] == -1.0
-
-
-@pytest.mark.skipif(not (DEVDATA / "chair_opus" / "result.json").exists(), reason="the chair sessions are not on this machine")
-def test_real_chair_sessions():
-    sessions = [P.score_session(DEVDATA / n) for n in ("chair_opus", "chair_astra")]
-    for s in sessions:
-        assert s["warnings"] == [] and s["review"].endswith(s["sha256"][:12]) and s["n_views"] == 5
-        for v in s["views"]:  # the crop and the mask match review.py: the same IoU
-            for n in P.ASSETS:
-                assert v[n]["iou"] == pytest.approx(v["review_iou"][n], abs=1e-12)
-        for n in P.ASSETS:
-            assert all(math.isfinite(x) for x in s["mean"][n].values())
-    # Both sessions start from the same original.glb under the same cameras and lights.
-    for k, x in sessions[0]["mean"]["original"].items():
-        assert x == pytest.approx(sessions[1]["mean"]["original"][k], rel=1e-3, abs=1e-3)
 
 
 def test_background_composite_credits_a_real_opening():

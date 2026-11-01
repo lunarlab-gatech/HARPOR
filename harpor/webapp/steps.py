@@ -1,8 +1,9 @@
-"""The stages of a web-app job, the command that runs each one on ICE, and when each one is done.
+"""The stages of a web-app job, the command that runs each one on the GPU machine, and when each one is done.
 
 Every stage is one subprocess, `bash -c SCRIPT`, so the server itself needs only envs/web. The
-scripts are those of our ICE runs: the same interpreters by full path and the same environment
-lines, with G=$(readlink -f ~/scratch)/gator and the job folder J under G/webapp_runs:
+scripts are those of our runs on the GPU machine: the same interpreters by full path and the same environment
+lines, with G the root (HARPOR_ROOT, by default $(readlink -f ~/scratch)/gator), C the repo (Config.code) and the
+job folder J under G/webapp_runs:
 
   topics   envs/web     video topics            frames/topics.json (rosbag input; skipped for a video and
                                                 a Stray Scanner capture)
@@ -51,6 +52,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from harpor.fileio import read_json
+
 NAMES = ["topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "place", "propose", "parts",
          "agent", "align", "vomp", "mjcf", "usd", "urdf", "turntable", "package"]
 GPU = ("masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable")
@@ -58,8 +61,8 @@ GPU = ("masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable")
 OPTIONAL = {"turntable": "360 video"}
 REVIEW_AFTER = "select"
 PARTS_AFTER = "propose"  # an unconfirmed "vlm_edit" part list pauses the job here (pause_after)
-STAGES = [{"name": n, "gpu": n in GPU, "review_after": n == REVIEW_AFTER} for n in NAMES]
-CODE = Path(__file__).resolve().parents[2]  # the gator_clone that fake mode runs from
+STAGES = [{"name": n, "gpu": n in GPU} for n in NAMES]
+CODE = Path(__file__).resolve().parents[2]  # the repo root, which fake mode runs from and Config.code defaults to
 
 # Copied from the ICE run scripts of Stage A and of VoMP; keep them exactly. The exception is TORCH_CUDA_ARCH_LIST,
 # which no stage sets: nvdiffrast, which builds its plugin at run time, clears it and builds for the visible GPUs.
@@ -87,14 +90,16 @@ PARTS_MODES = ("vlm", "vlm_edit", "user")
 
 @dataclass
 class Config:
-    G: Path            # $(readlink -f ~/scratch)/gator: envs/, sif/, gator_clone/, the model clones
+    G: Path            # HARPOR_ROOT, by default $(readlink -f ~/scratch)/gator: envs/, sif/, the model clones
     runs: Path         # the job folders
     fake: bool = False
     demos: Path | None = None  # the demos folder (WEBAPP_DEMOS), shown at /demos.html (demos.py)
+    code: Path = CODE  # the repo that the real stages run from
 
 
 def config_from_env():
-    G = Path(os.environ.get("GATOR_ROOT") or Path("~/scratch").expanduser().resolve() / "gator")
+    G = Path(os.environ.get("HARPOR_ROOT") or os.environ.get("GATOR_ROOT")
+             or Path("~/scratch").expanduser().resolve() / "gator")
     demos = os.environ.get("WEBAPP_DEMOS")
     return Config(G=G, runs=Path(os.environ.get("WEBAPP_RUNS") or G / "webapp_runs"),
                   fake=os.environ.get("WEBAPP_FAKE") == "1", demos=Path(demos).expanduser() if demos else None)
@@ -106,7 +111,7 @@ def job(job_dir):
 
 
 def _json(path):
-    return json.loads(Path(path).read_text()) if Path(path).is_file() else {}
+    return read_json(path) or {}
 
 
 def agent(job):
@@ -164,8 +169,9 @@ def command(stage, job, cfg, key_file=None):
             script += f" --key-file {q(str(key_file))} --agent {agent(job)}"
         return ["bash", "-c", script], str(CODE), env
 
-    lines = ["set -eo pipefail", f"G={q(str(cfg.G))}", f"J={q(str(Path(cfg.runs) / job['id']))}"]
-    run = "cd $G/gator_clone && "
+    lines = ["set -eo pipefail", f"G={q(str(cfg.G))}", f"J={q(str(Path(cfg.runs) / job['id']))}",
+             f"C={q(str(cfg.code))}"]
+    run = "cd $C && "
     sif = " --sif $G/sif/gator-agent.sif"  # the agent's container, which also runs Blender
     if stage in ("topics", "frames", "extract", "lidar", "select", "package"):
         module = {"topics": "harpor.webapp.video topics", "frames": "harpor.webapp.video analyze",
@@ -173,7 +179,7 @@ def command(stage, job, cfg, key_file=None):
                   "select": "harpor.webapp.views select", "package": "harpor.webapp.jobs package"}[stage]
         lines.append(run + f'$G/envs/web/bin/python -m {module} --job "$J"')
     elif stage == "masks":
-        # Without the earlier sam3.json, sam3_masks keeps no earlier picks: only the job's overrides pick.
+        # The rm removes the masks stage's marker, so sam3_masks keeps no earlier picks: only the job's overrides pick.
         # --prompt=NOUN in one word, so that a noun such as "-cup" is not read as an option.
         picks = "".join(f" --pick {q(f'{n}={k}')}" for n, k in sorted(job["overrides"].get("instance", {}).items()))
         lines += [f"export {SAM3_ENV}", f'rm -f "$J/scene/sam3_{job["slug"]}/sam3.json"',
@@ -185,7 +191,7 @@ def command(stage, job, cfg, key_file=None):
         lines += ['rm -rf "$J/physics/work" "$J/physics/materials.npz" "$J/physics/voxels.npz" "$J/physics/summary.json"'
                   + (' "$J/physics/vomp"' if links else ""),
                   VOMP_ACTIVATE, f"export {VOMP_ENV}",
-                  'cd $G/VoMP && python $G/gator_clone/harpor/physics/vomp_run.py --glb "$J/physics/aligned.glb" --out "$J/physics"'
+                  'cd $G/VoMP && python $C/harpor/physics/vomp_run.py --glb "$J/physics/aligned.glb" --out "$J/physics"'
                   + (' --links "$J/physics/links"' if links else "")]
     elif stage in ("mjcf", "usd", "urdf"):
         from harpor.webapp.physics_auto import sim_name
@@ -224,7 +230,7 @@ def command(stage, job, cfg, key_file=None):
         if stage == "prep":  # a view that lost its mask must not stay in the pool from an earlier prep
             lines.append('rm -rf "$J/pool/input" "$J/pool/masks" "$J/pool/prep.json"')
         lines.append(run + f"{py} {args}")
-    return ["bash", "-c", "\n".join(lines)], str(Path(cfg.G) / "gator_clone"), env
+    return ["bash", "-c", "\n".join(lines)], str(cfg.code), env
 
 
 def done(stage, job_dir):
@@ -233,8 +239,7 @@ def done(stage, job_dir):
     if stage in MARKERS:
         return (J / MARKERS[stage]).is_file()
     if stage == "extract":
-        names = _json(J / "frames" / "pool.json").get("names")
-        names = names.values() if isinstance(names, dict) else names
+        names = (_json(J / "frames" / "pool.json").get("names") or {}).values()
         return bool(names) and all((J / "scene" / "images" / f"{n}.png").is_file() for n in names)
     if stage == "masks":
         return (J / "scene" / f"sam3_{job(J)['slug']}" / "sam3.json").is_file()
@@ -248,7 +253,6 @@ def done(stage, job_dir):
             seen = {Path(str(p)).stem for p in da["image_files"]}
         return {p.stem for p in (J / "pool" / "input" / "images").glob("*.png")} <= seen
     if stage == "lidar":  # an upload or delete of the calibration since the record, or an older estimator, makes it stale
-        from harpor.fileio import read_json
         from harpor.stage_a.lidar_scale import VERSIONS
 
         rec = read_json(J / "pool" / "lidar.json")  # None when it does not parse: not done
@@ -293,8 +297,6 @@ def guard(stage, job_dir):
     """The reason a stage that ran (or failed) leaves the job unusable, else None."""
     J = Path(job_dir)
     if stage == "lidar":
-        from harpor.fileio import read_json
-
         rec = read_json(J / "pool" / "lidar.json")  # None when it does not parse
         if not isinstance(rec, dict) or not rec or rec.get("ok") is True:
             return None

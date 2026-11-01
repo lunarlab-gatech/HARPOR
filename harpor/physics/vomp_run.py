@@ -1,7 +1,7 @@
 """Run VoMP v1.1 on one GLB: per-voxel materials and rigid-body mass properties (build_plan.md note 9).
 
 Run it in the VoMP env from the VoMP clone, because inference.json names its weights by relative path:
-    cd $VOMP && python $GATOR/harpor/physics/vomp_run.py --glb aligned.glb --out RUN_DIR [--links LINKS_DIR]
+    cd $VOMP && python <repo>/harpor/physics/vomp_run.py --glb aligned.glb --out RUN_DIR [--links LINKS_DIR]
 Writes into RUN_DIR:
   work/          VoMP's renders, render geometry, voxels and DINO features
   materials.npz  VoMP's save_materials format (voxel_data: x, y, z, youngs_modulus, poissons_ratio,

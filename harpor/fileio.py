@@ -45,6 +45,11 @@ def replace(path, save, /, *args, **kw):
 
 # ---- private files: the session file, the key files, webapp.json ----
 
+def config_dir():
+    """~/.config/gator, the folder of those files. It reads the home folder at each call, since tests change HOME."""
+    return Path.home() / ".config" / "gator"
+
+
 def private_folder(folder, make=False):
     """Refuses (SystemExit) a folder that is not this user's, or that group or others may open. make: make it
     with mode 0700 when it is missing."""

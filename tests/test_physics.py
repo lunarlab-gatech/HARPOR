@@ -354,6 +354,15 @@ def two_box_hinge(tmp_path, rho=(600.0, 300.0)):
     return tmp_path / "parts.glb", tmp_path / "physics" / "summary.json", hinge, centers
 
 
+def fix_to_world(glb):
+    """Add a fixed joint from the world to the body link of glb, as two_lid_chest has."""
+    from harpor.parts.joints import read_joints, write_joints
+
+    doc, binary = read_glb(glb)
+    joints = {**read_joints(doc), "body": {"version": 1, "frame": "S", "parent": "world", "type": "fixed"}}
+    write_glb(glb, write_joints(doc, joints), binary)
+
+
 def hull_parts(V, F, threshold):
     trimesh = pytest.importorskip("trimesh")
     h = trimesh.Trimesh(V, F).convex_hull
@@ -503,8 +512,9 @@ def test_articulated_mjcf_nests_the_lid_on_a_hinge(tmp_path):
     assert np.allclose(m.jnt_axis[m.joint("chest_lid_joint").id], hinge["axis"])
     assert (tmp_path / "mjcf" / "assets" / "collision_lid_0.obj").is_file()
 
-    # --fixed-base keeps only the hinge.
-    build(glb, summary, tmp_path / "fixed", "chest", decompose=hull_parts, fixed_base=True)
+    # A world joint on the root keeps only the hinge.
+    fix_to_world(glb)
+    build(glb, summary, tmp_path / "fixed", "chest", decompose=hull_parts)
     c = check(tmp_path / "fixed", "chest")
     assert c["njnt"] == 1 and json.loads((tmp_path / "fixed" / "mjcf.json").read_text())["fixed_base"]
 

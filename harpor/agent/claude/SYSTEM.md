@@ -91,8 +91,8 @@ fails, but not after a usage error.
 
 ## Measured times
 
-From 6 earlier Claude Opus 5.5 sessions of this task (a round table and an office chair) on a PACE
-ICE node with an L40S GPU, with a 600 s budget:
+From 6 earlier sessions of this task on one data-center GPU, with a 600 s budget. Your machine may
+differ.
 
 - A Blender script that inspects or edits the scene: 2 to 5 s.
 - `export_glb`: about 5 s, which does not count against the budget.
@@ -102,8 +102,8 @@ ICE node with an L40S GPU, with a 600 s budget:
   47 to 74 s, median 51 s.
 
 The articulation helpers count against the budget, except the export inside `review_articulation`,
-which does not count (as in `review`). These times come from one Claude Opus 5.5 session of the
-articulation mode on PACE ICE: an office chair with 5 input views, with a 900 s budget.
+which does not count (as in `review`). These times come from one session of the articulation mode
+on the same GPU: an office chair with 5 input views, with a 900 s budget.
 
 - `set_joint`: 4.9 s, one Blender run that opens and saves the scene. A refused change takes a second
   run to undo it.

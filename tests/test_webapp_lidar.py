@@ -223,6 +223,24 @@ def read_glb(data):
     return out
 
 
+def read_diff(data):
+    """(_DIFF, row for row with read_glb's "diff"; the node's extras) of a lidar.cloud_glb file (a path or bytes)."""
+    data = data if isinstance(data, bytes) else Path(data).read_bytes()
+    n = struct.unpack_from("<I", data, 12)[0]
+
+    def strict(x):
+        raise AssertionError(f"{x} is not JSON")
+
+    doc = json.loads(data[20:20 + n], parse_constant=strict)
+    node = next(x for x in doc["nodes"] if x["name"] == "diff")
+    (prim,) = doc["meshes"][node["mesh"]]["primitives"]
+    acc = doc["accessors"][prim["attributes"]["_DIFF"]]
+    assert (acc["componentType"], acc["type"]) == (5126, "SCALAR")
+    view = doc["bufferViews"][acc["bufferView"]]
+    assert acc["count"] == doc["accessors"][prim["attributes"]["POSITION"]]["count"] and "byteStride" not in view
+    return np.frombuffer(data, "<f4", acc["count"], 28 + n + view["byteOffset"]), node["extras"]
+
+
 def opencv(a):
     """glTF axes back to OpenCV camera axes (x right, y down, z forward)."""
     return np.asarray(a) * [1.0, -1.0, -1.0]
@@ -323,7 +341,7 @@ def test_clouds_of_a_rosbag(points_bag, tmp_path, monkeypatch):
     for v in rec["views"]:
         c = read_glb(J / "lidar" / "cloud" / f"{v['name']}.glb")
         scan, used = opencv(c["scan"]), opencv(c["used"])
-        assert sorted(c) == ["scan", "used"] and len(used) == v["points_used"] > 100
+        assert sorted(c) == ["da3", "diff", "scan", "used"] and len(used) == v["points_used"] > 100
         assert (scan[:, 2] < 0).sum() == 500 and len(scan) <= L.SCAN_POINTS  # behind the camera: glTF z > 0
         mask = np.array(Image.open(J / "scene" / "sam3_box" / f"{v['name']}.png")) > 0
         u, w = K[0, 0] * used[:, 0] / used[:, 2] + K[0, 2], K[1, 1] * used[:, 1] / used[:, 2] + K[1, 2]
@@ -358,6 +376,282 @@ def test_cloud_glb():
     assert list(read_glb(L.cloud_glb({"scan": scan, "used": np.zeros((0, 3))}))) == ["scan"]
     assert read_glb(L.cloud_glb({"used": [[0.0, 0.0, 1.0], [np.nan, 0.0, 1.0]]}))["used"].tolist() == [[0, 0, -1]]
     assert L.cloud_glb({"scan": np.zeros((0, 3)), "used": np.zeros((0, 3))}) is None and L.cloud_glb({}) is None
+
+
+def test_cloud_glb_nodes_of_the_comparison():
+    """"da3" holds positions, and "diff" also _DIFF, row for row: a row that is not finite in either leaves both. An
+    extras' None stays null, since NaN is not JSON. A file without the new nodes has the bytes that it always had."""
+    trimesh = pytest.importorskip("trimesh")
+    scan = np.arange(150.0).reshape(50, 3) / 7
+    used = scan[:4] + 0.5
+    assert hashlib.sha256(L.cloud_glb({"scan": scan, "used": used})).hexdigest() == (
+        "f1c3786037b4a20dbf86838c23fdb93bb65baa95320a0aea60aa1a240fcc60d0")
+    xyz = [[0.0, 0.0, 1.0], [np.nan, 0.0, 1.0], [1.0, 2.0, 3.0], [0.0, 1.0, 2.0], [0.0, 1.0, 4.0]]
+    extras = {"s": 1.25, "median_m": None, "used": 0}
+    data = L.cloud_glb({"scan": scan, "used": used, "da3": [[0.0, 0.0, 2.0], [np.inf, 0.0, 1.0]], "diff": xyz,
+                        "diff_m": [0.01, 7.0, -0.02, np.nan, np.inf], "diff_extras": extras})
+    got = read_glb(data)
+    m, stored = read_diff(data)
+    assert list(got) == ["scan", "used", "da3", "diff"] and stored == extras
+    assert opencv(got["diff"]).tolist() == [[0, 0, 1], [1, 2, 3]] and m == pytest.approx([0.01, -0.02])
+    assert opencv(got["da3"]).tolist() == [[0, 0, 2]]
+    assert sorted(trimesh.load(io.BytesIO(data), file_type="glb").geometry) == ["da3", "diff", "scan", "used"]
+    alone = L.cloud_glb({"diff": [[0.0, 0.0, 1.0]], "diff_m": [0.5], "diff_extras": extras})
+    assert list(read_glb(alone)) == ["diff"] and read_diff(alone)[0].tolist() == [0.5]
+    assert L.cloud_glb({"diff": np.zeros((0, 3)), "diff_m": [], "diff_extras": extras}) is None
+    assert L.cloud_glb({"diff": [[np.nan, 0.0, 1.0]], "diff_m": [0.5], "diff_extras": extras}) is None
+
+
+def plane_view():
+    """A 64 x 48 view, its DA3 depth 1 m but for one hole, its mask the middle, and LiDAR samples on the pixels of one
+    row, row for row with camera points whose x tells the rows apart: 1.30 m, 1.20 m and 1.25 m deep in the mask, 1.30
+    m outside it, one on the hole, one that is not finite. Returns view_ratio's points and the camera points."""
+    depth, mask = np.ones((48, 64)), np.zeros((48, 64), bool)
+    depth[24, 30] = np.nan
+    mask[8:40, 8:56] = True
+    uvz = np.array([[20, 24, 1.30], [24, 24, 1.20], [28, 24, 1.25], [30, 24, 1.25], [2, 24, 1.30], [34, 24, np.nan]])
+    xyz = np.c_[np.arange(6.0), np.zeros(6), uvz[:, 2]]
+    return lidar_scale.view_ratio(uvz, (0, 0, 64, 48), depth, None, mask, min_points=1)[1], xyz
+
+
+def test_view_diff_is_the_signed_gap_in_meters():
+    """Without a baseline, each row's gap is z - s x DA3's depth: positive when the LiDAR reads farther. A point on
+    DA3's hole, or not finite, has no row, and the points outside the mask have one but do not count in the median."""
+    p, xyz = plane_view()
+    assert p["used"].tolist() == [True, True, True, False, False]  # the hole's point has no r
+    got = L.view_diff(xyz, p, 1.25)
+    assert got["diff"][:, 0].tolist() == [0, 1, 2, 4]  # the rows of xyz, by points["index"]
+    assert got["diff_m"] == pytest.approx([0.05, -0.05, 0.0, 0.05])
+    assert got["diff_extras"] == {"s": 1.25, "median_m": pytest.approx(0.0), "used": 3}
+    assert L.view_diff(xyz, p, 1.0)["diff_m"] == pytest.approx([0.3, 0.2, 0.25, 0.3])  # at another scale
+    none = L.view_diff(xyz, {**p, "used": np.zeros(5, bool)}, 1.25)
+    assert none["diff_extras"] == {"s": 1.25, "median_m": None, "used": 0} and len(none["diff"]) == 4
+    json.dumps(none["diff_extras"], allow_nan=False)
+
+
+def test_references_pick_the_scale_as_the_check_images_do():
+    """The job's combined s, also for a view with its own, also on a failed record; else the view's own; else none."""
+    views = [{"name": "a", "s": 1.3}, {"name": "b", "s": None}]
+    assert L.references({"ok": True, "s": 1.25, "views": views}) == {"a": 1.25, "b": 1.25}
+    assert L.references({"ok": False, "s": 1.25, "views": views}) == {"a": 1.25, "b": 1.25}
+    assert L.references({"ok": False, "s": None, "views": views}) == {"a": 1.3}
+    assert L.references({"ok": False, "s": None, "views": []}) == {}
+    p, xyz = plane_view()
+    assert L.compared({"a": (xyz, xyz)}, {"a": p}, {}, None) == {}  # neither: no nodes
+    assert sorted(L.compared({"a": (xyz, xyz)}, {"a": p}, {"a": 1.25}, None)["a"]) == ["diff", "diff_extras", "diff_m"]
+
+
+def test_da3_comes_only_with_a_diff_set(tmp_path):
+    """The viewer draws DA3's surface only with a diff set. So a view with no points gets no file, and a view with a
+    scan but no diff rows keeps its scan alone."""
+    p, xyz = plane_view()
+    depth = {"depth": np.ones((48, 64)), "crop": (0, 0, 64, 48)}
+    empty, none = {**{k: v[:0] for k, v in p.items()}, **depth}, np.zeros((0, 3))
+    clouds, points = {"a": (xyz, xyz), "b": (none, none), "c": (none, xyz)}, {"a": {**p, **depth}, "b": empty, "c": empty}
+    camera = {"K": np.array([[60.0, 0.0, 32.0], [0.0, 60.0, 24.0], [0.0, 0.0, 1.0]]), "D": [], "model": None,
+              "size": (64, 48)}
+    parts = L.compared(clouds, points, dict.fromkeys(clouds, 1.25), dict.fromkeys(clouds, camera))
+    assert len(parts["a"]["da3"]) == 48 * 64 and "da3" not in parts["b"] and "da3" not in parts["c"]
+    assert L.write_clouds(tmp_path, clouds, points, parts) == ["a", "c"]
+    assert list(read_glb(tmp_path / "a.glb")) == ["scan", "used", "da3", "diff"]
+    assert list(read_glb(tmp_path / "c.glb")) == ["scan"]
+
+
+def test_da3_surface_goes_through_the_crop_and_the_camera():
+    """Each point of the surface projects to its DA3 pixel's source pixel, through the crop, at s x its depth. A pixel
+    without depth is left out, and so is one that the lens cannot invert. The stride keeps at most DA3_POINTS, also on
+    a grid whose rounded-up stride goes over the plain ratio (489 x 489 at stride 2 keeps 245 x 245 = 60,025), and its
+    points keep their own pixels, over the whole grid."""
+    h, w, crop, size = 30, 40, (20, 10, 420, 310), (460, 330)
+    K = np.array([[300.0, 0.0, 230.0], [0.0, 300.0, 165.0], [0.0, 0.0, 1.0]])
+    camera = {"K": K, "D": [-0.1, 0.01, 0.0, 0.0, 0.0], "model": "plumb_bob", "size": size}
+    depth = 1 + np.arange(h * w, dtype=np.float32).reshape(h, w) / 1000
+    depth[3, 4], depth[5, 6] = np.nan, 0
+    X = L.da3_surface(depth, crop, camera, 1.5)
+    assert X.dtype == np.float32 and len(X) == h * w - 2
+    u, v, z, ok = lidar_scale.project(X, K, camera["D"], "plumb_bob", size)
+    gu, gv = lidar_scale.source_to_grid(u, v, crop, (w, h))
+    iu, iv = lidar_scale.pixel(gu), lidar_scale.pixel(gv)
+    assert ok.all() and np.abs(gu - iu).max() < 1e-3 and np.abs(gv - iv).max() < 1e-3
+    assert np.array_equal(z, X[:, 2]) and z == pytest.approx(1.5 * depth[iv, iu], rel=1e-6)
+    h, w, step = 600, 800, 3  # 480,000 pixels: 200 x 267 stay at stride 3
+    depth = 1 + np.arange(h * w, dtype=float).reshape(h, w) / 1e5
+    X = L.da3_surface(depth, crop, camera, 1.5)
+    u, v, z, ok = lidar_scale.project(X, K, camera["D"], "plumb_bob", size)
+    gu, gv = lidar_scale.source_to_grid(u, v, crop, (w, h))
+    iu, iv = lidar_scale.pixel(gu), lidar_scale.pixel(gv)
+    assert ok.all() and np.abs(gu - iu).max() < 5e-3 and np.abs(gv - iv).max() < 5e-3
+    assert np.unique(iu).tolist() == list(range(0, w, step)) and np.unique(iv).tolist() == list(range(0, h, step))
+    assert len(X) == 200 * 267 and z == pytest.approx(1.5 * depth[iv, iu], rel=1e-6)
+    K2, size2, D = np.array([[300.0, 0.0, 320.0], [0.0, 300.0, 240.0], [0.0, 0.0, 1.0]]), (640, 480), [-0.3, 0.0, 0.0, 0.0]
+    gv, gu = np.mgrid[:48, :64].reshape(2, -1)
+    u, v = lidar_scale.grid_to_source(gu, gv, (0, 0, 640, 480), (64, 48))
+    good = lidar_scale.unproject(u, v, K2, D, "plumb_bob", size2)[2]
+    X = L.da3_surface(np.ones((48, 64)), (0, 0, 640, 480), {"K": K2, "D": D, "model": "plumb_bob", "size": size2}, 1.0)
+    pu, pv, _, seen = lidar_scale.project(X, K2, D, "plumb_bob", size2)
+    assert 0 < good.sum() < 0.9 * len(good) and len(X) == good.sum()  # the frame's corners lie past the lens's fold
+    assert seen.all() and np.hypot(pu - u[good], pv - v[good]).max() < 0.02
+    camera = {"K": K, "D": [], "model": None, "size": size}
+    for g in (489, 504):
+        got = L.da3_surface(np.ones((g, g)), (0, 0, 460, 330), camera, 1.0)
+        assert 0.3 * L.DA3_POINTS < len(got) <= L.DA3_POINTS, g
+    assert len(L.da3_surface(np.ones((244, 245)), (0, 0, 460, 330), camera, 1.0)) == 244 * 245  # 59,780: every pixel
+
+
+def test_clouds_compare_with_da3(points_bag, tmp_path, monkeypatch):
+    """A bag's cloud holds DA3's surface at the job's s, on the scene, and the LiDAR's gap to it, near 0 since the fake
+    DA3 is the scene times 0.8. Its rows are camera points of the samples, and the used points are among them. A view
+    is compared at the combined s, not its own. With the combined s of a failed estimate the cloud uses that s; with
+    no combined s, each view's own, so a failed scale can still be looked at."""
+    J = make_job(tmp_path, points_bag)
+    rec = scaled(J)
+    K = F.intrinsics(*SIZE)
+    assert len({v["s"] for v in rec["views"]}) > 1  # the views differ, so the choice of s shows
+    for v in rec["views"]:
+        f = J / "lidar" / "cloud" / f"{v['name']}.glb"
+        c, (m, extras) = read_glb(f), read_diff(f)
+        assert extras["s"] == rec["s"] and extras["used"] == v["points_used"] and abs(extras["median_m"]) < 0.02
+        assert {tuple(x) for x in c["used"].tolist()} <= {tuple(x) for x in c["diff"].tolist()} and len(m) > len(c["used"])
+        X = opencv(c["da3"])
+        truth = F.render(*SIZE, F.frame_angle(J, v["name"]))[0]
+        u, w = K[0, 0] * X[:, 0] / X[:, 2] + K[0, 2], K[1, 1] * X[:, 1] / X[:, 2] + K[1, 2]
+        err = X[:, 2] / truth[lidar_scale.pixel(w), lidar_scale.pixel(u)] - 1
+        assert len(X) == SIZE[0] * SIZE[1] and np.median(np.abs(err)) < abs(rec["s"] * F.FAKE_DA3_SCALE - 1) + 2e-3
+    with monkeypatch.context() as patch:  # a combined s, on a record that is not ok
+        patch.setattr(lidar_scale, "MIN_VIEWS", 100)
+        low = failed(J)
+        s = json.loads((J / "pool" / "lidar.json").read_text())["s"]
+        assert low.startswith("LiDAR points cover the object") and s is not None
+        assert all(read_diff(f)[1]["s"] == s for f in (J / "lidar" / "cloud").glob("*.glb"))
+    monkeypatch.setattr(lidar_scale, "MAX_IQR_REL", -1.0)  # every view scattered: no combined s
+    failed(J)
+    rec = json.loads((J / "pool" / "lidar.json").read_text())
+    assert rec["s"] is None
+    for v in rec["views"]:
+        assert read_diff(J / "lidar" / "cloud" / f"{v['name']}.glb")[1]["s"] == v["s"]
+
+
+def old_clouds(J):
+    """The job's clouds as a build before the comparison left them: scan and used only."""
+    for f in (J / "lidar" / "cloud").glob("*.glb"):
+        c = read_glb(f)
+        f.write_bytes(L.cloud_glb({"scan": opencv(c["scan"]), "used": opencv(c["used"])}))
+
+
+def job_files(J):
+    """{path in J: (bytes, mtime)} of every file but the clouds and their run copies."""
+    out = {}
+    for f in sorted(J.rglob("*")):
+        rel = f.relative_to(J).as_posix()
+        if f.is_file() and not rel.startswith(("lidar/cloud/", "run/lidar/")):
+            out[rel] = (f.read_bytes(), f.stat().st_mtime_ns)
+    return out
+
+
+def test_the_clouds_command(points_bag, tmp_path, capsys):
+    """clouds gives an old job the files that the stage writes now, also when the bag has left the server, with the
+    run's copies by pick (each from its view's cloud), and changes nothing else, not even a file's time. It stops
+    before it writes while the job is busy, and when the stored data no longer gives pool/lidar.json's scale or a
+    view's result, is damaged or is not there."""
+    from harpor.webapp import views
+
+    J = make_job(tmp_path, points_bag)
+    rec = scaled(J)
+    new = cloud_files(J)
+    picks = mvsam3d.view_names(J / "pool")[3:6]
+    old_clouds(J)
+    views.build_run(J / "pool", picks, J / "run", metric=rec["s"], clouds=J / "lidar" / "cloud")
+    set_job(J, video={"name": "gone.bag", "path": str(tmp_path / "gone.bag")})
+    before = job_files(J)
+    assert sorted(p.name for p in (J / "run" / "lidar").glob("*.glb")) == ["0.glb", "1.glb", "2.glb"]
+    capsys.readouterr()
+    L.main(["clouds", "--job", str(J)])
+    assert "wrote the clouds of 10 views and 3 copies in run/lidar" in capsys.readouterr().out
+    assert cloud_files(J) == new and job_files(J) == before
+    for i, n in enumerate(picks):
+        assert (J / "run" / "lidar" / f"{i}.glb").read_bytes() == new[f"{n}.glb"]
+    assert not list((J / "run" / "lidar").glob(".*")) and not list((J / "lidar" / "cloud").glob(".*"))
+
+    old_clouds(J)
+    stale = cloud_files(J)
+    rewritten = {p.name: p.read_bytes() for p in (J / "run" / "lidar").glob("*.glb")}
+    set_job(J, status="running")
+    with pytest.raises(SystemExit, match="the job is busy"):
+        L.main(["clouds", "--job", str(J)])
+    set_job(J, status="done")
+    assert cloud_files(J) == stale
+    good = (J / "pool" / "lidar.json").read_text()
+    (J / "pool" / "lidar.json").write_text(json.dumps({**json.loads(good), "s": rec["s"] * 1.001}))
+    with pytest.raises(SystemExit, match=r"the stored data gives s .* but pool/lidar.json has s .*nothing was written"):
+        L.main(["clouds", "--job", str(J)])
+    assert cloud_files(J) == stale and {p.name: p.read_bytes() for p in (J / "run" / "lidar").glob("*.glb")} == rewritten
+    (J / "pool" / "lidar.json").write_text(good)
+    da3 = J / "pool" / "da3_output.npz"
+    keep = da3.read_bytes()
+    with np.load(da3) as f:
+        arrays = dict(f)
+    np.savez(da3, **{**arrays, "depth": arrays["depth"] * 1.01})  # DA3 ran again
+    with pytest.raises(SystemExit, match="changed after the lidar stage"):
+        L.main(["clouds", "--job", str(J)])
+    da3.write_bytes(keep[:len(keep) // 2])  # a copy cut short
+    with pytest.raises(SystemExit, match="the stored data cannot be used"):
+        L.main(["clouds", "--job", str(J)])
+    da3.write_bytes(keep)
+    assert cloud_files(J) == stale
+    mask = J / "pool" / "masks" / "f00000.png"
+    keep = mask.read_bytes()
+    cut = np.array(Image.open(mask))
+    cut[:, :cut.shape[1] // 2] = 0
+    Image.fromarray(cut).save(mask)  # the median view's s stays, so the combined s does, and the file would lie
+    s = rec["s"]
+    with pytest.raises(SystemExit, match=rf"gives s {s} but pool/lidar.json has s {s}, and other results for f00000, so"):
+        L.main(["clouds", "--job", str(J)])
+    mask.write_bytes(keep)
+    assert cloud_files(J) == stale
+    samples = (J / "lidar" / "samples.json").read_text()
+    (J / "lidar" / "samples.json").unlink()
+    with pytest.raises(SystemExit, match="no stored LiDAR samples"):
+        L.main(["clouds", "--job", str(J)])
+    (J / "lidar" / "samples.json").write_text(samples)
+    (J / "pool" / "lidar.json").unlink()
+    with pytest.raises(SystemExit, match="no pool/lidar.json"):
+        L.main(["clouds", "--job", str(J)])
+    (J / "pool" / "lidar.json").write_text(good)
+    set_job(J, lidar=None)
+    with pytest.raises(SystemExit, match="no LiDAR"):
+        L.main(["clouds", "--job", str(J)])
+
+
+def test_changed_views():
+    """A view that one side lacks, or whose s or used points differ past SAME_S. A view with no s on both sides is the
+    same."""
+    views = [{"name": "a", "s": 1.25, "points_used": 300}, {"name": "b", "s": None, "points_used": 0}]
+    rec = {"views": views}
+
+    def one(**kw):
+        return {"views": [{**views[0], **kw}, views[1]]}
+
+    assert L.changed_views(rec, rec) == [] and L.changed_views(one(s=1.25 * (1 + L.SAME_S / 2)), rec) == []
+    assert L.changed_views(one(s=1.2501), rec) == ["a"] and L.changed_views(one(points_used=299), rec) == ["a"]
+    assert L.changed_views({"views": [{**views[0], "s": None}, views[1]]}, rec) == ["a"]
+    assert L.changed_views({"views": [views[1]]}, rec) == ["a"] and L.changed_views(rec, {"views": views[:1]}) == ["b"]
+    assert L.changed_views(rec, {"views": [views[0], {**views[1], "s": 1.0}]}) == ["b"]
+    assert L.changed_views({"views": [views[0], {**views[1], "points_used": 5}]}, rec) == ["b"]  # against a 0
+
+
+def test_the_clouds_command_on_a_failed_scale_and_a_run_without_lidar(points_bag, tmp_path, monkeypatch):
+    """A job whose scale failed gets its pool's clouds at each view's own s. A run built without the LiDAR scale has
+    no copies, and gets none."""
+    from harpor.webapp import views
+
+    J = make_job(tmp_path, points_bag)
+    monkeypatch.setattr(lidar_scale, "MAX_IQR_REL", -1.0)
+    failed(J)
+    new = cloud_files(J)
+    old_clouds(J)
+    views.build_run(J / "pool", mvsam3d.view_names(J / "pool")[:3], J / "run")
+    L.rewrite_clouds(J)
+    assert cloud_files(J) == new and not (J / "run" / "lidar").exists()
 
 
 def test_a_dynamic_tf_link_and_a_livox_window(tmp_path):
@@ -890,7 +1184,11 @@ def test_the_samples_cache(points_bag, tmp_path, monkeypatch):
     more = scaled(J)
     assert more["source"]["cache"] == "hit" and reads == [] and len(more["views"]) == 5
     assert more["views"][-1]["name"] == "f00009" and more["views"][-1]["status"] == "used"
-    assert cloud_files(J) == {**clouds, "f00009.glb": cloud_files(J)["f00009.glb"]}  # its cloud from the cache
+    now = cloud_files(J)
+    assert sorted(now) == sorted([*clouds, "f00009.glb"])  # its cloud from the cache
+    for f, data in clouds.items():  # the same points; only the comparison follows the job's new s
+        a, b = read_glb(data), read_glb(now[f])
+        assert np.array_equal(a["scan"], b["scan"]) and np.array_equal(a["used"], b["used"])
     assert len(read_glb(J / "lidar" / "cloud" / "f00009.glb")["used"]) == more["views"][-1]["points_used"]
     for d in ("input/images", "input/object", "masks"):  # and another: prep left f00009 out again
         (J / "pool" / d / "f00009.png").unlink()
@@ -1143,6 +1441,13 @@ def test_clouds_of_a_stray_capture(tmp_path):
         assert len(c["scan"]) == 256 * 192 and len(used) == v["points_used"] > 100
         uvz = np.c_[K[0, 0] * used[:, 0] / used[:, 2] + K[0, 2], K[1, 1] * used[:, 1] / used[:, 2] + K[1, 2], used[:, 2]]
         assert cKDTree(samples[v["name"]]).query(uvz)[0].max() < 1e-3, v["name"]
+        # Its K stays inside stray_samples, so the comparison has the gaps but not DA3's surface.
+        m, extras = read_diff(J / "lidar" / "cloud" / f"{v['name']}.glb")
+        assert "da3" not in c and len(c["diff"]) == len(m) >= len(used)
+        assert extras["s"] == rec["s"] and extras["used"] == v["points_used"] and abs(extras["median_m"]) < 0.02
+    first = cloud_files(J)
+    L.main(["clouds", "--job", str(J)])
+    assert cloud_files(J) == first
 
     # An export without intrinsics: no odometry columns for them, and a camera_matrix.csv that is not one.
     lines = (root / "odometry.csv").read_text().splitlines()

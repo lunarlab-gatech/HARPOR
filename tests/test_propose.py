@@ -63,15 +63,14 @@ def no_key_in(folder, key):
 
 
 def test_validate_normalizes_a_good_list():
-    parts = P.validate([{"name": "Lid", "parent": " box   body", "joint": "Revolute"}, "box body"], noun="box")
+    parts = P.validate([{"name": "Lid", "parent": " box   body", "joint": "Revolute"}, {"name": "box body"}], noun="box")
     assert parts == [{"name": "box body", "parent": None, "joint": "fixed", "count": 1, "axis_hint": None},
                      {"name": "Lid", "parent": "box body", "joint": "revolute", "count": 1, "axis_hint": None}]
-    proposal = {"base": "box body", "parts": parts}
-    assert P.validate(proposal, noun="box") == parts
 
 
 @pytest.mark.parametrize("parts,why", [
     ([], "1 to 12"),
+    (["body"], "an object with a name"),
     ([{"name": f"p{i}", "parent": None if i == 0 else "p0"} for i in range(13)], "1 to 12"),
     ([{"name": "body"}, {"name": "Body", "parent": "body"}], "same name"),
     ([{"name": "cabinet"}, {"name": "door", "parent": "cabinet"}], "whole object"),
@@ -92,11 +91,6 @@ def test_validate_normalizes_a_good_list():
 def test_validate_catches_each_fault(parts, why):
     with pytest.raises(ValueError, match=why):
         P.validate(parts, noun="cabinet")
-
-
-def test_validate_checks_the_named_base():
-    with pytest.raises(ValueError, match="the base is"):
-        P.validate({"base": "frame", "parts": [{"name": "body"}, {"name": "door", "parent": "body"}]})
 
 
 def test_parse_takes_the_first_json_object():
@@ -224,6 +218,7 @@ def test_the_user_list_needs_no_key(tmp_path):
     J = job(tmp_path, agent="none", mode="vlm", parts=[{"name": "body"}, {"name": "lid", "parent": "body", "joint": "revolute"}])
     proposal = P.run(J)
     assert proposal["source"] == "user" and proposal["agent"] == "none" and proposal["model"] is None
+    assert proposal["mode"] == "user"  # the mode the job runs in, not the one it asked for
     assert [p["name"] for p in proposal["parts"]] == ["body", "lid"] and proposal["base"] == "body"
     J2 = job(tmp_path / "b", agent="opus", mode="user")
     with pytest.raises(SystemExit, match="no part list"):

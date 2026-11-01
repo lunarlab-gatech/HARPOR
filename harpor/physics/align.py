@@ -169,11 +169,11 @@ def gltf_matrix(T_s_from_w):
     return M.T.reshape(-1).tolist()
 
 
-def wrap_scene(doc, matrix, name="gravity_align"):
+def wrap_scene(doc, matrix):
     """Put the default scene's root nodes under one new node with this matrix. Returns a new dict."""
     doc = json.loads(json.dumps(doc))
     scene = doc["scenes"][doc.get("scene", 0)]
-    doc["nodes"].append({"name": name, "matrix": matrix, "children": scene["nodes"]})
+    doc["nodes"].append({"name": "gravity_align", "matrix": matrix, "children": scene["nodes"]})
     scene["nodes"] = [len(doc["nodes"]) - 1]
     return doc
 
@@ -247,7 +247,7 @@ def load_w(path):
     return frames.gltf_to_w(np.asarray(m.vertices)), np.asarray(m.faces)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--glb", required=True)
     ap.add_argument("--out", required=True, help="output .glb; the report goes next to it as .json")
@@ -256,7 +256,7 @@ def main():
     ap.add_argument("--x", choices=["pca", "footprint"], default="pca")
     ap.add_argument("--opaque", action="store_true")
     ap.add_argument("--links-out", help="folder for one GLB per mesh node (the links of an articulated GLB)")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     doc, binary = read_glb(a.glb)
     joints, links = joint_spec.read_joints(doc), joint_spec.mesh_nodes(doc)
     problems = joint_spec.validate(joints, links) if joints else []  # a rigid GLB's node names do not matter

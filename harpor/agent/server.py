@@ -42,8 +42,8 @@ def parse_request(line):
 
 
 class ToolServer:
-    def __init__(self, socket_path, work, control, blender, python=sys.executable):
-        self.socket_path, self.work, self.python = str(socket_path), str(work), python
+    def __init__(self, socket_path, work, control, blender):
+        self.socket_path, self.work = str(socket_path), str(work)
         self.env = {**os.environ, "PYTHONPATH": str(REPO), "PYTHONSAFEPATH": "1", "GATOR_WORK": str(work),
                     "GATOR_CONTROL": str(control), "GATOR_BLENDER": shlex.join(blender)}
         self._lock = threading.Lock()
@@ -69,7 +69,7 @@ class ToolServer:
             if self._stopping:
                 return "the session has ended\n", 1
             p = self._proc = subprocess.Popen(
-                [self.python, "-m", "harpor.agent.tools", *argv], cwd=REPO, env=self.env,
+                [sys.executable, "-m", "harpor.agent.tools", *argv], cwd=REPO, env=self.env,
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             out, _ = p.communicate()

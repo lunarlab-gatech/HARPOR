@@ -7,7 +7,8 @@ the scale s that it finds, so that MV-SAM3D, place, the agent and physics all wo
 Samples. Every pool frame ("f00012") gets an (N, 3) float array [u, v, z]: the LiDAR points that
 fall on the frame, as pixels of the upright full-size source frame (scene/images/<name>.png) at
 integer pixel centres, and z, the depth in meters along the camera's optical axis. project() turns
-camera points into pixels; rot90_points() follows np.rot90 when the frames were turned upright.
+camera points into pixels and unproject() pixels into rays; rot90_points() follows np.rot90 when the
+frames were turned upright.
 
 The estimate (estimate()) runs on the pool after da3:
   view_ratio  per view: the samples go to DA3's grid through prep's crop (source_to_grid), a z-buffer
@@ -55,18 +56,15 @@ from harpor.fileio import write_json
 
 SCALED = ("depth", "pointmaps", "pointmaps_sam3d")  # scaled whole; the extrinsics' translation column too
 # Of pool/lidar.json, by the samples' source (job.json "lidar" "kind"). steps.done("lidar") takes only a record of its
-# source's version, so the scale is found again when the estimator changes for that source. Version 2 came with the
-# samples' time window and time base of lidar.CACHE_VERSION 4, ZBUFFER_ABS, the trim, the scatter rule on the used
-# points, and the weights capped at the median view's. Version 3 (a bag only) follows the points along the LiDAR's rays
-# (follow_rays): at 0.4 m with a LiDAR 15 cm beside the camera, s came out 0.8% high on average and single views up to
-# 2.6% high (synthetic). A Stray capture has no rays and gets the same scale as before, so its jobs stay current.
+# source's version, so a bump makes that source's jobs find the scale again.
 VERSIONS = {"rosbag": 3, "stray": 2}
-VERSION = max(VERSIONS.values())  # the newest
 
 # Projection.
 MIN_Z = 0.1  # m; nearer points are dropped
 FOLD_MARGIN = 0.2  # plumb_bob, rational: the pinhole pre-filter keeps points inside the image grown by this share
 FOLD_STEPS = 4096  # samples of the distortion curve when finding where it stops increasing (the fold)
+UNPROJECT_STEPS = 200  # unproject's iterations at most; a wide fisheye's outer ring needs this many
+UNPROJECT_TOL_PX = 0.01  # a pixel that unproject finds must project back this near
 DISTORTION_MODELS = ("plumb_bob", "rational_polynomial", "equidistant")
 MODEL_ALIASES = {"radtan": "plumb_bob", "radial-tangential": "plumb_bob", "fisheye": "equidistant",
                  "kannala_brandt": "equidistant", "kannala-brandt": "equidistant"}
@@ -184,6 +182,14 @@ def source_to_grid(u, v, crop, grid_wh):
             (np.asarray(v, float) + 0.5 - y0) * h / (y1 - y0) - 0.5)
 
 
+def grid_to_source(gu, gv, crop, grid_wh):
+    """Grid pixels to source pixels, the inverse of source_to_grid."""
+    x0, y0, x1, y1 = (float(c) for c in crop)
+    w, h = grid_wh
+    return ((np.asarray(gu, float) + 0.5) * (x1 - x0) / w - 0.5 + x0,
+            (np.asarray(gv, float) + 0.5) * (y1 - y0) / h - 0.5 + y0)
+
+
 def rot90_points(u, v, size_wh, k):
     """Pixels of an image of size size_wh to the same pixels in np.rot90(image, k) (k counterclockwise
     quarter turns). The turned image's size is size_wh swapped when k is odd."""
@@ -297,6 +303,31 @@ def project(X_c, K, D, model, size_wh):
     u, v = K[0, 0] * xd + K[0, 1] * yd + K[0, 2], K[1, 1] * yd + K[1, 2]
     ok = near & (u >= -0.5) & (u < W - 0.5) & (v >= -0.5) & (v < H - 0.5)
     return u, v, z, ok
+
+
+def unproject(u, v, K, D, model, size_wh):
+    """Pixels to rays, the inverse of project: (x, y, ok), the ray through each pixel being (x, y, 1). A fixed-point
+    iteration on distort: each step moves x, y by what distort still misses, over distort's gain there. ok marks the
+    pixels that project sends back within UNPROJECT_TOL_PX, so a pixel that does not converge, or that lands past the
+    fold, is not ok."""
+    K = np.asarray(K, float)
+    u, v = np.asarray(u, float).reshape(-1), np.asarray(v, float).reshape(-1)
+    yd = (v - K[1, 2]) / K[1, 1]
+    xd = (u - K[0, 2] - K[0, 1] * yd) / K[0, 0]
+    x, y, rows = xd.copy(), yd.copy(), np.arange(len(xd))
+    with np.errstate(all="ignore"):
+        for _ in range(UNPROJECT_STEPS if distortion(D, model)[0] else 0):
+            ax, ay = distort(x[rows], y[rows], D, model)
+            r = np.hypot(x[rows], y[rows])
+            gain = np.where(r > 1e-12, np.hypot(ax, ay) / np.maximum(r, 1e-12), 1.0)
+            dx, dy = (xd[rows] - ax) / gain, (yd[rows] - ay) / gain
+            x[rows] += dx
+            y[rows] += dy
+            rows = rows[np.hypot(dx, dy) > 0.1 * UNPROJECT_TOL_PX / K[0, 0]]  # NaN is done, and project drops it
+            if not len(rows):
+                break
+    pu, pv, _, ok = project(np.c_[x, y, np.ones_like(x)], K, D, model, size_wh)
+    return x, y, ok & (np.hypot(pu - u, pv - v) <= UNPROJECT_TOL_PX)
 
 
 def zbuffer(iu, iv, z, hw, tol=ZBUFFER_TOL, abs_tol=ZBUFFER_ABS):
@@ -662,7 +693,8 @@ def estimate(pool_dir, samples, check_dir=None, points_out=None, source="rosbag"
     """The lidar.json record of a pool (mvsam3d prep and da3 ran on it) and the LiDAR samples
     ({pool name: (N, 3) [u, v, z]} or an .npz). overrides change thresholds by name (thresholds()).
     With check_dir, writes check_dir/<name>.jpg for every view. A dict points_out gets {view name:
-    view_ratio's points}. source, the samples' kind, picks the causes that a failed check names (CAUSES).
+    view_ratio's points, with the view's DA3 depth and crop, so the lidar stage need not read them again}. source,
+    the samples' kind, picks the causes that a failed check names (CAUSES).
     rays: {pool name: view_ratio's ray}. A view with rays and a scale goes on along them (follow_rays);
     its record has passes (0 when the view had no scale to start from). The record's version is that of
     the estimator that ran: a bag's with rays, else a Stray capture's (VERSIONS)."""
@@ -695,6 +727,7 @@ def estimate(pool_dir, samples, check_dir=None, points_out=None, source="rosbag"
             rec, points[n] = follow_rays(*args, ray, rec["s"], t)
         elif ray is not None:
             rec["passes"] = 0
+        points[n].update(depth=depth[i], crop=crops[n])
         views.append({"name": n, "frame": int(n[1:]) if re.fullmatch(r"f\d+", n) else None, **rec})
     comb = combine(views, source=source, **{k: t[k] for k in COMBINE_KEYS})
     ok, s, reason = comb.pop("ok"), comb.pop("s"), comb.pop("reason")

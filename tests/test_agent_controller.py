@@ -54,7 +54,7 @@ def finish(verdict, *limitations):
 
 
 def checkpoint(defect):
-    return tool("checkpoint", "--receipt", "{receipt}", "--status", "needs_review", "--defect", defect)
+    return tool("checkpoint", "--receipt", "{receipt}", "--defect", defect)
 
 
 REVIEW, EXPORT = tool("review"), tool("export_glb")
@@ -658,7 +658,6 @@ def test_apptainer_command_keeps_control_out(tmp_path):
     assert cmd[-len(C.codex_command()) - 7:] == ["--pwd", "/work", "/sif/agent.sif", *C.CODEX_KEY_WRAPPER,
                                                  *C.codex_command()]
     assert C.apptainer_command(root, "a.sif", "k", "/tmp/x", agent=["sh", "-c", "true"])[-3:] == ["sh", "-c", "true"]
-    assert "RUST_LOG=info" in C.apptainer_command(root, "a.sif", "k", "/tmp/x", extra_env={"RUST_LOG": "info"})
     with pytest.raises(ValueError, match="cannot bind"):
         C.apptainer_command(tmp_path / "a,b", "a.sif", "k", "/tmp/x")
     blender = C.blender_command(root, "/sif/agent.sif")
@@ -1320,9 +1319,9 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     assert edge(root / r["glb"]) == 1.2 and r["rejected"] == [] and r["candidate_built"] is True
     # The agent ended by itself once finish ran, before the controller's stop.
     assert (r["exit"], r["returncode"], r["cli_exit"], r["end_reason"]) == ("exited", 0, "ended", "finished")
-    tokens = {k: sum(s["usage"][k] for s in CLAUDE_SCRIPT[:2]) for k in C.PRICES}
+    tokens = {k: sum(s["usage"][k] for s in CLAUDE_SCRIPT[:2]) for k in T.TOKENS}
     assert r["turns"] == 2 and r["tokens"] == tokens
-    assert r["cost_usd"] == pytest.approx(sum(tokens[k] * C.PRICES[k] for k in tokens) / 1e6, abs=1e-4)
+    assert r["cost_usd"] == pytest.approx(sum(tokens[k] * T.PRICES[T.CLAUDE_MODEL][k] for k in tokens) / 1e6, abs=1e-4)
     assert r["key_found_in"] == [] and r["network_commands"] == []
     assert [p for p in all_files(tmp_path) if ANTHROPIC_KEY.encode() in p.read_bytes()] == [key_file]
     assert json.loads((root / "result.json").read_text()) == r
@@ -1411,9 +1410,9 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     assert (r["agent"], r["model"], r["effort"], r["source"], r["verdict"]) == ("claude", "claude-opus-5-5", "low", "finish", "complete")
     assert r["glb"] == "work/exports/001.glb" and edge(root / r["glb"]) == 1.2 and r["counts"]["reviews"] == 1
     assert (r["exit"], r["returncode"], r["cli_exit"], r["end_reason"], r["turns"]) == ("exited", 0, "ended", "finished", 3)
-    tokens = {k: sum(s["usage"][k] for s in script) for k in C.PRICES}
+    tokens = {k: sum(s["usage"][k] for s in script) for k in T.TOKENS}
     assert r["tokens"] == tokens
-    assert r["cost_usd"] == pytest.approx(sum(tokens[k] * C.PRICES[k] for k in tokens) / 1e6, abs=1e-4)
+    assert r["cost_usd"] == pytest.approx(sum(tokens[k] * T.PRICES[T.CLAUDE_MODEL][k] for k in tokens) / 1e6, abs=1e-4)
     assert (root / "work" / "edit.py").read_text() == "size = 1.2\n"
 
     reqs = [json.loads(line) for line in (tmp_path / "requests.jsonl").read_text().splitlines()]
@@ -1460,8 +1459,6 @@ def test_claude_session_layout_and_agent_record(tmp_path):
     assert C.agent_info(root)["effort"] == "max"
     codex = prepare(tmp_path / "codex", "refinement").parent
     assert C.agent_info(codex) == {"agent": "codex", "model": "gpt-6-astra", "effort": "xhigh"}
-    (codex / "control" / "agent.json").unlink()  # a session from before the choice
-    assert C.agent_info(codex)["agent"] == "codex"
     manual = tmp_path / "system_v1.md"
     manual.write_text("old manual\n")
     for bad, why in [({"agent": "gpt"}, "agent is codex or claude"), ({"agent": "claude", "effort": "extreme"}, "effort is one of"),
@@ -1498,7 +1495,7 @@ def test_claude_image_side_and_system_go_to_the_record(tmp_path, monkeypatch):
     assert C.agent_info(plain) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh"}
     assert (plain / "session" / "system.md").read_bytes() == (C.AGENT_DIR / "claude" / "SYSTEM.md").read_bytes()
     built = []
-    monkeypatch.setattr(C, "run_session", lambda root, cmd, env, **kw: built.append(cmd) or {})
+    monkeypatch.setattr(C, "run_session", lambda root, cmd, **kw: built.append(cmd) or {})
     (tmp_path / "key.env").write_text(f"ANTHROPIC_API_KEY={ANTHROPIC_KEY}\n")
     for r in (root, plain):
         C.run_container_session(r, "/sif/agent.sif", tmp_path / "key.env")
@@ -1533,30 +1530,31 @@ def test_claude_shell_and_agent_commands(tmp_path):
 
 
 def test_claude_agent_override_runs_from_the_repo(tmp_path, monkeypatch):
-    """agent= replaces claude_agent's whole host command: it runs from the repository with no stdin, its
-    stdout goes to claude_stdout.log, and extra_env reaches it. Without an end line the usage is summed."""
+    """agent= replaces claude_agent's whole host command: it runs from the repository with no stdin and its
+    stdout goes to claude_stdout.log. Without an end line the usage is summed."""
     root = prepare(tmp_path, "refinement", agent="claude").parent
     monkeypatch.setattr(C, "blender_command", lambda root, sif: FAKE_BLENDER)
     (tmp_path / "key.env").write_text(f"ANTHROPIC_API_KEY={ANTHROPIC_KEY}\n")
     script = ("import json, os, sys, time\n"
-              "print('cwd', os.getcwd(), 'stdin', repr(sys.stdin.read()), 'seen', os.environ['SEEN'])\n"
-              "line = {'t': time.time(), 'type': 'response', 'usage': {'input_tokens': 1000, 'output_tokens': 100, "
+              "print('cwd', os.getcwd(), 'stdin', repr(sys.stdin.read()))\n"
+              "line = {'t': time.time(), 'type': 'response', 'stop_reason': 'tool_use', 'cost_usd': 0.0064, "
+              "'usage': {'input_tokens': 1000, 'output_tokens': 100, "
               "'cache_read_input_tokens': 2000, 'cache_creation_input_tokens': None}, 'blocks': [{'type': 'tool_use', "
               "'id': 't1', 'name': 'bash', 'input': {'command': 'curl -O https://x/y.png'}}]}\n"
               "open(sys.argv[1], 'a').write(json.dumps(line) + '\\n')\n"
               "sys.exit(2)\n")
-    r = C.run_container_session(root, "/sif/agent.sif", tmp_path / "key.env", extra_env={"SEEN": "yes"},
+    r = C.run_container_session(root, "/sif/agent.sif", tmp_path / "key.env",
                                 agent=[sys.executable, "-c", script, str(root / "session" / "claude.jsonl")], **FAST)
     assert (r["exit"], r["returncode"], r["cli_exit"], r["verdict"]) == ("exited", 2, "refusal", "fallback_original")
-    assert (root / "session" / "claude_stdout.log").read_text() == f"cwd {C.REPO} stdin '' seen yes\n"
+    assert (root / "session" / "claude_stdout.log").read_text() == f"cwd {C.REPO} stdin ''\n"
     assert (r["turns"], r["end_reason"], r["network_commands"]) == (1, None, ["curl -O https://x/y.png"])
     assert r["tokens"] == usage(1000, 100, read=2000) and r["cost_usd"] == pytest.approx(0.0064)
 
 
 def test_claude_usage_prefers_the_end_line(tmp_path):
     log = tmp_path / "claude.jsonl"
-    response = {"type": "response", "usage": usage(1_000_000, 0)}
-    log.write_text(json.dumps(response) + "\nnot json\n[1]\n" + json.dumps({**response, "usage": "bad"}) + "\n")
+    response = {"type": "response", "stop_reason": "end_turn", "usage": usage(1_000_000, 0), "cost_usd": 4.0}
+    log.write_text(json.dumps(response) + "\nnot json\n[1]\n" + json.dumps({**response, "usage": "bad", "cost_usd": "bad"}) + "\n")
     assert C.claude_usage(log)["cost_usd"] == 4.0
     end = {"type": "end", "reason": "end_turn", "turns": 7, "totals": usage(5, 6, 7, 8), "cost_usd": 1.5}
     with open(log, "a") as f:
@@ -1567,8 +1565,8 @@ def test_claude_usage_prefers_the_end_line(tmp_path):
 
 def test_claude_usage_without_an_end_line_takes_each_lines_cost(tmp_path):
     """claude_agent prices each response by the models that ran its attempts, and logs every attempt's
-    tokens as billed when a refusal fallback ran; the controller sums those, and prices only a line
-    without its own cost at PRICES."""
+    tokens as billed when a refusal fallback ran; the controller sums those, and a line without a cost
+    adds 0."""
     log = tmp_path / "claude.jsonl"
     lines = [{"type": "response", "usage": usage(100, 40), "billed": usage(200, 540), "cost_usd": 0.0126},
              {"type": "response", "usage": usage(10, 20), "cost_usd": 0.003175},
@@ -1576,7 +1574,7 @@ def test_claude_usage_without_an_end_line_takes_each_lines_cost(tmp_path):
     log.write_text("".join(json.dumps(e) + "\n" for e in lines))
     r = C.claude_usage(log)
     assert r["tokens"] == usage(1_000_210, 560) and r["turns"] == 3
-    assert r["cost_usd"] == round(0.0126 + 0.003175 + 4.0, 4)
+    assert r["cost_usd"] == round(0.0126 + 0.003175, 4)
 
 
 def test_find_key_reads_anthropic_keys(tmp_path):

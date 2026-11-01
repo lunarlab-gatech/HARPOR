@@ -10,7 +10,6 @@ from scipy.ndimage import gaussian_filter
 from harpor.webapp import video as V
 
 H, W, N, BLUR = 96, 160, 64, 30
-TABLE = Path("~/Downloads/table.MOV").expanduser()
 
 
 def picture(i):
@@ -27,11 +26,11 @@ def shot(i):
     return gaussian_filter(a.astype(float), (3, 3, 0)).astype(np.uint8) if i == BLUR else a
 
 
-def write_video(path, rotation=0):
+def write_video(path, rotation=0, options=None):
     import av
 
     with av.open(str(path), "w") as c:
-        s = c.add_stream("libx264", rate=30, options={"crf": "12"})
+        s = c.add_stream("libx264", rate=30, options={"crf": "12", **(options or {})})
         s.width, s.height, s.pix_fmt = W, H, "yuv420p"
         if rotation:
             s.set_display_rotation(rotation)
@@ -453,8 +452,8 @@ def test_bad_inputs(tmp_path):
         V.topics(job(tmp_path / "y", tmp_path / "x.zip", source={"kind": "stray", "topic": None}))
 
 
-@pytest.mark.skipif(not TABLE.exists(), reason="the user's video is not on this machine")
-def test_probe_table_video():
-    info = V.probe(TABLE)
-    assert info["n_frames"] == 478 and info["hdr"] == "HLG" and info["bit_depth"] == 10
-    assert (info["width"], info["height"]) == (1920, 1080) and info["codec"] == "hevc"
+def test_probe_finds_hlg(tmp_path):
+    """A file tagged with the HLG transfer function, as a phone writes it, gives hdr "HLG"."""
+    path = write_video(tmp_path / "hlg.mp4", options={
+        "color_trc": "arib-std-b67", "x264-params": "transfer=arib-std-b67:colorprim=bt2020:colormatrix=bt2020nc"})
+    assert V.probe(path)["hdr"] == "HLG"

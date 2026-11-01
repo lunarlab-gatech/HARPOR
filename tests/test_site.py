@@ -625,5 +625,5 @@ def test_command_line_with_demos(tmp_path, demo_dir):
 
 def test_gitignore_keeps_secrets_and_the_built_site_out():
     lines = (ROOT / ".gitignore").read_text().splitlines()
-    for want in (".env.*", "!*.env.example", "*.pem", "*.key", "supabase/.temp/", "supabase/.branches/", "/site/"):
+    for want in (".env.*", "*.pem", "*.key", "supabase/.temp/", "supabase/.branches/", "/site/"):
         assert want in lines, want

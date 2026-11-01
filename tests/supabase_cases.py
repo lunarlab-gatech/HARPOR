@@ -7,13 +7,10 @@ case_sql(case) makes one transaction: it sets up the case's rows as the superuse
 the case's role, checks the answer and rolls back. <c>, <d> and <job> in names and in expected answers
 become ids. A case with a key this module does not know is an error, so a typo in the table cannot pass
 unseen.
-
-python tests/supabase_cases.py prints the SQL of every case.
 """
 
 import json
 import re
-import sys
 from pathlib import Path
 
 PATH = Path(__file__).with_name("supabase_cases.json")
@@ -332,14 +329,3 @@ def case_sql(case):
         raise ValueError(f"{cid}: expect needs error or ok")
     out.append("rollback;")
     return "\n".join(out) + "\n"
-
-
-def main():
-    print(base_sql())
-    for case in load():
-        print(case_sql(case))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -21,6 +21,7 @@ import anyio
 import pytest
 
 import fake_supabase as fs
+from harpor import fileio
 from harpor.webapp import server, session, supa
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -275,7 +276,7 @@ def test_local_key_reads_one_line_now_and_never_quotes_it(home):
     conf.chmod(0o700)
     key = "sk-ant-test-" + "k" * 30
     f = conf / "anthropic.env"
-    f.write_text(f"# the HARPOR CLI's key\nOTHER=1\nexport ANTHROPIC_API_KEY='{key}'\n")
+    f.write_text(f"# a key\nOTHER=1\nexport ANTHROPIC_API_KEY='{key}'\n")
     f.chmod(0o600)
     assert session.local_key("opus") == key
     f.write_text(f"ANTHROPIC_API_KEY={key}\n")  # read again at each use
@@ -331,8 +332,8 @@ def webapp_json(home, port, worker=True, token="tok-" + "t" * 40):
     conf = home / ".config" / "gator"
     conf.mkdir(parents=True, exist_ok=True)
     conf.chmod(0o700)
-    session.supa.write_private(conf / "webapp.json", json.dumps({"node": "box", "port": port, "token": token,
-                                                                 "worker": worker}).encode())
+    fileio.write_private(conf / "webapp.json", json.dumps({"node": "box", "port": port, "token": token,
+                                                           "worker": worker}).encode())
     return token
 
 
@@ -375,14 +376,14 @@ def test_the_server_starts_the_real_session(fake, home, capsys):
     """server.worker_of with the real session.py: a Session that holds the lock, or tunnel mode when it cannot."""
     c = fake.add_user("c@example.org", approved=True)
     write_session(fake, home, c)
-    parts = server.worker_of(())
+    s = server.worker_of(())
     try:
-        assert type(parts["session"]) is session.Session and parts["session"].user_id == c
+        assert type(s) is session.Session and s.user_id == c
         assert server.worker_of(()) is None  # the lock is taken
         out = capsys.readouterr().out
         assert "the personal worker does not start: another HARPOR process holds" in out
     finally:
-        parts["session"].close()
+        s.close()
     write_session(fake, home, c, refresh_token=None)
     assert server.worker_of(()) is None and "signed out of the HARPOR site" in capsys.readouterr().out
 

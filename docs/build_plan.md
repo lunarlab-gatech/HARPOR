@@ -30,7 +30,7 @@ every stage on PACE ICE or on a user's own GPU machine (note 10, Flow).
 
 ### Status
 
-What works (the notes hold the runs and numbers):
+What works (the notes hold the main results; git history holds the run logs):
 - The web app runs the whole pipeline from a video on ICE (note 10). The public site and the personal
   workers are built and pass their tests (`docs/public_site.md`).
 - Stage A: SAM 3 masks, Depth Anything 3 and MV-SAM3D with the pose fitted to the masks (notes 3
@@ -167,16 +167,11 @@ flowchart TB
 
     The first run downloads the weights into `$HF_HOME`. The token there must belong to the
     Hugging Face account that has access to `facebook/sam3`.
-  - Check on ICE (2026-10-15, `runs/sam3_check/`, weights revision `3c879f3`): the tabletop (2
-    photos; plate, knife, fork, pan, coffee cup, glass). The masks agree closely with the user's
-    web-demo masks, and instance 0 is always the right object. Meta's own code (`7f473cf`, in
-    bf16; `research.md` section 4.1) agrees with the demo masks about as well, so the gap to the
-    demo masks does not come from the transformers port.
-  - Against Meta's code on the same photos, the top scores are much closer to Meta's with the CLS
-    box than without it. With the CLS box, the masks agree closely with Meta's.
-  - In tabletop photo 1, "plate" gets no instance above 0.5 (Meta's code finds none above 0.3).
-    "saucer" finds the same object at 0.97. When a photo gets no mask, try another noun first.
-  - Times on the tabletop: 14 s to load the model, then 0.5 s per photo for six prompts.
+  - On real photos, the top scores are much closer to those of Meta's code with the padding box than
+    without it, and with it the masks agree closely with Meta's.
+  - With weights revision `3c879f3`, "plate" gets no instance above 0.5 in one tabletop photo (Meta's
+    code finds none above 0.3), and "saucer" finds the same object at 0.97. When a photo gets no
+    mask, try another noun first.
 
 ### 4. Stage A: SAM 3D Objects on ICE (`harpor/stage_a/sam3d.py`)
 
@@ -184,8 +179,8 @@ Everything lives under `G=$(readlink -f ~/scratch)/gator`. Run the steps in a te
 L40S session. The GPU is needed only for step 4, but SAM 3D's setup guide expects the build on a
 GPU node.
 
-1. **Copy the code.** From the laptop, on the GT network or VPN:
-   `rsync -a --exclude .git --filter=':- .gitignore' ~/lunar_lab_research/HARPOR/ ali497@login-ice.pace.gatech.edu:scratch/gator/gator_clone/`
+1. **Copy the code.** From the repo root on the laptop, on the GT network or VPN:
+   `rsync -a --exclude .git --filter=':- .gitignore' ./ <user>@<login node>:scratch/gator/gator_clone/`
    (the filter skips what `.gitignore` names: caches, `results/`, `site/` and the media files).
 2. **Environment** (about 1 h). The recipe builds for both L40S (8.9) and H100/H200 (9.0):
 
@@ -293,91 +288,32 @@ toy, with masks. `STEPS="sam3d place"` reruns only those steps.
   from DA3's 504 px to the image size.
 - `sam3d` calls `pipe.run_multi_view` with MV-SAM3D's entropy weighting (the settings in its
   README), texture baking, the nvdiffrast engine and the gsplat bake backend, as in note 4.
-- `place` fits the mesh to the masks of all views (see the fixes below): `--fit pose` (default)
-  fits the scale and then shift, size and a small rotation; `--fit scale` fits only the scale;
-  `--fit none` (or `--no-fit-scale`) keeps MV-SAM3D's pose. It then writes `posed.glb` in frame W
+- `place` fits the mesh to the masks of all views (see below): `--fit pose` (default)
+  fits the scale and then shift, size and a small rotation; `--fit none` keeps MV-SAM3D's pose.
+  It then writes `posed.glb` in frame W
   (view 0's OpenCV camera, DA3 meters, or LiDAR-scaled meters when the web app's `select` applied a
   LiDAR scale, note 12),
   `cameras.json` for the agent's manifest (`session_views()`), and `placement.json` with the fit
   and the mask IoU of every view.
 
-Results on the example (2026-10-14, ICE L40S):
-- `da3` took 70.5 s at 14 GB RAM. `sam3d` took 294 s (MV-SAM3D's own time 273 s) at 18.7 GiB
-  allocated, 21.5 GB on the whole GPU. `place` took 5 s.
-- The first try failed at texture baking with "Ninja is required to load C++ extensions", because
-  `envs/sam3d/bin` was not on PATH. The run script now adds it.
-- The mesh's shape and rotation match all 8 views, but its silhouette is about 10% larger than
-  the mask in every view. Mask IoU is 0.72 to 0.80, mean 0.753. In view 0, the median distance from
-  DA3's masked points to the mesh is 2.1% of the mesh diagonal, and 48% of the points are within
-  2%.
-- A scale scan (`runs/mvsam3d_example/scale_scan.py`, read-only) scaled the posed mesh about its
-  center and about view 0's camera. Scaling by 0.90 about the center, at the same depth, raises the
-  mean IoU over the 8 views from 0.750 to 0.889 (each view 0.873 to 0.901). The best scale about
-  the camera is 1.00. So MV-SAM3D's predicted scale is about 11% too large, and the cameras and
-  depth are right.
-- The fix (2026-10-14): `place` now fits the scale about the mesh's box center to the masks of all
-  views (`fit_scale`, at 384 px). The search takes steps of 0.05 over 0.7 to 1.3, grows that range
-  while the best value sits at an edge (up to 0.3 to 3.0), then refines with steps of 0.01 and
-  0.0025. Ties go to the scale closest to 1. The fit is applied only if the mean IoU gains at
-  least 0.005. `placement.json` keeps MV-SAM3D's own pose as `pose_mvsam3d` and writes the fitted
-  pose as `pose`, which reproduces `posed.glb` through `canonical_glb_to_w`. `scale_fit` records
-  `applied`, the `scale` used (1.0 when not applied), the `candidate_scale` and its
-  `candidate_mean_iou`, `at_limit`, and a `warning` when the mesh overlaps no mask or the scale
-  stops at a limit. silhouette() fills boundary pixels, so the fit runs about 0.5% small. On the example
-  the fit chose 0.895.
-  Mean IoU at 512 px went from 0.753 to 0.888 (each view 0.875 to 0.900). The view-0 check also
-  improved, although it is not part of the fit: the median distance from DA3's points to the mesh
-  went from 2.1% to 0.89% of the diagonal, and the share within 2% from 48% to 80%. The toy is now
-  0.25 × 0.28 × 0.20 m. `place` took 40 s with the scale fit alone. The unfitted outputs are in
-  `runs/mvsam3d_example/unfitted/`.
-- Plain single-view SAM 3D on view 1 of the same toy (`runs/sam3d_view1_example`) took 89 s and
-  has IoU 0.828 in view 1 under a camera fitted to its own pointmap. It makes the toy 0.72 × 0.76 ×
-  0.52 m at 1.08 m, while MV-SAM3D makes it 0.28 × 0.31 × 0.22 m at 0.42 m. Both match the photo:
-  one photo cannot separate size from distance, and MoGe's guess is 2.5 times too large for a desk
-  toy. In the 360° video (`runs/videos/toy_sam3d_vs_mvsam3d.mp4`, each mesh framed to its own size
-  with `same_scale: false`), MV-SAM3D shows the sitting pose and the black cloth tag on the back,
-  which the other photos see. Single-view SAM 3D guesses a smooth back.
+`placement.json` keeps MV-SAM3D's own pose as `pose_mvsam3d` and writes the fitted pose as `pose`,
+which reproduces `posed.glb` through `canonical_glb_to_w`. `fit_scale` and `fit_pose` are applied
+only if the mean IoU gains at least `min_gain` (0.005). Their docstrings give the searches.
+- `scale_fit` records `applied`, the `scale` used (1.0 when not applied), the `candidate_scale` and
+  its `candidate_mean_iou`, `at_limit`, and a `warning` when the mesh overlaps no mask or the scale
+  stops at a limit.
+- `pose_fit` records the applied `scale`, `shift_W` and `rotation_deg` (1 and zeros when not
+  applied), the `candidate_*` values, the IoUs, `evaluations` and `at_bound`.
 
-Round table (`runs/table_mv/` and `runs/table_mv2/`, 2026-10-14): 5 frames of the user's 16 s
-video `table.MOV` at 1920 x 1080 (prep: 1024 x 576), SAM 3 web-demo masks.
-- First photo set (`table_mv`; in 3 of the 5 photos a leg runs off the bottom edge): DA3 316 s,
-  `sam3d` 532 s. MV-SAM3D's shape is right: in view 1, DA3 measures a top about 1.04 m across with
-  the legs 0.79 m below it, and the mesh has the same proportions (0.76) at about 12% larger. But
-  its tabletop sat 17 cm from DA3's (12 cm to the side, 12 cm farther, 8 cm low) and was tilted 8
-  degrees, so the mean mask IoU was 0.26, and the scale fit, which cannot move the mesh, raised it
-  only to 0.28. The run's `pipeline.sh` starts Astra only if the mean mask IoU is at least 0.5
-  (the guard), so it skipped Astra.
-- Fix 2 (2026-10-14): `fit_pose` adds shift, size and a small rotation about the box center after
-  `fit_scale`. Coordinate descent over log scale, shift (in box diagonals) and an axis-angle
-  rotation (degrees); steps 0.05, 0.05 and 5, halving while at or above 0.003, 0.003 and 0.3;
-  bounds 0.5 to 2 times, 0.25 diagonals and 20 degrees per axis; at most 400 evaluations. It runs
-  twice, first with the rotation held at 0 and then with it free, and keeps the rotation only if
-  it gains 0.005 mean IoU, because a one-pass search traded a missing shift for a false rotation.
-  The whole fit is applied only if it gains `min_gain` (0.005).
-  Since 2026-10-28 the first run also has a move that scales the mesh about view 0's camera. Each
-  sweep tries it first, with the same steps as the scale. It keeps view 0's silhouette and changes
-  size and distance together. With narrow views the IoU is nearly flat along that move, and moves
-  of one coordinate could not follow it: a box 5% too large and 5% too far, seen from 0 and +-10
-  degrees, stopped 3.4% too large and 1.2 cm too far. It now ends 0.06% small. The move is taken only
-  when it stays within the bounds: for an object far from view 0's camera, its shift part is many
-  times its step, and a clipped move would no longer keep the silhouette. The second run, with the
-  rotation free, leaves the move out. In the two older `fit_pose` tests the move costs about 17% more
-  evaluations (177 to 207, 193 to 226). In the two valley tests it needs fewer (122 to 113, 136 to 82).
-  `placement.json` gets `pose_fit` with the applied `scale`, `shift_W` and `rotation_deg` (1 and
-  zeros when not applied), the `candidate_*` values, the IoUs, `evaluations` and `at_bound`.
-  `similar_pose` writes the pose that reproduces `posed.glb`. `place` now takes 2 to 4 min. With
-  only three 160 x 120 masks of a box, the true pose scores about 0.965 and poses a few degrees or
-  percent off score as well, so the tests check the fit to that precision.
-- `table_mv` with the pose fit: mean IoU 0.278 to 0.753 (0.73 to 0.80 per view); scale 0.877 on
-  top of the scale fit's 0.905, shift 0.12 diagonals, rotation (-8.4, 3.8, 0.9) degrees. The view-1
-  depth check, which is not part of the fit, went from a 4.1% to a 0.49% median gap and from 24% to
-  94% of points within 2%. Extent about 1.02 x 1.05 x 1.06 m in W.
-- Second photo set (`table_mv2`, the whole table in every photo): mean IoU 0.19 with MV-SAM3D's
-  pose, 0.21 after the scale fit and 0.48 after the pose fit, split by view: photos 2 and 4 reach
-  0.77 and 0.82, photos 1, 3 and 5 only 0.16 to 0.34. Photos 2 and 4 are nearly the same view
-  (DA3 puts their cameras about 8 cm apart), and the overlays of 1, 3 and 5 show the legs off to
-  one side. DA3's cameras for this set do not agree with each other; a round table looks the same
-  from every side, so DA3 has to register the views by the background alone.
+Results on ICE (L40S):
+- On MV-SAM3D's example, 8 views took 294 s for `sam3d`, at 18.7 GiB allocated. MV-SAM3D's scale was
+  11% too large, while the cameras and depth were right. The scale fit raised the mean IoU from 0.753
+  to 0.888.
+- `place` takes 2 to 4 min with the pose fit.
+- On a round table, MV-SAM3D's tabletop sat 17 cm from DA3's. The scale fit cannot move the mesh, so
+  `fit_pose` adds the shift and a small rotation.
+- DA3 could not register a round table's views by the background alone. The table looks the same
+  from every side, and in one photo set DA3's cameras did not agree with each other.
 
 ### 5. Stage B: agent (`harpor/agent/`)
 
@@ -439,13 +375,16 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
 - In refinement, the controller builds `candidate.blend` from the original with the stock glTF
   importer before the clock starts. `export_glb` exports the visible objects only.
 - On ICE we cannot limit the container's network, because users cannot set network rules. Codex's
-  web search is off, but the agent's shell commands can reach the internet (teddy run 2 below).
+  web search is off, but the agent's shell commands can reach the internet (one teddy session fetched
+  `get-pip.py` with curl and pip-installed numpy, scipy and pillow).
   `result.json` lists shell commands that look like network use in `network_commands`: package
   installs (`pip`, `conda`, `apt`, `npm`, `uv`, `poetry` with `install` or `add`), `curl` and
   `wget` with a flag or URL, `git clone/fetch/pull`, and Python fetch calls (`urllib.request`,
   `urlopen(`, `requests.get(`). A bare tool name or URL is not enough, because ordinary Blender
   scripts contain them (`pip` as a point-in-polygon mask, `curl` of a vector field, URLs in comments
-  and XML namespaces). The list only records these commands. Nothing blocks them.
+  and XML namespaces). The pattern needs a space, quote or shell operator right before the tool name,
+  so `/work/venv/bin/pip install` does not match. The list only records these commands. Nothing
+  blocks them.
 - Real isolation is possible: `apptainer exec --net --network none` works without root on ICE
   (no route to the internet, loopback works; tested 2026-10-14). The CLI would then reach the API
   through a small forwarder in the container and a host proxy on a Unix socket, which could also
@@ -455,14 +394,10 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
   contain the key in `key_found_in`, and those files must not be shared. A host proxy that adds
   the key is not an option, because other users on a shared node could reach its port. Use a
   separate key with a low spend cap for agent runs.
-- Launcher check (2026-10-14, `runs/agent_port_check/`, a scripted agent instead of the CLI, on the
-  teddy): `/storage` and `/scratch` are missing inside, the helper folder is read-only, and no
-  events file is reachable. `export_glb` took 5.5 s and moved the deadline by that much, and a
-  second call returned the cached export. `review` took 21 s and gave mask IoU 0.87 (`place.py`:
-  0.865). The controller ended the session 3 s after `finish`, and a background process that the
-  agent had started with `setsid` was gone. A rerun gave the same GLB byte for byte, with
-  `candidate.blend` built by the controller and a hidden 50 m cube that the agent added left out of
-  the export.
+- The launcher check, with a scripted agent on the teddy, showed that `/storage` and `/scratch` are
+  missing inside, the helper folder is read-only, no events file is reachable, `export_glb` moves
+  the deadline by its own time, the controller ends the session and the agent's background processes
+  after `finish`, and the review's mask IoU (0.87) matches `place.py`'s (0.865).
 - The prompts are in `harpor/agent/prompts/`, whose README gives the source, the license and the
   recorded edits. `prepare_session` uses `prompts.load(mode)` when no prompt is given.
 - What the prompts expect from the helpers is now there. In refinement, the controller renders
@@ -473,66 +408,9 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
   plus 8%, rendered at 768 px on the long side. `review.json` records the window. Orbit and detail
   views are packed side by side, up to the width of a photo row. On the teddy, the window was
   136 x 138 px of the 1008 px photo, and the mask IoU stayed 0.87.
-- Astra teddy session (`runs/teddy_astra_01/`, 2026-10-14, one view at 3,360 px, Prompt 1, 600 s):
-  the agent called `finish` with `complete` at 475 s of wall time. It made 2 exports, 2 reviews and
-  1 checkpoint. 26 requests averaged 16 s, with first bytes within 4 s, and there were no errors.
-  It smoothed the faceted surface, re-projected the photographed fleece and cloth detail, added
-  short pile (a second mesh; 310,650 triangles) and flattened the paws. Mask IoU went from 0.867 to
-  0.884, the center moved by 0.6% of the diagonal, and the extents changed by under 1.5%. The
-  review sheet shows the cream fleece of the photo instead of the original's gray. Tokens: 838,617
-  input (789,268 cached), 12,904 output (6,370 of them reasoning). The rear keeps the generated
-  texture, which the agent named as its one limitation.
-- Astra teddy run 2 (`runs/teddy_astra_02/`, 2026-10-14): 2 exports, 2 reviews and 2 checkpoints
-  (seams from the photo projection, then dark texture marks on the forehead and shorts). During a
-  third edit at 505 s the OpenAI API answered "Quota exceeded. Check your plan and billing
-  details.", so Codex exited 1 and the controller delivered checkpoint 2 as `needs_review`. Mask
-  IoU stayed 0.872. The agent also made a venv, fetched `get-pip.py` with curl and pip-installed
-  numpy, scipy and pillow. `network_commands` caught only the curl command: its pattern needs a
-  space or quote right before `pip`, so `/work/venv/bin/pip install` does not match.
-- Astra on the MV-SAM3D toy (`runs/toy_mv_astra_01/`, 2026-10-14): the first multi-view session,
-  with the scale-fitted mesh, all 8 views at 1024 x 768 and metric units. The agent made the
-  fabric non-metallic (the fully metallic setting made the white plush look gray), smoothed the
-  faceted surfaces, reshaped the heart's upper lobes from the two frontal photos, closed gaps at
-  the heart's attachments and cleaned stray texture. It made 6 exports, 5 reviews and 4
-  checkpoints. It never called `finish`: the clock ran out at 633 s (600 s plus 33 s of exports)
-  during the 6th review, so the controller delivered checkpoint 4 as `needs_review`, with the
-  open defect "Local foot material replacement has visible boundaries". Mean mask IoU over the 8
-  views went from 0.888 to 0.890, so the pose and size were kept. With 8 views each review took
-  about 37 s, against about 21 s with one view. 39 requests averaged 14.1 s; 1,685,585 input
-  tokens (1,574,964 cached) and 16,602 output tokens (7,950 reasoning). No downloads. The agent
-  often left `review` running while it worked on; one review client exited 143 after the host had
-  already logged that review, and the agent read the result from `reviews/`. Video:
-  `runs/videos/toy_mv_astra_progression.mp4`.
-- Astra on the round table (`runs/table_mv_astra_01/`, 2026-10-14): the first photo set with the
-  pose-fitted mesh (note 4b), 5 views at 1024 x 576. The agent kept the tabletop and pose and
-  rebuilt the warped, paper-thin black base from the existing attachment points (straight diagonal
-  members, four vertical braces and a central collar), then thickened and darkened it after review
-  1 and smoothed the tabletop's faceted shading. 4 exports, 4 reviews (about 28 s each), 3
-  checkpoints; it called `finish needs_review` at 556 s with export 3, noting that the tabletop
-  still looks too bright under the review lights. Mean mask IoU 0.712 to 0.726. 43 requests
-  averaged 11.4 s. No downloads. Video: `runs/videos/table_astra_progression.mp4`.
-- Office chair, whole pipeline (`runs/chair_mv/`, `runs/chair_mv_astra_01/`, 2026-10-14): 5 photos at
-  1920 x 1080 (prep 1024 x 576), SAM 3 web-demo masks (in photos 4 and 5 they leave holes where the
-  table shows through the mesh back). DA3 296 s, `sam3d` 592 s, `place` 73 s; 19.8 GB GPU peak.
-  The scale fit chose 0.80 (mean IoU 0.508 to 0.585), and the pose fit added a shift and a 9 degree
-  turn (to 0.799; 0.75 to 0.83 per view). View-1 depth check: median gap 0.69% of the diagonal, 91%
-  within 2%. Astra kept the pose and the five-spoke base, opened the solid back into a see-through
-  woven mesh, gave the seat a charcoal texture and the frame chrome, and restored the end caps.
-  3 exports, 3 reviews, 2 checkpoints, `finish complete` at 552 s with export 3. 45 requests
-  averaged 11.6 s. No downloads. Video: `runs/videos/chair_astra_progression.mp4`.
-- Tabletop scene, 6 objects from the same 2 photos (1920 x 1080, SAM 3 web-demo masks per object;
-  `runs/<object>_mv/` and `runs/<object>_mv_astra_01/`, 2026-10-14). Run in parallel on three ICE
-  L40S jobs (6267690, 6276585, 6276602) with `runs/tabletop/queue.sh JOBID OBJECT...`, which runs
-  each object's `pipeline.sh` (now taking `JOB`) and then `make_video.sh` (turntable of MV-SAM3D's
-  posed mesh, the first export and the delivered GLB). All six finished in about 55 minutes.
-  Stage A mean IoU after the pose fit / Astra result (mask IoU in the reviews barely moved):
-  pan 0.893 / complete at 278 s (smoothed rim and bowl, restored cooking marks, shiny steel);
-  knife 0.852 / complete at 368 s (blade thickness and edge, satin steel and matte grip);
-  fork 0.791 / complete at 408 s (four connected curved tines, smoothed head);
-  coffee cup 0.916 / complete at 294 s (white glazed porcelain, smoothed surfaces and rim);
-  glass 0.907 / complete at 215 s (transparent glass, hammered surface relief);
-  plate 0.497 / not run (just under the 0.5 guard; the cup hides much of it in both photos).
-  No downloads in any run. Videos: `runs/videos/<object>_astra_progression.mp4`.
+- Astra sessions on the teddy, the MV-SAM3D toy, the round table, the office chair and five tabletop
+  objects took 215 to 633 s of wall time. On the teddy, the extents changed by under 1.5%. Mean mask
+  IoU moved by at most about 0.02.
 - Videos: `harpor/agent/blender/turntable.py` renders a 360-degree turntable of one or more GLBs in
   frame W, each asset with its own camera so all panels show the same view, joined with Blender's
   sequencer (6 s, 30 fps, H.264). Optional keys: an asset's `matrix` (4x4, row-major) maps
@@ -540,7 +418,7 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
   above the horizontal), and `frames_dir` (one asset) writes PNG frames instead of a video. The web
   app's 360 video uses them (note 10). `python3 harpor/agent/loop_trace.py RUN_DIR --turntable-args
   ARGS.json` prints a session's loop in order and writes turntable arguments for the original and
-  every export. Videos so far are in `runs/videos/`.
+  every export.
 
 #### Agent setup and pilot checks on ICE
 
@@ -572,11 +450,7 @@ reach.
 3. **API key.** You create `~/.config/gator/openai.env` with one line, `OPENAI_API_KEY=...`, and
    `chmod 600` it. Apptainer reads it with `--env-file`, so the value must not contain spaces or
    quotes.
-4. **Pilot checks** (`runs/pilot_codex/`, 2026-10-14): every request carried
-   `reasoning.effort: xhigh`; the agent read three PNGs with known words through `view_image`; a
-   math question (answer 18424) took 20 s, with the first byte after 1.9 s; image turns took 2 to
-   5 s.
-5. **Long sessions** can be launched with `nohup setsid srun ...` on the login node, so a dropped
+4. **Long sessions** can be launched with `nohup setsid srun ...` on the login node, so a dropped
    SSH connection does not stop them.
 
 **Claude Opus 5.5** (`harpor/agent/claude_agent.py`, 2026-10-17):
@@ -604,106 +478,16 @@ reach.
 - For both agents, the tool server runs the helpers from the repository with
   `PYTHONSAFEPATH=1`, so a `.py` file the agent writes in `/work` cannot replace a module that runs
   on the host.
-- Astra vs Opus on the same Stage A meshes (2026-10-17, `runs/<object>_mv_opus_01`, effort `xhigh`
-  for both; each Opus session starts from the Astra session's `original.glb`, views and source
-  text). Opus: table 203 s, chair 267 s, both `complete`. Astra: table 559 s, chair 555 s (wall times). Table:
-  both rebuilt the base; Astra iterated four times (IoU 0.726, `needs_review`), Opus once (0.696,
-  `complete`). Chair: Opus fixed the materials and left the mesh back opaque, which it noted; Astra
-  opened the woven back. So Opus is faster but stops sooner and calls more results `complete`.
-- Harness v2 (2026-10-17). The first harness downscaled images to 1568 px and re-encoded them as
-  JPEG, and its manual said "The session ends at the deadline. Your thinking time counts against it
-  too." v2 sends images up to 2576 px, PNG lossless when small, and drops those two sentences. The
-  first manual is saved as `runs/opus_dig/system_v1.md`. Runs: `runs/<object>_mv_opus_v1b` (a repeat
-  of the first harness) and `runs/<object>_mv_opus_v2`, both effort `xhigh` from the same Astra
-  `original.glb` (`runs/opus_dig/run.py VARIANT OBJECT...`).
-- Photo-match scores (`harpor/eval/photo_match.py`, candidate means; `runs/opus_dig/photo_match_round2.json`):
-
-  | Object | Agent | IoU | color ΔE | pixel ΔE | edge | wall s |
-  |---|---|---|---|---|---|---|
-  | table | Astra | 0.726 | 6.1 | 14.7 | 0.156 | 559 |
-  | table | Opus v1 / v1b / v2 | 0.695 / 0.706 / 0.723 | 1.9 / 2.2 / 3.7 | 10.8 / 11.1 / 10.9 | 0.094 / 0.118 / 0.140 | 203 / 202 / 185 |
-  | chair | Astra | 0.793 | 4.4 | 10.5 | 0.173 | 555 |
-  | chair | Opus v1 / v1b / v2 | 0.794 | 4.4 / 6.1 / 3.3 | 11.7 / 11.6 / 12.9 | 0.247 / 0.244 / 0.228 | 267 / 199 / 253 |
-
-  v2 gave the best Opus colour on the chair (ΔE 3.3) and the best Opus IoU on the table (0.723),
-  and the run time changed little.
-- Why Opus stops early (from the Opus session logs, `runs/opus_dig/traces/`):
-  1. It thinks time is short while much of the budget remains. On the table it finished with 402
-     to 421 s unused (Astra 65 s), and it overestimates how long an edit and a review take.
-  2. It inspects less. Astra used `review --clay` or `--detail` on the table and the chair, Opus in
-     none of its 6 table and chair runs, and only table v1b compared its IoU with the original's.
-  3. In most of its table and chair runs it said `complete` while a defect it had named was still
-     unfixed.
-  4. On the chair it treated a structural defect, the see-through back, as a material one.
-  The image size and the manual's time sentences were not the cause.
-- Harness v3, time facts (2026-10-17). Every helper but `finish` now ends its output with
-  `time left: N s of the 600 s budget`, computed the way the controller counts, also when the
-  helper fails (both agents; both manuals say so). The Claude manual also has a "Measured times"
-  section with step costs measured in the earlier Opus sessions: a Blender script, `export_glb`
-  (not counted), a review render, a model turn, and review to review. The measurement script is
-  `runs/opus_dig/measure.py` (it reads copies of the session logs); the manual is saved as
-  `runs/opus_dig/system_v3.md` (v2's as `system_v2.md`). Runs: `runs/table_mv_opus_v3{a,b}`
-  (`run.py v3a|v3b table`). Criteria set before the run: (a) in each session, Opus fixes every defect
-  it named or finishes `needs_review` naming it; (b) median unused time below 250 s.
-
-  | Session | unused s | exports / reviews | IoU | color ΔE | edge | verdict |
-  |---|---|---|---|---|---|---|
-  | table v3a | 275 | 3 / 2 | 0.714 | 2.2 | 0.124 | complete |
-  | table v3b | 328 | 2 / 2 | 0.729 | 2.0 | 0.150 | complete |
-
-  Both criteria failed. (a) Both sessions said `complete` with a defect they had named still open
-  (unfilled underside openings on v3a, bars thinner than the photo on v3b). (b) The median unused
-  time was 302 s. In the 3 earlier table runs it was 402 to 421 s, and both v3 runs left less time
-  unused than any of them, but Astra left 65 s on the table. No session stopped for lack of
-  time. The agents never quoted the time-left line, and no session cited the measured times. None
-  used `--clay` or `--detail`. Table v3b has the best table IoU of all sessions so far (0.729;
-  Astra 0.726). With 1 or 2 runs per variant these score differences are within run-to-run
-  spread. So the time facts cut idle time but do not change the finish decision (cause 3), which
-  is now the main gap.
-- Harness v4, verdict rule restated (2026-10-17). v3 plus one sentence in the Claude manual's
-  `finish` entry that quotes the task prompt word for word: "Use needs_review if required work
-  remains." and "Never mark unresolved required work complete." It is an experiment file,
-  `runs/opus_dig/system_v4.md` (`run.py v4a|v4b`, the `--system` option); the repository manual
-  stays at v3. Runs: `runs/table_mv_opus_v4{a,b}`.
-  The 4 v3 and v4 table sessions were judged again with one rule that uses only the action record
-  (tool calls, helper output, checkpoints, finish; thinking left out): a `complete` session passes
-  only if every checkpoint defect got a later edit and review and no limitation names a flaw it
-  knows remains. Two judges per session agreed on all 4.
-
-  | Session | unused s | defects fixed / filed | IoU | color ΔE | edge | passes (a) |
-  |---|---|---|---|---|---|---|
-  | table v4a | 338 | 0 / 1 | 0.727 | 5.4 | 0.165 | no: underside openings |
-  | table v4b | 305 | 1 / 1 | 0.735 | 2.5 | 0.132 | yes |
-
-  v4 passes (a) in 1 of 2 sessions (v4b), the same as v3 under this rule (v3b passes on actions;
-  the earlier reading of its thinking had failed it). All 4 v3 and v4 sessions said `complete`;
-  none used `needs_review`, `--clay` or `--detail`. Median unused time 322 s (v3 302 s). Table v4a
-  read `iou_original`, saw lower IoU in all 5 views, and still wrote that the model matches the
-  photos. Table v4b has the best table IoU (0.735), within run-to-run spread. So restating the
-  rule did not change the verdicts. The planned next test is effort `max` on the v4 harness.
-- Harness v5, effort `max` (2026-10-17). v4 at effort `max` (`run.py v5a|v5b`,
-  `runs/table_mv_opus_v5{a,b}`). Same rule and two-judge process; the judges agreed on both
-  sessions.
-
-  | Session | unused s | defects fixed / filed | IoU | color ΔE | edge | passes (a) |
-  |---|---|---|---|---|---|---|
-  | table v5a | 320 | 1 / 1 | 0.717 | 3.6 | 0.130 | no: IoU gap named, not checked |
-  | table v5b | 239 | 1 / 1 | 0.718 | 2.3 | 0.094 | no: IoU gap named, not checked |
-
-  (b) is not met: the median unused time was 280 s (v4 322 s). (a) passed in neither session (v3
-  and v4 1 of 2 each). Both said `complete`, and both wrote the open flaw into a limitation. Both
-  read `iou_original`, and neither used `--clay` or `--detail`. Both failures rest on
-  limitations that name a measured IoU gap; a reading that accepts those would pass both sessions.
-  Scores are close to v4's. By their checkpoint and finish records, Astra's table and chair
-  sessions follow the same rule: each defect it filed got a later edit and review, its limitations
-  name only estimates, and on the table it chose `needs_review`.
-  Summary of the dig: on photo_match the later Opus table sessions match or beat Astra on several
-  scores. The gap that remains is in how Opus finishes: it names leftover flaws as limitations and
-  still says `complete`, and it does not confirm fixes with `--clay` or `--detail`. On the table,
-  time facts and effort `max` cut its unused time from 402 to 421 s to a median of 280 s;
-  restating the verdict rule changed nothing. A `finish` check that refuses `complete` while a
-  filed defect has no later edit and review would have caught neither v5 table session, because
-  both fixed the defect they filed.
+- Every helper except `finish` ends its output with `time left: N s of the 600 s budget` (both
+  agents). The Claude manual's Measured times come from the Opus sessions of 2026-10-17.
+- Opus is faster than Astra on the same Stage A meshes, stops sooner and calls more results
+  `complete`. On `photo_match` (note 6), the later Opus table sessions match or beat Astra on
+  several scores. The gap that remains is in how Opus finishes: it names leftover flaws as
+  limitations and still says `complete`, and it does not confirm fixes with `--clay` or `--detail`.
+  On the table, the time-left lines, the Measured times and effort `max` cut its unused time from 402
+  to 421 s to a median of 280 s, while restating the verdict rule changed nothing. A `finish` check
+  that refuses `complete` while a filed defect has no later edit and review would have caught neither
+  table session at effort `max`, because both fixed the defect they filed.
 
 ### 6. Evaluation (`harpor/eval/`)
 
@@ -797,8 +581,8 @@ An articulated GLB (joints in its node extras) takes the same steps with links. 
   `RUN/vomp/<link>/`, and `RUN/summary.json` describes the whole object.
 - **Mass:** `mass.combine` adds the links' rigid bodies into one for the whole object.
 - **MJCF:** one body per link, nested under its parent. A link gets a hinge or slide joint, or no
-  joint when its joint is fixed or when it is a loose link welded to its holder. `--fixed-base` drops
-  the root's free joint.
+  joint when its joint is fixed or when it is a loose link welded to its holder. A world joint on the
+  root drops the root's free joint.
 - **USD:** an articulation root, one rigid body per link and one joint prim per joint.
 - **URDF:** `python -m harpor.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
   (in `envs/mujoco`) writes `model.urdf` from the MJCF's meshes and inertials. A rigid object gives one
@@ -810,46 +594,13 @@ Setup traps on ICE (`runs/vomp11_setup/cmd.sh`):
 - The renders use Cycles on the GPU with no CPU fallback, so step 2 must run on a GPU node.
   A fresh output folder is needed for each run.
 
-Batch of eight objects (`runs/physics_batch/cmd.sh`, 2026-10-14 to 15; split over the three ICE
-jobs, about 5 min per object; outputs in `runs/<name>_vomp11/` and `_vomp10/`, MJCF in `_vomp11/mjcf/`):
-- Inputs: the Astra `finish` deliverables of table (export 3, `needs_review`), chair, pan, knife,
-  fork, glass and coffee cup. The plate has no Astra run (its Stage A mask IoU was 0.497, just under
-  the 0.5 guard), so it uses `runs/plate_mv/posed.glb`.
-- Up: pan, knife, fork, glass, coffee cup and plate come from the same two photos, so they share one
-  gravity. A RANSAC plane on Depth Anything 3's view-0 pointmap (`runs/_verify/table_up.py`; 56%
-  inliers, 3.6 mm RMS) gives up (0.0119, -0.8165, -0.5772) in W, a 35.3 degree camera tilt. Each object
-  uses its own axis closest to it: pan normals (2.7 degrees), fork and knife thinnest axis (4.0 and
-  11.1), plate thinnest axis (16.6), coffee cup thinnest axis (7.5, through `--up-near`) and glass
-  long axis (8.0, through `--up-near`). The normals rule had put the cup about 45 degrees off (its
-  renders showed it tipped); those runs are kept in `runs/physics_batch/old_up/`. Table and chair
-  (other photos) use normals: table normals and PCA agree within 0.7 degrees; for the chair PCA
-  tipped it 76 degrees, while normals gives a 0.96 m tall chair.
-- The glass uses `--opaque`. VoMP then sees an opaque textured glass, so its values come from the
-  look of an opaque object.
-- Medians and rigid-body mass (MJCF from the v1.1 numbers; every MJCF compiles with its summary's mass):
-
-  | object | aligned size (m) | v1.1 E, nu, rho | v1.1 mass | v1.0 E, nu, rho | v1.0 mass | hulls |
-  |---|---|---|---|---|---|---|
-  | table | 1.03 x 1.02 x 0.77 | 4.1 GPa, 0.30, 980 | 43.4 kg | 62 GPa, 0.33, 3,046 | 119 kg | 26 |
-  | chair | 0.69 x 0.58 x 0.96 | 2.3 GPa, 0.32, 1,037 | 20.1 kg | 5.2 GPa, 0.35, 1,208 | 70.5 kg | 39 |
-  | pan | 0.57 x 0.32 x 0.09 | 4.1 GPa, 0.32, 1,039 | 2.41 kg | 103 GPa, 0.33, 5,348 | 12.6 kg | 21 |
-  | knife | 0.35 x 0.05 x 0.03 | 3.9 GPa, 0.32, 1,028 | 0.208 kg | 19 GPa, 0.36, 2,278 | 0.911 kg | 4 |
-  | fork | 0.18 x 0.03 x 0.02 | 4.1 GPa, 0.32, 1,014 | 0.022 kg | 3.4 GPa, 0.36, 930 | 0.020 kg | 3 |
-  | glass | 0.10 x 0.10 x 0.16 | 4.2 GPa, 0.21, 1,018 | 0.354 kg | 26 GPa, 0.33, 3,543 | 0.942 kg | 21 |
-  | coffee cup | 0.11 x 0.10 x 0.07 | 4.2 GPa, 0.22, 1,012 | 0.111 kg | 32 GPa, 0.33, 3,474 | 0.367 kg | 54 |
-  | plate | 0.13 x 0.13 x 0.02 | 4.1 GPa, 0.21, 1,025 | 0.087 kg | 39 GPa, 0.33, 3,346 | 0.287 kg | 26 |
-
-- v1.1 gives almost every object about 4 GPa and 1,000 kg/m^3, a plastic, including the steel
-  cutlery, the pan, the ceramics and the glass. v1.0 spreads the values and lands nearer the real
-  materials for the pan, glass, cup, plate, knife and table frame, and misses the fork. The masses
-  are not reliable either way: the voxel volume of thin parts is too large, and the mesh sizes were
-  not checked against the real objects.
-- Checks (independent agents): VoMP's renders show every object in its resting pose (cup and glass
-  opening up, cutlery, pan and plate flat, chair on its casters, table on its base) with no ground
-  patch; an independent recompute from `materials.npz` (`runs/_verify/mass/mass_check.py`) matches
-  the mass, COM and inertia of every batch run exactly; every MJCF compiles with its summary's mass
-  and inertia (relative difference under 2e-6).
-- The batch MJCFs and USDs were not run in a simulator.
+Batch of eight objects (table, chair, pan, knife, fork, glass, coffee cup and plate):
+- VoMP v1.1 gives almost every object about 4 GPa and 1,000 kg/m^3, a plastic, including the steel
+  cutlery, the pan, the ceramics and the glass. v1.0 lands nearer the real materials for most of
+  these objects.
+- The masses are not reliable either way: the voxel volume of thin parts is too large, and the mesh
+  sizes were not checked against the real objects.
+- The batch models were never run in a simulator.
 
 ### 10. Web app (`harpor/webapp/`)
 
@@ -859,7 +610,9 @@ masks, Depth Anything 3, the metric scale from LiDAR (optional, note 12), MV-SAM
 fit, the part list and the part split (for an articulated object only, note 11), the agent
 (GPT-6-Astra or Claude Opus 5.5), alignment, VoMP v1.1, MJCF, USD and URDF.
 
-**Start it.** Log in to ICE on the Mac so that the `cm-ice` socket is up, start an L40S job, then:
+**Start it.** Run `export HARPOR_SSH_HOST=<user>@<login node>` once in the Mac's shell profile.
+`HARPOR_SSH_SOCKET` (default `~/.ssh/cm-ice`) and `HARPOR_REMOTE_CODE` (default `~/scratch/gator/gator_clone`) are
+optional. Log in to ICE on the Mac so that the socket is up, start an L40S job, then:
 
 ```bash
 bash harpor/webapp/open_mac.sh JOBID
@@ -1197,12 +950,6 @@ holds the points of the views used. A job that asked for the 360 video adds `tur
 `results.zip` adds `urdf/` for every job, `parts.glb` and `parts.json` for an articulated job,
 `lidar.json` for a job with LiDAR, and `turntable.mp4` for a job with the 360 video.
 
-**Check on ICE** (2026-10-16, job 6308026, agent turned off, so no API use):
-- `table.MOV`, prompt "table": 6 picks at least 53 degrees apart. Mean mask IoU 0.66: the legs
-  match, but MV-SAM3D made the tabletop too wide in every view. View 0's DA3 points lie a median
-  0.28% of the diagonal from the mesh (97.5% within 2%). Upright extent 1.07 x 1.04 x 0.80 m.
-  36 min in total.
-
 ### 11. Articulated objects (`harpor/parts/`)
 
 Until 2026-10-20 the pipeline treated an object as one rigid body: SAM 3 masked the whole object,
@@ -1275,8 +1022,8 @@ Decisions (2026-10-20, user):
   Only `harpor.physics.align` moves the joints to S, with `T_s_from_w`, and marks them `frame: "S"`.
   `harpor.physics.mjcf` refuses joints in W.
 
-**Steps.** Each command runs from `$G/gator_clone`, with `G=$(readlink -f ~/scratch)/gator` and `J` the
-job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step 1 as the stage
+**Steps.** Each command runs from the repo root, with `G` the root folder (`$HARPOR_ROOT`, by default
+`$(readlink -f ~/scratch)/gator`) and `J` the job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step 1 as the stage
 `propose`, steps 2 to 5 as the stage `parts`, and step 6 as its agent stage.
 
 1. **Propose** (`envs/sam3d`): `python -m harpor.parts.stage propose --job "$J" [--key-file F] [--agent astra|opus|none]`
@@ -1433,8 +1180,8 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
   occupied voxel). A skipped link is missing from `rigid_body`, and the MJCF gives it a hull inertial.
 - **Mass**: `mass.combine` adds the masses, weights the COM by mass and moves each inertia to the
   common COM (parallel axis theorem).
-- **MJCF** (`envs/mujoco`): `python -m harpor.physics.mjcf ... [--fixed-base]`. The root link is the
-  body `<name>`, with a free joint unless the GLB has a fixed base or `--fixed-base` is given. Every
+- **MJCF** (`envs/mujoco`): `python -m harpor.physics.mjcf ...`. The root link is the
+  body `<name>`, with a free joint unless the GLB has a fixed base. Every
   other link is the body `<name>_<link>`, nested under its parent at pos 0 (all links share frame S),
   with a `hinge` or `slide` joint at the joint's origin and axis, limited to [lower, upper], or with
   no joint (fixed). A loose link is welded, with a warning. CoACD runs per link
@@ -1471,95 +1218,16 @@ job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step
 after `propose` and the stages `propose`, `parts` and `urdf` are described in note 10.
 
 **Checks on ICE** (2026-10-20):
-- Software (job 6420894, test tree `$G/gator_dev`). In the SIF, Blender 5.2.2's `export_scene.gltf`
-  has `export_extras` and `export_animations`, `bmesh.ops` has `holes_fill`, `edgeloop_fill`,
-  `edgenet_fill`, `triangulate`, `poke` and `delete`, and numpy is 2.3.4. `envs/sam3d` has trimesh
-  5.1.1, rtree, networkx, scipy, PIL and anthropic 1.15.0, but no shapely, manifold3d or embree.
-- Synthetic split: `runs/chair_mv/posed.glb` (10,268 faces) with a made-up assignment of two parts
-  (the top 40% by height in W). In the first run, `holes_fill` and `edgenet_fill` left the top part's
-  cut loop of 109 edges open, and `edgeloop_fill` closed it. BEAUTY triangulation of the bent 109-gon
-  made zero-area slivers (trimesh found 6 to 18 edges not used twice). After the fix of step 4 the
-  split took 6 s, the faces matched by order, and both parts were watertight with consistent winding.
-  Their volumes, 0.00419 m^3 and 0.00534 m^3, add up to the posed mesh's 0.00953 m^3.
-- Synthetic physics on that split, with a test hinge placed by hand on the top part (origin at its
-  bottom back edge, axis x in W, range 0 to 0.4 rad). Align with `--links-out` took 1 s.
-  `vomp_run --links` took 582 s in all. Of that time, the model load took 3.8 s, the predict for the
-  base 235 s on 9,744 voxels, and the predict for the top 85 s on 12,278 voxels. The base got 9.0 kg
-  (E 3.74 GPa, rho 1,078 kg/m^3), the top 10.5 kg (E 1.58 GPa, rho 895 kg/m^3), and the whole object
-  19.5 kg. The `mjcf` step took 88 s (CoACD 38 and 32 hulls), `usd` 21 s and `urdf` 1 s (72 mesh
-  files: 2 visual OBJs and 70 hulls, none missing; yourdfpy is not installed). MuJoCo counts 3 bodies
-  (the world and the 2 links) and 2 joints (free and hinge). The MJCF excludes the pair base and top.
-  The probe moves a vertex of the top by up to 0.30 m at q = 0.4 rad, and 4 s of simulation stayed
-  stable.
-- Real chair, first pass (`$G/dev_tests/chair_real/v1`, the old prompt and vote). The run folder comes
-  from an MV-SAM3D run of the user's office chair video: 5 views (`img1` to `img5`), part-mask photos
-  at 1024 x 576 px, vote maps at 768 x 432 px and a posed mesh of 10,268 faces. Opus 5.5 proposed in
-  97.2 s: the base "star base", and the parts gas cylinder (prismatic, on the star base), seat
-  (revolute, on the gas cylinder), height lever (revolute, on the seat), caster x5 (revolute) and
-  caster wheel x5 (revolute, on the caster). SAM 3's top "seat" instance was the whole chair in all 5
-  views (97 to 101% of the object mask), and the 80% cover rule dropped it. So only fragments voted:
-  the seat cluster took only the seat pan (30% of the surface, confidence 0.58), and the backrest
-  stayed with the base. The gas cylinder and the height lever were not found. The casters and the
-  wheels were `dropped_small` (about 0.2% of the surface each).
-- A probe of SAM 3 prompts on the same 5 photos:
-
-  | Prompt | SAM 3's result |
-  |---|---|
-  | "chair base" | one clean instance per view, score 0.88 to 0.95, 8.5 to 12.6% of the object mask |
-  | "star base" | no instance |
-  | "seat and backrest" | the top instance covers 80 to 89% of the object and none of the "chair base" mask |
-  | "seat" | the top instance covers 97 to 101% of the object and about all of the base mask |
-  | "backrest" | 37 to 49% of the object |
-
-- Real chair, second pass (`$G/dev_tests/chair_real`):
-  - Propose: Opus 5.5 took 80.9 s. It listed the base "chair base" and one part, "seat and backrest",
-    revolute, on the chair base, with the axis hint "vertical axis through gas cylinder, seat swivels
-    around".
-  - Part masks: 40.9 s for 2 prompts on 5 photos at 1024 x 576 px, without the model load (`seconds`
-    in `part_masks.json`), with a GPU memory peak of 3.8 GiB.
-  - Vote: 1.6 s. Of the 10,268 faces, no view sees 4,414 (43%), the graph cut relabelled 636 and the
-    cleanup moved 925. chair_base has 4,818 faces, 21.0% of the surface, confidence 0.54.
-    seat_and_backrest has 5,450 faces, 79.0% of the surface, confidence 0.71. Two "seat and backrest"
-    instances (img4 index 6 and img5 index 7) were the whole chair and were dropped for holding 100%
-    of the base. The other clusters of "seat and backrest" ended as 8 `dropped_small` and 1
-    `unconfirmed`. The overlay shows the seat and backrest as one solid part, and the legs, casters
-    and column as the base.
-  - Split: 10 s in all. Blender itself took 1.0 s, and the rest is the Apptainer start. Each part got
-    16 cap faces in 1 hole (`edgeloop_fill`), the faces matched by order, and there were no warnings.
-  - Finish: `parts.json` has 2 parts and 1 seam. The seam has 16 edges and is 0.126 m long (a ring
-    around the gas column), with 4 lines. The first line that RANSAC found (the best fit) is 0.046 m
-    long and holds 37% of the seam's length.
-  - Agent: Opus 5.5, effort xhigh, mode articulation, 900 s budget, run with
-    `python -m harpor.webapp.agent_step --agent opus`. It finished `articulated` after 208 s of wall
-    time, in 8 turns, for about $0.24 (4,871 output tokens and 104,459 cache-read tokens). The first
-    model turn ended 86 s after the session's clock started. A Blender script that inspected the scene
-    took 4.3 s. `set_joint` at 138 s took 4.9 s. `review_articulation --states 5` took 53.3 s for 35
-    renders (5 states under 5 input views and 2 orbit views). Its export, the only export of the
-    session, took 5.4 s of that time, which the agent's clock does not count. `finish` took 0.3 s, at
-    207 s. The joint is revolute, seat_and_backrest on chair_base, with the origin and axis fitted to
-    the seam loop and the range -pi to pi rad. The penetration share was 0 in all 5 states.
-    The agent wrote two limitations: the range is -pi to pi rad, while a real chair turns without
-    limit, and the gas-lift height is not modelled (one joint per part).
-  - Physics ran through a scratch script that chains the steps. Align used `--up normals`, because the
-    up hint of `physics_auto` looks for the web app's view name `0`, and this run names its views
-    `img1` to `img5`. Align took 1 s: camera tilt 35.3 degrees, extent 0.69 x 0.58 x 0.96 m, and the
-    joint in S has the axis (0.026, -0.072, 0.997), 4.3 degrees from vertical, with its origin 0.38 m up.
-    `vomp_run --links` took 562 s in all (predict 212 s for chair_base on 5,686 voxels and 82 s for
-    seat_and_backrest on 11,619 voxels). chair_base: 5.30 kg, E 3.9 GPa, nu 0.34, rho 1,088 kg/m^3.
-    seat_and_backrest: 15.28 kg, E 1.0 GPa, nu 0.32, rho 1,055 kg/m^3. The whole chair is 20.59 kg
-    (the single-body v1.1 chair of note 9: 20.1 kg). The `mjcf` step took 46 s (CoACD 28 and 25 hulls;
-    2 link bodies plus the world body, and 2 joints, free and hinge; the probe moves a vertex of the
-    seat by up to 0.84 m at q = pi rad). `usd` took 22 s, and `urdf` under 1 s (2 links, 1 revolute
-    joint, 55 mesh files: 2 visual OBJs and 53 hulls).
-  - Video: a 12 s sweep of the swivel through its range with the base held, then 3 s of free physics.
-    The largest |qvel| at the end was 0.12 (MuJoCo units, m/s or rad/s), because the swivel has no
-    damping and the seat keeps turning slowly.
+- `envs/sam3d` has no shapely, manifold3d or embree.
+- SAM 3 takes "seat" as the whole chair, while "seat and backrest" and "chair base" separate cleanly.
+- `holes_fill` and `edgenet_fill` left a cut loop of 109 edges open, so `split` uses `edgeloop_fill`
+  first.
 
 Measured times on ICE for the real chair (5 views, 10,268 faces, 2 parts):
 
 | Stage or helper | Time |
 |---|---|
-| `propose`, Opus 5.5 | 80.9 s (97.2 s in the first pass) |
+| `propose`, Opus 5.5 | 80.9 s |
 | part masks, 2 prompts on 5 photos, without the model load | 40.9 s |
 | `vote` | 1.6 s |
 | `split` | 10 s, of which Blender 1.0 s |
@@ -2151,16 +1819,27 @@ the job's current calibration (see the last bullet), it is the stage's done mark
   per set that has points, `scan` and `used`, each a mesh with one POINTS primitive (mode 0) whose
   float VEC3 POSITION accessor has min and max. Points become (x, -y, -z), glTF's axes: y up, the
   camera at the origin looking down -z, as a glTF camera does. Points that are not finite are left
-  out. A file holds at most about 0.75 MB. Blender opens it too.
+  out. Blender opens it too.
+- Each file also compares the LiDAR with DA3 at the job's s (`lidar.references`: a view's own s only
+  when the job has none), in two optional nodes. `diff` holds the points
+  with a finite r > 0 in `view_ratio`'s points, also those outside the mask, with a float SCALAR
+  attribute `_DIFF`, z (1 - s / r) in meters, and extras {s, median_m, used}. `da3`, only beside
+  `diff`, holds DA3's surface at s, its pixels at a fixed stride, at most `DA3_POINTS` (60,000),
+  through the crop and the camera model. A Stray capture has no `da3`, since its K stays inside
+  `stray_samples`. `scan` and `da3` hold at most about 1.5 MB, and `diff` adds 16 bytes a point. A
+  file of the box run holds about 0.9 MB, against 0.2 MB without the comparison.
+  `python -m harpor.webapp.lidar clouds --job "$J"` writes the files and the `run/lidar/` copies again
+  from the stored samples, clouds, masks and DA3 output. It stops, before it writes, when that
+  estimate does not give `pool/lidar.json`'s s and each view's s and used points.
 - The stage removes `lidar/cloud/` first and writes `lidar/cloud/<view>.glb` with the check images,
   also when the record is not ok, before `pool/lidar.json`; a failed source writes none. `used` is
   `view_ratio`'s used rows of the view's camera points. `select` copies the picks' files to
   `run/lidar/<i>.glb` (`build_run(..., clouds=)`, before `da3_output.npz`) when the scale is applied,
-  so a build with LiDAR off has none. `run/lidar/` is served and mirrored: about 4.5 MB per job
-  with 6 views (9 MB with 12) on the site, as review files, gone 14 days after the job stops.
+  so a build with LiDAR off has none. `run/lidar/` is served and mirrored: about 10 MB per job
+  with 6 views (20 MB with 12) on the site, as review files, gone 14 days after the job stops.
   `lidar/cloud/` is served and mirrored only while `pool/lidar.json` says ok false
   (`server.pool_clouds`, which `server.resolve` follows): there are no views used then, so the Inputs
-  tab shows each pool view's points by frame name, to check the calibration (up to about 24 MB with 32
+  tab shows each pool view's points by frame name, to check the calibration (up to about 55 MB with 32
   views). A found scale takes them off the site, since the worker drops what `resolve` no longer
   serves. A job built before this has no points until its `lidar` stage runs again (the cache version
   changed).

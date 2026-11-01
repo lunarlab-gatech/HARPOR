@@ -94,7 +94,7 @@ def test_headers_and_the_postgrest_calls():
     async def main():
         async with supa.Supa(URL + "/", PUB, bearer, transport=fake.transport) as s:
             assert await s.rpc("x", p_a=1, p_b=None) == "w1"
-            assert await s.select("jobs", "id,status", filters={"or": "(a.is.null,b.eq.1)"}, order="id", limit=5,
+            assert await s.select("jobs", "id,status", filters={"or": "(a.is.null,b.eq.1)"}, limit=5,
                                   id=JOB, deleted_at=None, approved=True) == [{"id": 1}]
             with pytest.raises(ValueError, match="not a table"):
                 await s.select("jobs?select=*")
@@ -109,7 +109,7 @@ def test_headers_and_the_postgrest_calls():
     assert (r[0].method, r[0].url.path, fake.body(0)) == ("POST", "/rest/v1/rpc/x", {"p_a": 1, "p_b": None})
     assert r[1].url.path == "/rest/v1/jobs" and params(r[1]) == {
         "select": "id,status", "id": f"eq.{JOB}", "deleted_at": "is.null", "approved": "is.true",
-        "or": "(a.is.null,b.eq.1)", "order": "id", "limit": "5"}
+        "or": "(a.is.null,b.eq.1)", "limit": "5"}
     assert len(r) == 2
     assert not any(hasattr(supa.Supa, n) for n in ("insert", "upsert", "patch", "delete", "download"))
 

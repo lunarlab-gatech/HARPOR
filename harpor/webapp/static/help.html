@@ -117,7 +117,8 @@
 <h3>The Log tab</h3>
 <p>The first line counts the build stages that are done or failed, and names the one that runs. Under it, each stage
   shows its name, what it does, GPU when it runs on the GPU, its status and its time. A stage that does not apply is
-  skipped, and its note says why, such as turned off: rigid object.</p>
+  skipped, and its note says why, such as turned off: rigid object. When the job finishes, Total under the stages gives
+  the sum of their times. Time in the queue or waiting for a review is not counted.</p>
 <p>While the job runs, the live log of the running stage shows next to the stages. After the job stops, click a
   stage's name to see its log. Full log opens the whole log file in a new tab.</p>
 <table>
@@ -522,6 +523,24 @@ time_offset_s: 0.0</pre>
 <p>Blue points are the ones the scale used: inside the object's mask, not hidden behind nearer points, with a
   confident DA3 depth, and not far from the view's other points. A view marked outlier, scattered or few points was
   left out of the scale (see <a href="#lidar">How the scale is found</a>).</p>
+<p>Compare with DA3 shows how far each LiDAR point lies from DA3's depth. The box appears once a view has the
+  comparison, and it stays on when you pick another view. The comparison uses the job's scale in every view, so the
+  differences between views stay visible. A view uses its own scale only when the job has none. Gray points are DA3's
+  surface at that scale, at most 60,000 of them. A Stray capture has only the dots, because its intrinsics are not kept.
+  For a rosbag, the round dots are the LiDAR points whose ray meets DA3's surface within 25% of the point's range. A
+  point further off has no dot, so the largest differences do not show. For a Stray capture, the dots are the points
+  that the camera sees and that DA3 has a depth for. Turn the box off to see the whole scan.</p>
+<p>Blue dots are nearer than DA3 and red dots are farther. The color is full at 15 mm in every view, and dots that agree
+  take the text's color. A 1% gap is 15 mm at 1.5 m, so far surfaces go full color, and their color does not give the
+  size of the gap. The dots include points outside the mask. Those points do not affect the scale, and their color does
+  not follow it. To compare views, read the object's dots and the median in the legend. The legend gives the scale and
+  the median difference of the points that the scale used, in mm. A positive median means that the LiDAR reads farther
+  than DA3.</p>
+<p>A view whose file has no comparison shows its usual points and a line that says so. A view without a scale has no
+  comparison. A job built before this view gets one with
+  <code>python -m harpor.webapp.lidar clouds --job J</code>, where J is the job's folder. The command needs no GPU, does
+  not rerun any stage and changes only the point files. It stops while the job runs, and when the job's stored data no
+  longer gives the job's scale and the same result in each view.</p>
 <p>The view starts where the camera stood, so it looks like the photo. The small pyramid marks the camera. Drag to turn,
   and use the wheel or pinch to zoom. On a focused view, the arrow keys turn and + and - zoom. Reset goes back to the
   start.</p>

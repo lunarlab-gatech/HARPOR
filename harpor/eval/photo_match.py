@@ -1,4 +1,4 @@
-"""How well an agent session's delivered asset matches the input photos (build_plan.md note 5).
+"""How well an agent session's delivered asset matches the input photos (build_plan.md note 6).
 
     python -m harpor.eval.photo_match ROOT [ROOT ...] [--dino] [--json OUT]
 

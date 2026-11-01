@@ -176,7 +176,7 @@ def update(job_dir, **fields):
 def update_stage(job_dir, stage, **fields):
     with _LOCK:
         job = load(job_dir)
-        job["stages"].setdefault(stage, dict(STAGE)).update(fields)  # jobs from before "topics" lack it
+        job["stages"].setdefault(stage, dict(STAGE)).update(fields)  # older jobs lack newer stages, such as turntable
         save(job_dir, job)
 
 
@@ -246,7 +246,7 @@ def lidar_settings(job_dir, job, value, read_bag=True):
         if not isinstance(value, dict) or value.get("kind") != "stray":
             raise ValueError('lidar is null or {"kind": "stray"} for a Stray Scanner capture')
         export = Path(job["video"]["path"])
-        if not (export if export.is_absolute() else Path(job_dir) / export).is_file():  # as lidar.stray_samples
+        if not export.is_file():
             raise ValueError(f"the uploaded export {export.name} is not on the server; upload it again")
         return {"kind": "stray"}
     if input_kind != "rosbag":
@@ -376,20 +376,18 @@ def key_kind_error(key, agent):
     if agent == "opus":
         return None if key.startswith("sk-ant-") else "Anthropic keys start with sk-ant-"
     if key.startswith("sk-ant-"):
-        return "this is an Anthropic key (sk-ant-); GPT-6-Astra needs an OpenAI key"
+        return "this is an Anthropic key (sk-ant-); this agent needs an OpenAI key"
     return None if key.startswith("sk-") else "OpenAI keys start with sk-"
 
 
-def check_key(key, fake=None, agent="astra"):
+def check_key(key, fake, agent="astra"):
     """(ok, message) for the API key of agent astra (OpenAI: GET https://api.openai.com/v1/models with
     it) or opus (Anthropic: the model record of claude-opus-5-5, with the anthropic SDK). A key whose
     prefix belongs to the other provider (key_kind_error) is refused before any request. In fake mode
-    (default: WEBAPP_FAKE=1) every key that passes that check passes. The message never holds the
-    key."""
+    every key that passes that check passes. The message never holds the key."""
     import urllib.error
     import urllib.request
 
-    fake = os.environ.get("WEBAPP_FAKE") == "1" if fake is None else fake
     if not isinstance(key, str) or not KEY.fullmatch(key):
         return False, "an API key is one word of letters, digits, - and _"
     why = key_kind_error(key, agent)
@@ -945,7 +943,7 @@ class Runner:
         if not self._status(job_id, "running"):
             return
         for stage in steps.NAMES[steps.NAMES.index(first):]:
-            # Jobs from before the parts stages lack their records.
+            # Jobs from before a stage, such as turntable, lack its record.
             ran = not (load(J)["stages"].get(stage, {}).get("status") == "done" and steps.done(stage, J))
             if ran and self._run_stage(job_id, stage) not in ("done", "skipped", "warned"):
                 return

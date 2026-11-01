@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 import pytest
-from test_physics import hull_parts, inflated_hull, two_box_hinge, two_lid_chest
+from test_physics import fix_to_world, hull_parts, inflated_hull, two_box_hinge, two_lid_chest
 
 from harpor import frames
 
@@ -67,7 +67,8 @@ def test_urdf_of_a_rigid_box_and_of_a_fixed_base(tmp_path):
     assert link.find("collision/geometry/mesh").get("filename") == "meshes/collision_0.obj"
 
     glb, summary, _, _ = two_box_hinge(tmp_path / "chest")
-    mj = build_mjcf(glb, summary, tmp_path / "chest" / "mjcf", "chest", decompose=hull_parts, fixed_base=True)
+    fix_to_world(glb)
+    mj = build_mjcf(glb, summary, tmp_path / "chest" / "mjcf", "chest", decompose=hull_parts)
     report = build(glb, summary, tmp_path / "chest" / "mjcf", tmp_path / "chest" / "urdf", "chest")
     c = check(tmp_path / "chest" / "urdf")
     assert report["fixed_base"] and c["links"] == 3 and c["joint_types"] == {"world_joint": "fixed", "lid_joint": "revolute"}

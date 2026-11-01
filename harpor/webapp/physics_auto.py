@@ -1,6 +1,6 @@
 """Physics inputs for the web app without a person in the loop (stage "align").
 
-Runs in envs/sam3d (numpy, scipy, trimesh, pillow), from the gator_clone root, after place (and the
+Runs in envs/sam3d (numpy, scipy, trimesh, pillow), from the repo root, after place (and the
 agent, unless it was skipped):
 
     python -m harpor.webapp.physics_auto align --job J
@@ -29,7 +29,6 @@ sim_name() makes the object noun a MuJoCo and USD name.
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -169,19 +168,8 @@ def pick_glb(job_dir):
                                                  if r else "no agent result")
 
 
-def run_align(argv):
-    """harpor.physics.align's CLI in this process (its main() reads sys.argv)."""
-    from harpor.physics import align
-
-    saved = sys.argv
-    sys.argv = ["harpor.physics.align", *argv]
-    try:
-        align.main()
-    finally:
-        sys.argv = saved
-
-
 def align_job(job_dir):
+    from harpor.physics import align
     from harpor.webapp import steps
 
     job_dir = Path(job_dir)
@@ -199,8 +187,8 @@ def align_job(job_dir):
     print(f"GLB: {glb} ({rule}); up hint {up['hint']} from the {info['source']}"
           + (f" ({info['reason']})" if "reason" in info else "") + ("; made opaque for VoMP" if opaque else ""))
     # --up-near=... in one argument: argparse takes "-0.1,..." after a space for an option.
-    run_align(["--glb", str(glb), "--out", str(out / "aligned.glb"), "--up-near=" + ",".join(map(str, up["hint"])),
-               "--x", "footprint", *(["--opaque"] if opaque else []), *(["--links-out", str(out / "links")] if links else [])])
+    align.main(["--glb", str(glb), "--out", str(out / "aligned.glb"), "--up-near=" + ",".join(map(str, up["hint"])),
+                "--x", "footprint", *(["--opaque"] if opaque else []), *(["--links-out", str(out / "links")] if links else [])])
 
 
 def main(argv=None):

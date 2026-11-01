@@ -22,7 +22,8 @@ from harpor.webapp import agent_step, jobs, steps
 
 ROOT = Path(__file__).resolve().parents[1]
 KEY = "sk-fake-" + secrets.token_hex(16)
-ICE = steps.Config(G=Path("/storage/ice1/5/0/ali497/gator"), runs=Path("/storage/ice1/5/0/ali497/gator/webapp_runs"))
+ICE = steps.Config(G=Path("/storage/ice1/5/0/ali497/gator"), runs=Path("/storage/ice1/5/0/ali497/gator/webapp_runs"),
+                   code=Path("/storage/ice1/5/0/ali497/gator/gator_clone"))
 JOB = {"id": "20261015-120000-abcdef", "prompt": "coffee cup", "slug": "coffee_cup",
        "overrides": {"locked": [], "excluded": [], "instance": {"f00012": "1", "f00020": "none"}}}
 ART = {**JOB, "articulated": True, "parts": {"mode": "vlm", "list": [], "confirmed": False}}  # an articulated job
@@ -83,15 +84,16 @@ def test_commands_have_the_ice_environment():
     for s, (argv, cwd, env) in scripts.items():
         assert argv[:2] == ["bash", "-c"] and cwd == "/storage/ice1/5/0/ali497/gator/gator_clone"
         assert argv[2].startswith("set -eo pipefail\nG=/storage/ice1/5/0/ali497/gator\n"
-                                  "J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n")
+                                  "J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n"
+                                  "C=/storage/ice1/5/0/ali497/gator/gator_clone\n")
         assert ("export " + STAGE_A in argv[2]) == (s in ("prep", "da3", "sam3d", "place", "propose", "parts", "agent",
                                                           "align", "turntable")), s
         assert env == {"PYTHONUNBUFFERED": "1"} and KEY not in argv[2]
     sc = {s: v[0][2] for s, v in scripts.items()}
     assert sc["masks"].endswith("\nexport HF_HOME=$G/.cache/huggingface\nrm -f \"$J/scene/sam3_coffee_cup/sam3.json\"\n"
-                                "cd $G/gator_clone && $G/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks --scene "
+                                "cd $C && $G/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks --scene "
                                 "\"$J/scene\" --prompt='coffee cup' --overwrite --pick f00012=1 --pick f00020=none")
-    assert sc["prep"].endswith('cd $G/gator_clone && $G/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d prep '
+    assert sc["prep"].endswith('cd $C && $G/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d prep '
                                '--scene "$J/scene" --mask-prompt sam3_coffee_cup --out "$J/pool"')
     assert sc["da3"].endswith('$G/envs/da3/bin/python -m harpor.stage_a.mvsam3d da3 --da3-root $G/Depth-Anything-3 --out "$J/pool"')
     assert sc["sam3d"].endswith("$G/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d sam3d --mv-root $G/MV-SAM3D "
@@ -101,18 +103,19 @@ def test_commands_have_the_ice_environment():
     opus = steps.command("agent", {**JOB, "agent": "opus"}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
     assert opus == sc["agent"][:-len("astra")] + "opus"
     assert "\n".join(VOMP) in sc["vomp"] and sc["vomp"].endswith(
-        'cd $G/VoMP && python $G/gator_clone/harpor/physics/vomp_run.py --glb "$J/physics/aligned.glb" --out "$J/physics"')
+        'cd $G/VoMP && python $C/harpor/physics/vomp_run.py --glb "$J/physics/aligned.glb" --out "$J/physics"')
     assert sc["topics"].endswith('$G/envs/web/bin/python -m harpor.webapp.video topics --job "$J"')
     assert sc["frames"].endswith('$G/envs/web/bin/python -m harpor.webapp.video analyze --job "$J"')
     assert sc["package"].endswith('$G/envs/web/bin/python -m harpor.webapp.jobs package --job "$J"')
     # The 360 video: Blender renders the frames in the SIF (envs/sam3d), and envs/web encodes them.
     assert sc["turntable"].endswith(
         f'\nrm -rf "$J/turntable"\nexport {STAGE_A}\n'
-        'cd $G/gator_clone && $G/envs/sam3d/bin/python -m harpor.webapp.turntable render --job "$J" '
-        '--sif $G/sif/gator-agent.sif\ncd $G/gator_clone && $G/envs/web/bin/python -m harpor.webapp.turntable encode --job "$J"')
+        'cd $C && $G/envs/sam3d/bin/python -m harpor.webapp.turntable render --job "$J" '
+        '--sif $G/sif/gator-agent.sif\ncd $C && $G/envs/web/bin/python -m harpor.webapp.turntable encode --job "$J"')
     assert sc["lidar"] == ('set -eo pipefail\nG=/storage/ice1/5/0/ali497/gator\n'
                            'J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n'
-                           'cd $G/gator_clone && $G/envs/web/bin/python -m harpor.webapp.lidar scale --job "$J"')
+                           'C=/storage/ice1/5/0/ali497/gator/gator_clone\n'
+                           'cd $C && $G/envs/web/bin/python -m harpor.webapp.lidar scale --job "$J"')
     with pytest.raises(ValueError):
         steps.command("agent", JOB, ICE)
     fake_cfg = steps.Config(G=ICE.G, runs=ICE.runs, fake=True)
@@ -122,7 +125,7 @@ def test_commands_have_the_ice_environment():
     assert fake[1] == str(ROOT)
 
     # The parts stages. propose takes the key file only when the VLM lists the parts.
-    assert sc["propose"].endswith('\ncd $G/gator_clone && $G/envs/sam3d/bin/python -m harpor.parts.stage propose --job "$J"')
+    assert sc["propose"].endswith('\ncd $C && $G/envs/sam3d/bin/python -m harpor.parts.stage propose --job "$J"')
     vlm = steps.command("propose", {**ART, "agent": "opus"}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
     assert vlm == sc["propose"] + " --key-file /dev/shm/gator-webapp-1/k.env --agent opus"
     with pytest.raises(ValueError, match="the propose stage needs the key file"):
@@ -135,10 +138,10 @@ def test_commands_have_the_ice_environment():
     assert steps.command("propose", ART, fake_cfg, key_file="/k/x.env")[0][2].endswith(
         "fake_steps propose --job /storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef "
         "--key-file /k/x.env --agent astra")
-    stage = 'cd $G/gator_clone && $G/envs/sam3d/bin/python -m harpor.parts.stage '
+    stage = 'cd $C && $G/envs/sam3d/bin/python -m harpor.parts.stage '
     assert sc["parts"].endswith(
         '\nrm -f "$J/run/parts.json" "$J/run/parts.glb"\nexport HF_HOME=$G/.cache/huggingface\n'
-        'cd $G/gator_clone && $G/envs/sam3seg/bin/python -m harpor.stage_a.part_masks --run "$J/run" '
+        'cd $C && $G/envs/sam3seg/bin/python -m harpor.stage_a.part_masks --run "$J/run" '
         '--proposal "$J/run/proposal.json" --out "$J/run/parts/sam3"\n'
         f'export {STAGE_A}\n{stage}vote --job "$J"\n{stage}split --job "$J" --sif $G/sif/gator-agent.sif\n'
         f'{stage}finish --job "$J"')
@@ -161,17 +164,25 @@ def test_masks_command_takes_a_noun_that_starts_with_a_dash(monkeypatch):
         assert ran[-1] == [noun]
 
 
+def test_stages_run_from_the_config_code(tmp_path):
+    assert steps.Config(G=tmp_path, runs=tmp_path).code == ROOT  # the repo of the running server
+    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", code=Path("/my repo"))
+    for s in set(steps.NAMES) - {"mjcf", "usd", "urdf"}:
+        argv, cwd, _ = steps.command(s, JOB, cfg, key_file="/k/x.env")
+        assert cwd == "/my repo" and "\nC='/my repo'\n" in argv[2] and "gator_clone" not in argv[2], s
+
+
 def test_physics_commands_name_the_object():
     pytest.importorskip("harpor.webapp.physics_auto")
     mjcf, usd = (steps.command(s, JOB, ICE)[0][2] for s in ("mjcf", "usd"))
-    assert mjcf.endswith('rm -rf "$J/physics/mjcf"\ncd $G/gator_clone && $G/envs/mujoco/bin/python -m harpor.physics.mjcf '
+    assert mjcf.endswith('rm -rf "$J/physics/mjcf"\ncd $C && $G/envs/mujoco/bin/python -m harpor.physics.mjcf '
                          '--glb "$J/physics/aligned.glb" --summary "$J/physics/summary.json" --name coffee_cup '
                          '--out "$J/physics/mjcf"')
     assert usd.endswith('$G/envs/mujoco/bin/python -m harpor.physics.usd --glb "$J/physics/aligned.glb" --summary '
                         '"$J/physics/summary.json" --name coffee_cup --mjcf "$J/physics/mjcf" --out "$J/physics/usd"')
     for job in (JOB, ART):  # one link for a rigid object
         assert steps.command("urdf", job, ICE)[0][2].endswith(
-            'cd $G/gator_clone && $G/envs/mujoco/bin/python -m harpor.physics.urdf --glb "$J/physics/aligned.glb" '
+            'cd $C && $G/envs/mujoco/bin/python -m harpor.physics.urdf --glb "$J/physics/aligned.glb" '
             '--summary "$J/physics/summary.json" --name coffee_cup --mjcf "$J/physics/mjcf" --out "$J/physics/urdf"')
 
 
@@ -197,7 +208,7 @@ def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
     (G / "tools" / "micromamba").chmod(0o755)
     for d in ("gator_clone", "VoMP"):
         (G / d).mkdir()
-    cfg = steps.Config(G=G, runs=tmp_path / "runs")
+    cfg = steps.Config(G=G, runs=tmp_path / "runs", code=G / "gator_clone")
     J = cfg.runs / JOB["id"]
 
     def run(stage):
@@ -238,6 +249,7 @@ def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
 
 def test_config_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("GATOR_ROOT", str(tmp_path))
+    monkeypatch.delenv("HARPOR_ROOT", raising=False)
     monkeypatch.delenv("WEBAPP_RUNS", raising=False)
     monkeypatch.setenv("WEBAPP_FAKE", "1")
     cfg = steps.config_from_env()
@@ -246,7 +258,14 @@ def test_config_from_env(monkeypatch, tmp_path):
     monkeypatch.delenv("WEBAPP_FAKE")
     assert steps.config_from_env().runs == tmp_path / "r" and not steps.config_from_env().fake
     assert [s["name"] for s in steps.STAGES if s["gpu"]] == ["masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable"]
-    assert [s["name"] for s in steps.STAGES if s["review_after"]] == ["select"]
+
+
+def test_config_from_env_prefers_harpor_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("HARPOR_ROOT", str(tmp_path / "new"))
+    monkeypatch.setenv("GATOR_ROOT", str(tmp_path / "old"))
+    monkeypatch.delenv("WEBAPP_RUNS", raising=False)
+    cfg = steps.config_from_env()
+    assert cfg.G == tmp_path / "new" and cfg.runs == tmp_path / "new" / "webapp_runs"
 
 
 def test_done_markers_guard_and_skip(tmp_path):
@@ -255,6 +274,8 @@ def test_done_markers_guard_and_skip(tmp_path):
     (J / "job.json").write_text(json.dumps({"prompt": "coffee cup", "slug": "coffee_cup"}))
     assert not any(steps.done(s, J) for s in steps.NAMES)
     (J / "frames").mkdir()
+    (J / "frames" / "pool.json").write_text('{"pool": [3')  # a marker that does not parse is not done
+    assert not steps.done("extract", J)
     (J / "frames" / "pool.json").write_text(json.dumps({"pool": [3, 9], "names": {"3": "f00003", "9": "f00009"}}))
     (J / "scene" / "images").mkdir(parents=True)
     (J / "scene" / "images" / "f00003.png").write_bytes(b"")
@@ -810,7 +831,7 @@ def test_a_key_of_the_other_provider_is_never_sent(monkeypatch):
         pre = "fake mode: " if fake else ""
         for key, agent, why in [(KEY, "opus", "Anthropic keys start with sk-ant-"),
                                 ("sk-proj-" + KEY[8:], "opus", "Anthropic keys start with sk-ant-"),
-                                (OPUS_KEY, "astra", "this is an Anthropic key (sk-ant-); GPT-6-Astra needs an OpenAI key"),
+                                (OPUS_KEY, "astra", "this is an Anthropic key (sk-ant-); this agent needs an OpenAI key"),
                                 ("ant-" + KEY, "astra", "OpenAI keys start with sk-")]:
             ok, msg = jobs.check_key(key, fake=fake, agent=agent)
             assert (ok, msg) == (False, pre + why) and key not in msg
@@ -1059,7 +1080,7 @@ def test_runner_pauses_for_the_part_list_and_confirms_it(make_runner, tmp_path, 
     job = wait(J, "done")
     assert job["parts"] == {"mode": "vlm", "list": [], "confirmed": False} and job["stages"]["parts"]["status"] == "done"
     job_id, J = ready_job(cfg, auto_continue=True)  # the user's list with an agent: only the agent takes the key
-    runner.submit_build(job_id, KEY, articulated=True, parts={"mode": "user", "list": ["base", {"name": "door", "parent": "base"}]})
+    runner.submit_build(job_id, KEY, articulated=True, parts={"mode": "user", "list": [{"name": "base"}, {"name": "door", "parent": "base"}]})
     job = wait(J, "done")
     assert job["parts"]["mode"] == "user" and "key file" not in (J / "logs" / "propose.log").read_text()
     assert "key file 0o600 OPENAI_API_KEY" in (J / "logs" / "agent.log").read_text() and not list(runner.key_dir.iterdir())
@@ -1069,7 +1090,8 @@ def test_runner_pauses_for_the_part_list_and_confirms_it(make_runner, tmp_path, 
             runner.submit_build(job_id, KEY if agent != "none" else None, agent=agent, articulated=True,
                                 parts={"mode": mode, "list": []})
     with pytest.raises(ValueError, match="parts 'lid' and 'Lid' give the same name"):
-        runner.submit_build(job_id, None, agent="none", articulated=True, parts={"list": ["base", "lid", "Lid"]})
+        runner.submit_build(job_id, None, agent="none", articulated=True,
+                            parts={"list": [{"name": "base"}, {"name": "lid"}, {"name": "Lid"}]})
     with pytest.raises(ValueError, match="articulated is true or false"):
         runner.submit_build(job_id, None, agent="none", articulated="yes")
     runner.submit_build(job_id, None, agent="none", articulated=True,
@@ -1702,8 +1724,8 @@ def test_agent_step_runs_a_fresh_refinement_session(tmp_path, monkeypatch):
     assert not (J / "agent" / "s" / "work" / "stale.txt").exists()
     m = json.loads((J / "agent" / "s" / "control" / "manifest.json").read_text())
     assert m["mode"] == "refinement" and len(m["views"]) == 2 and m["units"] == "meters"
-    assert m["source"] == agent_step.source("toy box", 2)
-    assert "2 frames from a phone video of the toy box" in m["source"] and "Depth Anything 3 cameras" in m["source"]
+    assert m["source"] == agent_step.source("toy box", 2, "video")
+    assert "2 frames from a video of the toy box" in m["source"] and "Depth Anything 3 cameras" in m["source"]
     assert (J / "agent" / "s" / "original.glb").read_bytes() == (J / "run" / "posed.glb").read_bytes()
     assert r["verdict"] == "fallback_original" and r["key_found_in"] == []
     assert json.loads((J / "agent" / "result.json").read_text()) == json.loads((J / "agent" / "s" / "result.json").read_text())
@@ -1741,7 +1763,7 @@ def test_agent_step_runs_an_articulation_session(tmp_path, monkeypatch, capsys):
     root = J / "agent" / "s"
     m = json.loads((root / "control" / "manifest.json").read_text())
     assert budgets == [900.0] and (m["mode"], m["parts"]) == ("articulation", "input/parts.json")
-    assert m["source"] == agent_step.source("toy box", 2, parts=True) and "split into parts" in m["source"]
+    assert m["source"] == agent_step.source("toy box", 2, "video", parts=True) and "split into parts" in m["source"]
     assert json.loads((root / "work" / "input" / "parts.json").read_text()) == parts
     assert (root / "original.glb").read_bytes() == (J / "run" / "parts.glb").read_bytes()
     assert (r["mode"], r["verdict"], r["timings"]["budget_s"], r["candidate_built"]) == \
@@ -1751,6 +1773,23 @@ def test_agent_step_runs_an_articulation_session(tmp_path, monkeypatch, capsys):
     assert agent_step.mode(J, {**job, "articulated": False}) == "refinement"
     (J / "run" / "parts.glb").unlink()
     assert agent_step.mode(J, job) == "refinement"
+
+
+def test_agent_step_names_the_jobs_real_input(tmp_path, monkeypatch):
+    """The manifest's source line says what the job started from, as job.json has it."""
+    from harpor.agent import controller as C
+
+    J = run_folder(tmp_path)
+    job = {**json.loads((J / "job.json").read_text()), "source": {"kind": "rosbag", "topic": "/cam"}}
+    (J / "job.json").write_text(json.dumps(job))
+
+    def prepare(root, kind, task, views, source, **kw):
+        raise SystemExit(source)
+
+    monkeypatch.setattr(C, "prepare_session", prepare)
+    with pytest.raises(SystemExit, match="2 frames from a rosbag of the toy box"):
+        agent_step.run(J, "/sif/agent.sif", J / "key.env")
+    assert "2 frames from a Stray Scanner capture of the toy box" in agent_step.source("toy box", 2, "stray")
 
 
 def test_agent_step_runs_a_claude_session_for_opus(tmp_path, monkeypatch, capsys):

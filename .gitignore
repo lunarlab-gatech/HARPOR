@@ -14,10 +14,8 @@ venv/
 .idea/
 
 # API keys (the real ones live in ~/.config/gator, never in the repo), and other secrets
-.env
 *.env
 .env.*
-!*.env.example
 *.pem
 *.key
 
@@ -25,6 +23,7 @@ venv/
 supabase/.temp/
 supabase/.branches/
 /site/
+.wrangler/
 
 # Things that live on ICE under $G, not in the repo: environments, the SIF, model weights,
 # caches, session runs and web-app jobs
@@ -52,4 +51,3 @@ results/
 *.avi
 *.mkv
 *.webm
-.wrangler/

@@ -1,21 +1,21 @@
 """The HARPOR web app's server: upload a phone video, a rosbag or a Stray Scanner capture, choose the
 views, build a simulation-ready object.
 
-Runs in envs/web (fastapi, uvicorn, av, numpy, pillow, scipy, rosbags) inside the ICE GPU job, from the
-gator_clone root (start_ice.sh starts it there):
+Runs in envs/web (fastapi, uvicorn, av, numpy, pillow, scipy, rosbags) on the GPU machine, from the repo
+root (start_ice.sh starts it there, inside a Slurm job):
 
-    python -m harpor.webapp [--runs DIR] [--host 0.0.0.0] [--port 0] [--fake] [--worker [--local-keys A]]
+    python -m harpor.webapp [--runs DIR] [--host 127.0.0.1] [--port 0] [--fake] [--worker [--local-keys A]]
                            [--demos DIR]
 
 It makes a login token, writes ~/.config/gator/webapp.json (0600: node, port, token, url_path, and
 slurm_job and slurm_node from SLURM_JOB_ID and SLURMD_NODENAME, so start_ice.sh reuses the server
-only in the same job, and worker), prints the port forward for the Mac and the URL, and serves the app
+only in the same job, and worker), prints the URL and the port forward from another computer, and serves the app
 with one uvicorn worker. When the server stops (Ctrl-C or SIGTERM), it runs the hooks that on_stop
 added, then cancels the running stages, and deletes webapp.json if it still holds this server's token.
 --worker also serves the public site: a personal worker (worker.py) in this process, on the same Runner,
-signed in as the machine's user (python -m harpor.webapp.worker login). The server then listens on
-127.0.0.1 unless --host says otherwise. --local-keys names the agents whose key the machine keeps in its
-own key file. webapp.json's "worker" is true while the worker runs, else false.
+signed in as the machine's user (python -m harpor.webapp.worker login). --local-keys names the agents whose
+key the machine keeps in its own key file. webapp.json's "worker" is true while the worker runs, else false.
+--host defaults to 127.0.0.1; start_ice.sh passes 0.0.0.0, so that the login node can reach the server.
 --port 0 takes a free port. --fake runs every stage with harpor.webapp.fake_steps, so the app works
 on a Mac without GPUs (OpenAI keys that start with sk- and Anthropic keys that start with sk-ant-
 pass). The runs folder defaults to steps.config_from_env(): WEBAPP_RUNS, else $G/webapp_runs. --demos DIR (default:
@@ -159,10 +159,9 @@ import socket
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
-from functools import lru_cache
 from pathlib import Path
 
-from harpor.fileio import read_json, write_json
+from harpor.fileio import config_dir, read_json, write_json
 from harpor.webapp import jobs, steps
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -194,7 +193,6 @@ LIDAR_COUNTS = ("views", "views_with_points", "views_used", "outliers", "scatter
                 "no_samples")
 PART_REASON = 200  # the longest reason for a bad part list (part_reason)
 KEY_LATER = "no key yet: the job asks for it when it needs it"  # the answer to a body with key_later
-FORWARD = "ssh -S ~/.ssh/cm-ice -O forward -L 8765:{node}:{port} ali497@login-ice.pace.gatech.edu"
 NO_TELEMETRY = {"tracing": False, "metrics": False, "logs": False, "operation_spans": False, "auto_configure": False}
 
 
@@ -247,43 +245,23 @@ def content_length(request):
     return 10**15 if len(size) > 15 else int(size)
 
 
-def file_offset(path, sha256):
-    """The time_offset_s that lidar_scale.read_calibration reads from the calibration file at path (None
-    when it gives none, or when the file cannot be read or is not the one of sha256)."""
-    return _file_offset(str(path), sha256)
-
-
-@lru_cache(maxsize=256)
-def _file_offset(path, sha256):
-    from harpor.stage_a import lidar_scale
-
-    try:
-        data = Path(path).read_bytes()
-        if hashlib.sha256(data).hexdigest() != sha256:
-            return None
-        return lidar_scale.read_calibration(data, Path(path).name)["time_offset_s"]
-    except (OSError, ValueError):
-        return None
-
-
-def calibration_summary(cal, J=None):
+def calibration_summary(cal):
     """The short form of job.json "calibration" for the page, or None: name, bytes, translation_m (the
     length of T_cam_lidar's translation), rotation_deg (the angle of its rotation), has_intrinsics (K
     is given), camera_axes, time_offset_s (None when the file gives none) and lidar_topic (the LiDAR
     topic it was uploaded for, or None). A calibration stored before lidar_topic was (an older job) holds
-    time_offset_s 0.0 also for a file without one, which the lidar stage reads as none: with the job
-    folder J, its time_offset_s comes from the file (file_offset)."""
+    time_offset_s 0.0 also for a file without one, which the lidar stage reads as none, so there a 0
+    counts as none."""
     if not cal:
         return None
-    if J is not None and "lidar_topic" not in cal:
-        cal = {**cal, "time_offset_s": file_offset(Path(J) / "lidar" / "calibration" / str(cal.get("name")),
-                                                   cal.get("sha256"))}
+    offset = cal.get("time_offset_s")
+    offset = None if "lidar_topic" not in cal and not offset else offset
     T = cal["T_cam_lidar"]
     c = max(-1.0, min(1.0, (T[0][0] + T[1][1] + T[2][2] - 1) / 2))
     return {"name": cal.get("name"), "bytes": cal.get("bytes"),
             "translation_m": round(math.hypot(T[0][3], T[1][3], T[2][3]), 4),
             "rotation_deg": round(math.degrees(math.acos(c)), 2), "has_intrinsics": cal.get("K") is not None,
-            "camera_axes": cal.get("camera_axes"), "time_offset_s": cal.get("time_offset_s"),
+            "camera_axes": cal.get("camera_axes"), "time_offset_s": offset,
             "lidar_topic": cal.get("lidar_topic")}
 
 
@@ -654,7 +632,7 @@ def make_app(cfg, token, key_dir=None):
         job.update(source=steps.source(job), kind=steps.source(job)["kind"], agent=steps.agent(job),
                    articulated=steps.articulated(job), parts_mode=steps.parts_mode(job),
                    parts_review=steps.waits_for_parts(J, job), lidar=lidar_of(job),
-                   calibration=calibration_summary(job.get("calibration"), J), preview=preview_of(J))
+                   calibration=calibration_summary(job.get("calibration")), preview=preview_of(J))
         # The scale was found with the job's calibration as it is now (steps.done compares their sha256), and by
         # this estimator (lidar_scale.VERSIONS, by source); lidar_stale says which of the two changed.
         ran = (job["stages"].get("lidar") or {}).get("status") == "done"
@@ -1072,7 +1050,7 @@ class TokenGate:
 def write_info(info):
     """~/.config/gator/webapp.json (0600), replaced atomically, for start_ice.sh. The folder is made with
     mode 0700 when it is missing; an existing folder is used as it is."""
-    d = Path("~/.config/gator").expanduser()
+    d = config_dir()
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     write_json(d / "webapp.json", info, private=True, indent=1)
     return d / "webapp.json"
@@ -1092,19 +1070,14 @@ def _exit_on_sigterm(sig, frame):
 
 
 def worker_of(local_keys):
-    """What the personal worker starts with: its session (session.Session, which takes the session file's lock). A
-    worker that cannot start leaves the server in tunnel mode: it prints why and returns None."""
-    from harpor.webapp import supa, worker
+    """The personal worker's session (session.Session, which takes the session file's lock). A worker that
+    cannot start leaves the server in tunnel mode: it prints why and returns None."""
+    from harpor.webapp import session, supa, worker
 
     if local_keys:
         worker.check_local_keys(local_keys)  # the server refuses to start with --local-keys and a bad key file
     try:
-        from harpor.webapp import session
-    except ImportError as e:  # a broken install: the tunnel still works
-        print(f"the personal worker does not start: {e}", flush=True)
-        return None
-    try:
-        return {"session": session.Session()}
+        return session.Session()
     except (SystemExit, supa.Error) as e:
         print(f"the personal worker does not start: {e}\n{worker.SIGNED_OUT}", flush=True)
         return None
@@ -1114,7 +1087,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m harpor.webapp", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runs", help="folder of the job folders (default: WEBAPP_RUNS, else $G/webapp_runs)")
-    ap.add_argument("--host", help="the address to listen on (default 0.0.0.0, or 127.0.0.1 with --worker)")
+    ap.add_argument("--host", default="127.0.0.1", help="the address to listen on (default 127.0.0.1)")
     ap.add_argument("--port", type=int, default=0, help="0 takes a free port")
     ap.add_argument("--fake", action="store_true", help="run every stage with harpor.webapp.fake_steps (no GPU)")
     ap.add_argument("--worker", action="store_true",
@@ -1132,7 +1105,6 @@ def main(argv=None):
         local_keys = tuple(dict.fromkeys(k.strip() for k in a.local_keys.split(",") if k.strip()))
         if not local_keys or set(local_keys) - {"astra", "opus"}:
             ap.error("--local-keys takes astra, opus or astra,opus")
-    host = a.host or ("127.0.0.1" if a.worker else "0.0.0.0")
     import uvicorn
 
     cfg = steps.config_from_env()
@@ -1142,11 +1114,11 @@ def main(argv=None):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        sock.bind((host, a.port))
+        sock.bind((a.host, a.port))
     except OSError as e:
-        raise SystemExit(f"cannot listen on {host}:{a.port}: {e}")
+        raise SystemExit(f"cannot listen on {a.host}:{a.port}: {e}")
     port, node, token = sock.getsockname()[1], socket.getfqdn(), secrets.token_urlsafe(32)
-    parts = worker_of(local_keys) if a.worker else None  # before the Runner claims the runs folder
+    session = worker_of(local_keys) if a.worker else None  # before the Runner claims the runs folder
     from harpor.webapp import demos
 
     try:
@@ -1154,10 +1126,10 @@ def main(argv=None):
     except demos.DemoError as e:
         raise SystemExit(f"the demos folder: {e}")
     w = None
-    if parts is not None:
+    if session is not None:
         from harpor.webapp import worker
 
-        w = worker.Worker(app, cfg, local_keys, **parts)
+        w = worker.Worker(app, cfg, local_keys, session=session)
         on_stop(app, w.stop_thread)  # the worker stops before the runner cancels the stages
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
     info = write_info({"node": node, "port": port, "token": token, "url_path": f"/?token={token}",
@@ -1167,14 +1139,9 @@ def main(argv=None):
     print(f"login details in {info}")
     if cfg.demos:
         print(f"demos: {len(app.app.state.demos)} from {cfg.demos}")
-    if a.worker:  # a user's own machine: the tunnel's ICE forward does not apply
-        print(f"on this machine: http://localhost:{port}/?token={token}")
-        print(f"from another computer: ssh -L {port}:127.0.0.1:{port} <this machine>, then open the same URL there",
-              flush=True)
-    else:
-        print(f"on the Mac: {FORWARD.format(node=node, port=port)}")
-        print(f"then open http://localhost:8765/?token={token}")
-        print(f"(on this machine: http://localhost:{port}/?token={token})", flush=True)
+    print(f"on this machine: http://localhost:{port}/?token={token}")
+    target, via = ("127.0.0.1", "<this machine>") if a.worker or a.host == "127.0.0.1" else (node, "<login node>")
+    print(f"from another computer: ssh -L {port}:{target}:{port} {via}, then open the same URL there", flush=True)
     if w is not None:
         print(f"the personal worker of {w.place} runs in this server", flush=True)
         w.start_thread()

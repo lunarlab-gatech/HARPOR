@@ -290,23 +290,21 @@ def row_fields(view, queue_pos=None):
     return row
 
 
-def first_not_done(state, parts_confirmed=False, scale_stale=False):
-    """app.js retryFrom: "frames" while the input is not analyzed, else the first build stage not done or
-    skipped (None before any build, and when all are, unless the scale is stale). A job stopped at an
-    unconfirmed part list goes back to propose, and a stale LiDAR scale (scale_stale: another calibration or
-    an older estimator) to lidar, also on a done job."""
+def first_not_done(state, parts_confirmed=False):
+    """app.js retryFrom without its stale-scale rule: "frames" while the input is not analyzed, else the first
+    build stage not done or skipped (None before any build, and when all are). A job stopped at an unconfirmed
+    part list goes back to propose."""
     stage = {s["name"]: s for s in state["stages"]}
     if stage["frames"]["status"] != "done":
         return "frames"
     x = next((s for s in state["stages"] if s["name"] in jobs.BUILD and s["status"] not in ("done", "skipped")), None)
     if x is None:  # a done job
-        return "lidar" if scale_stale else None
+        return None
     if stage["extract"]["status"] == "pending":
         return None
     unconfirmed = state.get("articulated") is True and state.get("parts_mode") == "vlm_edit" \
         and stage.get("propose", {}).get("status") == "done" and not parts_confirmed
-    name = "propose" if x["name"] == "parts" and unconfirmed else x["name"]
-    return "lidar" if scale_stale and jobs.BUILD.index(name) > jobs.BUILD.index("lidar") else name
+    return "propose" if x["name"] == "parts" and unconfirmed else x["name"]
 
 
 # ---- logs ----

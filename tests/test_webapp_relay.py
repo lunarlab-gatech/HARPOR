@@ -266,10 +266,10 @@ def retry_cases():
 
 def test_first_not_done_is_app_js_retry_from():
     cases = retry_cases()
-    py = [relay.first_not_done(st, confirmed, stale) for st, confirmed, stale in cases]
-    assert py[:7] == ["frames", "frames", "masks", None, None, "usd", "lidar"]
-    assert py[7:11] == ["propose", "parts", "parts", "parts"] and py[11:15] == ["sam3d", "prep", "lidar", "prep"]
-    assert py[15:] == ["lidar", "lidar", None]
+    want = ["frames", "frames", "masks", None, None, "usd", "lidar", "propose", "parts", "parts", "parts",
+            "sam3d", "prep", "lidar", "prep", "lidar", "lidar", None]
+    py = [relay.first_not_done(st, confirmed) for st, confirmed, stale in cases if not stale]
+    assert py == [w for w, case in zip(want, cases) if not case[2]]  # only app.js knows a stale scale
     assert run_app_js({"/api/jobs": []}, f"""
         const out = [];
         for (const [st, confirmed, stale] of {json.dumps(cases)}) {{
@@ -277,7 +277,7 @@ def test_first_not_done_is_app_js_retry_from():
           out.push(retryFrom(st));
         }}
         console.log(JSON.stringify(out));
-        """) == py
+        """) == want
 
 
 def test_app_js_build_stages_are_jobs_build():

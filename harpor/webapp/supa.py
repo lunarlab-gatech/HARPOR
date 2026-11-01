@@ -5,8 +5,8 @@ A personal worker runs on a user's own GPU machine (python -m harpor.webapp --wo
 user with PKCE and a loopback redirect, keeps the refresh token in a 0600 file and calls Supabase with the
 user's access token and the publishable key, as role authenticated, under RLS and through the own_*
 functions (Store). session.py builds that session from the parts here: sign_in (with pkce_pair,
-authorize_url, Loopback and Auth), Tokens, and read_private and write_private (harpor/fileio.py). No part of
-HARPOR uses the project's secret key: Supa and Auth refuse one.
+authorize_url, Loopback and Auth) and Tokens. No part of HARPOR uses the project's secret key: Supa and Auth
+refuse one.
 
 Secrets. The tokens and the PKCE verifier stay in Python variables. They never go to os.environ
 (Runner._run_stage passes os.environ to every stage), to a command line, to a log or to an error. An Error
@@ -37,8 +37,6 @@ from datetime import datetime, timezone
 
 import anyio
 import httpx
-
-from harpor.fileio import private_folder, read_private, write_private  # noqa: F401 (session uses them from here)
 
 log = logging.getLogger("harpor.supa")
 for _name in ("httpx", "httpcore"):  # their INFO and DEBUG lines name every URL
@@ -262,24 +260,22 @@ class Supa:
         r = await self.call("POST", f"/rest/v1/rpc/{name(fn)}", json=args, again=again)
         return r.json() if r.content else None
 
-    async def select(self, table, columns="*", filters=None, order=None, limit=None, **eq):
+    async def select(self, table, columns="*", filters=None, limit=None, **eq):
         """Rows of table that RLS lets the user read: eq gives column=value filters; filters gives PostgREST
         filters as they are ({"or": "(a.is.null,b.eq.1)"})."""
         params = {"select": columns, **{k: filter_of(v) for k, v in eq.items()}, **(filters or {})}
-        if order:
-            params["order"] = order
         if limit:
             params["limit"] = str(limit)
         return (await self.call("GET", f"/rest/v1/{name(table)}", params=params)).json()
 
-    async def upload(self, bucket, obj, data, content_type, cache=IMMUTABLE):
+    async def upload(self, bucket, obj, data, content_type):
         """The standard upload of data (bytes) to bucket/obj, never over an existing object (x-upsert: false).
         An object that is already there counts as uploaded: job-files names hold the content's hash, and a try
         whose answer was lost finds its own upload. Tried again after a 5xx or a network error. A refusal by
         the Storage policies (the user's storage is full) raises Error with status 400 or 403."""
         await self.call("POST", f"/storage/v1/object/{name(bucket, BUCKET_NAME)}/{quote(obj)}", content=data,
                         again=True, ok=duplicate,
-                        headers={"Content-Type": content_type, "Cache-Control": cache, "x-upsert": "false"})
+                        headers={"Content-Type": content_type, "Cache-Control": IMMUTABLE, "x-upsert": "false"})
 
     async def remove(self, bucket, objs):
         """Delete objects through the Storage API (a SQL delete leaves the file behind), 1,000 a call. Returns
@@ -496,8 +492,8 @@ class Tokens:
     10 s window ends the whole session, so the session file must hold the new token before anything else can
     fail. The access token lives only in memory."""
 
-    def __init__(self, auth, refresh_token, save, margin=REFRESH_MARGIN):
-        self.auth, self.refresh_token, self.save, self.margin = auth, refresh_token, save, margin
+    def __init__(self, auth, refresh_token, save):
+        self.auth, self.refresh_token, self.save, self.margin = auth, refresh_token, save, REFRESH_MARGIN
         self.access, self.expires, self.grant, self.renewals = None, 0.0, None, 0
         self.lock = anyio.Lock()
 

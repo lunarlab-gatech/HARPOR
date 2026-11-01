@@ -14,7 +14,7 @@ const OPTIONAL = ["turntable"];  // steps.OPTIONAL: when it fails, the job still
 const AGENTS = { astra: { key: "OpenAI API key", placeholder: "sk-..." },
   opus: { key: "Anthropic API key", placeholder: "sk-ant-..." }, none: { key: null, placeholder: "" } };
 const RAN = { codex: "GPT-6-Astra", claude: "Claude Opus 5.5" };  // agent_result.agent, the controller's name
-const VLM = { astra: "GPT-6-Astra", opus: "Claude Opus 5.5" };  // proposal.json "agent": the model that listed the parts
+const VLM = { astra: RAN.codex, opus: RAN.claude };  // proposal.json "agent": the model that listed the parts
 const agentOf = (a) => a === false ? "none" : a === true || a == null ? "astra" : a;  // older jobs hold true or false
 // What each stage does, shown muted next to its name.
 const STAGE_LABEL = { topics: "camera topics", frames: "frame analysis", extract: "extract frames", masks: "SAM 3 masks",
@@ -654,6 +654,9 @@ function renderState(st, follow) {
     const b = [...document.querySelectorAll("#stages button.name")].find((y) => y.dataset.stage === focused);
     if (b) b.focus();
   }
+  // A finished job's total, under the clocks: their sum, so a wait in the queue or for a review does not count.
+  $("#runtotal").hidden = st.status !== "done";
+  $("#runtotalsecs").textContent = fmt(stages.reduce((sum, x) => sum + (x.started && x.ended ? Math.max(0, x.ended - x.started) : 0), 0));
 
   $("#cancel").hidden = !(ACTIVE.includes(st.status) || st.status === "review");
   // A done job retries only a failed optional stage (Runner.resume runs package again after it), or runs again from lidar
@@ -1751,6 +1754,8 @@ const poolClouds = (job) => (job.files || []).map((f) => POOL_CLOUD.exec(f)).fil
   .map(([path, n]) => ({ id: n, label: n, path, name: n, save: `${job.id}_lidar_${n}.glb` }));
 const NO_CLOUD = "No LiDAR points to show.";
 const NO_GL = "Cannot draw the points here: ";
+const NO_COMPARE = "No comparison for this view.";
+const DIFF_SPAN_MM = 15;  // full color at this many mm, in every view, so that the drift between views shows
 // The viewer drawn now (renderCloud). It lives outside V, since openJob makes a new V before clearInput frees it: a
 // page has few WebGL contexts, so each one goes before another job or selection draws.
 let cloudNow = null;
@@ -1758,14 +1763,17 @@ function freeCloud() {
   if (cloudNow && cloudNow.gl) cloudNow.gl.free();
   cloudNow = null;
 }
-// lidar.cloud_glb's file: {scan, used}, each a Float32Array of x, y, z in glTF axes (a set that is not in it is empty).
-// Only the nodes named exactly "scan" and "used" count, each a mesh whose first primitive is POINTS (mode 0) with a
-// float VEC3 POSITION, tightly packed, inside the BIN chunk. Anything else throws.
+// lidar.cloud_glb's file: {scan, used, da3, diff}, each a Float32Array of x, y, z in glTF axes (a set that is not in it
+// is empty), delta, the diff points' gaps in meters, and compare, the diff node's extras {s, median, used}, or null.
+// Only the nodes named exactly so count, each a mesh whose first primitive is POINTS (mode 0) with a float VEC3 POSITION,
+// tightly packed, inside the BIN chunk. A diff node also has a float SCALAR _DIFF of as many rows, and its extras: s
+// over 0, used a count of its points, and median_m a number, null only when used is 0. Anything else throws.
 function readCloud(buf) {
   const bad = () => { throw new Error("not a LiDAR points file"); };
   const at = (list, i) => Array.isArray(list) && Number.isInteger(i) && i >= 0 && i < list.length ? list[i] || {} : bad();
   const whole = (x) => Number.isInteger(x) && x >= 0;
-  const dv = new DataView(buf), out = { scan: new Float32Array(0), used: new Float32Array(0) };
+  const none = () => new Float32Array(0), dv = new DataView(buf);
+  const out = { scan: none(), used: none(), da3: none(), diff: none(), delta: none(), compare: null };
   if (buf.byteLength < 28 || dv.getUint32(0, true) !== 0x46546C67 || dv.getUint32(4, true) !== 2) bad();
   const jlen = dv.getUint32(12, true), bin = 28 + jlen;
   if (dv.getUint32(16, true) !== 0x4E4F534A || jlen % 4 || bin > buf.byteLength) bad();
@@ -1773,15 +1781,26 @@ function readCloud(buf) {
   if (dv.getUint32(24 + jlen, true) !== 0x004E4942 || bin + blen > buf.byteLength) bad();
   let doc;
   try { doc = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, jlen))); } catch (e) { bad(); }
+  const floats = (i, type, k) => {  // accessor i, k floats a row
+    const acc = at(doc.accessors, i), view = at(doc.bufferViews, acc.bufferView);
+    const vo = view.byteOffset || 0, ao = acc.byteOffset || 0, n = acc.count;
+    if (acc.componentType !== 5126 || acc.type !== type || view.byteStride || (view.buffer || 0) !== 0
+      || ![vo, ao, n, view.byteLength].every(whole) || (vo + ao) % 4 || ao + 4 * k * n > view.byteLength
+      || vo + view.byteLength > blen) bad();
+    return new Float32Array(buf, bin + vo + ao, k * n);
+  };
   for (const node of doc && Array.isArray(doc.nodes) ? doc.nodes : []) {
     const name = node && node.name;
-    if (name !== "scan" && name !== "used") continue;
-    const prim = at(at(doc.meshes, node.mesh).primitives, 0), acc = at(doc.accessors, (prim.attributes || {}).POSITION);
-    const view = at(doc.bufferViews, acc.bufferView), vo = view.byteOffset || 0, ao = acc.byteOffset || 0, n = acc.count;
-    if (prim.mode !== 0 || acc.componentType !== 5126 || acc.type !== "VEC3" || view.byteStride || (view.buffer || 0) !== 0
-      || ![vo, ao, n, view.byteLength].every(whole) || (vo + ao) % 4 || ao + 12 * n > view.byteLength
-      || vo + view.byteLength > blen) bad();
-    out[name] = new Float32Array(buf, bin + vo + ao, 3 * n);
+    if (!["scan", "used", "da3", "diff"].includes(name)) continue;
+    const prim = at(at(doc.meshes, node.mesh).primitives, 0), attrs = prim.attributes || {};
+    if (prim.mode !== 0) bad();
+    out[name] = floats(attrs.POSITION, "VEC3", 3);
+    if (name !== "diff") continue;
+    const { s, median_m: median, used } = node.extras || {};
+    out.delta = floats(attrs._DIFF, "SCALAR", 1);
+    if (3 * out.delta.length !== out.diff.length || !(Number.isFinite(s) && s > 0) || !whole(used)
+      || used > out.delta.length || !(used ? Number.isFinite(median) : median === null)) bad();
+    out.compare = { s, median, used };
   }
   return out;
 }
@@ -1828,29 +1847,38 @@ function pyramid(d, aspect) {
 // The viewer's vertical field in radians: 50°, or wider when the canvas (canvasAspect) is narrower than the frame
 // (frameAspect), so the frame fills as much of the field across as up and down.
 const fieldOf = (frameAspect, canvasAspect) => 2 * Math.atan(FIELD_HALF * Math.max(1, frameAspect / canvasAspect));
-// The WebGL viewer of a canvas: {show(data, aspect), reset(), draw(), free()}, or null without WebGL. on.sized() runs at
+// The WebGL viewer of a canvas: {show(data, aspect), reset(), compare(yes), draw(), free()}, or null without WebGL. on.sized() runs at
 // the first size of the canvas that is not 0 (a hidden tab has none), and on.lost() when the browser takes the context
 // back. The scan is drawn with the depth test, the camera's pyramid on it, and the used points last without it, so they
-// always show. The colors are style.css's tokens, read at each draw. It draws only on a change, never in a loop.
+// always show. With compare(true), a view with a diff set shows the da3 set in the scan's place and the diff points in
+// the used points': the shader takes each point's color from --fg toward --near or --far by its gap (delta) over
+// DIFF_SPAN_MM. The colors are style.css's tokens, read at each draw. It draws only on a change, never in a loop.
 function cloudGL(canvas, on) {
   const gl = canvas.getContext && canvas.getContext("webgl", { antialias: true });
   if (!gl) return null;
   const prog = gl.createProgram();
-  for (const [type, src] of [[gl.VERTEX_SHADER, "attribute vec3 p; uniform mat4 M; uniform float size; "
-    + "void main() { gl_Position = M * vec4(p, 1.0); gl_PointSize = size; }"],
-  [gl.FRAGMENT_SHADER, "precision mediump float; uniform vec3 color; uniform bool dot; "
-    + "void main() { if (dot && length(gl_PointCoord - 0.5) > 0.5) discard; gl_FragColor = vec4(color, 1.0); }"]]) {
+  for (const [type, src] of [[gl.VERTEX_SHADER, "attribute vec3 p; attribute float d; uniform mat4 M; "
+    + "uniform float size, span; uniform vec3 color, lo, hi; varying vec3 c; "
+    + "void main() { gl_Position = M * vec4(p, 1.0); gl_PointSize = size; "
+    + "float t = clamp(d / span, -1.0, 1.0); c = mix(color, t < 0.0 ? lo : hi, abs(t)); }"],
+  [gl.FRAGMENT_SHADER, "precision mediump float; varying vec3 c; uniform bool dot; "
+    + "void main() { if (dot && length(gl_PointCoord - 0.5) > 0.5) discard; gl_FragColor = vec4(c, 1.0); }"]]) {
     const sh = gl.createShader(type);
     gl.shaderSource(sh, src);
     gl.compileShader(sh);
     gl.attachShader(prog, sh);
   }
+  gl.bindAttribLocation(prog, 0, "p");  // the attribute that is always on
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return null;
-  const loc = Object.fromEntries(["M", "size", "color", "dot"].map((u) => [u, gl.getUniformLocation(prog, u)]));
-  const attr = gl.getAttribLocation(prog, "p"), range = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE) || [1, 1];
-  const bufs = { scan: gl.createBuffer(), used: gl.createBuffer(), cam: gl.createBuffer() }, n = { scan: 0, used: 0, cam: 0 };
+  const loc = Object.fromEntries(["M", "size", "span", "color", "lo", "hi", "dot"]
+    .map((u) => [u, gl.getUniformLocation(prog, u)]));
+  const attr = gl.getAttribLocation(prog, "p"), gap = gl.getAttribLocation(prog, "d");
+  const range = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE) || [1, 1];
+  const bufs = Object.fromEntries(["scan", "used", "da3", "diff", "delta", "cam"].map((k) => [k, gl.createBuffer()]));
+  const n = { scan: 0, used: 0, da3: 0, diff: 0, delta: 0, cam: 0 };
   let start = null, view = null, frame = 0, dead = false, freed = false, sized = false, frameAspect = 4 / 3;
+  let comparing = false;
   const put = (k, a) => {
     gl.bindBuffer(gl.ARRAY_BUFFER, bufs[k]);
     gl.bufferData(gl.ARRAY_BUFFER, a, gl.STATIC_DRAW);
@@ -1871,6 +1899,7 @@ function cloudGL(canvas, on) {
     const { target: t, dist: d, yaw, pitch } = view, cp = Math.cos(pitch);
     const eye = [t[0] + d * cp * Math.sin(yaw), t[1] + d * Math.sin(pitch), t[2] + d * cp * Math.cos(yaw)];
     gl.useProgram(prog);
+    gl.uniform1f(loc.span, DIFF_SPAN_MM / 1000);
     const aspect = canvas.width / Math.max(1, canvas.height);
     gl.uniformMatrix4fv(loc.M, false, matmul(perspective(fieldOf(frameAspect, aspect), aspect, 0.02 * d, 200 * d),
       lookAt(eye, t)));
@@ -1884,11 +1913,22 @@ function cloudGL(canvas, on) {
       gl.uniform1i(loc.dot, mode === gl.POINTS ? 1 : 0);
       gl.drawArrays(mode, 0, n[k]);
     };
+    const both = comparing && n.diff > 0;  // a view without a diff set shows its scan and used points
     gl.enable(gl.DEPTH_TEST);
-    pass("scan", gl.POINTS, 2, "--line-strong");
+    pass(both ? "da3" : "scan", gl.POINTS, 2, "--line-strong");
     pass("cam", gl.LINES, 1, "--fg");
     gl.disable(gl.DEPTH_TEST);
-    pass("used", gl.POINTS, 4, "--accent");
+    if (!both) {
+      pass("used", gl.POINTS, 4, "--accent");
+      return;
+    }
+    gl.uniform3fv(loc.lo, token("--near"));
+    gl.uniform3fv(loc.hi, token("--far"));
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufs.delta);
+    gl.enableVertexAttribArray(gap);
+    gl.vertexAttribPointer(gap, 1, gl.FLOAT, false, 0, 0);
+    pass("diff", gl.POINTS, 4, "--fg");
+    gl.disableVertexAttribArray(gap);  // the other sets have no gaps: without an array, d is 0
   };
   const draw = () => {
     if (dead || frame) return;
@@ -1962,8 +2002,7 @@ function cloudGL(canvas, on) {
   return {
     show(data, aspect) {
       if (dead) return;
-      put("scan", data.scan);
-      put("used", data.used);
+      for (const k of ["scan", "used", "da3", "diff", "delta"]) put(k, data[k]);
       start = orbitStart(data.scan, data.used);
       frameAspect = aspect;
       put("cam", pyramid(0.1 * start.dist, aspect));
@@ -1973,6 +2012,10 @@ function cloudGL(canvas, on) {
     reset() {
       if (!start) return;
       view = { ...start };
+      draw();
+    },
+    compare(yes) {  // keeps the view where it is
+      comparing = yes;
       draw();
     },
     draw,
@@ -1991,9 +2034,9 @@ function cloudGL(canvas, on) {
   };
 }
 // The LiDAR points of the views (usedClouds or poolClouds; a job with LiDAR), under the views used: the view picker,
-// Reset, the canvas and a legend with the counts and the view's scale from pool/lidar.json. A view's file is fetched
-// once, and not before the canvas has a size, so a hidden tab loads nothing. gone: renderInput's guard against another
-// page or selection that came meanwhile.
+// Reset, Compare with DA3 once a view read has a diff set, the canvas and a legend with the counts and the view's scale
+// from pool/lidar.json. A view's file is fetched once, and not before the canvas has a size, so a hidden tab loads
+// nothing. gone: renderInput's guard against another page or selection that came meanwhile.
 async function renderCloud(job, shown, gone) {
   freeCloud();
   const box = $("#inputlidar");
@@ -2010,13 +2053,17 @@ async function renderCloud(job, shown, gone) {
   const first = shown[0].id;  // view 0 when it has points
   // The canvas takes the keys (application), and its legend describes it.
   const C = cloudNow = { job, shown: new Map(shown.map((x) => [x.id, x])), at: first, data: new Map(), sized: false,
-    gl: null, onCanvas: false, scale: new Map(((rec && rec.views) || []).map((v) => [v.name, v])), body: h("div", {}),
+    gl: null, onCanvas: false, compare: false, now: null,
+    scale: new Map(((rec && rec.views) || []).map((v) => [v.name, v])), body: h("div", {}),
     canvas: h("canvas", { class: "cloud", role: "application", "aria-roledescription": "3D view", tabindex: "0",
       "aria-describedby": "cloudlegend" }), legend: h("p", { class: "legend", id: "cloudlegend" }) };
   const pick = h("select", { onchange: (e) => cloudShow(C, e.target.value) },
     shown.map((x) => h("option", { value: x.id, selected: x.id === first }, x.label)));
+  C.box = h("label", {}, h("input", { type: "checkbox", onchange: (e) => cloudCompare(C, e.target.checked) }),
+    "Compare with DA3");
+  C.box.hidden = true;
   fill(box, bar(h("label", {}, "View ", pick), h("button", { type: "button", class: "small secondary",
-    onclick: () => { if (C.gl) C.gl.reset(); } }, "Reset")), C.body);
+    onclick: () => { if (C.gl) C.gl.reset(); } }, "Reset"), C.box), C.body);
   fill(C.body, C.canvas, C.legend);
   C.onCanvas = true;
   C.gl = cloudGL(C.canvas, {
@@ -2029,6 +2076,7 @@ async function renderCloud(job, shown, gone) {
 // that does not parse, a line that offers the file instead.
 async function cloudShow(C, i) {
   C.at = i;
+  C.now = null;
   const { path: p, save: name, label } = C.shown.get(i);
   const offer = () => {
     C.onCanvas = false;
@@ -2054,20 +2102,37 @@ async function cloudShow(C, i) {
   if (!data) return offer();
   const pv = C.job.preview;
   C.gl.show(data, pv && pv.width > 0 && pv.height > 0 ? pv.width / pv.height : 4 / 3);
-  cloudLegend(C, data);
+  if (data.diff.length) C.box.hidden = false;
+  cloudLegend(C, C.now = data);
+}
+function cloudCompare(C, on) {  // the box stays on across views
+  C.compare = on;
+  if (C.gl) C.gl.compare(on);
+  cloudLegend(C, C.now);
 }
 // The legend: each set's square, name and count. The used points' count comes with the view's scale and status as the
-// review gives them (lidarViewText: "×1.21 (9 pts, outlier)"), when pool/lidar.json has the view. "loading" until the
-// file is read.
+// review gives them (lidarViewText: "×1.21 (9 pts, outlier)"), when pool/lidar.json has the view. While the comparison
+// shows: the DA3 surface (a Stray capture has none), the colors and their fixed scale, the scale used and the used
+// points' median. With the box on, a view without a diff set says so. "loading" until the file is read.
 function cloudLegend(C, data) {
   if (!data) {
     fill(C.legend, "loading");
     return;
   }
-  const v = C.scale.get(C.shown.get(C.at).name);
   const key = (set, text) => h("span", { class: "key" }, h("span", { class: "sq " + set, "aria-hidden": "true" }), text);
+  if (C.compare && data.diff.length) {
+    const { s, median, used } = data.compare, mm = Math.round(1e4 * median) / 10;  // rounded first: never "-0.0"
+    const mid = used ? `Median of the ${count(used)} used points: ${mm >= 0 ? "+" : ""}${mm.toFixed(1)} mm` : "No used points";
+    fill(C.legend, data.da3.length ? key("da3", `DA3 surface (${count(data.da3.length / 3)})`) : null, " ",
+      h("span", { class: "key long" }, h("span", { class: "sq diff", "aria-hidden": "true" }),
+        `Blue: LiDAR nearer than DA3. Red: LiDAR farther. Full color at ±${DIFF_SPAN_MM} mm`), " ",
+      h("span", { class: "key" }, `Scale ×${s.toFixed(3)}`), " ", h("span", { class: "key" }, mid));
+    return;
+  }
+  const v = C.scale.get(C.shown.get(C.at).name);
   fill(C.legend, key("scan", `Whole scan (${count(data.scan.length / 3)})`), " ",
-    key("used", "Used for the scale" + (v ? ": " + lidarViewText(v) : ` (${count(data.used.length / 3)})`)));
+    key("used", "Used for the scale" + (v ? ": " + lidarViewText(v) : ` (${count(data.used.length / 3)})`)),
+    C.compare ? [" ", h("span", { class: "key long" }, NO_COMPARE)] : null);
 }
 
 // ---- 5d. the 360 video of the object (Results tab) ----

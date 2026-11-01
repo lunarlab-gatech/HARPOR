@@ -58,7 +58,7 @@ def test_apply_scale_scales_depth_points_and_translations_only(tmp_path):
 # The estimate. The sphere scene of test_webapp_views: DA3 grid 64x48 with K. The source frames are
 # 220x150; prep center-cropped them to CROP (160x120) and resized that to 128x96 (the pool images and
 # masks), and DA3 worked at 64x48, so the source camera K_SRC is K through the crop.
-from test_webapp_views import H, W, K, circle, look_at, make_pool, sphere  # noqa: E402
+from test_webapp_views import H, W, circle, look_at, make_pool, sphere  # noqa: E402
 
 SRC = (220, 150)
 CROP = (30, 15, 190, 135)
@@ -506,6 +506,57 @@ def test_ray_hits_do_not_depend_on_the_chunks(monkeypatch):
     assert out[0][0].sum() > 1500
 
 
+def test_grid_to_source_inverts_source_to_grid():
+    """Each DA3 pixel goes back to the source pixel at its middle: the grid covers the crop box, edge to edge."""
+    crop, grid = (40, 10, 600, 430), (140, 105)
+    gv, gu = np.mgrid[0:105, 0:140].astype(float)
+    u, v = L.grid_to_source(gu, gv, crop, grid)
+    a, b = L.source_to_grid(u, v, crop, grid)
+    assert np.allclose(a, gu) and np.allclose(b, gv)
+    assert L.grid_to_source(-0.5, -0.5, crop, grid) == pytest.approx((39.5, 9.5))
+    assert L.grid_to_source(139.5, 104.5, crop, grid) == pytest.approx((599.5, 429.5))
+
+
+@pytest.mark.parametrize("D, model", [(None, None), ([-0.2, 0.05, 1e-3, -5e-4, 0.01], "plumb_bob"),
+                                      ([0.2, -0.05, 1e-3, 1e-3, 0.0, 0.1, 0.0, 0.0], "rational_polynomial"),
+                                      ([-0.01, 0.003, -0.002, 0.0005], "equidistant")])
+def test_unproject_inverts_project(D, model):
+    """Every pixel's ray lands back on the pixel, at any depth, also with skew in K and at the principal point."""
+    K, size = np.array([[600.0, 1.5, 320.0], [0.0, 610.0, 230.0], [0.0, 0.0, 1.0]]), (640, 480)
+    v, u = np.mgrid[0:480:13, 0:640:13].astype(float)
+    u, v = np.r_[u.ravel(), 320.0], np.r_[v.ravel(), 230.0]
+    x, y, ok = L.unproject(u, v, K, D, model, size)
+    assert ok.all() and abs(x[-1]) < 1e-9 and abs(y[-1]) < 1e-9
+    pu, pv, _, seen = L.project(2.5 * np.c_[x, y, np.ones_like(x)], K, D, model, size)
+    assert seen.all() and np.hypot(pu - u, pv - v).max() < 0.02
+
+
+def test_unproject_keeps_a_wide_fisheyes_outer_ring():
+    """A wide fisheye converges slowly near 90 degrees from the axis, and a ray at 80 degrees still comes back."""
+    K, size = np.array([[300.0, 0.0, 500.0], [0.0, 300.0, 500.0], [0.0, 0.0, 1.0]]), (1000, 1000)
+    D = [0.01, -0.002, 0.001, -0.0002]
+    th = np.radians([1.0, 30.0, 60.0, 80.0])
+    X = np.c_[np.tan(th), np.zeros(4), np.ones(4)]
+    u, v, _, seen = L.project(X, K, D, "equidistant", size)
+    x, y, ok = L.unproject(u, v, K, D, "equidistant", size)
+    assert seen.all() and ok.all() and np.allclose(x, X[:, 0], rtol=1e-3) and np.allclose(y, 0, atol=1e-6)
+
+
+def test_unproject_drops_pixels_that_do_not_converge(monkeypatch):
+    """A barrel lens with k1 -0.3 folds at r 1.05, where the distorted radius is 0.70: a pixel further out has no ray.
+    A pixel inside converges, unless the iteration stops too early."""
+    K, size, D = np.array([[300.0, 0.0, 320.0], [0.0, 300.0, 240.0], [0.0, 0.0, 1.0]]), (640, 480), [-0.3, 0.0, 0.0, 0.0]
+    v, u = np.mgrid[0:480:7, 0:640:7].astype(float)
+    u, v = u.ravel(), v.ravel()
+    rd = np.hypot(u - 320, v - 240) / 300
+    x, y, ok = L.unproject(u, v, K, D, "plumb_bob", size)
+    assert ok[rd < 0.5].all() and not ok[rd > 0.72].any()
+    pu, pv, _, seen = L.project(np.c_[x, y, np.ones_like(x)][ok], K, D, "plumb_bob", size)
+    assert seen.all() and np.hypot(pu - u[ok], pv - v[ok]).max() < 0.02
+    monkeypatch.setattr(L, "UNPROJECT_STEPS", 1)
+    assert not L.unproject(u, v, K, D, "plumb_bob", size)[2][rd > 0.3].any()
+
+
 def test_rot90_points_matches_np_rot90():
     a = np.arange(35).reshape(5, 7)
     v, u = np.mgrid[0:5, 0:7]
@@ -740,7 +791,7 @@ def test_estimate_recovers_the_scale(tmp_path):
     pool, samples = lidar_pool(tmp_path)
     rec = L.estimate(pool, samples, check_dir=tmp_path / "check")
     assert rec["ok"] and rec["reason"] is None and abs(rec["s"] / 1.25 - 1) < 0.005
-    assert rec["version"] == L.VERSIONS["stray"] == 2 and L.VERSION == 3
+    assert rec["version"] == L.VERSIONS["stray"] == 2
     assert rec["da3"] == {"process_res": 504, "grid": [W, H]} and rec["warnings"] == []
     assert [v["status"] for v in rec["views"]] == ["used"] * 8 and [v["frame"] for v in rec["views"]] == list(range(0, 80, 10))
     assert min(v["points_used"] for v in rec["views"]) > 300 and rec["combine"]["views_used"] == 8
@@ -761,6 +812,7 @@ def test_estimate_recovers_the_scale(tmp_path):
         p = pts[v["name"]]
         assert p["used"].sum() == v["points_used"] and len(p["index"]) == v["points_visible"]
         assert np.array_equal(np.stack([p["u"], p["v"]], 1), samples[v["name"]][p["index"], :2])
+        assert p["depth"].shape == (H, W) and len(p["crop"]) == 4  # the lidar stage need not read them again
 
 
 def test_estimate_follows_the_rays(tmp_path):

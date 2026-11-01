@@ -130,7 +130,7 @@ Nothing below is done by the code. Do every account step and every git step your
    privacy page. The values are public by design, and the build refuses a secret key. Commit `site.json`:
    personal machines get it with the repo, and `python -m harpor.webapp.worker login` reads it (or pass
    `--site-config PATH`). Build the site with
-   `python -m harpor.webapp.site build --demos ~/lunar_lab_research/harpor_demos`, which writes `site/` with the
+   `python -m harpor.webapp.site build --demos DIR`, which writes `site/` with the
    demos (see Demos below).
 8. **The host.** The same `site/` folder works on Cloudflare Pages (upload `site/` in the dashboard, or
    `npx wrangler pages deploy site`) and on GitHub Pages. `.gitignore` leaves `site/` out of the main branch,
@@ -311,7 +311,7 @@ opens its demo, with its 360 video, a 3D view of `aligned.glb`, its facts and it
 demos are files of the site, not rows or Storage objects, so nothing in Supabase changes.
 
 - **The folder.** `WEBAPP_DEMOS` names it, and `--demos DIR` overrides it for the server, the site build and
-  `demos add`. There is no default. Keep it outside the repo, for example `~/lunar_lab_research/harpor_demos`.
+  `demos add`. There is no default. Keep it outside the repo, for example `~/harpor_demos`.
   Each demo is a folder `<name>/` (a-z, 0-9 and -) with `demo.json` and the files it lists: `turntable.mp4`,
   `poster.jpg`, `aligned.glb` and `results.zip`. The module docstring of `demos.py` gives the format.
 - **Make a demo.** On the machine that holds the job (ICE for real jobs; `envs/web` has PyAV and Pillow):

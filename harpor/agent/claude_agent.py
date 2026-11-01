@@ -1,6 +1,6 @@
 """Claude Opus 5.5 as the Stage B agent, through our own Messages API loop (build_plan.md note 5).
 
-The controller starts it as the session's agent process, from the gator_clone root, with its own
+The controller starts it as the session's agent process, from the repo root, with its own
 interpreter:
 
     python -m harpor.agent.claude_agent ROOT --sif SIF --sock-dir DIR --key-file FILE
@@ -93,18 +93,6 @@ MAX_READ_BYTES = 64 << 20
 LOG_OUTPUT_CHARS = 4000
 # Shell output kept in memory while a command runs: the first and last bytes once it passes TRIM_AT.
 KEEP_HEAD, KEEP_TAIL, TRIM_AT = 8 << 10, 256 << 10, 1 << 20
-TOKENS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-# USD per million tokens of the models that can serve a turn: Claude Opus 5.5 and the refusal fallbacks
-# that "default" picks (Claude Opus 5, Claude Opus 4.8). cache_creation_input_tokens is the 5-minute
-# write (1.25x input), cache_creation_1h the 1-hour write (2x input). A model not listed is priced as
-# the dearest one.
-PRICES = {
-    tools.CLAUDE_MODEL: tools.OPUS_PRICES,
-    "claude-opus-5": {"input_tokens": 5.0, "output_tokens": 25.0, "cache_read_input_tokens": 0.50,
-                      "cache_creation_input_tokens": 6.25, "cache_creation_1h": 10.0},
-    "claude-opus-4-8": {"input_tokens": 5.0, "output_tokens": 25.0, "cache_read_input_tokens": 0.50,
-                        "cache_creation_input_tokens": 6.25, "cache_creation_1h": 10.0},
-}
 EXIT = {"ended": 0, "refusal": 2, "api_error": 3, "interrupted": 130}
 # Never passed to the host shell: every variable of the API providers (keys, tokens, base URLs), and
 # BASH_ENV and ENV, which would make bash source a file even with --norc. (In Apptainer, --containall
@@ -482,8 +470,8 @@ def _index(x):
 class TextEditor:
     """The str_replace_based_edit_tool commands view, create, str_replace and insert on root/work."""
 
-    def __init__(self, files, max_chars=MAX_VIEW_CHARS, depth=2):
-        self.files, self.max_chars, self.depth = files, max_chars, depth
+    def __init__(self, files, max_chars=MAX_VIEW_CHARS):
+        self.files, self.max_chars, self.depth = files, max_chars, 2
 
     def __call__(self, inp):
         if not isinstance(inp, dict):
@@ -615,11 +603,11 @@ class TextEditor:
         self.files.write(rel, out.encode("utf-8"))
         return f"inserted {len(new)} lines into {shown} after line {k}:\n" + self.snippet(out, k + 1, k + len(new))
 
-    def snippet(self, text, first, last, context=3):
+    def snippet(self, text, first, last):
         lines = _lines(text)
         if not lines:
             return "(the file is now empty)"
-        first, last = max(1, first - context), min(len(lines), max(first, last) + context)
+        first, last = max(1, first - 3), min(len(lines), max(first, last) + 3)
         return self.clip(_numbered(lines, min(first, last), last))
 
 
@@ -652,9 +640,9 @@ class ImageBudget:
     """The images of a session: every one stays in the history and goes with every later request, so
     their base64 bytes and their number are capped (IMAGE_BUDGET_BYTES, MAX_IMAGES)."""
 
-    def __init__(self, limit=None, count=None):
+    def __init__(self, limit=None):
         self.limit = IMAGE_BUDGET_BYTES if limit is None else limit
-        self.count = MAX_IMAGES if count is None else count
+        self.count = MAX_IMAGES
         self.used = self.n = 0
 
     def take(self, content):
@@ -782,17 +770,17 @@ def stream_turn(client, params, log, turn):
 
 
 def _tokens(u):
-    return {k: getattr(u, k, None) or 0 for k in TOKENS}
+    return {k: getattr(u, k, None) or 0 for k in tools.TOKENS}
 
 
 def _attempt_cost(u, model):
     """USD of one attempt's usage u at the prices of model (the dearest listed one if not listed). A
     cache write is a 5-minute one unless u.cache_creation says it was a 1-hour one."""
-    p = PRICES.get(model) or max(PRICES.values(), key=lambda x: x["output_tokens"])
+    p = tools.PRICES.get(model) or max(tools.PRICES.values(), key=lambda x: x["output_tokens"])
     t = _tokens(u)
     hour = getattr(getattr(u, "cache_creation", None), "ephemeral_1h_input_tokens", 0) or 0
     long = min(t["cache_creation_input_tokens"], hour)
-    return (sum(t[k] * p[k] for k in TOKENS) + long * (p["cache_creation_1h"] - p["cache_creation_input_tokens"])) / 1e6
+    return (sum(t[k] * p[k] for k in tools.TOKENS) + long * (p["cache_creation_1h"] - p["cache_creation_input_tokens"])) / 1e6
 
 
 def billed(msg, model):
@@ -803,7 +791,7 @@ def billed(msg, model):
     for the log, [] without them."""
     its = getattr(msg.usage, "iterations", None) or []
     parts = [(e, getattr(e, "model", None) or model) for e in its] or [(msg.usage, msg.model or model)]
-    tokens = {k: sum(_tokens(u)[k] for u, _ in parts) for k in TOKENS}
+    tokens = {k: sum(_tokens(u)[k] for u, _ in parts) for k in tools.TOKENS}
     cost = sum(_attempt_cost(u, m) for u, m in parts)
     return tokens, cost, [{"type": e.type, "model": m, **_tokens(e)} for e, m in parts if its]
 
@@ -886,7 +874,7 @@ def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", model=MO
     sh = ContainerShell(root, sif, sock_dir, host=shell == "host", timeout=command_timeout)
     files = WorkFiles(root / "work")
     editor, images = TextEditor(files), ImageBudget()
-    totals, responses, cost, reissued = dict.fromkeys(TOKENS, 0), 0, 0.0, 0
+    totals, responses, cost, reissued = dict.fromkeys(tools.TOKENS, 0), 0, 0.0, 0
 
     def say(text):
         print(redact(text, key), file=out, flush=True)
@@ -922,7 +910,7 @@ def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", model=MO
                 usage = _tokens(msg.usage)
                 tokens, turn_cost, iterations = billed(msg, model)
                 cost += turn_cost
-                for k in TOKENS:
+                for k in tools.TOKENS:
                     totals[k] += tokens[k]
                 stop_details = msg.stop_details.to_dict() if msg.stop_details is not None else None
                 log.write("response", turn=turn, id=msg.id, model=msg.model, stop_reason=msg.stop_reason,

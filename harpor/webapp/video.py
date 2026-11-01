@@ -1,7 +1,7 @@
 """Frames of the uploaded video, rosbag or Stray Scanner capture: facts, sharpness per frame, candidate
 views and the frame pool.
 
-Runs in envs/web (PyAV, rosbags, numpy, pillow), from the gator_clone root:
+Runs in envs/web (PyAV, rosbags, numpy, pillow), from the repo root:
 
     python -m harpor.webapp.video topics --job J
     python -m harpor.webapp.video analyze --job J
@@ -69,6 +69,7 @@ from pathlib import Path
 import numpy as np
 
 from harpor.fileio import write_json
+from harpor.webapp import steps
 
 HDR = {18: "HLG", 16: "PQ"}  # AVCOL_TRC_ARIB_STD_B67, AVCOL_TRC_SMPTE2084
 METRIC_WIDTH = 960
@@ -300,7 +301,6 @@ def load_job(job_dir):
         raise SystemExit(f"{f} not found")
     job = json.loads(f.read_text())
     video = Path(job["video"]["path"])
-    video = video if video.is_absolute() else Path(job_dir) / video
     if not video.exists():
         raise SystemExit(f"the uploaded file {video} is missing")
     return job, video
@@ -313,7 +313,7 @@ def source(job, path, extra=None):
     lists of its frames (rosbag.probe's stamps_out); the other kinds leave it alone. A Stray Scanner
     zip is unpacked into path.parent / "stray" first (stray.unpack, which does nothing the second
     time)."""
-    src = job.get("source") or {"kind": "video"}
+    src = steps.source(job)
     if src.get("kind") == "video":
         return (lambda: {**probe(path), "kind": "video"}), (lambda info, **kw: frames(path, **kw))
     if src.get("kind") == "stray":
@@ -339,7 +339,7 @@ def topics(job_dir):
 
     job_dir = Path(job_dir)
     job, path = load_job(job_dir)
-    kind = (job.get("source") or {}).get("kind") or "video"
+    kind = steps.source(job)["kind"]
     if kind != "rosbag":
         raise SystemExit(f"topics is for a rosbag job; this job's input is "
                          f"{'a Stray Scanner capture' if kind == 'stray' else 'a video'}")

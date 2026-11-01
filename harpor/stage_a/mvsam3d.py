@@ -13,7 +13,7 @@ Four steps write into one run folder, each in its own process:
          -> canonical.glb, splat.ply, pose.json (canonical -> view 0's camera, PyTorch3D axes)
   place  fits the mesh to the masks of all views: first its scale (MV-SAM3D's own scale was 11% too
          large on its example), then shift, size and a small rotation (its position was 17 cm off on
-         the round table); --fit scale or --fit none limit this. Then -> posed.glb in frame W (view 0's OpenCV camera, DA3
+         the round table); --fit none skips this. Then -> posed.glb in frame W (view 0's OpenCV camera, DA3
          units, or meters when select applied a LiDAR scale),
          cameras.json (every view's K at the image size and w2c relative to view 0, for the agent's manifest), placement.json (the fit, mask IoU per view, view 0 depth check) and
          overlay_<name>.png
@@ -21,7 +21,7 @@ Four steps write into one run folder, each in its own process:
     python -m harpor.stage_a.mvsam3d prep --scene DIR --mask-prompt NAME --out RUN [--max-side 1024]
     envs/da3/bin/python -m harpor.stage_a.mvsam3d da3 --da3-root Depth-Anything-3 --out RUN
     python -m harpor.stage_a.mvsam3d sam3d --mv-root MV-SAM3D --sam3d-root sam-3d-objects --out RUN
-    python -m harpor.stage_a.mvsam3d place --out RUN [--fit pose|scale|none]
+    python -m harpor.stage_a.mvsam3d place --out RUN [--fit pose|none]
 
 DA3's world frame is its chosen reference view, not view 0, so cameras are always taken relative to
 view 0. View 0 is the first name in natural order, as in MV-SAM3D's loader.
@@ -410,11 +410,9 @@ def fit_pose(x_w, faces, cams, masks, size=384, max_evals=400, shift_limit=0.25,
 
 
 def place(out, samples=300000, fit="pose", min_gain=0.005):
-    """fit: "pose" (scale, then shift, size and a small rotation), "scale" or "none" (True and False
-    mean "pose" and "none")."""
-    fit = {True: "pose", False: "none"}.get(fit, fit)
-    if fit not in ("pose", "scale", "none"):
-        raise ValueError(f"fit must be pose, scale or none, not {fit!r}")
+    """fit: "pose" (scale, then shift, size and a small rotation) or "none"."""
+    if fit not in ("pose", "none"):
+        raise ValueError(f"fit must be pose or none, not {fit!r}")
     import trimesh
     from PIL import Image
     from scipy.ndimage import binary_erosion
@@ -433,8 +431,8 @@ def place(out, samples=300000, fit="pose", min_gain=0.005):
     # Fit the size to the masks of all views; keep MV-SAM3D's pose when the fit gains too little.
     pose = {k: pose_raw[k] for k in ("rotation_wxyz", "translation", "scale")}
     x_w = canonical_glb_to_w(mesh.vertices, pose)
-    scale_fit = {"applied": False, "scale": 1.0}
-    if fit in ("scale", "pose"):
+    scale_fit, pose_fit = {"applied": False, "scale": 1.0}, {"applied": False}
+    if fit == "pose":
         k, center, before, after, at_limit = fit_scale(x_w, mesh.faces, cams, masks)
         applied = bool(after.mean() - before.mean() >= min_gain)
         scale_fit = {"applied": applied, "scale": k if applied else 1.0, "candidate_scale": k, "center_W": center.tolist(),
@@ -449,8 +447,6 @@ def place(out, samples=300000, fit="pose", min_gain=0.005):
             pose = scaled_pose(pose, k, center)
             x_w = canonical_glb_to_w(mesh.vertices, pose)
         print("scale fit:", json.dumps(scale_fit))
-    pose_fit = {"applied": False}
-    if fit == "pose":
         (k, R_w, shift, rvec), center, before, after, evals, at_bound = fit_pose(x_w, mesh.faces, cams, masks)
         applied = bool(after.mean() - before.mean() >= min_gain)
         cand = {"scale": round(k, 4), "shift_W": np.round(shift, 4).tolist(), "rotation_deg": np.round(rvec, 2).tolist()}
@@ -533,9 +529,8 @@ def main(argv=None):
     s.add_argument("--seed", type=int, default=42)
     pl = sub.add_parser("place")
     pl.add_argument("--out", required=True)
-    pl.add_argument("--fit", choices=("pose", "scale", "none"), default="pose",
-                    help="pose: scale, then shift, size and a small rotation (default); scale: size only; none")
-    pl.add_argument("--no-fit-scale", action="store_true", help="same as --fit none")
+    pl.add_argument("--fit", choices=("pose", "none"), default="pose",
+                    help="pose: scale, then shift, size and a small rotation (default); none")
     a = ap.parse_args(argv)
     if a.step == "prep":
         prep(a.scene, a.mask_prompt, a.out, a.max_side)
@@ -544,7 +539,7 @@ def main(argv=None):
     elif a.step == "sam3d":
         sam3d(a.mv_root, a.sam3d_root, a.out, a.seed)
     else:
-        place(a.out, fit="none" if a.no_fit_scale else a.fit)
+        place(a.out, fit=a.fit)
 
 
 if __name__ == "__main__":

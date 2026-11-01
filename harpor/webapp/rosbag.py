@@ -653,11 +653,6 @@ def lidar_topics(r):
     return lidar, skipped
 
 
-def camera_axes(frame_id, edges=()):
-    """The axes of camera_axes_from alone: "optical", "body" or None."""
-    return camera_axes_from(frame_id, edges)[0]
-
-
 def camera_axes_from(frame_id, edges=()):
     """(axes, rule) of a camera's frame: "optical" (x right, y down, z forward) or "body" (x forward, y
     left, z up), and the rule that decided. "name": the frame's name has "optical". "tf": the name does

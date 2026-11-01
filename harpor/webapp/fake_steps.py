@@ -545,7 +545,7 @@ def agent(J, key_file, which="astra"):
         tokens = {"input_tokens": 41000, "output_tokens": 9000, "cache_read_input_tokens": 380000,
                   "cache_creation_input_tokens": 52000}
         result.update(turns=12, tokens=tokens, end_reason="interrupted",
-                      cost_usd=round(sum(tokens[k] * controller.PRICES[k] for k in tokens) / 1e6, 4))
+                      cost_usd=round(sum(tokens[k] * tools.PRICES[tools.CLAUDE_MODEL][k] for k in tokens) / 1e6, 4))
     write_json(root / "result.json", result)
     shutil.copyfile(root / "result.json", J / "agent" / "result.json")
     print(f"agent (fake {info['model']}): finish {result['verdict']}, GLB {result['glb']}"

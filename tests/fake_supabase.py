@@ -341,13 +341,6 @@ class FakeSupabase:
             self.tokens[token] = (user_id, self.now() + timedelta(seconds=seconds))
             return token
 
-    def expire_tokens(self, user_id=None):
-        """Every access token (of user_id) runs out now, so the next call gets 401."""
-        with self.lock:
-            for t, (u, _) in list(self.tokens.items()):
-                if user_id in (None, u):
-                    self.tokens[t] = (u, self.now() - timedelta(seconds=1))
-
     def grant(self, user_id):
         """A session as Auth answers it: access and refresh token, expires_in and the user."""
         refresh = "fake-refresh-" + secrets.token_urlsafe(16)

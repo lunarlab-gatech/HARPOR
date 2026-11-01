@@ -1,6 +1,6 @@
 """Part masks with SAM 3: every instance of every part of the proposal in every view (build_plan.md note 11).
 
-Runs in envs/sam3seg (as sam3_masks), from the gator_clone root:
+Runs in envs/sam3seg (as sam3_masks), from the repo root:
 
     python -m harpor.stage_a.part_masks --run J/run --proposal J/run/proposal.json --out J/run/parts/sam3
 

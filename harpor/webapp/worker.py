@@ -3,7 +3,7 @@
 
     python -m harpor.webapp --worker [--local-keys astra,opus]
 
-Worker(app, cfg, local_keys) runs on make_app's app: it uses the inner FastAPI app through
+Worker(app, cfg, local_keys, session=session) runs on make_app's app: it uses the inner FastAPI app through
 httpx.ASGITransport and that app's one jobs.Runner, in a thread with its own event loop
 (start_thread). It never listens on a port. The server's lifespan calls stop_thread before
 runner.shutdown (server.on_stop), so the worker never copies the "cancelled" that shutdown writes.
@@ -46,11 +46,11 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import anyio
 import httpx
 
+from harpor.fileio import config_dir, private_folder
 from harpor.webapp import jobs, keybox, relay, server, steps, supa
 
 log = logging.getLogger("harpor.worker")
@@ -123,10 +123,10 @@ class Pub:
 
 class Worker:
     """The personal worker of one server (see the module docstring). local_keys names the agents whose key the
-    machine keeps in its own key file. store, session and local_key are for tests: a supa.Store, the session
-    (session.Session by default) and the function that reads a local key (session.local_key by default)."""
+    machine keeps in its own key file. session: the session.Session that server.worker_of started. store and
+    local_key are for tests: a supa.Store and the function that reads a local key (session.local_key by default)."""
 
-    def __init__(self, app, cfg, local_keys=(), store=None, session=None, local_key=None):
+    def __init__(self, app, cfg, local_keys=(), *, session, store=None, local_key=None):
         local_keys = tuple(local_keys or ())
         if set(local_keys) - set(steps.PROVIDER):
             raise ValueError(f"local keys are for {' and '.join(steps.PROVIDER)}")
@@ -134,12 +134,9 @@ class Worker:
         self.runner = self.inner.state.runner
         self.cfg, self.local_keys, self.session = cfg, local_keys, session
         if store is None:
-            from harpor.webapp import session as sessions
-
-            self.session = session or sessions.Session()  # takes the session file's lock
             store = supa.Store.of(self.session)
         self.store, self._local_key = store, local_key
-        self.place = getattr(self.session, "machine_name", None) or "your machine"
+        self.place = self.session.machine_name or "your machine"
         self.box = keybox.KeyBox()  # a new ECDH P-256 pair, in memory only
         self.jobs, self.locks, self.settings = {}, {}, {}
         self.trash = {}  # job-files object -> when it goes
@@ -235,8 +232,7 @@ class Worker:
         self.settings = await self.store.settings()
         if not self.store.machine_id:  # the login came before the approval
             await self.store.bind(self.place)
-            if hasattr(self.session, "set_machine"):
-                self.session.set_machine(self.store.machine_id)
+            self.session.set_machine(self.store.machine_id)
         await self.store.start(self.box.public_b64, self.ends_at, VERSION, list(self.local_keys))
         rows = await self.reconcile()
         try:
@@ -263,8 +259,7 @@ class Worker:
             if self.client is not None:
                 await self.client.aclose()
             await self.store.close()
-            if self.session is not None and hasattr(self.session, "close"):
-                self.session.close()  # the session's lock: login and logout work again while the server runs on
+            self.session.close()  # the session's lock: login and logout work again while the server runs on
 
     def stopped(self, e):
         """True (and the worker stops) when Supabase says another worker took over."""
@@ -856,7 +851,7 @@ class Worker:
         """Local jobs whose upload ended at or after the session's mirror_since, with no job.json "public", get
         a row (own_job_create) and "public": {job, user, machine, resumes: 0}. Jobs made before the first
         login stay local."""
-        since = getattr(self.session, "mirror_since", None)
+        since = self.session.mirror_since
         for f in sorted(self.runner.runs.glob("*/job.json")):
             local = f.parent.name
             job = server.read_json(f) if jobs.ID.fullmatch(local) else None
@@ -991,14 +986,14 @@ def expired_roles(days):
     return ({"review", "log"} if days > REVIEW_DAYS else set()) | ({"result"} if days > RESULT_DAYS else set())
 
 
-def check_local_keys(agents, folder=None):
+def check_local_keys(agents):
     """Refuse (SystemExit) a start with --local-keys unless each agent's key file (session.KEY_FILES) is a file of
     this user with mode 0600 in a folder of mode 0700. Only the modes are looked at here; the key is read when a
     job needs it (session.local_key)."""
     from harpor.webapp.session import KEY_FILES
 
-    folder = Path(folder) if folder else Path.home() / ".config" / "gator"
-    supa.private_folder(folder)
+    folder = config_dir()
+    private_folder(folder)
     for agent in agents:
         path = folder / KEY_FILES[agent]
         try:

@@ -79,22 +79,18 @@ def _words(s):
     return " ".join(s.split())
 
 
-def validate(parts, noun=None, base=None):
+def validate(parts, noun=None):
     """The part list in its normal form, the base first: [{name, parent, joint, count, axis_hint}].
-    parts: a list of dicts (or of names), or a proposal dict. Missing joints are "unknown", missing
-    counts 1; the base gets joint "fixed" and count 1, and every parent is written as its part's name.
-    Raises ValueError with the reason when the list breaks a rule (see the module docstring)."""
-    if isinstance(parts, dict):
-        base = parts.get("base", base)
-        parts = parts.get("parts")
+    parts: a list of dicts. Missing joints are "unknown", missing counts 1; the base gets joint "fixed"
+    and count 1, and every parent is written as its part's name. Raises ValueError with the reason when
+    the list breaks a rule (see the module docstring)."""
     if not isinstance(parts, list) or not 1 <= len(parts) <= MAX_PARTS:
         raise ValueError(f"a part list has 1 to {MAX_PARTS} parts")
     noun_slug = _slug(noun) if noun else None
     out, by_slug = [], {}
     for p in parts:
-        p = {"name": p} if isinstance(p, str) else p
         if not isinstance(p, dict):
-            raise ValueError(f"a part is a name or an object with a name, not {p!r}")
+            raise ValueError(f"a part is an object with a name, not {p!r}")
         name = p.get("name")
         if not isinstance(name, str) or not name.strip():
             raise ValueError("every part needs a name")
@@ -146,8 +142,6 @@ def validate(parts, noun=None, base=None):
             seen.add(q["name"])
             q = by_slug[_slug(q["parent"])]
     root = by_slug[_slug(roots[0])]
-    if base is not None and _slug(base) != _slug(root["name"]):
-        raise ValueError(f"the base is {base!r}, but the part without a parent is {root['name']!r}")
     root.update(joint="fixed", count=1)
     return [root] + [p for p in out if p is not root]
 
@@ -321,9 +315,9 @@ def run(job_dir, key_file=None, agent=None, client=None):
     from harpor.webapp.agent_step import scrub
 
     J = Path(job_dir)
-    job = json.loads((J / "job.json").read_text())
+    job = steps.job(J)
     agent = agent or steps.agent(job)
-    mode = (job.get("parts") or {}).get("mode") or "vlm"
+    mode = steps.parts_mode(job)
     keys = controller.read_keys(key_file) if key_file and Path(key_file).is_file() else []
     out = J / "run" / "proposal.json"
     out.unlink(missing_ok=True)
@@ -357,11 +351,12 @@ def confirm(job_dir, parts):
     """Rewrite J/run/proposal.json with the list the user confirmed (the "VLM proposes, I edit" mode):
     parts goes through validate() (its ValueError passes on), and the record gains confirmed and
     edited. Returns it."""
+    from harpor.webapp import steps
+
     J = Path(job_dir)
-    job = json.loads((J / "job.json").read_text())
+    job = steps.job(J)
     f = J / "run" / "proposal.json"
-    proposal = json.loads(f.read_text()) if f.is_file() else {"source": "user", "agent": None, "model": None,
-                                                               "noun": job["prompt"], "warnings": [], "seconds": 0.0}
+    proposal = json.loads(f.read_text())
     parts = validate(parts, job["prompt"])
     proposal.update(base=parts[0]["name"], parts=parts, edited=parts != proposal.get("parts"), confirmed=True)
     write_json(f, proposal)

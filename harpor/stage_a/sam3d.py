@@ -1,6 +1,6 @@
 """Stage A, single view: SAM 3D Objects on one photo and its mask (build_plan.md note 4).
 
-Runs inside the sam3d micromamba env, from the gator_clone root:
+Runs inside the sam3d micromamba env, from the repo root:
 
     python -m harpor.stage_a.sam3d --sam3d-root <sam-3d-objects clone> \
         --image view0.png --mask view0_mask.png --out <dir>

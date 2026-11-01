@@ -734,7 +734,7 @@ def test_tf_chain():
     opt = R.camera_to_lidar("camera_optical_frame", "livox_frame", edges)
     assert opt["camera_axes"] == "optical" and np.allclose(opt["T_cam_lidar"] @ ahead, [0, 0, 2, 1])
     assert R.camera_to_lidar("camera_link", "nowhere", body) is None
-    assert (R.camera_axes("/cam_optical"), R.camera_axes("camera_link"), R.camera_axes(" ")) == ("optical", "body", None)
+    assert [R.camera_axes_from(f)[0] for f in ("/cam_optical", "camera_link", " ")] == ["optical", "body", None]
     assert (ext["camera_axes_from"], opt["camera_axes_from"]) == ("default", "name")
 
     # A frame without "optical" in its name has optical axes when one of its TF links is the standard
@@ -743,7 +743,7 @@ def test_tf_chain():
     cam0 = [("base_link", "cam0", Tc, True, 0), edges[1]]
     kal = R.camera_to_lidar("cam0", "livox_frame", cam0)
     assert (kal["camera_axes"], kal["camera_axes_from"], kal["link"]) == ("optical", "tf", "static")
-    assert np.allclose(kal["T_cam_lidar"], opt["T_cam_lidar"]) and R.camera_axes("cam0", cam0) == "optical"
+    assert np.allclose(kal["T_cam_lidar"], opt["T_cam_lidar"]) and R.camera_axes_from("cam0", cam0)[0] == "optical"
     assert R.camera_axes_from("cam0", [("cam0", "imu", R.invert(Tc), False, 0)]) == ("optical", "tf")  # cam0 the parent
 
     def tilted(deg):  # the optical camera turned down by deg about its x axis

@@ -239,7 +239,10 @@
     <div id="runbody" hidden>
       <p id="runsum" class="hint"></p>
       <div class="runcols">
-        <div class="stagecol"><ol id="stages"></ol></div>
+        <div class="stagecol">
+          <ol id="stages"></ol>
+          <p id="runtotal" title="The sum of the stage times. Time in the queue or waiting for a review is not counted." hidden><span>Total</span><span id="runtotalsecs"></span></p>
+        </div>
         <div class="logcol">
           <p class="loghead"><span id="logname" class="hint"></span> <a id="rawlog" class="hint" target="_blank" rel="noopener" hidden>Full log</a></p>
           <pre id="log" tabindex="0" role="region" aria-label="Log"></pre>

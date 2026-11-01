@@ -46,9 +46,19 @@ BLENDER_SCRIPTS = Path(__file__).resolve().parent / "blender"
 CODEX_MODEL, CLAUDE_MODEL = "gpt-6-astra", "claude-opus-5-5"
 EFFORTS = ("low", "medium", "high", "xhigh", "max")  # Claude's effort levels
 FALLBACK_BETA = "server-side-fallback-2026-07-01"  # Claude's server-side refusal fallback
-# Claude Opus 5.5's row of claude_agent.PRICES (USD per million tokens; the columns are explained there).
-OPUS_PRICES = {"input_tokens": 4.0, "output_tokens": 20.0, "cache_read_input_tokens": 0.20,
-               "cache_creation_input_tokens": 5.0, "cache_creation_1h": 8.0}
+TOKENS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+# USD per million tokens of the models that can serve a turn: Claude Opus 5.5 and the refusal fallbacks
+# that "default" picks (Claude Opus 5, Claude Opus 4.8). cache_creation_input_tokens is the 5-minute
+# write (1.25x input), cache_creation_1h the 1-hour write (2x input). A model not listed is priced as
+# the dearest one.
+PRICES = {
+    CLAUDE_MODEL: {"input_tokens": 4.0, "output_tokens": 20.0, "cache_read_input_tokens": 0.20,
+                   "cache_creation_input_tokens": 5.0, "cache_creation_1h": 8.0},
+    "claude-opus-5": {"input_tokens": 5.0, "output_tokens": 25.0, "cache_read_input_tokens": 0.50,
+                      "cache_creation_input_tokens": 6.25, "cache_creation_1h": 10.0},
+    "claude-opus-4-8": {"input_tokens": 5.0, "output_tokens": 25.0, "cache_read_input_tokens": 0.50,
+                        "cache_creation_input_tokens": 6.25, "cache_creation_1h": 10.0},
+}
 EXPORT_TIMEOUT_S = 180.0
 MAX_EXCLUDED_S = 600.0  # cap on the export time that moves the deadline
 REVIEW_TIMEOUT_S = 300.0  # render only
@@ -883,7 +893,6 @@ def main(argv=None):
     v.add_argument("--clay", action="store_true", help="opaque gray material on every surface")
     c = sub.add_parser("checkpoint", help="read-only copy of a reviewed GLB")
     c.add_argument("--receipt", required=True)
-    c.add_argument("--status", choices=["needs_review"], default="needs_review")
     c.add_argument("--defect", required=True, help="the open defect")
     f = sub.add_parser("finish", help="hand off the reviewed GLB; the last action")
     f.add_argument("--receipt", required=True)

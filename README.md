@@ -24,9 +24,11 @@ python3.12 -m venv .venv && .venv/bin/pip install fastapi uvicorn httpx numpy sc
 Open the "on this machine" link it prints, then add a short video.
 
 **Real jobs:** you need Linux with an NVIDIA GPU, Apptainer, Hugging Face access to `facebook/sam3` and
-`facebook/sam-3d-objects`, the environments in [docs/build_plan.md](docs/build_plan.md) notes 4, 4b, 7 and 9, and
-an OpenAI or Anthropic key if you want the agent. Clone the repo to `$GATOR_ROOT/gator_clone` (by default
-`~/scratch/gator/gator_clone`) and run `python -m harpor.webapp` there with the Python of `envs/web`.
+`facebook/sam-3d-objects`, the environments in [docs/build_plan.md](docs/build_plan.md) notes 3, 4, 4b, 7 and 9 and
+the header of `harpor/webapp/start_ice.sh`, and
+an OpenAI or Anthropic key if you want the agent. Clone the repo anywhere, set `HARPOR_ROOT` to the folder with
+`envs/`, `sif/` and the model clones (by default `~/scratch/gator`), and run `python -m harpor.webapp` from the repo
+with the Python of `envs/web`.
 
 ## More
 

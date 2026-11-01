@@ -61,7 +61,7 @@ create table public.usage_daily (
   primary key (user_id, day)
 );
 
--- A user's own GPU machines. `python -m gator.webapp.worker login` makes the row (own_machine_bind)
+-- A user's own GPU machines. `python -m harpor.webapp.worker login` makes the row (own_machine_bind)
 -- and keeps its id in the machine's session file. A personal worker serves only the jobs of its
 -- machine.
 create table public.machines (

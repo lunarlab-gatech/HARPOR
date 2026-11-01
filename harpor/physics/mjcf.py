@@ -1,7 +1,7 @@
 """Write a MuJoCo model (MJCF) for one aligned GLB and its VoMP rigid-body numbers (build_plan.md note 9).
 
     python -m harpor.physics.mjcf --glb aligned.glb --summary summary.json --out DIR [--name chair]
-        [--friction 0.6] [--coacd-threshold 0.05] [--fixed-base]
+        [--friction 0.6] [--coacd-threshold 0.05]
 
 Writes into DIR:
   <name>.xml   the object: one body with a free joint, the VoMP inertial (mass, COM and fullinertia
@@ -26,8 +26,8 @@ the larger friction, so in another scene the effective value is max(--friction, 
 Contact softness stays at MuJoCo's defaults.
 
 A GLB with joints (harpor.parts.joints, in frame S after harpor.physics.align; build_plan.md note 11) gives
-one body per link instead. The root link is the body <name> (a free joint unless the GLB has a fixed base
-or --fixed-base is given); every other link is a body <name>_<link> nested under its parent at pos 0,
+one body per link instead. The root link is the body <name> (a free joint unless the GLB has a fixed base);
+every other link is a body <name>_<link> nested under its parent at pos 0,
 since all links share frame S, with a hinge or slide joint at the joint's origin and axis, limited to
 [lower, upper], or no joint (fixed). A link without a joint is welded, with a warning, to the link of its
 nearest glTF ancestor that holds a mesh, or else to the root (harpor.parts.joints.welds).
@@ -337,13 +337,13 @@ def scene_xml(name, friction):
 """
 
 
-def build(glb, summary, out, name, friction=0.6, threshold=0.05, decompose=convex_parts, fixed_base=False):
-    """Write the model (see the module docstring) and mjcf.json. fixed_base applies to a GLB with joints."""
+def build(glb, summary, out, name, friction=0.6, threshold=0.05, decompose=convex_parts):
+    """Write the model (see the module docstring) and mjcf.json."""
     import trimesh
 
     joints, links = joint_spec.load(glb)
     if joints:
-        return build_links(glb, summary, out, name, joints, links, friction, threshold, decompose, fixed_base)
+        return build_links(glb, summary, out, name, joints, links, friction, threshold, decompose)
     out = Path(out)
     assets = out / "assets"
     assets.mkdir(parents=True, exist_ok=True)
@@ -373,8 +373,7 @@ def build(glb, summary, out, name, friction=0.6, threshold=0.05, decompose=conve
     return report
 
 
-def build_links(glb, summary, out, name, joints, links, friction=0.6, threshold=0.05, decompose=convex_parts,
-                fixed_base=False):
+def build_links(glb, summary, out, name, joints, links, friction=0.6, threshold=0.05, decompose=convex_parts):
     """build() for a GLB with joints: one body per link (see the module docstring)."""
     import trimesh
 
@@ -391,7 +390,7 @@ def build_links(glb, summary, out, name, joints, links, friction=0.6, threshold=
     s = json.loads(Path(summary).read_text())
     root, children, base = joint_spec.tree(joints, links)
     weld_to = joint_spec.welds(joints, links, root, joint_spec.holders(read_glb(glb)[0]))
-    free = not (fixed_base or base)
+    free = not base
     loaded = load_s(glb, by_link=True)
     visuals, skipped = visual_parts([(n, m) for _, n, m in loaded], assets)
     link_of = {n: k for k, n, _ in loaded}
@@ -526,11 +525,10 @@ def main():
     ap.add_argument("--name", default="object")
     ap.add_argument("--friction", type=float, default=0.6)
     ap.add_argument("--coacd-threshold", type=float, default=0.05)
-    ap.add_argument("--fixed-base", action="store_true", help="a GLB with joints: no free joint on the root link")
     a = ap.parse_args()
     if not re.fullmatch(r"[A-Za-z_][\w-]*", a.name) or a.name == "scene":
         ap.error("--name must be a plain identifier other than 'scene' (scene.xml includes <name>.xml)")
-    report = build(a.glb, a.summary, a.out, a.name, a.friction, a.coacd_threshold, fixed_base=a.fixed_base)
+    report = build(a.glb, a.summary, a.out, a.name, a.friction, a.coacd_threshold)
     report["compiled"] = check(a.out, a.name)
     (Path(a.out) / "mjcf.json").write_text(json.dumps(report, indent=1))
     print(json.dumps({k: report[k] for k in ("collision_hulls", "start_z", "inertial", "compiled")}, indent=1))

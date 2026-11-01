@@ -1,8 +1,9 @@
 """The metric scale from LiDAR: the web app's lidar stage (build_plan.md note 12).
 
-Runs in envs/web (numpy, scipy, pillow, rosbags; CPU only), from the gator_clone root, after da3:
+Runs in envs/web (numpy, scipy, pillow, rosbags; CPU only), from the repo root, after da3:
 
     python -m harpor.webapp.lidar scale --job J
+    python -m harpor.webapp.lidar clouds --job J
 
 J/job.json "lidar" (steps.lidar) names the source. SOURCES has one function per kind that gives the
 LiDAR samples of the pool frames: "rosbag" (rosbag_samples), a LiDAR topic of the job's bag, and
@@ -14,6 +15,14 @@ the Inputs tab are cached in J/lidar/samples.npz and J/lidar/clouds.npz, keyed i
 stage writes J/lidar/cloud/<view>.glb (cloud_glb) with the check images, also when the record is not ok,
 before pool/lidar.json. How the samples, the time matching, the intrinsics and the clouds work:
 build_plan.md note 12 (Rosbag source, Stray Scanner source, Points for the Inputs tab).
+
+Each cloud also compares the LiDAR with DA3, at the job's s (references: a view's own s only when the job has none):
+"diff" holds the LiDAR points that have a ratio r, also those outside the mask, which do not affect s, with their
+signed gap in meters, z (1 - s / r): z - s x DA3's depth without a baseline, positive when the LiDAR reads farther. For
+a rosbag job, "da3" holds DA3's surface at s (da3_surface). A Stray capture's K stays inside stray_samples, so it has
+"diff" only. clouds (rewrite_clouds) writes these files again for a job built before them, from the stored samples and
+without a GPU: it finds the estimate again, stops when that does not give pool/lidar.json's s and each view's s and used
+points, and changes nothing else.
 
 The estimate is lidar_scale.estimate, with the check images in J/lidar/check. For a rosbag job it also follows
 the LiDAR's rays (rays: the camera points of the samples and the LiDAR's origin in the camera frame). The record,
@@ -36,6 +45,7 @@ import re
 import shutil
 import struct
 import time
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -50,13 +60,11 @@ CLOCK_TOL_S = 0.2  # the camera's and the LiDAR's log-minus-stamp offsets agree 
 # A bag whose topics.json is older than the LiDAR listing (Runner.submit_analyze lists it again on a topic choice).
 OLD_TOPICS = ("the bag was listed before LiDAR topics were; choose its camera topic again to list them (for a job in "
               "review or done: upload the bag again)")
-CACHE_VERSIONS = {"rosbag": 7, "stray": 6}  # of lidar/samples.json, by kind; another version is a miss (3: the
-# clouds in lidar/clouds.npz; 4: the log base moves point times by each scan's last point, and the window grows with the
-# scan period; 5: the camera's axes can come from TF, rosbag.camera_axes_from, so the key's bag and version hold that
-# decision; 6: the read span grows with the scan period, read_span, and one bad point time does not set a scan's last
-# point, last_point; 7, a bag only: the info has each frame's LiDAR origin and size for the estimator's rays, rays)
+CACHE_VERSIONS = {"rosbag": 7, "stray": 6}  # of lidar/samples.json, by kind; another version is a miss
 SCAN_POINTS = 60_000  # the most points of a view's whole scan in its cloud (lidar/cloud/<view>.glb)
 SCAN_KEEP = 20_000  # while reading, each scan also keeps a random subset of its points, at most this many, for the clouds
+DA3_POINTS = 60_000  # the most points of DA3's surface in a view's cloud
+SAME_S = 1e-6  # rewrite_clouds: an estimate within this share of pool/lidar.json's s is the same
 NO_K = ("the export has no intrinsics (fx, fy, cx, cy in odometry.csv, or camera_matrix.csv), so the Inputs tab has "
         "no LiDAR points")
 
@@ -119,8 +127,7 @@ def cache_write(J, key, samples, info, clouds):
 def frame_names(J, names):
     """The pool views and the other frames that extract wrote (frames/pool.json), sorted."""
     pool = read_json(Path(J) / "frames" / "pool.json") or {}
-    extracted = pool.get("names") or {}
-    extracted = extracted.values() if isinstance(extracted, dict) else extracted
+    extracted = (pool.get("names") or {}).values()
     more = {n for n in extracted if isinstance(n, str) and (Path(J) / "scene" / "images" / f"{n}.png").is_file()}
     bad = [n for n in names if not re.fullmatch(r"f\d+", n)]
     if bad:
@@ -678,7 +685,6 @@ def stray_samples(J, job, spec, names):
     from harpor.webapp.jobs import INPUTS
 
     path = Path(job["video"]["path"])
-    path = path if path.is_absolute() else J / path
     source = {"kind": "stray", "file": path.name}
     kind = steps.source(job)["kind"]
     if kind != "stray":
@@ -783,25 +789,40 @@ SOURCES = {"rosbag": rosbag_samples, "stray": stray_samples}  # job.json "lidar"
 # ---- the clouds of the Inputs tab ----
 
 def cloud_glb(parts):
-    """A GLB (bytes) of point sets, or None when every set is empty. parts: {"scan": (N, 3), "used": (M, 3)}
-    camera points in OpenCV axes. Each set becomes (x, -y, -z), glTF's axes: x right, y up, z back toward
-    the viewer, with the camera at the origin looking down -z as a glTF camera does. One node per set that has
-    points, named as the set, with one POINTS primitive (mode 0) whose POSITION accessor has min and max, as
-    glTF requires. Points that are not finite are left out. Hand-written, so envs/web needs no trimesh."""
+    """A GLB (bytes) of point sets, or None when every set is empty. parts: {"scan": (N, 3), "used": (M, 3), and
+    optionally "da3": (K, 3), "diff": (L, 3), with "diff_m": (L,) and "diff_extras"} camera points in OpenCV axes. Each
+    set becomes (x, -y, -z), glTF's axes: x right, y up, z back toward the viewer, with the camera at the origin looking
+    down -z as a glTF camera does. One node per set that has points, named as the set, with one POINTS primitive (mode
+    0) whose POSITION accessor has min and max, as glTF requires. "diff" also has diff_m as a float SCALAR attribute,
+    _DIFF, and diff_extras as the node's extras. Points that are not finite are left out, and a row of "diff" with a
+    value that is not finite. Hand-written, so envs/web needs no trimesh."""
     nodes, meshes, accessors, views, chunks, offset = [], [], [], [], [], 0
-    for name in ("scan", "used"):
-        a = np.asarray(parts.get(name, np.zeros((0, 3))), float).reshape(-1, 3)
-        a = (a[np.isfinite(a).all(1)] * [1.0, -1.0, -1.0]).astype("<f4")
-        if not len(a):
-            continue  # glTF has no accessor of count 0
-        data = a.tobytes()  # 12 bytes a point, so every view starts 4-byte aligned
+
+    def accessor(a, kind, **bounds):  # a as a new accessor of float rows; returns its index
+        nonlocal offset
+        data = a.tobytes()  # 4 bytes a number, so every view starts 4-byte aligned
         views.append({"buffer": 0, "byteOffset": offset, "byteLength": len(data), "target": 34962})
-        accessors.append({"bufferView": len(views) - 1, "componentType": 5126, "type": "VEC3", "count": len(a),
-                          "min": a.min(0).tolist(), "max": a.max(0).tolist()})
-        meshes.append({"name": name, "primitives": [{"attributes": {"POSITION": len(accessors) - 1}, "mode": 0}]})
-        nodes.append({"name": name, "mesh": len(meshes) - 1})
+        accessors.append({"bufferView": len(views) - 1, "componentType": 5126, "type": kind, "count": len(a), **bounds})
         chunks.append(data)
         offset += len(data)
+        return len(accessors) - 1
+
+    for name in ("scan", "used", "da3", "diff"):
+        a = np.asarray(parts.get(name, np.zeros((0, 3))), float).reshape(-1, 3)
+        keep = np.isfinite(a).all(1)
+        if name == "diff" and len(a):
+            m = np.asarray(parts["diff_m"], float).reshape(-1)
+            keep &= np.isfinite(m)
+        a = (a[keep] * [1.0, -1.0, -1.0]).astype("<f4")
+        if not len(a):
+            continue  # glTF has no accessor of count 0
+        attributes = {"POSITION": accessor(a, "VEC3", min=a.min(0).tolist(), max=a.max(0).tolist())}
+        node = {"name": name, "mesh": len(meshes)}
+        if name == "diff":
+            attributes["_DIFF"] = accessor(m[keep].astype("<f4"), "SCALAR")
+            node["extras"] = parts["diff_extras"]
+        meshes.append({"name": name, "primitives": [{"attributes": attributes, "mode": 0}]})
+        nodes.append(node)
     if not nodes:
         return None
     doc = {"asset": {"version": "2.0", "generator": "HARPOR lidar"}, "scene": 0,
@@ -815,17 +836,84 @@ def cloud_glb(parts):
             + js + struct.pack("<II", len(binary), 0x004E4942) + binary)
 
 
-def write_clouds(folder, clouds, points):
-    """folder/<view>.glb for each view of clouds ({view: (xyz, scan)}) that has points: its whole scan and the
-    points that the scale used (points: lidar_scale.estimate's points_out; the used rows of xyz). Returns the
-    views written."""
+def references(rec):
+    """{view: the s that compares it with DA3} of an estimate or its record: the job's combined s when it has one, else
+    the view's own, as the check images pick it, so a failed scale can still be looked at. A view with neither is left
+    out. The combined s, because the differences between views are what the comparison shows."""
+    out = {}
+    for v in rec.get("views") or []:
+        s = v.get("s") if rec.get("s") is None else rec["s"]
+        if s is not None:
+            out[v["name"]] = s
+    return out
+
+
+def changed_views(est, rec):
+    """The names of the views that an estimate and its record do not share, or whose s or used points differ by more
+    than SAME_S."""
+    def facts(r):  # {view: (its s, its used points)}
+        return {v["name"]: (v.get("s"), v.get("points_used")) for v in r.get("views") or []}
+
+    a, b = facts(est), facts(rec)
+    return sorted(n for n in a.keys() | b.keys() if n not in a or n not in b or any(
+        x != y and (None in (x, y) or abs(x - y) > SAME_S * abs(y)) for x, y in zip(a[n], b[n])))
+
+
+def view_diff(xyz, p, s):
+    """cloud_glb's "diff" parts of a view: the LiDAR points with a ratio r (p: the view's points_out, row by row in
+    xyz) and z (1 - s / r), meters, signed. Its extras: s, the median over the used points (None without any) and
+    their count."""
+    r = np.asarray(p["r"], float)
+    X = np.asarray(xyz, float)[np.asarray(p["index"], int)]
+    keep = np.isfinite(X).all(1) & np.isfinite(r) & (r > 0)
+    m = X[keep, 2] * (1 - s / r[keep])
+    used = m[np.asarray(p["used"], bool)[keep]]
+    used = used[np.isfinite(used)]
+    return {"diff": X[keep], "diff_m": m, "diff_extras": {
+        "s": float(s), "median_m": float(np.median(used)) if len(used) else None, "used": len(used)}}
+
+
+def da3_surface(depth, crop, camera, s):
+    """DA3's surface at scale s as camera points (at most DA3_POINTS, float32): each DA3 pixel with a depth, at a
+    fixed stride, goes through crop to the source frame, then along its ray (camera: K, D, model and size, as in rays)
+    to s x its depth along the optical axis. A pixel that the camera model cannot invert is left out."""
+    depth = np.asarray(depth, float)
+    h, w = depth.shape
+    step = 1
+    while depth[::step, ::step].size > DA3_POINTS:
+        step += 1
+    d = depth[::step, ::step]
+    gv, gu = np.nonzero(np.isfinite(d) & (d > 0))
+    u, v = lidar_scale.grid_to_source(gu * step, gv * step, crop, (w, h))
+    x, y, ok = lidar_scale.unproject(u, v, camera["K"], camera["D"], camera["model"], camera["size"])
+    z = s * d[gv, gu]
+    return np.stack([x * z, y * z, z], 1)[ok].astype(np.float32)
+
+
+def compared(clouds, points, refs, cameras):
+    """{view: the parts of its comparison with DA3 for cloud_glb}: "diff" for each view with a reference s (refs), and
+    "da3" too for a view with a camera (cameras: rays' output, None for a Stray capture) and diff rows, since the viewer
+    draws it only with them."""
+    out = {}
+    for n, (xyz, _) in clouds.items():
+        if n in refs and n in points:
+            out[n] = view_diff(xyz, points[n], refs[n])
+            if n in (cameras or {}) and len(out[n]["diff"]):
+                out[n]["da3"] = da3_surface(points[n]["depth"], points[n]["crop"], cameras[n], refs[n])
+    return out
+
+
+def write_clouds(folder, clouds, points, compare=None):
+    """folder/<view>.glb for each view of clouds ({view: (xyz, scan)}) that has points: its whole scan, the points
+    that the scale used (points: lidar_scale.estimate's points_out; the used rows of xyz) and its comparison with DA3
+    (compare: compared's). Returns the views written."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     out = []
     for n, (xyz, scan) in sorted(clouds.items()):
         p = points.get(n)
         used = np.asarray(xyz)[np.asarray(p["index"])[np.asarray(p["used"], bool)]] if p else np.zeros((0, 3))
-        data = cloud_glb({"scan": scan, "used": used})
+        data = cloud_glb({"scan": scan, "used": used, **(compare or {}).get(n, {})})
         if data is None:
             continue
         tmp = folder / f".tmp_{n}.glb"
@@ -856,7 +944,7 @@ def scale(job_dir):
 
     J = Path(job_dir)
     t0 = time.time()
-    job = json.loads((J / "job.json").read_text())
+    job = steps.job(J)
     try:
         spec = steps.lidar(job)
     except ValueError as e:
@@ -895,15 +983,18 @@ def scale(job_dir):
         print(f"time base {tm['base']}", flush=True)
     pts = {}
     try:
+        cameras = rays(info, clouds) if spec["kind"] == "rosbag" else None
         est = lidar_scale.estimate(J / "pool", {n: samples[n] for n in names if n in samples}, check_dir=check,
                                    points_out=pts, source=spec["kind"],  # the reason names the source's causes
-                                   rays=rays(info, clouds) if spec["kind"] == "rosbag" else None)
+                                   rays=cameras)
     except ValueError as e:  # a pool that prep and da3 left inconsistent
         write_json(out, record({"ok": False, "s": None, "reason": str(e), "views": [], "combine": None}, info, t0,
                                spec["kind"]),
                    indent=1)
         raise SystemExit(f"no metric scale: {e}") from None
-    write_clouds(cloud, {n: clouds[n] for n in names if n in clouds}, pts)  # with the check images, also when not ok
+    shown = {n: clouds[n] for n in names if n in clouds}
+    # With the check images, also when not ok.
+    write_clouds(cloud, shown, pts, compared(shown, pts, references(est), cameras))
     rec = record(est, info, t0, spec["kind"])
     write_json(out, rec, indent=1)  # last: with ok, the stage's done marker
     lines = lidar_scale.summary(rec)
@@ -917,13 +1008,66 @@ def scale(job_dir):
     return rec
 
 
+def rewrite_clouds(job_dir):
+    """Write J/lidar/cloud/<view>.glb and J/run/lidar/<i>.glb again from the job's stored samples, clouds, masks and DA3
+    output, as the stage and views.build_run would (a run without the LiDAR scale has no copies), and nothing else.
+    Returns the views written. SystemExit with the reason, before it writes, when the job is busy, when the stored data
+    is missing or its estimate does not give pool/lidar.json's scale and each view's s and used points."""
+    from harpor.stage_a.mvsam3d import view_names
+    from harpor.webapp import jobs, steps
+
+    J = Path(job_dir)
+    job = steps.job(J)
+    if job.get("status") in jobs.ACTIVE:
+        raise SystemExit("the job is busy, and a stage may be rewriting these files; run this after it stops")
+    try:
+        spec = steps.lidar(job)
+    except ValueError as e:
+        raise SystemExit(f"job.json: {e}") from None
+    if spec is None:
+        raise SystemExit("this job has no LiDAR (job.json lidar is null), so it has no clouds")
+    rec, names = read_json(J / "pool" / "lidar.json"), view_names(J / "pool")
+    if not isinstance(rec, dict) or not names or not (J / "pool" / "da3_output.npz").is_file():
+        raise SystemExit("the job has no pool/lidar.json or no DA3 depth; run prep, da3 and the lidar stage first")
+    hit = cache_read(J, (read_json(J / "lidar" / "samples.json") or {}).get("key"), names)
+    if hit is None:
+        raise SystemExit("the job has no stored LiDAR samples (lidar/samples.json); run the lidar stage")
+    samples, info, clouds = hit
+    pts = {}
+    try:
+        cameras = rays(info, clouds) if spec["kind"] == "rosbag" else None
+        est = lidar_scale.estimate(J / "pool", {n: samples[n] for n in names if n in samples}, points_out=pts,
+                                   source=spec["kind"], rays=cameras)
+    except (ValueError, OSError, zipfile.BadZipFile) as e:  # masks that are gone, a damaged DA3 file, or a pool that
+        raise SystemExit(f"the stored data cannot be used: {e}") from None  # prep and da3 left inconsistent
+    refs, want, changed = references(est), references(rec), changed_views(est, rec)
+    if changed or set(refs) != set(want) or any(abs(refs[n] / want[n] - 1) > SAME_S for n in refs):
+        raise SystemExit(f"the stored data gives s {est['s']} but pool/lidar.json has s {rec.get('s')}"
+                         + (f", and other results for {', '.join(changed)}" if changed else "")
+                         + ", so the samples, masks or DA3 output changed after the lidar stage; nothing was written; "
+                         "run that stage again")
+    shown = {n: clouds[n] for n in names if n in clouds}
+    out = write_clouds(J / "lidar" / "cloud", shown, pts, compared(shown, pts, refs, cameras))
+    run = read_json(J / "run" / "prep.json") or {}
+    copies = 0
+    for i, v in enumerate((run.get("views") or []) if run.get("metric_scale") is not None else ()):
+        src = J / "lidar" / "cloud" / f"{v.get('pool_name')}.glb"
+        if src.is_file():
+            (J / "run" / "lidar").mkdir(exist_ok=True)
+            replace(J / "run" / "lidar" / f"{i}.glb", lambda tmp: shutil.copyfile(src, tmp))
+            copies += 1
+    print(f"wrote the clouds of {len(out)} views and {copies} copies in run/lidar", flush=True)
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="step", required=True)
-    sub.add_parser("scale", help="the metric scale of a job's pool from its LiDAR").add_argument(
-        "--job", required=True, help="job folder with job.json")
+    for step, what in (("scale", "the metric scale of a job's pool from its LiDAR"),
+                       ("clouds", "write a job's clouds again from its stored data, with the comparison with DA3")):
+        sub.add_parser(step, help=what).add_argument("--job", required=True, help="job folder with job.json")
     a = ap.parse_args(argv)
-    scale(a.job)
+    {"scale": scale, "clouds": rewrite_clouds}[a.step](a.job)
 
 
 if __name__ == "__main__":

@@ -555,13 +555,13 @@ def test_a_calibration_is_for_its_lidar_topic(client, tmp_path):
     assert jobs.load(J)["status"] == "ready" and jobs.load(J)["lidar"] is None
 
     # A calibration stored before lidar_topic was (an older job) holds time_offset_s 0.0 also when its file
-    # gives none. The lidar stage reads the file, so the summary takes the offset from the file too.
+    # gives none, so the summary shows none there, also for a file that says 0. The lidar stage reads the file.
     for extra, offset in (("", None), ("time_offset_s: 0\n", 0.0)):
         assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS},
                      content=calibration_yaml(T_CAM_LIDAR, extra)).json()["time_offset_s"] == offset
         old = {k: v for k, v in jobs.load(J)["calibration"].items() if k != "lidar_topic"}
         jobs.update(J, calibration={**old, "time_offset_s": 0.0})
-        assert c.get(f"/api/jobs/{job_id}").json()["calibration"]["time_offset_s"] == offset, extra
+        assert c.get(f"/api/jobs/{job_id}").json()["calibration"]["time_offset_s"] is None, extra
 
 
 def test_the_calibration_cannot_change_while_the_part_list_waits(client, tmp_path):
@@ -623,7 +623,6 @@ def test_a_done_job_says_when_its_scale_is_stale(client, tmp_path):
     c, cfg = client
     login(c)
     job_id = c.put("/api/upload", params={"name": "no_tf.bag"}, content=bag.read_bytes()).json()["id"]
-    J = cfg.runs / job_id
     job = wait(c, job_id, "ready", "failed")
     assert job["status"] == "ready" and job["lidar_current"] is None, job["error"]
     url, first = f"/api/jobs/{job_id}/calibration", calibration_yaml(T_CAM_LIDAR)
@@ -882,7 +881,7 @@ def test_calibration_changes_take_turns(client, tmp_path, monkeypatch):
 def test_fake_rosbag_job_with_lidar_end_to_end(client, tmp_path):
     """A bag whose /tf_static links the camera to the LiDAR and whose camera_info is rectified: the
     LiDAR scale undoes the fake DA3's 0.8, and every later stage works in meters."""
-    from test_webapp_lidar import POINTS
+    from test_webapp_lidar import POINTS, read_diff, read_glb
 
     bag = scene_bag(tmp_path / "scene.bag")
     c, cfg = client
@@ -924,6 +923,10 @@ def test_fake_rosbag_job_with_lidar_end_to_end(client, tmp_path):
         assert r.status_code == 200 and r.headers["content-type"] == "model/gltf-binary"
         assert r.headers["cache-control"] == "no-cache"
     assert c.get(f"/api/jobs/{job_id}/file/run/lidar/0.glb").content[:4] == b"glTF"
+    # The real stage compares each view with the fake DA3, which is the scene times 0.8, so the gap is near 0.
+    data = c.get(f"/api/jobs/{job_id}/file/run/lidar/0.glb").content
+    assert sorted(read_glb(data)) == ["da3", "diff", "scan", "used"]
+    assert read_diff(data)[1]["s"] == rec["s"] and abs(read_diff(data)[1]["median_m"]) < 0.02
     # The pool's own points only while the scale has failed (server.pool_clouds).
     pool = sorted((J / "lidar" / "cloud").glob("f*.glb"))
     assert pool and not any(f.startswith("lidar/") for f in job["files"])
@@ -1349,7 +1352,7 @@ def test_main_writes_the_login_file(tmp_path, monkeypatch, capsys):
     assert d["url_path"] == f"/?token={d['token']}" and len(d["token"]) >= 40
     assert d["slurm_job"] == "4242" and d["slurm_node"] == "atl1-1-02-003-19-2"
     out = capsys.readouterr().out
-    assert f"8765:{d['node']}:{d['port']} ali497@login-ice.pace.gatech.edu" in out and d["token"] in out
+    assert f"ssh -L {d['port']}:127.0.0.1:{d['port']} <this machine>" in out and d["token"] in out
     assert (tmp_path / "runs").is_dir()
     assert not info.exists()  # the server stopped, so start_ice.sh must not find it
     # A later start replaced the file meanwhile: it stays.
@@ -1437,6 +1440,73 @@ def test_start_ice_reuses_only_a_server_of_the_same_job(tmp_path):
             assert "TOKEN=" not in p.stdout and not info.exists()
     finally:
         other.shutdown()
+
+
+def test_start_ice_starts_a_server_that_the_login_node_can_reach(tmp_path):
+    """start_ice.sh with stand-ins for squeue and setsid: its alive check calls http://$node:$port from the login
+    node, so the server it starts listens on every address, not on the 127.0.0.1 default. The server runs from
+    this script's repo and gets the script's root by name: HARPOR_ROOT, else GATOR_ROOT, else ~/scratch/gator."""
+    home, bin_, argv = tmp_path / "home", tmp_path / "bin", tmp_path / "argv"
+    home.mkdir()
+    (tmp_path / "storage").mkdir()
+    (home / "scratch").symlink_to(tmp_path / "storage")  # as on ICE
+    bin_.mkdir()
+    (bin_ / "squeue").write_text("#!/bin/bash\necho 'RUNNING atl1-node-07'\n")
+    (bin_ / "setsid").write_text(f"#!/bin/bash\necho \"$*\" > {argv}\nexit 1\n")  # records the command, starts nothing
+    (bin_ / "sleep").write_text("#!/bin/bash\nexec /bin/sleep 0.1\n")
+    for f in bin_.iterdir():
+        f.chmod(0o755)
+
+    def start(root, **roots):
+        web = root / "envs" / "web" / "bin"
+        web.mkdir(parents=True)
+        (web / "python").symlink_to(sys.executable)
+        p = subprocess.run(["bash", str(ROOT / "harpor" / "webapp" / "start_ice.sh"), "222"], capture_output=True, text=True,
+                           timeout=60, env={"HOME": str(home), "PATH": f"{bin_}:{os.environ['PATH']}", **roots})
+        assert p.returncode == 1 and "the server did not start" in p.stderr, p.stderr
+        assert (f"cd {ROOT} && HARPOR_ROOT={root} exec {web}/python -m harpor.webapp --host 0.0.0.0 --port 0"
+                in argv.read_text())
+
+    start((tmp_path / "storage").resolve() / "gator")
+    start(tmp_path / "old", GATOR_ROOT=str(tmp_path / "old"))
+    start(tmp_path / "new", HARPOR_ROOT=str(tmp_path / "new"), GATOR_ROOT=str(tmp_path / "old"))
+
+
+def test_open_mac_reads_its_settings(tmp_path):
+    """open_mac.sh with stand-ins for ssh and the browser openers, and only those on PATH: the ssh host has no
+    default, the socket and the remote folder do, and the remote folder's ~ stays for the remote shell."""
+    home, bin_, calls = tmp_path / "home", tmp_path / "bin", tmp_path / "calls"
+    home.mkdir()
+    bin_.mkdir()
+    for tool in ("cat", "mkdir", "sed"):
+        (bin_ / tool).symlink_to(shutil.which(tool))
+    record = f'#!/bin/bash\necho "${{0##*/}} $*" >> {calls}\n'
+    (bin_ / "ssh").write_text(record + "case $* in *start_ice.sh*) printf 'NODE=n\\nPORT=7\\nTOKEN=tok\\n';; esac\n")
+    (bin_ / "open").write_text(record)
+    (bin_ / "ssh").chmod(0o755)
+    (bin_ / "open").chmod(0o755)
+
+    def run(**env):
+        calls.write_text("")
+        p = subprocess.run([shutil.which("bash"), str(ROOT / "harpor" / "webapp" / "open_mac.sh"), "222"], text=True,
+                           capture_output=True, timeout=60, env={"HOME": str(home), "PATH": str(bin_), **env})
+        return p, calls.read_text().splitlines()
+
+    p, ran = run()
+    assert p.returncode == 1 and "set HARPOR_SSH_HOST=user@login-node" in p.stderr and ran == []
+    p, ran = run(HARPOR_SSH_HOST="me@login")
+    assert p.returncode == 0, p.stderr
+    sock = f"-S {home}/.ssh/cm-ice"
+    assert ran == [f"ssh {sock} -O check me@login",
+                   f"ssh {sock} me@login bash ~/scratch/gator/gator_clone/harpor/webapp/start_ice.sh 222",
+                   f"ssh {sock} -O forward -L 8765:n:7 me@login", "open http://localhost:8765/?token=tok"]
+    assert (home / ".config" / "gator").stat().st_mode & 0o777 == 0o700  # as fileio.private_folder asks
+    (bin_ / "xdg-open").write_text(record)  # some Linux systems have an unrelated open
+    (bin_ / "xdg-open").chmod(0o755)
+    p, ran = run(HARPOR_SSH_HOST="me@login", HARPOR_SSH_SOCKET="/s/cm", HARPOR_REMOTE_CODE="/code")
+    assert p.returncode == 0, p.stderr
+    assert ran == ["ssh -S /s/cm -O check me@login", "ssh -S /s/cm me@login bash /code/harpor/webapp/start_ice.sh 222",
+                   "ssh -S /s/cm -O forward -L 8765:n:7 me@login", "xdg-open http://localhost:8765/?token=tok"]
 
 
 def test_job_api_leaves_out_agent_text_that_held_the_key(client):
@@ -3499,9 +3569,9 @@ def test_app_js_input_panel_follows_the_selection():
 
 # ---- the job page's tabs: Results, Downloads, Inputs, Settings, Log ----
 
-def glb_bytes(data, rename=None, **accessor):
+def glb_bytes(data, rename=None, edit=None, **accessor):
     """A lidar.cloud_glb file as a list of bytes (for a JS Uint8Array), with its JSON chunk changed: rename
-    {old node name: new name}, and accessor 0's fields set."""
+    {old node name: new name}, accessor 0's fields set, and edit(doc)."""
     import struct
 
     n = struct.unpack_from("<I", data, 12)[0]
@@ -3509,6 +3579,8 @@ def glb_bytes(data, rename=None, **accessor):
     for node in doc["nodes"]:
         node["name"] = (rename or {}).get(node["name"], node["name"])
     doc["accessors"][0].update(accessor)
+    if edit:
+        edit(doc)
     js = json.dumps(doc).encode()
     js += b" " * (-len(js) % 4)
     rest = data[20 + n:]
@@ -3547,6 +3619,224 @@ def test_app_js_reads_the_lidar_points_file():
     target, at, dist, target2, at2, ahead = out["orbit"]
     assert target == [2, 0, -5] and max(map(abs, at)) < 1e-6 and dist == pytest.approx(math.hypot(2, 5))
     assert target2 == [1, 1, -2] and max(map(abs, at2)) < 1e-6 and ahead == [0, 0, -1]
+
+
+def compare_glb(n=5, used=2, median=-0.0043, s=1.25, da3=True, gap=0.01):
+    """A lidar.cloud_glb file with the comparison: n diff points with gaps of gap m, and a DA3 surface of 7 points."""
+    from harpor.webapp import lidar
+
+    a = np.arange(3.0 * n).reshape(n, 3) + [0, 0, 1]
+    return lidar.cloud_glb({"scan": a, "used": a[:used], "da3": a[:1].repeat(7, 0) if da3 else np.zeros((0, 3)), "diff": a,
+                            "diff_m": np.full(n, gap), "diff_extras": {"s": s, "median_m": median, "used": used}})
+
+
+def test_app_js_reads_the_comparison():
+    """readCloud reads the da3 and diff nodes, row for row, and checks them as it checks the rest: a _DIFF of another
+    count or kind, or extras that are missing or odd, throw. A file without them reads as before, and a diff node of
+    no used points may have a null median."""
+    from harpor.webapp import lidar
+
+    good = compare_glb()
+    last = lambda doc: doc["accessors"][-1]  # noqa: E731  _DIFF
+
+    def extras(**kw):
+        return lambda doc: next(n for n in doc["nodes"] if n["name"] == "diff")["extras"].update(kw)
+
+    def no_attr(doc):
+        del doc["meshes"][-1]["primitives"][0]["attributes"]["_DIFF"]
+
+    def no_extras(doc):
+        del next(n for n in doc["nodes"] if n["name"] == "diff")["extras"]
+
+    files = {"good": list(good), "old": list(lidar.cloud_glb({"scan": [[0.0, 0.0, 1.0]]})),
+             "null": list(compare_glb(used=0, median=None)),
+             "count": glb_bytes(good, edit=lambda d: last(d).update(count=4)),
+             "kind": glb_bytes(good, edit=lambda d: last(d).update(type="VEC3", count=1)),
+             "type": glb_bytes(good, edit=lambda d: last(d).update(componentType=5125)),
+             "past": glb_bytes(good, edit=lambda d: last(d).update(count=500)),
+             "no_attr": glb_bytes(good, edit=no_attr), "no_extras": glb_bytes(good, edit=no_extras),
+             "s0": glb_bytes(good, edit=extras(s=0)), "s_text": glb_bytes(good, edit=extras(s="1.2")),
+             "many": glb_bytes(good, edit=extras(used=6)), "half": glb_bytes(good, edit=extras(used=1.5)),
+             "no_median": glb_bytes(good, edit=extras(median_m=None)),
+             "text": glb_bytes(good, edit=extras(median_m="0.1")),
+             "median_of_none": list(compare_glb(used=0, median=0.1)),
+             "lines": glb_bytes(good, edit=lambda d: next(m for m in d["meshes"] if m["name"] == "da3")["primitives"][0].update(mode=1))}
+    out = run_form_js("""
+        const files = """ + json.dumps(files) + """, out = {};
+        for (const k of Object.keys(files)) {
+          try {
+            const r = readCloud(new Uint8Array(files[k]).buffer);
+            out[k] = [r.da3.length / 3, r.diff.length / 3, Array.from(r.delta), r.compare];
+          } catch (e) { out[k] = e.message; }
+        }
+        console.log(JSON.stringify(out));
+        """)
+    assert out.pop("good") == [7, 5, [pytest.approx(0.01)] * 5, {"s": 1.25, "median": -0.0043, "used": 2}]
+    assert out.pop("old") == [0, 0, [], None]
+    assert out.pop("null")[3] == {"s": 1.25, "median": None, "used": 0}
+    assert set(out.values()) == {"not a LiDAR points file"}, out
+
+
+def test_app_js_compare_with_da3():
+    """The box shows once a view read has a diff set, and stays on across views, also over a view with none. On, the
+    viewer gets it for each view, and the legend says what the set shows, with the fixed scale; a Stray view has no
+    surface to name. A view without the data says so and how to get it. Off, the legend is as before. While a view
+    loads, the box leaves "loading" alone."""
+    from harpor.webapp import lidar
+
+    old = lidar.cloud_glb({"scan": [[0.0, 0.0, 1.0], [1.0, 0.0, 1.0]], "used": [[0.0, 0.0, 1.0]]})
+    glbs = {"/api/jobs/j/file/run/lidar/0.glb": list(old), "/api/jobs/j/file/run/lidar/1.glb": list(compare_glb()),
+            "/api/jobs/j/file/run/lidar/2.glb": list(compare_glb(median=-0.00001, s=1.2, da3=False)),
+            "/api/jobs/j/file/run/lidar/3.glb": list(compare_glb(used=0, median=None))}
+    files = ["selection.json", *(k.split("/file/")[1] for k in glbs)]
+    lid = {"kind": "rosbag", "topic": "/lidar/points"}
+    picks = [*PICKS, {"name": "f00400", "frame": 400, "time_s": 40.0, "q": 0.6}]
+    out = run_form_js(ELEMENTS + """
+        (async () => {
+          const out = {}, job = """ + json.dumps(input_job("j", lidar=lid, files=files)) + """, glbs = """ + json.dumps(glbs) + """;
+          const fetch0 = fetch;
+          let hold = null;
+          globalThis.fetch = async (url, opt) => {
+            if (hold) await hold;
+            return url in glbs ? { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(glbs[url]).buffer } : fetch0(url, opt);
+          };
+          const g = { shows: [], toggles: [], show(d) { this.shows.push([d.da3.length / 3, d.diff.length / 3]); },
+            compare(on) { this.toggles.push(on); }, reset() {}, draw() {}, free() {} };
+          cloudGL = (canvas, on) => { g.on = on; return g; };
+          const settle = async () => { for (let k = 0; k < 40; k++) await null; };
+          const one = (pred) => made.filter(pred).pop();
+          V = { id: "j" };
+          await renderInput(job);
+          const legend = one((e) => e.className === "legend"), select = one((e) => e.tag === "select");
+          const label = one((e) => e.tag === "label" && text(e) === "Compare with DA3"), box = one((e) => e.tag === "input");
+          const pick = async (i) => { select.onchange({ target: { value: i } }); await settle(); return text(legend); };
+          const tick = (on) => { box.onchange({ target: { checked: on } }); return text(legend); };
+          out.box = [box.attrs.type, label.hidden];
+          g.on.sized();
+          await settle();
+          out.old = [text(legend), label.hidden];
+          out.plain = [await pick("1"), label.hidden];
+          out.on = tick(true);
+          out.toggles = [...g.toggles];
+          out.stray = await pick("2");
+          out.none = await pick("0");
+          out.zero = await pick("3");
+          out.back = await pick("1");
+          out.shows = [...g.shows];
+          out.off = tick(false);
+          out.toggles2 = [...g.toggles];
+          out.hidden = label.hidden;
+          out.shown = made.some((e) => e.className === "sq diff");
+          tick(true);
+          let go;
+          hold = new Promise((r) => { go = r; });
+          cloudNow.data.clear();
+          select.onchange({ target: { value: "2" } });
+          await settle();
+          const late = tick(false);
+          go();
+          hold = null;
+          await settle();
+          out.loading = [late, text(legend)];
+          console.log(JSON.stringify(out));
+        })()
+        """, {"/api/jobs/j/file/selection.json": {"ok": True, "picks": picks}})
+    assert out["box"] == ["checkbox", True]
+    plain = "Whole scan (5) Used for the scale (2)"
+    assert out["old"] == ["Whole scan (2) Used for the scale (1)", True]  # no diff set yet: no box
+    assert out["plain"] == [plain, False] and out["hidden"] is False
+    colors = "Blue: LiDAR nearer than DA3. Red: LiDAR farther. Full color at ±15 mm"
+    assert out["on"] == f"DA3 surface (7) {colors} Scale ×1.250 Median of the 2 used points: -4.3 mm"
+    assert out["toggles"] == [True] and out["toggles2"] == [True, False]
+    assert out["stray"] == f" {colors} Scale ×1.200 Median of the 2 used points: +0.0 mm"  # no surface, never "-0.0"
+    assert out["none"] == "Whole scan (2) Used for the scale (1) No comparison for this view."
+    assert out["zero"] == f"DA3 surface (7) {colors} Scale ×1.250 No used points"
+    assert out["back"] == out["on"] and out["off"] == plain
+    assert out["shows"] == [[0, 0], [7, 5], [0, 5], [0, 0], [7, 5], [7, 5]]
+    assert out["shown"] is True
+    assert out["loading"] == ["loading", plain]
+
+
+def test_cloud_gl_colors_the_gaps_on_a_fixed_scale():
+    """The real cloudGL on a stand-in context. Off, the scan and the used points draw as before. On, the da3 set takes
+    the scan's place, with the depth test, and the diff points the used points', without it, round and larger, with
+    their gaps as an attribute that is off again for the next frame. The span is 15 mm in every view, whatever its
+    gaps, and the colors are the tokens of the moment. A gap's sign picks the color, and the color is full at the span
+    and past it. A view without a diff set keeps its scan and used points. Every buffer goes with free()."""
+    out = run_form_js("""
+        const tokens = { "--viewer-bg": "#efeeea", "--line-strong": "#8d8a83", "--fg": "#1c1c1a", "--accent": "#1e4f85",
+          "--near": "#2166ac", "--far": "#b2182b" };
+        globalThis.getComputedStyle = () => ({ getPropertyValue: (k) => tokens[k] });
+        globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+        window.devicePixelRatio = 1;
+        const calls = [], shaders = [], base = { createProgram: () => "program", createShader: (type) => type,
+          getProgramParameter: () => true, getUniformLocation: (p, u) => u, getAttribLocation: (p, a) => a,
+          getParameter: () => [1, 64], getExtension: () => null, createBuffer: () => ({}),
+          shaderSource: (type, src) => shaders.push(src) };
+        const gl = new Proxy(base, { get: (t, k) => k in t ? t[k] : k === k.toUpperCase() ? k
+          : (...a) => { calls.push([k, ...a]); } });
+        const canvas = { getContext: () => gl, addEventListener() {}, clientWidth: 400, clientHeight: 300, width: 400, height: 300 };
+        const C = cloudGL(canvas, { sized() {}, lost() {} });
+        // The draws since the last call, each with the state that it saw.
+        const frame = () => {
+          const out = [], counts = [], on = new Set(), u = {};
+          let depth = false;
+          for (const [k, a, b, c] of calls.splice(0)) {
+            if (k === "uniform1f" || k === "uniform3fv") u[a] = k === "uniform1f" ? b : Array.from(b).map((x) => Math.round(255 * x));
+            else if (k === "enable" || k === "disable") depth = k === "enable";
+            else if (k === "enableVertexAttribArray") on.add(a);
+            else if (k === "disableVertexAttribArray") on.delete(a);
+            else if (k === "drawArrays") {
+              out.push([a, depth, u.size, u.span || 0, u.color, on.has("d"), u.lo, u.hi]);
+              counts.push(c);
+            }
+          }
+          return { draws: out, counts, attrs: [...on] };
+        };
+        const f = (a) => new Float32Array(a), none = f([]);
+        const view = (gap) => ({ scan: f([0, 0, -1, 1, 0, -1, 0, 1, -1]), used: f([0, 0, -1]), da3: f(Array(15).fill(-2)),
+          diff: f([0, 0, -1, 1, 1, -1]), delta: f([gap, -gap]), compare: { s: 1.2, median: 0, used: 1 } });
+        const old = { scan: f([0, 0, -1]), used: f([0, 0, -1]), da3: none, diff: none, delta: none, compare: null };
+        const out = { shaders };
+        C.show(view(0.001), 4 / 3);
+        out.off = frame();
+        C.compare(true);
+        out.on = frame();
+        C.show(view(0.5), 4 / 3);  // gaps 500 times as large: the same span, and the box stays on across views
+        out.wide = frame();
+        tokens["--fg"] = "#e7e5e0";
+        C.draw();
+        out.dark = frame();
+        C.show(old, 4 / 3);
+        out.old = frame();
+        C.free();
+        out.buffers = calls.filter((c) => c[0] === "deleteBuffer").length;
+        // The vertex shader's color lines, run as JS: GLSL's mix and clamp, on the colors of the tokens.
+        const lines = /float t = [^}]*/.exec(shaders[0])[0].replace("float t", "const t").replace("c = mix", "return mix");
+        const shade = new Function("d", "span", "color", "lo", "hi", "clamp", "mix", "abs", lines);
+        const clamp = (x, a, b) => Math.min(Math.max(x, a), b), mix = (a, b, t) => a.map((x, i) => x + (b[i] - x) * t);
+        const paint = (d, span) => shade(d, span, [28, 28, 26], [33, 102, 172], [178, 24, 43], clamp, mix, Math.abs);
+        out.shades = [-0.06, -0.03, -0.015, 0, 0.015, 0.03, 0.06].map((d) => paint(d, 0.03));
+        console.log(JSON.stringify(out));
+        """)
+    grey, ink, accent, near, far = [141, 138, 131], [28, 28, 26], [30, 79, 133], [33, 102, 172], [178, 24, 43]
+    scan = ["POINTS", True, 2, 0.015, grey, False]
+    cam = ["LINES", True, 1, 0.015, ink, False]
+    assert out["off"]["draws"] == [[*scan, None, None], [*cam, None, None], ["POINTS", False, 4, 0.015, accent, False, None, None]]
+    both = [[*scan, None, None], [*cam, None, None], ["POINTS", False, 4, 0.015, ink, True, near, far]]
+    assert out["on"]["draws"] == both and out["wide"]["draws"] == both
+    assert out["off"]["counts"] == [3, 16, 1]  # the scan, the camera's pyramid and the used points
+    assert out["on"]["counts"] == out["wide"]["counts"] == [5, 16, 2]  # da3 and diff in their place
+    assert out["old"]["counts"] == [1, 16, 1]
+    assert out["on"]["attrs"] == out["wide"]["attrs"] == ["p"]  # d is off again
+    assert out["dark"]["draws"][-1][4] == [231, 229, 224]
+    assert out["old"]["draws"][0][4] == grey and out["old"]["draws"][-1][:6] == ["POINTS", False, 4, 0.015, accent, False]
+    assert out["buffers"] == 6
+    vertex, fragment = out["shaders"]
+    assert "uniform vec3 color" not in fragment and "color" in vertex  # a uniform in both needs one precision
+    assert "varying vec3 c" in vertex and "varying vec3 c" in fragment
+    half = [[(a + b) / 2 for a, b in zip(ink, end)] for end in (near, far)]
+    assert out["shades"] == [near, near, half[0], ink, half[1], far, far]
 
 
 def test_app_js_lidar_start_view_shows_the_whole_frame():
@@ -3659,7 +3949,7 @@ def test_app_js_lidar_points_in_the_inputs_tab():
           console.log(JSON.stringify(out));
         })()
         """, replies)
-    assert out["bar"] == ["LiDAR pointsView view 0view 2Reset", [["0", "view 0", ""], ["2", "view 2", None]]]
+    assert out["bar"] == ["LiDAR pointsView view 0view 2ResetCompare with DA3", [["0", "view 0", ""], ["2", "view 2", None]]]
     assert out["canvas"] == ["cloud", {"role": "application", "aria-roledescription": "3D view", "tabindex": "0",
                                        "aria-describedby": "cloudlegend", "aria-label": "LiDAR points of view 0"}]
     assert out["before"] == ["loading", []]  # no size yet: nothing fetched
@@ -4159,6 +4449,36 @@ def test_app_js_cancelled_stage_is_not_a_failure():
     assert out["exit 1: out of memory"] == ["failed", "badge failed", "masksSAM 3 masksfailed", "1/3 done · 1 failed"]
     assert out["the server stopped"] == ["failed", "badge failed", "masksSAM 3 masksfailedthe server stopped",
                                          "1/3 done · 1 failed"]
+
+
+def test_app_js_total_time_under_the_stage_clocks():
+    """A finished job shows its total under the stage clocks: the sum of the stages' times, so the wait for the review
+    between two stages does not count and a stage that did not run adds nothing. A job that has not finished shows no
+    total, and the page has a place for it."""
+    out = run_form_js(ELEMENTS + TAB_SETUP + """
+        (() => {
+          const stages = [{ name: "frames", status: "done", started: 100, ended: 130 },
+            { name: "extract", status: "done", started: 1000, ended: 1090 },
+            { name: "masks", status: "skipped" },
+            { name: "prep", status: "done", started: 1090, ended: 4690 }];
+          V = { id: "j" };
+          const out = {};
+          for (const status of ["queued", "running", "review", "failed", "cancelled", "done"]) {
+            renderState({ ...st(status), stages }, false);
+            out[status] = $("#runtotal").hidden;
+          }
+          out.total = $("#runtotalsecs").textContent;
+          renderState({ ...st("done"), stages: [{ name: "frames", status: "done", started: 100, ended: 112.5 },
+            { name: "extract", status: "skipped" }, { name: "masks", status: "skipped" }, { name: "prep", status: "skipped" }] }, false);
+          out.short = $("#runtotalsecs").textContent;
+          console.log(JSON.stringify(out));
+        })()
+        """)
+    assert [out[k] for k in ("queued", "running", "review", "failed", "cancelled")] == [True] * 5
+    assert out["done"] is False
+    assert out["total"] == "1 h 2 min" and out["short"] == "12.5 s"
+    index = (server.STATIC / "index.html").read_text()
+    assert 'id="runtotal"' in index and 'id="runtotalsecs"' in index
 
 
 def test_app_js_tabs_take_the_focus_after_actions():

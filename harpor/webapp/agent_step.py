@@ -1,7 +1,7 @@
 """Agent stage of a web-app job: GPT-6-Astra or Claude Opus 5.5 refines the Stage A mesh (build_plan.md note 5),
 or gives the parts of an articulated job their joints (note 11).
 
-Runs in envs/sam3d from the gator_clone root, with apptainer on the PATH:
+Runs in envs/sam3d from the repo root, with apptainer on the PATH:
 
     python -m harpor.webapp.agent_step --job J --sif gator-agent.sif --key-file F [--agent astra|opus]
 
@@ -33,6 +33,7 @@ import signal
 from pathlib import Path
 
 from harpor.fileio import write_json
+from harpor.webapp import steps
 
 REDACTED = "[redacted API key]"
 AGENTS = {"astra": "codex", "opus": "claude"}  # the web app's name -> the controller's
@@ -55,16 +56,18 @@ def scrub(x, key):
     return x
 
 
-def source(prompt, n, parts=False):
-    """The manifest's source line, as in our ICE runs. parts: the mesh was split into parts."""
-    return (f"MV-SAM3D from {n} frames from a phone video of the {prompt}, with Depth Anything 3 cameras; "
+def source(prompt, n, kind, parts=False):
+    """The manifest's source line. kind: the job's input (steps.source). parts: the mesh was split into parts."""
+    from harpor.webapp.jobs import INPUTS
+
+    return (f"MV-SAM3D from {n} frames from {INPUTS[kind]} of the {prompt}, with Depth Anything 3 cameras; "
             f"pose (scale, shift, small rotation) fitted to the {n} SAM 3 masks"
             + ("; split into parts by SAM 3 part masks (input/parts.json)" if parts else ""))
 
 
 def mode(job_dir, job):
     """articulation for an articulated job whose parts stage made run/parts.glb, else refinement."""
-    return "articulation" if job.get("articulated") is True and (Path(job_dir) / "run" / "parts.glb").is_file() \
+    return "articulation" if steps.articulated(job) and (Path(job_dir) / "run" / "parts.glb").is_file() \
         else "refinement"
 
 
@@ -78,7 +81,7 @@ def run(job_dir, sif, key_file, agent="astra"):
     if not Path(key_file).is_file():
         raise SystemExit(f"no key file {key_file}")
     keys = controller.read_keys(key_file)  # every key of the file, not only the one this agent uses
-    job = json.loads((J / "job.json").read_text())
+    job = steps.job(J)
     root, out = J / "agent" / "s", J / "agent" / "result.json"
     if root.exists():  # an earlier try that failed or was cancelled; prepare_session needs a fresh folder
         shutil.rmtree(root)
@@ -90,7 +93,8 @@ def run(job_dir, sif, key_file, agent="astra"):
         if not parts.is_file():
             raise SystemExit(f"no {parts}; the parts stage did not finish")
     views = mvsam3d.session_views(J / "run")
-    controller.prepare_session(root, kind, None, views, source=source(job["prompt"], len(views), parts is not None),
+    controller.prepare_session(root, kind, None, views,
+                               source=source(job["prompt"], len(views), steps.source(job)["kind"], parts is not None),
                                metric=True, original=original, parts=parts, agent=AGENTS[agent],
                                effort=EFFORT.get(agent))
     controller.run_container_session(root, sif, key_file, budget_s=BUDGET_S[kind])
