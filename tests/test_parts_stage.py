@@ -139,9 +139,9 @@ def test_a_failed_split_names_its_log(job):
 
 
 def test_split_runs_blender_in_a_container_that_sees_only_the_run(tmp_path):
-    cmd = S.split_command(tmp_path / "job", "/scratch/gator/sif/gator-agent.sif")
+    cmd = S.split_command(tmp_path / "job", "/scratch/gator/sif/harpor-agent.sif")
     run = str((tmp_path / "job" / "run").resolve())
-    assert cmd[:2] == ["apptainer", "exec"] and cmd[-2:] == ["/scratch/gator/sif/gator-agent.sif", "blender"]
+    assert cmd[:2] == ["apptainer", "exec"] and cmd[-2:] == ["/scratch/gator/sif/harpor-agent.sif", "blender"]
     binds = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--bind"]
     assert binds == [f"{run}:{run}", f"{tools.BLENDER_SCRIPTS}:{tools.BLENDER_SCRIPTS}:ro"]
 

@@ -14,7 +14,7 @@
 # forwards localhost:LOCAL_PORT to the server's node and port on the same socket and opens
 # http://localhost:LOCAL_PORT/?token=... in the browser, which sets the login cookie. The forward
 # lasts as long as the ControlMaster. The last forward of each local port is kept in
-# ~/.config/gator/webapp_forward_<port>, so a later run cancels it when the node or port changed.
+# ~/.config/harpor/webapp_forward_<port>, so a later run cancels it when the node or port changed.
 set -euo pipefail
 JOB=${1:?usage: open_mac.sh JOBID [LOCAL_PORT]}
 LPORT=${2:-8765}
@@ -22,7 +22,7 @@ LPORT=${2:-8765}
 SOCK=${HARPOR_SSH_SOCKET:-~/.ssh/cm-ice}
 HOST=${HARPOR_SSH_HOST:?set HARPOR_SSH_HOST=user@login-node}
 REMOTE=${HARPOR_REMOTE_CODE:-'~/scratch/gator/gator_clone'}  # the remote shell expands the ~
-STATE=~/.config/gator/webapp_forward_$LPORT
+STATE=~/.config/harpor/webapp_forward_$LPORT
 
 if ! ssh -S "$SOCK" -O check "$HOST" 2>/dev/null; then
   echo "no ControlMaster on $SOCK; log in to the cluster first (ssh -M -S $SOCK $HOST)" >&2
@@ -49,7 +49,7 @@ if ! ssh -S "$SOCK" -O forward -L "$NEW" "$HOST"; then
   echo "the forward failed; is localhost:$LPORT taken? Check with: lsof -nP -iTCP:$LPORT -sTCP:LISTEN" >&2
   exit 1
 fi
-mkdir -p -m 700 ~/.config/gator
+mkdir -p -m 700 ~/.config/harpor
 echo "$NEW" > "$STATE"
 echo "forwarding localhost:$LPORT -> $NODE:$PORT"
 URL="http://localhost:$LPORT/?token=$TOKEN"

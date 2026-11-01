@@ -114,13 +114,7 @@ Nothing below is done by the code. Do every account step and every git step your
    Mac: `brew install supabase/tap/supabase`, then `supabase login`, `supabase link --project-ref <ref>` and
    `supabase db push` from the repo. Without the CLI, paste the seven files of `supabase/migrations/` in order
    into the SQL editor. Then run the Security Advisor. Never run `supabase config push`:
-   `supabase/config.toml` is for the local stack. A project that was set up before part 7
-   (`20261101000700_harpor_relay_lidar_topic.sql`) needs only that file. If you set the project up with
-   `supabase db push`, run it again: it sends only the new file. If you pasted the files, paste part 7 into the
-   SQL editor. There `db push` would start again from part 1 and fail, because part 1 is already in place. Add
-   part 7 before you deploy a site that was built after it. The older relay() refuses a calibration upload that
-   names its LiDAR topic, with the message "bad query". A personal machine checks the topic only after it pulls
-   this version. An older worker drops the topic, so its jobs take a calibration for any LiDAR topic, as before.
+   `supabase/config.toml` is for the local stack.
 6. **Storage.** Check that the bucket `job-files` exists with a 50 MB file limit. On Free the whole project has
    1 GB, so give each account a smaller Storage cap when you approve it (step 9). On Pro, set the project's
    global file limit first, then run the two update lines at the top of
@@ -230,7 +224,7 @@ forward, below). It needs no open port: the worker only calls out.
    after the approval.
 2. Start the server with the worker: `python -m harpor.webapp --worker`. It listens on 127.0.0.1 unless
    `--host` says otherwise, so the local UI stays on the machine. With `--local-keys opus` (or `astra`, or
-   `astra,opus`) the worker uses the key in `~/.config/gator/anthropic.env` (or `openai.env`) when a job needs
+   `astra,opus`) the worker uses the key in `~/.config/harpor/anthropic.env` (or `openai.env`) when a job needs
    it, and the page sends no key. The server refuses to start when such a file is not 0600 in a 0700 folder.
 3. Open the site. The machine's jobs show there, with "on lab-box". New inputs go in through the local UI, or
    with `python -m harpor.webapp.worker add PATH`, which streams the file to the server on this machine.
@@ -272,11 +266,11 @@ After that the folder stays on the machine, and you can delete it in the machine
 
 | File | Mode | What it holds |
 |---|---|---|
-| `~/.config/gator/` | 0700 | made with 0700 when missing; refused when others may open it |
-| `~/.config/gator/harpor_session.json` | 0600 | the site's URL and publishable key, your user, email and provider, the machine's id and name, the time from which local jobs are copied, and the refresh token (none after `logout`) |
-| `~/.config/gator/.harpor_session.lock` | 0600 | the lock of the one process that may use the session, with its pid |
-| `~/.config/gator/openai.env`, `anthropic.env` | 0600 | optional; read only with `--local-keys`, at the moment a job needs the key |
-| `~/.config/gator/webapp.json` | 0600 | as in the tunnel mode, plus `"worker"`: true while the worker runs in the server, else false |
+| `~/.config/harpor/` | 0700 | made with 0700 when missing; refused when others may open it |
+| `~/.config/harpor/harpor_session.json` | 0600 | the site's URL and publishable key, your user, email and provider, the machine's id and name, the time from which local jobs are copied, and the refresh token (none after `logout`) |
+| `~/.config/harpor/.harpor_session.lock` | 0600 | the lock of the one process that may use the session, with its pid |
+| `~/.config/harpor/openai.env`, `anthropic.env` | 0600 | optional; read only with `--local-keys`, at the moment a job needs the key |
+| `~/.config/harpor/webapp.json` | 0600 | as in the tunnel mode, plus `"worker"`: true while the worker runs in the server, else false |
 | `harpor/webapp/site.json` (in the repo) | | the project's URL and publishable key, and the optional contact: public values |
 
 No machine holds a secret key of the project. Do not copy the session file to another machine. Refresh tokens

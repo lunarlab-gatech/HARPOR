@@ -13,7 +13,7 @@ venv/
 .vscode/
 .idea/
 
-# API keys (the real ones live in ~/.config/gator, never in the repo), and other secrets
+# API keys (the real ones live in ~/.config/harpor, never in the repo), and other secrets
 *.env
 .env.*
 *.pem

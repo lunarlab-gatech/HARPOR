@@ -399,13 +399,12 @@
   // ---- writes: the relay ----
 
   // The agent that server.py will run for a request (server.agent_of): start names it (astra when it names none);
-  // overrides and continue name it or take the job's; parts always takes the job's. true or false as astra or none.
+  // overrides and continue name it or take the job's; parts always takes the job's.
   function effectiveAgent(route, body, view) {
-    const named = (a) => a === true ? "astra" : a === false ? "none" : a;
-    const job = view ? named(view.agent == null ? true : view.agent) : "astra";
-    if (route === "start") return named("agent" in body ? body.agent : "astra");
+    const job = view ? view.agent : "astra";
+    if (route === "start") return "agent" in body ? body.agent : "astra";
     if (route === "parts" || body.agent == null) return job;
-    return named(body.agent);
+    return body.agent;
   }
   function keyKindError(key, agent) {  // jobs.key_kind_error: the key's provider by its prefix alone
     if (agent === "opus") return key.startsWith("sk-ant-") ? null : "Anthropic keys start with sk-ant-";

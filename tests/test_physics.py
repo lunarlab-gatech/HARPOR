@@ -219,89 +219,18 @@ def test_usd_round_trip(tmp_path):
     assert mrs.GetInput("sourceColorSpace").Get() == "raw" and tuple(mrs.GetInput("scale").Get()) == (1, 1, 0.5, 1)
 
 
-STACK = {"table": [1.0, 1.0, 0.75], "pan": [0.5, 0.3, 0.08], "cup": [0.1, 0.1, 0.07]}  # sizes, bottom to top
-
-
-def box_objects(tmp_path, sizes, com=None, usd=False):
-    """A box per name of sizes {name: [x, y, z]}, bottom at z = 0: tmp_path/<name>.glb and <name>.json (1 kg, its
-    COM at com, else at the box's centre), built into tmp_path/root/<name>/mjcf, and usd/ when usd is true."""
+def test_load_w_needs_to_geometry(tmp_path, monkeypatch):
+    """trimesh 5.1.1 in envs/sam3d and envs/mujoco has Scene.to_geometry, so load_w has no fallback to Scene.dump."""
     trimesh = pytest.importorskip("trimesh")
-    from harpor.physics.mjcf import build as build_mjcf
+    from harpor.physics.align import load_w
 
-    for name, size in sizes.items():
-        box = trimesh.creation.box(size)
-        box.apply_translation([0, 0, size[2] / 2])
-        trimesh.Scene(trimesh.Trimesh(frames.w_to_gltf(box.vertices), box.faces)).export(tmp_path / f"{name}.glb")
-        rb = {"mass": 1.0, "com": com or [0, 0, size[2] / 2], "fullinertia": [0.1, 0.1, 0.1, 0, 0, 0]}
-        (tmp_path / f"{name}.json").write_text(json.dumps({"rigid_body": rb}))
-        d = tmp_path / "root" / name
-        build_mjcf(tmp_path / f"{name}.glb", tmp_path / f"{name}.json", d / "mjcf", name, decompose=hull_parts)
-        if usd:
-            from harpor.physics.usd import build as build_usd
-
-            build_usd(tmp_path / f"{name}.glb", tmp_path / f"{name}.json", d / "mjcf", d / "usd", name)
-
-
-def test_combine_mjcf_places_objects_apart(tmp_path):
-    mujoco = pytest.importorskip("mujoco")
-
-    from harpor.physics.combine_mjcf import combine
-
-    box_objects(tmp_path, {"big": [1.0, 0.8, 0.5], "small": [0.2, 0.1, 0.05]}, com=[0, 0, 0.1])
-    layout = combine(tmp_path / "root", tmp_path / "root" / "all.xml", front="small", gap=0.3)
-    m = mujoco.MjModel.from_xml_path(str(tmp_path / "root" / "all.xml"))
-    assert m.nbody == 3 and np.isclose(m.body("big").mass, 1.0) and m.nmesh == 4
-    assert np.isclose(layout["big"][1] - layout["small"][1], 0.4 + 0.3 + 0.05)  # half depths plus the gap
-
-
-def test_stack_mode_starts_a_falling_column_with_no_contacts(tmp_path):
-    mujoco = pytest.importorskip("mujoco")
-
-    from harpor.physics.combine_mjcf import stack
-
-    box_objects(tmp_path, STACK)
-    stack(tmp_path / "root", tmp_path / "root" / "stack.xml", "table", ["pan", "cup"], clearance=0.04, tilt=8)
-    m = mujoco.MjModel.from_xml_path(str(tmp_path / "root" / "stack.xml"))
-    d = mujoco.MjData(m)
-    mujoco.mj_forward(m, d)
-    assert d.ncon == 0 and m.opt.timestep == 0.001
-    # Each object's lowest collision vertex is 4 cm above the highest one of the object below it.
-    lows, highs = [], []
-    for body in ("table", "pan", "cup"):
-        gid = m.geom(f"{body}_collision_0").id
-        mid = m.geom_dataid[gid]
-        v = m.mesh_vert[m.mesh_vertadr[mid]:m.mesh_vertadr[mid] + m.mesh_vertnum[mid]]
-        w = d.geom_xpos[gid] + v @ d.geom_xmat[gid].reshape(3, 3).T
-        lows.append(w[:, 2].min())
-        highs.append(w[:, 2].max())
-    assert np.allclose(np.array(lows[1:]) - np.array(highs[:-1]), 0.04, atol=1e-4)
-
-
-def test_usd_scene_matches_the_mujoco_stack(tmp_path):
-    mujoco = pytest.importorskip("mujoco")
-    pytest.importorskip("pxr")
-    from pxr import Usd, UsdGeom, UsdPhysics
-
-    from harpor.physics.combine_mjcf import stack
-    from harpor.physics.usd_scene import build
-
-    box_objects(tmp_path, STACK, usd=True)
-    stack(tmp_path / "root", tmp_path / "root" / "stack.xml", "table", ["pan", "cup"])
-    rep = build(tmp_path / "root" / "stack.xml", tmp_path / "root" / "stack.usda")
-    assert rep["timesteps_per_second"] == 1000
-
-    m = mujoco.MjModel.from_xml_path(str(tmp_path / "root" / "stack.xml"))
-    dm = mujoco.MjData(m)
-    mujoco.mj_forward(m, dm)
-    stage = Usd.Stage.Open(str(tmp_path / "root" / "stack.usda"))
-    for name in ("table", "pan", "cup"):
-        prim = stage.GetPrimAtPath(f"/World/{name}")
-        assert prim.HasAPI(UsdPhysics.RigidBodyAPI)
-        M = np.array(UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default()))  # row-vector form
-        R = np.zeros(9)
-        mujoco.mju_quat2Mat(R, dm.xquat[m.body(name).id])
-        assert np.allclose(M[3, :3], dm.xpos[m.body(name).id], atol=1e-5)
-        assert np.allclose(M[:3, :3].T, R.reshape(3, 3), atol=1e-5)
+    box = trimesh.creation.box([0.3, 0.2, 0.1])
+    trimesh.Scene(trimesh.Trimesh(frames.w_to_gltf(box.vertices), box.faces)).export(tmp_path / "box.glb")
+    v, f = load_w(tmp_path / "box.glb")
+    assert np.allclose(np.ptp(v, axis=0), [0.3, 0.2, 0.1]) and len(f) == 12
+    monkeypatch.delattr(trimesh.Scene, "to_geometry")
+    with pytest.raises(AttributeError, match="to_geometry"):
+        load_w(tmp_path / "box.glb")
 
 
 def fake_vomp_link(d, centers, density, h):
@@ -512,11 +441,32 @@ def test_articulated_mjcf_nests_the_lid_on_a_hinge(tmp_path):
     assert np.allclose(m.jnt_axis[m.joint("chest_lid_joint").id], hinge["axis"])
     assert (tmp_path / "mjcf" / "assets" / "collision_lid_0.obj").is_file()
 
+    # --fixed-base keeps only the hinge.
+    build(glb, summary, tmp_path / "flag", "chest", decompose=hull_parts, fixed_base=True)
+    c = check(tmp_path / "flag", "chest")
+    assert c["njnt"] == 1 and json.loads((tmp_path / "flag" / "mjcf.json").read_text())["fixed_base"]
+
     # A world joint on the root keeps only the hinge.
     fix_to_world(glb)
     build(glb, summary, tmp_path / "fixed", "chest", decompose=hull_parts)
     c = check(tmp_path / "fixed", "chest")
     assert c["njnt"] == 1 and json.loads((tmp_path / "fixed" / "mjcf.json").read_text())["fixed_base"]
+
+
+@pytest.mark.parametrize("flag, njnt", [([], 2), (["--fixed-base"], 1)])
+def test_mjcf_command_line_fixes_the_base_only_with_the_flag(tmp_path, monkeypatch, flag, njnt):
+    pytest.importorskip("trimesh")
+    pytest.importorskip("mujoco")
+    from harpor.physics import mjcf
+
+    glb, summary, _, _ = two_box_hinge(tmp_path)
+    build = mjcf.build
+    monkeypatch.setattr(mjcf, "build", lambda *a, **k: build(*a, decompose=hull_parts, **k))  # no CoACD here
+    monkeypatch.setattr("sys.argv", ["mjcf", "--glb", str(glb), "--summary", str(summary), "--out",
+                                     str(tmp_path / "out"), "--name", "chest", *flag])
+    mjcf.main()
+    report = json.loads((tmp_path / "out" / "mjcf.json").read_text())
+    assert report["compiled"]["njnt"] == njnt and report["fixed_base"] is bool(flag)
 
 
 def test_a_link_without_vomp_voxels_gets_a_hull_inertial(tmp_path):

@@ -18,19 +18,16 @@ job.json "agent" is the agent stage's agent (steps.AGENTS): "astra" (GPT-6-Astra
 CLI, with the user's OpenAI API key), "opus" (Claude Opus 5.5 through claude_agent, with the user's
 Anthropic API key) or "none" (no key: the agent stage is skipped and physics uses run/posed.glb, or
 run/parts.glb for an articulated job, whose parts then get no joints).
-Jobs made before the choice hold true (astra) or false (none).
 
 job.json "lidar" (steps.lidar) turns on the metric scale from LiDAR: null, {"kind": "rosbag", "topic":
 T} for a LiDAR topic of the job's bag, or {"kind": "stray"} for the depth of a Stray Scanner capture,
 which a new Stray job has (on by default). lidar_settings checks it at the start. "calibration" is the
 LiDAR-camera calibration file the user uploaded for a bag, or null: {name, bytes, sha256, lidar_topic}
 and the fields that lidar_scale.read_calibration parsed from J/lidar/calibration/<name>. lidar_topic
-is the LiDAR topic that the upload named, or null (older jobs lack it): lidar_settings then refuses
-another LiDAR topic. An upload or a delete of the calibration makes the lidar stage's record stale
-(steps.done), and so does a record of an older estimator (lidar_scale.VERSIONS), so the next Build or
-retry starts from lidar (Runner.resume). A Stray Scanner capture
-needs no calibration: its depth is aligned with the color camera. Older jobs lack both (no LiDAR);
-their lidar stage shows as skipped.
+is the LiDAR topic that the upload named, or null: lidar_settings then refuses another LiDAR topic. An
+upload or a delete of the calibration makes the lidar stage's record stale (steps.done), and so does a
+record of an older estimator (lidar_scale.VERSIONS), so the next Build or retry starts from lidar
+(Runner.resume). A Stray Scanner capture needs no calibration: its depth is aligned with the color camera.
 
 job.json "articulated" (false for a rigid object) and "parts" {"mode", "list", "confirmed"} set up the
 parts of an articulated object (steps.py). The job's VLM lists the parts in the propose stage
@@ -39,7 +36,7 @@ confirm_parts (mode "vlm_edit"; whatever auto_continue says), or the user typed 
 (mode "user", which is also the mode of a job without an agent). "confirmed" turns true when the user
 confirms the list, and false again whenever propose runs. A rigid job skips propose and parts.
 
-job.json "turntable" (false at first; older jobs lack it) asks for the 360 video: the turntable stage
+job.json "turntable" (false at first) asks for the 360 video: the turntable stage
 (steps.py) renders it after urdf. It is optional (steps.OPTIONAL): when it fails, the job gets a warning
 and the build goes on to package.
 
@@ -176,7 +173,7 @@ def update(job_dir, **fields):
 def update_stage(job_dir, stage, **fields):
     with _LOCK:
         job = load(job_dir)
-        job["stages"].setdefault(stage, dict(STAGE)).update(fields)  # older jobs lack newer stages, such as turntable
+        job["stages"][stage].update(fields)
         save(job_dir, job)
 
 
@@ -215,7 +212,7 @@ def parts_settings(job):
 
 def lidar_settings(job_dir, job, value, read_bag=True):
     """job.json's "lidar" in the form the build runs with: None, {"kind": "rosbag", "topic": T} or
-    {"kind": "stray"}. value is None (or false) for no LiDAR. For a rosbag job it is {"topic": T}
+    {"kind": "stray"}. value is None for no LiDAR. For a rosbag job it is {"topic": T}
     ("kind" may say "rosbag"). For a Stray Scanner capture it is {"kind": "stray"}, its depth. job is
     the job.json dict, whose source and calibration count.
 
@@ -226,18 +223,14 @@ def lidar_settings(job_dir, job, value, read_bag=True):
       - the calibration was uploaded for another LiDAR topic than T (its lidar_topic; a calibration
         without one is not checked);
       - the bag's TF does not link the camera topic's frame to T's frame (tf_links), and no
-        calibration was uploaded. A listing made before the listing read all of /tf (its camera topics
-        have no camera_axes_from) read only the first 5 s, so for it the bag's whole TF decides
-        (rosbag.transforms, then rosbag.tf_chain), as in the stage;
+        calibration was uploaded;
       - the calibration's K is for images of another aspect ratio than the camera topic's;
       - the uploaded bag, or a Stray job's export, is not on the server;
       - neither the calibration's K nor the camera topic's camera_info (rosbag.camera_model) gives the
         intrinsics.
-    A bag listed before LiDAR topics were (topics.json without "lidar") must be listed again
-    (lidar.OLD_TOPICS). read_bag False leaves out the checks that open the bag: the camera_info, and the
-    whole TF of such an old listing. That is for submit_build under the lock, after the server's Start
-    checked it all."""
-    if value is None or value is False:
+    read_bag False leaves out the check that opens the bag, the camera_info. That is for submit_build under
+    the lock, after the server's Start checked it all."""
+    if value is None:
         return None
     from harpor.webapp import lidar
 
@@ -270,8 +263,7 @@ def lidar_settings(job_dir, job, value, read_bag=True):
         raise ValueError(f"the calibration {cal.get('name')} is for {cal['lidar_topic']}, not {topic}; choose "
                          f"{cal['lidar_topic']}, or upload a calibration for {topic}")
     cam_frame, lidar_frame = camera.get("frame_id"), found_lidar[topic].get("frame_id")
-    unlinked = cal is None and not (camera.get("tf_links") or {}).get(topic)
-    if unlinked and "camera_axes_from" in camera:  # a listing that read all of /tf
+    if cal is None and not camera["tf_links"].get(topic):
         raise ValueError(lidar.tf_reason(cam_frame, lidar_frame, topic))
     if cal and cal.get("K") and cal.get("image_size") and camera.get("width") and camera.get("height"):
         try:  # the stage's own check (lidar.fit_matrix), before any GPU stage runs
@@ -282,18 +274,6 @@ def lidar_settings(job_dir, job, value, read_bag=True):
     bag = Path(job["video"]["path"])
     if not bag.is_file():  # the lidar stage's own reason (lidar.rosbag_samples), without the server's path
         raise ValueError(f"the uploaded bag {bag.name} is not on the server; upload it again")
-    if unlinked and read_bag:  # an old listing: the link may start on /tf after the 5 s that it read
-        from harpor.webapp import rosbag
-
-        linked = None
-        if cam_frame and lidar_frame:
-            try:
-                with rosbag.open_bag(bag) as r:
-                    linked = rosbag.tf_chain(rosbag.transforms(r), cam_frame, lidar_frame)
-            except SystemExit as e:
-                raise ValueError(f"cannot read the TF of {bag.name}: {e}") from None
-        if linked is None:
-            raise ValueError(lidar.tf_reason(cam_frame, lidar_frame, topic))
     if read_bag and not (cal and cal.get("K")):
         from harpor.webapp import rosbag
 
@@ -309,12 +289,8 @@ def lidar_settings(job_dir, job, value, read_bag=True):
 
 def lidar_topic_error(found, topic):
     """Why topic is not a LiDAR topic of frames/topics.json (found, its dict) that the lidar stage can
-    use, else None. A listing from before LiDAR topics were listed gives lidar.OLD_TOPICS."""
-    from harpor.webapp import lidar
-
-    if "lidar" not in found:
-        return lidar.OLD_TOPICS
-    names = [x["topic"] for x in found["lidar"]]
+    use, else None."""
+    names = [x["topic"] for x in found.get("lidar") or []]
     if topic in names:
         return None
     why = {x["topic"]: x["why"] for x in found.get("lidar_skipped") or []}
@@ -322,14 +298,6 @@ def lidar_topic_error(found, topic):
         return f"the LiDAR topic {topic} cannot be used: {why[topic]}"
     return f"{topic} is not a LiDAR topic of the bag; " + (f"its LiDAR topics are {', '.join(names)}" if names
                                                            else "the bag has none")
-
-
-def _lidar_on(job):
-    """True when the job has LiDAR; a malformed "lidar" counts, so that its stage runs and says why."""
-    try:
-        return steps.lidar(job) is not None
-    except ValueError:
-        return True
 
 
 def last_progress(log):
@@ -348,19 +316,11 @@ def last_progress(log):
 
 def progress(job_dir):
     """Every stage's state (name, gpu, status, started, ended, returncode, note, seconds), with progress
-    from the last PROGRESS line of the running stage's log. A rigid job made before the part stages has no
-    record of propose and parts, a job made before LiDAR none of lidar, and one made before the 360 video
-    none of turntable; they show as skipped, as the build would skip them."""
+    from the last PROGRESS line of the running stage's log."""
     J = Path(job_dir)
     job, now, out = load(J), time.time(), []
     for s in steps.STAGES:
-        rec = job["stages"].get(s["name"])
-        if rec is None and s["name"] in ("propose", "parts") and not steps.articulated(job):
-            rec = {"status": "skipped", "note": steps.skip(s["name"], J)}
-        if rec is None and s["name"] in ("lidar", "turntable"):
-            why = steps.skip(s["name"], J)
-            rec = {"status": "skipped", "note": why} if why else None
-        st = {**STAGE, **(rec or {}), "name": s["name"], "gpu": s["gpu"], "seconds": None, "progress": None}
+        st = {**job["stages"][s["name"]], "name": s["name"], "gpu": s["gpu"], "seconds": None, "progress": None}
         if st["started"]:
             st["seconds"] = round((st["ended"] or now) - st["started"], 1)
         if st["status"] == "running":
@@ -548,8 +508,7 @@ class Runner:
         "topics" unless it is done, then "frames". topic, one of a rosbag job's frames/topics.json, sets
         source.topic and deletes the outputs and records of every build stage and the picks first, as
         for a new upload; not while the job is in review or done. A calibration uploaded for another
-        camera topic is deleted then. A bag listed before LiDAR topics were (topics.json without
-        "lidar") is listed again."""
+        camera topic is deleted then."""
         J = self.job_dir(job_id)
         with self._cv:
             job = load(J)
@@ -569,10 +528,7 @@ class Runner:
                     fields["calibration"] = None
             _clear(J, ["frames"])
             stages["frames"] = dict(STAGE)
-            listed = J / steps.MARKERS["topics"]
-            listed = json.loads(listed.read_text()) if listed.is_file() else {}
-            if not (stages.get("topics", {}).get("status") == "done" and steps.done("topics", J)) \
-                    or (steps.source(job)["kind"] == "rosbag" and "lidar" not in listed):
+            if not (stages["topics"]["status"] == "done" and steps.done("topics", J)):
                 stages["topics"] = dict(STAGE)
             self._cancelled.pop(job_id, None)
             update(J, **fields, status="analyzing", stages=stages, current=None, error=None, warnings=[])
@@ -631,8 +587,6 @@ class Runner:
             self._idle(job_id, job)
             if not steps.done("frames", J):
                 raise ValueError("the input has not been analyzed")
-            if "agent" in settings:
-                settings["agent"] = steps.agent(settings)
             job.update(settings)
             try:
                 s = slug(job.get("prompt") or "")
@@ -703,8 +657,6 @@ class Runner:
             self._idle(job_id, job)
             agent = steps.agent({**job, **fields})
             changed = agent != steps.agent(job)
-            if "agent" in fields:
-                fields["agent"] = agent
             waits = steps.waits_for_parts(J, job)
             if confirm_parts and not waits:
                 raise ValueError("the job does not wait for its part list")
@@ -713,11 +665,11 @@ class Runner:
                 raise ValueError("the job waits for its part list; confirm or edit it first")
             if not confirm_parts and i > p and steps.pause_after(steps.PARTS_AFTER, J):
                 from_stage, i = steps.PARTS_AFTER, p  # cancelled or failed at the part list: back to it
-            if checked_calibration is not None and _lidar_on(job) and \
+            if checked_calibration is not None and steps.lidar(job) is not None and \
                     (job.get("calibration") or {}).get("sha256") != checked_calibration["sha256"]:
                 raise ValueError("the calibration changed while the run was starting; try again")
             li = steps.NAMES.index("lidar")
-            if i > li and _lidar_on({**job, **fields}) and not steps.done("lidar", J):
+            if i > li and steps.lidar({**job, **fields}) is not None and not steps.done("lidar", J):
                 if confirm_parts:
                     raise ValueError("the LiDAR scale is not current (the calibration or the app's scale estimate "
                                      "changed since it ran); cancel the job, then retry from the lidar stage")
@@ -745,7 +697,7 @@ class Runner:
                 proposal = propose.confirm(J, parts_list)
                 _clear(J, steps.NAMES[i:])
                 stages.update({s: dict(STAGE) for s in steps.NAMES[i:]})
-                fields["parts"] = {**PARTS, **(job.get("parts") or {}), "list": proposal["parts"], "confirmed": True}
+                fields["parts"] = {**job["parts"], "list": proposal["parts"], "confirmed": True}
             if changed and i > r:  # the other agent runs, and the stages after it take its GLB
                 a = steps.NAMES.index("agent")
                 _clear(J, steps.NAMES[a:])
@@ -832,9 +784,9 @@ class Runner:
         """ValueError when the propose stage would run from stage index i on a job whose parts mode is
         "user" (also an agent "none") but whose job.json has no part list: it would fail."""
         p = steps.NAMES.index("propose")
-        done = job["stages"].get("propose", {}).get("status") == "done" and steps.done("propose", J)
+        done = job["stages"]["propose"]["status"] == "done" and steps.done("propose", J)
         runs = i <= p and (i <= steps.NAMES.index(steps.REVIEW_AFTER) or not done)
-        if runs and steps.articulated(job) and steps.parts_mode(job) == "user" and not (job.get("parts") or {}).get("list"):
+        if runs and steps.articulated(job) and steps.parts_mode(job) == "user" and not job["parts"]["list"]:
             raise ValueError("this job has no part list" + (": without an agent there is no VLM to list the parts"
                                                             if steps.agent(job) == "none" else ""))
 
@@ -943,8 +895,7 @@ class Runner:
         if not self._status(job_id, "running"):
             return
         for stage in steps.NAMES[steps.NAMES.index(first):]:
-            # Jobs from before a stage, such as turntable, lack its record.
-            ran = not (load(J)["stages"].get(stage, {}).get("status") == "done" and steps.done(stage, J))
+            ran = not (load(J)["stages"][stage]["status"] == "done" and steps.done(stage, J))
             if ran and self._run_stage(job_id, stage) not in ("done", "skipped", "warned"):
                 return
             if (ran and stage == steps.REVIEW_AFTER and pause) or steps.pause_after(stage, J):
@@ -963,7 +914,7 @@ class Runner:
         key_file, job = None, load(J)
         if stage == "propose":  # a new proposal is not confirmed
             with self._cv:
-                job = update(J, parts={**PARTS, **(load(J).get("parts") or {}), "confirmed": False})
+                job = update(J, parts={**load(J)["parts"], "confirmed": False})
         if steps.needs_key(stage, job):
             agent = steps.agent(job)
             with self._cv:

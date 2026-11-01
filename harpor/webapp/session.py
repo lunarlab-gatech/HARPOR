@@ -5,7 +5,7 @@
     python -m harpor.webapp.worker status | logout | add PATH [--name NAME]
 
 login signs in as the user with PKCE and a loopback redirect (supa.sign_in), adds this machine on the site once
-the owner approved the account (own_machine_bind), and writes ~/.config/gator/harpor_session.json, mode 0600 in
+the owner approved the account (own_machine_bind), and writes ~/.config/harpor/harpor_session.json, mode 0600 in
 a folder of mode 0700. The file holds the site's URL and publishable key (from harpor/webapp/site.json), the
 user, the machine and the refresh token. The server with --worker opens it with Session.
 
@@ -45,7 +45,7 @@ LOCK = ".harpor_session.lock"  # next to the session file
 VERSION = 1
 FIELDS = ("url", "publishable_key", "user_id", "machine_name", "mirror_since")  # what login writes
 MACHINE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,59}")  # machines.name
-KEY_FILES = {"astra": "openai.env", "opus": "anthropic.env"}  # in ~/.config/gator
+KEY_FILES = {"astra": "openai.env", "opus": "anthropic.env"}  # in ~/.config/harpor
 LOGIN = "python -m harpor.webapp.worker login"
 START = "python -m harpor.webapp --worker"
 WAITS = ("Your account waits for approval. HARPOR adds this machine when the server starts after the owner "
@@ -196,7 +196,7 @@ class Session:
 
 def local_key(agent):
     """The machine's own API key for agent (--local-keys), read now: the OPENAI_API_KEY= line of
-    ~/.config/gator/openai.env (astra) or the ANTHROPIC_API_KEY= line of anthropic.env (opus). The file must be
+    ~/.config/harpor/openai.env (astra) or the ANTHROPIC_API_KEY= line of anthropic.env (opus). The file must be
     this user's with mode 0600 in a folder of mode 0700. An error names the file and the line, never the text."""
     if agent not in KEY_FILES:
         raise ValueError(f"no key file for the agent {agent!r}")
@@ -373,7 +373,7 @@ def logout(*, transport=None):
 
 def add(path, name=None):
     """`worker add PATH`: stream a local file to the server on this machine, which runs all its upload checks, with
-    the login cookie of ~/.config/gator/webapp.json (never printed). The worker copies the new job to the site."""
+    the login cookie of ~/.config/harpor/webapp.json (never printed). The worker copies the new job to the site."""
     from harpor.webapp import server
 
     src = Path(path)

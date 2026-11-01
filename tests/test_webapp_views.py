@@ -87,7 +87,7 @@ def make_job(tmp_path, n=24, arc=360.0, bad=(), big=(), small=(), no_mask=(), sc
     picks = {str(p): p for p in job.get("picks", [])}
     (j / "frames" / "pool.json").write_text(json.dumps({"pool": frames, "names": {str(f): nm for f, nm in zip(frames, names)},
                                                         "picks": picks}))
-    (j / "job.json").write_text(json.dumps({"mode": "auto", "prompt": "toy", "slug": "toy", "n_views": 6, **job}))
+    (j / "job.json").write_text(json.dumps({"mode": "auto", "prompt": "toy", "slug": "toy", "n_views": 6, "lidar": None, **job}))
     return j, E, P, masks
 
 
@@ -309,12 +309,12 @@ def write_lidar(j, **rec):
 def test_metric_scale_reads_the_lidar_record(tmp_path):
     j = tmp_path / "job"
     (j / "pool").mkdir(parents=True)
-    assert V.metric_scale(j, {"lidar": None}) is None and V.metric_scale(j, {}) is None
+    assert V.metric_scale(j, {"lidar": None}) is None
     on = {"lidar": {"kind": "rosbag", "topic": "/livox/lidar"}}
     with pytest.raises(SystemExit, match="pool/lidar.json is missing"):
         V.metric_scale(j, on)
     write_lidar(j)
-    assert V.metric_scale(j, on) == 1.25 and V.metric_scale(j, {"lidar": False}) is None
+    assert V.metric_scale(j, on) == 1.25
     write_lidar(j, ok=False, s=3.0, reason="the LiDAR scale 3.00 is far from Depth Anything 3's metric estimate")
     with pytest.raises(SystemExit, match="LiDAR metric scale failed: the LiDAR scale 3.00 is far"):
         V.metric_scale(j, on)

@@ -1213,9 +1213,9 @@ def test_main_starts_the_worker_it_is_asked_for(tmp_path, monkeypatch, capsys):
 
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("GATOR_ROOT", str(tmp_path / "G"))
+    monkeypatch.setenv("HARPOR_ROOT", str(tmp_path / "G"))
     monkeypatch.setattr(jobs, "default_key_dir", lambda: tmp_path / "keys")
-    info = home / ".config" / "gator" / "webapp.json"
+    info = home / ".config" / "harpor" / "webapp.json"
     ran, started = [], []  # (host, webapp.json) while the server runs; the workers it started
     monkeypatch.setattr(uvicorn.Server, "run", lambda self, sockets: ran.append(
         (sockets[0].getsockname()[0], json.loads(info.read_text()))))
@@ -1251,7 +1251,7 @@ def test_main_starts_the_worker_it_is_asked_for(tmp_path, monkeypatch, capsys):
     assert ran[-1][0] == "0.0.0.0"
 
     def held():
-        raise SystemExit(f"another HARPOR server holds {home}/.config/gator/harpor_session.json (pid 7)")
+        raise SystemExit(f"another HARPOR server holds {home}/.config/harpor/harpor_session.json (pid 7)")
 
     monkeypatch.setattr(sessions, "Session", held)  # a session that cannot start leaves the server in tunnel mode
     n = len(started)
@@ -1261,7 +1261,7 @@ def test_main_starts_the_worker_it_is_asked_for(tmp_path, monkeypatch, capsys):
     assert "the personal worker does not start: another HARPOR server holds" in out and worker.SIGNED_OUT in out
     # --local-keys: the server refuses to start unless each key file is 0600 in a 0700 folder (it is not read)
     monkeypatch.setattr(sessions, "Session", lambda: fake.session(c, machine_id=machine(fake, c, "box-2")))
-    conf = home / ".config" / "gator"
+    conf = home / ".config" / "harpor"
     conf.chmod(0o700)
     with pytest.raises(SystemExit, match=r"anthropic\.env with the Anthropic key \(ANTHROPIC_API_KEY=\.\.\.\)"):
         server.main(args + ["--worker", "--local-keys", "opus"])

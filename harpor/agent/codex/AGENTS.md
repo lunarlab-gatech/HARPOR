@@ -6,8 +6,7 @@ This folder is `/work`, the only folder you can write to.
 
 - `input/manifest.json`: the mode (`refinement` or `articulation`), the frame W, the glTF axis
   mapping, the units, and one entry per input view with its camera (`K`, the OpenCV world-to-camera
-  matrix `w2c`, `width`, `height`) and its files under `input/` (`image`, `mask`, and `depth` and
-  `confidence` when present).
+  matrix `w2c`, `width`, `height`) and its files under `input/` (`image` and `mask`).
 - `input/parts.json` (articulation only): the parts of the split object, each with its parent, joint
   guess and boxes, and the seams where parts touch, with straight lines fitted to them.
 - `original/original.glb`: the asset to refine (refinement), or the object split into one mesh object

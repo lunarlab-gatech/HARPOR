@@ -74,12 +74,12 @@ def login(fake, user, home, tmp_path, name="lab-box", **kw):
 
 
 def session_file(home):
-    return home / ".config" / "gator" / "harpor_session.json"
+    return home / ".config" / "harpor" / "harpor_session.json"
 
 
 def hold_lock(home):
     """Another process that holds the session's lock, as a running server does; it prints ready, then waits."""
-    lock = home / ".config" / "gator" / ".harpor_session.lock"
+    lock = home / ".config" / "harpor" / ".harpor_session.lock"
     code = ("import fcntl, os, sys, time\n"
             f"fd = os.open({str(lock)!r}, os.O_RDWR | os.O_CREAT, 0o600)\n"
             "fcntl.flock(fd, fcntl.LOCK_EX)\nos.ftruncate(fd, 0)\nos.write(fd, f'{os.getpid()}\\n'.encode())\n"
@@ -160,7 +160,7 @@ def test_login_refusals(fake, home, tmp_path, capsys):
     finally:
         p.kill()
         p.wait()
-    conf = home / ".config" / "gator"
+    conf = home / ".config" / "harpor"
     conf.chmod(0o755)  # others may open the folder
     assert login(fake, c, home, tmp_path) == 1 and "chmod 700" in capsys.readouterr().out
     conf.chmod(0o700)
@@ -271,7 +271,7 @@ def test_logout_then_login_keeps_the_machine(fake, home, tmp_path):
 
 
 def test_local_key_reads_one_line_now_and_never_quotes_it(home):
-    conf = home / ".config" / "gator"
+    conf = home / ".config" / "harpor"
     conf.mkdir(parents=True)
     conf.chmod(0o700)
     key = "sk-ant-test-" + "k" * 30
@@ -329,7 +329,7 @@ class Upload:
 
 
 def webapp_json(home, port, worker=True, token="tok-" + "t" * 40):
-    conf = home / ".config" / "gator"
+    conf = home / ".config" / "harpor"
     conf.mkdir(parents=True, exist_ok=True)
     conf.chmod(0o700)
     fileio.write_private(conf / "webapp.json", json.dumps({"node": "box", "port": port, "token": token,
@@ -406,7 +406,7 @@ def test_a_personal_worker_process_copies_a_job_added_with_worker_add(fake, home
         p = subprocess.Popen([sys.executable, "-m", "harpor.webapp", "--fake", "--worker", "--runs",
                               str(tmp_path / "runs")], cwd=ROOT, env=env, stdout=out,
                              stderr=subprocess.STDOUT)
-    info = home / ".config" / "gator" / "webapp.json"
+    info = home / ".config" / "harpor" / "webapp.json"
     try:
         t0 = time.time()
         while not (fake.row("workers", user_id=c) and info.exists()):

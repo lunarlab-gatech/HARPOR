@@ -1,5 +1,5 @@
 """File helpers that the stages, the web app and the agent's helpers share: JSON read and write, an atomic
-replace, and the private files of ~/.config/gator. Standard library only, since the stages run in different
+replace, and the private files of ~/.config/harpor. Standard library only, since the stages run in different
 envs.
 """
 
@@ -46,8 +46,8 @@ def replace(path, save, /, *args, **kw):
 # ---- private files: the session file, the key files, webapp.json ----
 
 def config_dir():
-    """~/.config/gator, the folder of those files. It reads the home folder at each call, since tests change HOME."""
-    return Path.home() / ".config" / "gator"
+    """~/.config/harpor, the folder of those files. It reads the home folder at each call, since tests change HOME."""
+    return Path.home() / ".config" / "harpor"
 
 
 def private_folder(folder, make=False):

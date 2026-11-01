@@ -3,7 +3,6 @@
 Runs in envs/web (numpy, scipy, pillow, rosbags; CPU only), from the repo root, after da3:
 
     python -m harpor.webapp.lidar scale --job J
-    python -m harpor.webapp.lidar clouds --job J
 
 J/job.json "lidar" (steps.lidar) names the source. SOURCES has one function per kind that gives the
 LiDAR samples of the pool frames: "rosbag" (rosbag_samples), a LiDAR topic of the job's bag, and
@@ -20,9 +19,7 @@ Each cloud also compares the LiDAR with DA3, at the job's s (references: a view'
 "diff" holds the LiDAR points that have a ratio r, also those outside the mask, which do not affect s, with their
 signed gap in meters, z (1 - s / r): z - s x DA3's depth without a baseline, positive when the LiDAR reads farther. For
 a rosbag job, "da3" holds DA3's surface at s (da3_surface). A Stray capture's K stays inside stray_samples, so it has
-"diff" only. clouds (rewrite_clouds) writes these files again for a job built before them, from the stored samples and
-without a GPU: it finds the estimate again, stops when that does not give pool/lidar.json's s and each view's s and used
-points, and changes nothing else.
+"diff" only.
 
 The estimate is lidar_scale.estimate, with the check images in J/lidar/check. For a rosbag job it also follows
 the LiDAR's rays (rays: the camera points of the samples and the LiDAR's origin in the camera frame). The record,
@@ -45,7 +42,6 @@ import re
 import shutil
 import struct
 import time
-import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -57,14 +53,10 @@ WINDOW_S = 0.05  # points within +-50 ms of a camera stamp, or within half a sca
 WINDOW_MAX_S = 0.1  # up to +-100 ms (a 5 Hz LiDAR): see window()
 READ_S = 0.4  # scans are read at least +-0.4 s from each frame's log time, and further for a slow LiDAR (read_span)
 CLOCK_TOL_S = 0.2  # the camera's and the LiDAR's log-minus-stamp offsets agree this well (time_base): the header base
-# A bag whose topics.json is older than the LiDAR listing (Runner.submit_analyze lists it again on a topic choice).
-OLD_TOPICS = ("the bag was listed before LiDAR topics were; choose its camera topic again to list them (for a job in "
-              "review or done: upload the bag again)")
 CACHE_VERSIONS = {"rosbag": 7, "stray": 6}  # of lidar/samples.json, by kind; another version is a miss
 SCAN_POINTS = 60_000  # the most points of a view's whole scan in its cloud (lidar/cloud/<view>.glb)
 SCAN_KEEP = 20_000  # while reading, each scan also keeps a random subset of its points, at most this many, for the clouds
 DA3_POINTS = 60_000  # the most points of DA3's surface in a view's cloud
-SAME_S = 1e-6  # rewrite_clouds: an estimate within this share of pool/lidar.json's s is the same
 NO_K = ("the export has no intrinsics (fx, fy, cx, cy in odometry.csv, or camera_matrix.csv), so the Inputs tab has "
         "no LiDAR points")
 
@@ -160,18 +152,14 @@ def calibration(J, job, topic):
     return parsed, hashlib.sha256(data).hexdigest(), name
 
 
-def camera_stamps(J, path, topic):
-    """{"clock", "header_ns", "log_ns"} of the camera topic's frames: frames/stamps.json, or rosbag.probe."""
-    from harpor.webapp import rosbag
-
+def camera_stamps(J, topic):
+    """{"clock", "header_ns", "log_ns"} of the camera topic's frames: frames/stamps.json. Failed when it is missing or
+    for another topic."""
     st = read_json(Path(J) / "frames" / "stamps.json")
-    if isinstance(st, dict) and st.get("topic") == topic and isinstance(st.get("header_ns"), list) \
-            and isinstance(st.get("log_ns"), list) and st.get("clock") in ("header", "log"):
-        return st
-    print("frames/stamps.json is missing or for another topic; reading the camera's stamps", flush=True)
-    out = {}
-    info = rosbag.probe(path, topic, stamps_out=out)
-    return {"topic": topic, "clock": info["clock"], **out}
+    if not isinstance(st, dict) or st.get("topic") != topic:
+        raise Failed("frames/stamps.json is missing or for another topic; choose the camera topic again to analyze the "
+                     "bag again")
+    return st
 
 
 def fit_matrix(K, size, frame_size, source):
@@ -525,15 +513,10 @@ def project(xyz, T, intr, frame_size):
 
 def rays(info, clouds):
     """lidar_scale.estimate's rays of a rosbag job: each frame's camera points (the clouds' xyz, row for row with the
-    samples), the LiDAR's origin in that frame (info's rays) and the intrinsics that made the samples' pixels. Frames
-    without both are left out, and those views are found without rays."""
-    intr = info.get("intrinsics") or {}
-    out = {}
-    for n, r in (info.get("rays") or {}).items():
-        if n in clouds:
-            out[n] = {"points": clouds[n][0], "origin": r["origin"], "size": r["size"], "D": intr["D"],
-                      "model": intr["model"], "K": fit_matrix(intr["K"], intr["size"], r["size"], intr["source"])}
-    return out
+    samples), the LiDAR's origin in that frame (info's rays) and the intrinsics that made the samples' pixels."""
+    intr = info["intrinsics"]
+    return {n: {"points": clouds[n][0], "origin": r["origin"], "size": r["size"], "D": intr["D"], "model": intr["model"],
+                "K": fit_matrix(intr["K"], intr["size"], r["size"], intr["source"])} for n, r in info["rays"].items()}
 
 
 def to_samples(xyz, T, intr, frame_size):
@@ -561,9 +544,7 @@ def rosbag_samples(J, job, spec, names):
     if not path.is_file():
         raise Failed(f"the uploaded bag {path.name} is not on the server; upload it again")
     found = read_json(J / "frames" / "topics.json") or {}
-    if "lidar" not in found:
-        raise Failed(OLD_TOPICS)
-    lid = next((x for x in found["lidar"] if x["topic"] == topic), None)
+    lid = next((x for x in found.get("lidar") or [] if x["topic"] == topic), None)
     if lid is None:
         why = {x["topic"]: x["why"] for x in found.get("lidar_skipped") or []}
         raise Failed(f"the LiDAR topic {topic} cannot be used: {why[topic]}" if topic in why
@@ -602,7 +583,7 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
     for n in frames:
         with Image.open(J / "scene" / "images" / f"{n}.png") as im:
             sizes[n] = im.size
-    stamps = camera_stamps(J, path, cam)
+    stamps = camera_stamps(J, cam)
     count = len(stamps["log_ns"])
     late = [n for n in frames if int(n[1:]) >= count]
     if late:
@@ -693,7 +674,7 @@ def stray_samples(J, job, spec, names):
     if not path.is_file():
         raise Failed(f"the uploaded export {path.name} is not on the server; upload it again", {"source": source})
     video = (read_json(J / "frames" / "meta.json") or {}).get("video") or {}
-    if video.get("kind") != "stray" or "rotation" not in video:
+    if video.get("kind") != "stray":
         raise Failed("frames/meta.json is not of a Stray Scanner capture; analyze the input again", {"source": source})
     k = stray.turns(video)
     frames = frame_names(J, names)
@@ -836,27 +817,16 @@ def cloud_glb(parts):
             + js + struct.pack("<II", len(binary), 0x004E4942) + binary)
 
 
-def references(rec):
-    """{view: the s that compares it with DA3} of an estimate or its record: the job's combined s when it has one, else
-    the view's own, as the check images pick it, so a failed scale can still be looked at. A view with neither is left
-    out. The combined s, because the differences between views are what the comparison shows."""
+def references(est):
+    """{view: the s that compares it with DA3} of an estimate: the job's combined s when it has one, else the view's
+    own, as the check images pick it, so a failed scale can still be looked at. A view with neither is left out. The
+    combined s, because the differences between views are what the comparison shows."""
     out = {}
-    for v in rec.get("views") or []:
-        s = v.get("s") if rec.get("s") is None else rec["s"]
+    for v in est["views"]:
+        s = v.get("s") if est["s"] is None else est["s"]
         if s is not None:
             out[v["name"]] = s
     return out
-
-
-def changed_views(est, rec):
-    """The names of the views that an estimate and its record do not share, or whose s or used points differ by more
-    than SAME_S."""
-    def facts(r):  # {view: (its s, its used points)}
-        return {v["name"]: (v.get("s"), v.get("points_used")) for v in r.get("views") or []}
-
-    a, b = facts(est), facts(rec)
-    return sorted(n for n in a.keys() | b.keys() if n not in a or n not in b or any(
-        x != y and (None in (x, y) or abs(x - y) > SAME_S * abs(y)) for x, y in zip(a[n], b[n])))
 
 
 def view_diff(xyz, p, s):
@@ -945,10 +915,7 @@ def scale(job_dir):
     J = Path(job_dir)
     t0 = time.time()
     job = steps.job(J)
-    try:
-        spec = steps.lidar(job)
-    except ValueError as e:
-        raise SystemExit(f"job.json: {e}") from None
+    spec = steps.lidar(job)
     if spec is None:
         raise SystemExit("this job has no LiDAR (job.json lidar is null), so it has no metric scale stage")
     if spec["kind"] not in SOURCES:
@@ -1008,66 +975,13 @@ def scale(job_dir):
     return rec
 
 
-def rewrite_clouds(job_dir):
-    """Write J/lidar/cloud/<view>.glb and J/run/lidar/<i>.glb again from the job's stored samples, clouds, masks and DA3
-    output, as the stage and views.build_run would (a run without the LiDAR scale has no copies), and nothing else.
-    Returns the views written. SystemExit with the reason, before it writes, when the job is busy, when the stored data
-    is missing or its estimate does not give pool/lidar.json's scale and each view's s and used points."""
-    from harpor.stage_a.mvsam3d import view_names
-    from harpor.webapp import jobs, steps
-
-    J = Path(job_dir)
-    job = steps.job(J)
-    if job.get("status") in jobs.ACTIVE:
-        raise SystemExit("the job is busy, and a stage may be rewriting these files; run this after it stops")
-    try:
-        spec = steps.lidar(job)
-    except ValueError as e:
-        raise SystemExit(f"job.json: {e}") from None
-    if spec is None:
-        raise SystemExit("this job has no LiDAR (job.json lidar is null), so it has no clouds")
-    rec, names = read_json(J / "pool" / "lidar.json"), view_names(J / "pool")
-    if not isinstance(rec, dict) or not names or not (J / "pool" / "da3_output.npz").is_file():
-        raise SystemExit("the job has no pool/lidar.json or no DA3 depth; run prep, da3 and the lidar stage first")
-    hit = cache_read(J, (read_json(J / "lidar" / "samples.json") or {}).get("key"), names)
-    if hit is None:
-        raise SystemExit("the job has no stored LiDAR samples (lidar/samples.json); run the lidar stage")
-    samples, info, clouds = hit
-    pts = {}
-    try:
-        cameras = rays(info, clouds) if spec["kind"] == "rosbag" else None
-        est = lidar_scale.estimate(J / "pool", {n: samples[n] for n in names if n in samples}, points_out=pts,
-                                   source=spec["kind"], rays=cameras)
-    except (ValueError, OSError, zipfile.BadZipFile) as e:  # masks that are gone, a damaged DA3 file, or a pool that
-        raise SystemExit(f"the stored data cannot be used: {e}") from None  # prep and da3 left inconsistent
-    refs, want, changed = references(est), references(rec), changed_views(est, rec)
-    if changed or set(refs) != set(want) or any(abs(refs[n] / want[n] - 1) > SAME_S for n in refs):
-        raise SystemExit(f"the stored data gives s {est['s']} but pool/lidar.json has s {rec.get('s')}"
-                         + (f", and other results for {', '.join(changed)}" if changed else "")
-                         + ", so the samples, masks or DA3 output changed after the lidar stage; nothing was written; "
-                         "run that stage again")
-    shown = {n: clouds[n] for n in names if n in clouds}
-    out = write_clouds(J / "lidar" / "cloud", shown, pts, compared(shown, pts, refs, cameras))
-    run = read_json(J / "run" / "prep.json") or {}
-    copies = 0
-    for i, v in enumerate((run.get("views") or []) if run.get("metric_scale") is not None else ()):
-        src = J / "lidar" / "cloud" / f"{v.get('pool_name')}.glb"
-        if src.is_file():
-            (J / "run" / "lidar").mkdir(exist_ok=True)
-            replace(J / "run" / "lidar" / f"{i}.glb", lambda tmp: shutil.copyfile(src, tmp))
-            copies += 1
-    print(f"wrote the clouds of {len(out)} views and {copies} copies in run/lidar", flush=True)
-    return out
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="step", required=True)
-    for step, what in (("scale", "the metric scale of a job's pool from its LiDAR"),
-                       ("clouds", "write a job's clouds again from its stored data, with the comparison with DA3")):
-        sub.add_parser(step, help=what).add_argument("--job", required=True, help="job folder with job.json")
+    sub.add_parser("scale", help="the metric scale of a job's pool from its LiDAR").add_argument(
+        "--job", required=True, help="job folder with job.json")
     a = ap.parse_args(argv)
-    {"scale": scale, "clouds": rewrite_clouds}[a.step](a.job)
+    scale(a.job)
 
 
 if __name__ == "__main__":

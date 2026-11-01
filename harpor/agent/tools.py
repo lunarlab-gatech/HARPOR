@@ -206,7 +206,7 @@ def time_left(work, control):
 
 
 def _kill_group(p):
-    with contextlib.suppress(ProcessLookupError):
+    with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(p.pid, signal.SIGKILL)
     p.wait()
 
@@ -248,7 +248,7 @@ def blender_argv(blender, script, *args, blend=None):
 def _on_sigterm(signum, frame):
     # No wait here: the interrupted code may hold the child's wait lock.
     for p in list(_children):
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(p.pid, signal.SIGKILL)
     sys.exit(128 + signum)
 

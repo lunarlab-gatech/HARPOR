@@ -246,11 +246,8 @@ def build_run(pool_dir, names, run_dir, metric=None, clouds=None):
 def metric_scale(job_dir, job):
     """The LiDAR scale s from J/pool/lidar.json, or None for a job without LiDAR (steps.lidar). Stops with
     the reason when the lidar stage found no usable scale."""
-    try:
-        if steps.lidar(job) is None:
-            return None
-    except ValueError as e:
-        raise SystemExit(f"job.json: {e}") from None
+    if steps.lidar(job) is None:
+        return None
     path = Path(job_dir) / "pool" / "lidar.json"
     if not path.is_file():
         raise SystemExit("LiDAR is on but pool/lidar.json is missing; run the metric scale (LiDAR) stage first")

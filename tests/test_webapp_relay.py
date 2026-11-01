@@ -92,7 +92,7 @@ def test_the_routes_cover_the_relayed_routes_of_the_migrations():
 
 BODIES = [{}, {"agent": "astra"}, {"agent": "opus"}, {"agent": "none"}, {"agent": True}, {"agent": False},
           {"agent": None}, {"agent": "bogus"}, {"agent": 5}, {"agent": ["opus"]}]
-JOBS = [{"agent": "astra"}, {"agent": "opus"}, {"agent": "none"}, {"agent": True}, {"agent": False}, {}]
+JOBS = [{"agent": "astra"}, {"agent": "opus"}, {"agent": "none"}]
 
 
 def test_effective_agent_follows_server_agent_of():

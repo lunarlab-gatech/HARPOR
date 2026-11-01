@@ -64,16 +64,17 @@ PARTS_AFTER = "propose"  # an unconfirmed "vlm_edit" part list pauses the job he
 STAGES = [{"name": n, "gpu": n in GPU} for n in NAMES]
 CODE = Path(__file__).resolve().parents[2]  # the repo root, which fake mode runs from and Config.code defaults to
 
-# Copied from the ICE run scripts of Stage A and of VoMP; keep them exactly. The exception is TORCH_CUDA_ARCH_LIST,
-# which no stage sets: nvdiffrast, which builds its plugin at run time, clears it and builds for the visible GPUs.
+# Copied from the ICE run scripts of Stage A and of VoMP, with two differences. OMP_NUM_THREADS is 16 unless the
+# server's environment sets it. No stage sets TORCH_CUDA_ARCH_LIST: nvdiffrast, which builds its plugin at run time,
+# clears it and builds for the visible GPUs.
 STAGE_A_ENV = ('HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions '
-               'OMP_NUM_THREADS=16 CONDA_PREFIX=$G/envs/sam3d '
+               'OMP_NUM_THREADS=${OMP_NUM_THREADS:-16} CONDA_PREFIX=$G/envs/sam3d '
                'CPATH=$G/envs/sam3d/targets/x86_64-linux/include '
                'LIBRARY_PATH=$G/envs/sam3d/targets/x86_64-linux/lib:$G/envs/sam3d/lib PATH=$G/envs/sam3d/bin:$PATH')
 SAM3_ENV = "HF_HOME=$G/.cache/huggingface"
 VOMP_ACTIVATE = 'eval "$($G/tools/micromamba shell hook -s bash)"; micromamba activate $G/envs/vomp11'
 VOMP_ENV = ('CUDA_HOME=$CONDA_PREFIX HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch '
-            'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 OMP_NUM_THREADS=16 '
+            'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 OMP_NUM_THREADS=${OMP_NUM_THREADS:-16} '
             'CPATH=$CONDA_PREFIX/targets/x86_64-linux/include LIBRARY_PATH=$CONDA_PREFIX/targets/x86_64-linux/lib:$CONDA_PREFIX/lib')
 MARKERS = {"topics": "frames/topics.json", "frames": "frames/meta.json", "prep": "pool/prep.json",
            "sam3d": "run/pose.json", "place": "run/placement.json", "propose": "run/proposal.json",
@@ -98,8 +99,7 @@ class Config:
 
 
 def config_from_env():
-    G = Path(os.environ.get("HARPOR_ROOT") or os.environ.get("GATOR_ROOT")
-             or Path("~/scratch").expanduser().resolve() / "gator")
+    G = Path(os.environ.get("HARPOR_ROOT") or Path("~/scratch").expanduser().resolve() / "gator")
     demos = os.environ.get("WEBAPP_DEMOS")
     return Config(G=G, runs=Path(os.environ.get("WEBAPP_RUNS") or G / "webapp_runs"),
                   fake=os.environ.get("WEBAPP_FAKE") == "1", demos=Path(demos).expanduser() if demos else None)
@@ -115,33 +115,31 @@ def _json(path):
 
 
 def agent(job):
-    """job.json's "agent": astra, opus or none. Jobs made before the choice hold true (astra) or false
-    (none), and older ones nothing (astra). ValueError for anything else."""
-    a = job.get("agent", True)
-    if a is True or a is False:
-        return "astra" if a else "none"
+    """job.json's "agent": astra, opus or none. ValueError for anything else."""
+    a = job.get("agent")
     if isinstance(a, str) and a in AGENTS:
         return a
     raise ValueError(f"agent is one of {', '.join(AGENTS)}")
 
 
 def articulated(job):
-    """True when the job builds an articulated object (job.json "articulated"); older jobs are rigid."""
+    """True when the job builds an articulated object (job.json "articulated"). A run folder without job.json
+    gives {} here (physics_auto) and is not articulated."""
     return job.get("articulated") is True
 
 
 def parts_mode(job):
     """Who lists the parts (job.json "parts" "mode", PARTS_MODES; default "vlm"). A job without an agent
     has no VLM, so its mode is "user". ValueError for an unknown mode."""
-    mode = (job.get("parts") or {}).get("mode") or "vlm"
+    mode = job["parts"].get("mode") or "vlm"
     if mode not in PARTS_MODES:
         raise ValueError(f"the parts mode is one of {', '.join(PARTS_MODES)}")
     return "user" if agent(job) == "none" else mode
 
 
 def turntable(job):
-    """True when the job asks for the 360 video (job.json "turntable"); older jobs do not."""
-    return job.get("turntable") is True
+    """True when the job asks for the 360 video (job.json "turntable")."""
+    return job["turntable"] is True
 
 
 def needs_key(stage, job):
@@ -172,7 +170,7 @@ def command(stage, job, cfg, key_file=None):
     lines = ["set -eo pipefail", f"G={q(str(cfg.G))}", f"J={q(str(Path(cfg.runs) / job['id']))}",
              f"C={q(str(cfg.code))}"]
     run = "cd $C && "
-    sif = " --sif $G/sif/gator-agent.sif"  # the agent's container, which also runs Blender
+    sif = " --sif $G/sif/harpor-agent.sif"  # the agent's container, which also runs Blender
     if stage in ("topics", "frames", "extract", "lidar", "select", "package"):
         module = {"topics": "harpor.webapp.video topics", "frames": "harpor.webapp.video analyze",
                   "extract": "harpor.webapp.video extract", "lidar": "harpor.webapp.lidar scale",
@@ -274,17 +272,15 @@ def done(stage, job_dir):
 
 
 def source(job):
-    """job.json's "source" ({"kind": "video", "rosbag" or "stray", "topic"}); jobs made before rosbag input
-    are videos."""
-    return job.get("source") or {"kind": "video", "topic": None}
+    """job.json's "source": {"kind": "video", "rosbag" or "stray", "topic"}."""
+    return job["source"]
 
 
 def lidar(job):
-    """job.json's "lidar": None (missing, null or false: no LiDAR, as in older jobs),
-    {"kind": "rosbag", "topic": T}, a LiDAR topic of the job's bag, or {"kind": "stray"}, the depth of a
-    Stray Scanner capture. ValueError for anything else."""
-    v = job.get("lidar")
-    if v is None or v is False:
+    """job.json's "lidar": None (no LiDAR), {"kind": "rosbag", "topic": T}, a LiDAR topic of the job's bag, or
+    {"kind": "stray"}, the depth of a Stray Scanner capture. ValueError for anything else."""
+    v = job["lidar"]
+    if v is None:
         return None
     if isinstance(v, dict) and v.get("kind") == "rosbag" and isinstance(v.get("topic"), str) and v["topic"]:
         return {"kind": "rosbag", "topic": v["topic"]}
@@ -320,23 +316,20 @@ def guard(stage, job_dir):
 def skip(stage, job_dir):
     """The reason to skip a stage, else None: topics for a video and a Stray Scanner capture, lidar without
     LiDAR, propose and parts for a rigid object, the agent when the job has none or on a poor Stage A
-    placement, and turntable unless the job asks for the 360 video. A malformed "lidar" is not skipped: the
-    stage fails with the reason."""
+    placement, and turntable unless the job asks for the 360 video. physics_auto also asks about the agent stage
+    of a run folder without job.json: there only the placement decides."""
     job = _json(Path(job_dir) / "job.json")
     if stage == "topics":
         return {"rosbag": None, "stray": "Stray Scanner capture"}.get(source(job)["kind"], "video input")
     if stage == "lidar":
-        try:
-            return None if lidar(job) else "turned off: no LiDAR"
-        except ValueError:
-            return None
+        return None if lidar(job) else "turned off: no LiDAR"
     if stage in ("propose", "parts"):
         return None if articulated(job) else "turned off: rigid object"
     if stage == "turntable":
         return None if turntable(job) else "turned off"
     if stage != "agent":
         return None
-    if agent(job) == "none":
+    if job and agent(job) == "none":
         return ("turned off: without the agent the parts get no joints, so physics welds them into one body"
                 if articulated(job) else "turned off: physics uses the Stage A mesh")
     iou = _json(Path(job_dir) / "run" / "placement.json").get("check", {}).get("mean_mask_iou")
@@ -362,7 +355,7 @@ def waits_for_parts(job_dir, job=None):
     """True while the job waits in review for the user to confirm or edit the VLM's part list
     (pause_after propose). job: job.json's dict, if the caller has read it."""
     job = job if job is not None else _json(Path(job_dir) / "job.json")
-    return job.get("status") == "review" and (job.get("stages") or {}).get(PARTS_AFTER, {}).get("status") == "done" \
+    return job.get("status") == "review" and job["stages"][PARTS_AFTER]["status"] == "done" \
         and pause_after(PARTS_AFTER, job_dir)
 
 

@@ -243,7 +243,7 @@ def load_w(path):
     import trimesh
 
     s = trimesh.load(path, force="scene")
-    m = s.to_geometry() if hasattr(s, "to_geometry") else s.dump(concatenate=True)
+    m = s.to_geometry()
     return frames.gltf_to_w(np.asarray(m.vertices)), np.asarray(m.faces)
 
 

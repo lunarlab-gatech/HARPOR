@@ -7,7 +7,7 @@
 HARPOR (High-fidelity Articulated sim-Ready Object Reconstruction) turns one phone video, rosbag or
 Stray Scanner capture of one object into a textured GLB and MJCF, USD and URDF models. It follows the
 two stages of GATOR (arXiv 2610.11215v1): Stage A generates a posed mesh from several views (here
-MV-SAM3D; GATOR's own generator is deferred, `research.md` section 5), and Stage B is an LLM agent
+MV-SAM3D; we do not build GATOR's own generator), and Stage B is an LLM agent
 that repairs the mesh in Blender. VoMP then predicts the materials for physics. The web app runs
 every stage on PACE ICE or on a user's own GPU machine (note 10, Flow).
 
@@ -54,7 +54,7 @@ Not verified yet:
 | `LICENSE` | MIT, for HARPOR's own code. Third-party models and the vendored web libraries keep their own licenses (the Licenses bullet above, and `harpor/webapp/static/vendor/licenses/`) |
 | `docs/build_plan.md` | This file: overview, design and build notes |
 | `docs/public_site.md` | The public HARPOR site on Supabase: personal workers on users' own GPU machines, the owner's setup and the live checks |
-| `docs/research.md` | Research findings with sources: the paper and every results table, MV-SAM3D and SAM 3D, Blender, SAM 3, datasets, baselines and metrics, VoMP and the simulators, and the deferred generator design |
+| `docs/research.md` | Research findings with sources: the paper and every results table, MV-SAM3D and SAM 3D, Blender, SAM 3, VoMP and the simulators |
 
 ## Component diagram
 
@@ -89,7 +89,7 @@ flowchart TB
 | Claude Opus 5.5 | Anthropic API, model `claude-opus-5-5` | API key | the alternative agent, and the VLM that lists the parts (note 11) |
 | anthropic 1.15.0 | pip, in `envs/sam3d` and `envs/web` | MIT | runs Claude Opus 5.5 (`harpor/agent/claude_agent.py`), the part list of `propose` (note 11) and the web app's key check |
 | Blender 5.2.2 LTS | blender.org | GPL | agent workspace and review renders |
-| trimesh, scipy | pip | open source | GLB handling, the part vote and the photo-match scores |
+| trimesh, scipy | pip | open source | GLB handling and the part vote |
 | PyAV 19.0.1, rosbags 0.11.8 (with ruamel.yaml 0.19.1), FastAPI 0.143.2, uvicorn 0.54.0 | pip | BSD (the PyAV wheel bundles FFmpeg, LGPL), Apache-2.0, MIT, BSD | the web app: video and rosbag decoding, the calibration file (note 12), the server (note 10) |
 | Stray Scanner | iPhone app | free, open source | the iPhone LiDAR capture for the metric scale (note 12) |
 | model-viewer 4.4.0 | Google CDN locally, vendored copy on the public site (`site.py`) | Apache-2.0 | the web app's GLB viewers |
@@ -266,7 +266,7 @@ MV-SAM3D (`devinli123/MV-SAM3D` at abb04b5) fuses several photos of one object i
 generation. It needs a pointmap per view, all in one frame, which Depth Anything 3 (DA3, at
 3d835ec, model `DA3NESTED-GIANT-LARGE-1.1`, metric) gives together with every view's camera.
 
-Setup (`runs/mvsam3d_setup/cmd.sh`, about 10 min):
+Setup (`setup/mvsam3d.sh`, about 10 min):
 - MV-SAM3D reuses `envs/sam3d` and the SAM 3D weights. Its requirement files are the same as SAM
   3D's. `mvsam3d.py` puts the MV-SAM3D clone first on `sys.path` and checks that `sam3d_objects`
   was imported from it.
@@ -326,12 +326,13 @@ order. `run_container_session` runs the agent once per object in its own Apptain
 the ICE node, with `session/prompt.txt` on stdin and the JSONL events in `session/codex.jsonl`:
 
 ```bash
-apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
+apptainer exec --nv --containall --no-mount bind-paths \
   --bind <root>/work:/work --bind <root>/session:/session \
   --bind harpor/agent/bin:/opt/gator/bin:ro --bind <socket dir>:/opt/gator/sock:ro \
-  --env-file ~/.config/gator/openai.env --env CODEX_HOME=/session/codex_home \
+  --bind /etc/resolv.conf:/etc/resolv.conf:ro --bind /etc/hosts:/etc/hosts:ro \
+  --env-file ~/.config/harpor/openai.env --env CODEX_HOME=/session/codex_home \
   --env GATOR_SOCKET=/opt/gator/sock/tools.sock --env PREPEND_PATH=/opt/gator/bin \
-  --pwd /work gator-agent.sif \
+  --pwd /work harpor-agent.sif \
   sh -c 'export CODEX_API_KEY="$OPENAI_API_KEY"; unset OPENAI_API_KEY; exec "$@"' codex \
   codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --strict-config \
     -C /work -m gpt-6-astra -c 'model_reasoning_effort="xhigh"' --json -o /session/last_message.txt -
@@ -411,43 +412,44 @@ apptainer exec --nv --containall --no-mount /scratch --no-mount /storage \
 - Astra sessions on the teddy, the MV-SAM3D toy, the round table, the office chair and five tabletop
   objects took 215 to 633 s of wall time. On the teddy, the extents changed by under 1.5%. Mean mask
   IoU moved by at most about 0.02.
-- Videos: `harpor/agent/blender/turntable.py` renders a 360-degree turntable of one or more GLBs in
-  frame W, each asset with its own camera so all panels show the same view, joined with Blender's
-  sequencer (6 s, 30 fps, H.264). Optional keys: an asset's `matrix` (4x4, row-major) maps
-  the GLB's Blender world into W first, `label` may be left out, `elevation` lifts the cameras (degrees
-  above the horizontal), and `frames_dir` (one asset) writes PNG frames instead of a video. The web
-  app's 360 video uses them (note 10). `python3 harpor/agent/loop_trace.py RUN_DIR --turntable-args
-  ARGS.json` prints a session's loop in order and writes turntable arguments for the original and
-  every export.
+- Videos: `harpor/agent/blender/turntable.py` renders a 360-degree turntable of one GLB in frame W
+  into the PNG frames of `frames_dir`. The asset's optional `matrix` (4x4, row-major) maps the GLB's
+  Blender world into W first, and `elevation` lifts the camera (degrees above the horizontal). The web
+  app's 360 video encodes these frames (note 10). `python3 harpor/agent/loop_trace.py RUN_DIR` prints
+  a session's loop in order.
 
 #### Agent setup and pilot checks on ICE
 
-Files: `containers/gator-agent.def` (Ubuntu 24.04, Node.js 24.21.0, Codex CLI 0.162.1, Blender
+Files: `containers/harpor-agent.def` (Ubuntu 24.04, Node.js 24.21.0, Codex CLI 0.162.1, Blender
 5.2.2 and Blender's X and GL libraries) and `harpor/agent/codex/config.toml`.
 ICE allows unprivileged `--fakeroot` builds (tested 2026-10-14). The ICE `apptainer.conf` binds
-`/scratch` and `/storage` into every container, so the agent runs with `--containall` and both
-`--no-mount` flags, which keeps the rest of scratch (including other projects' data) out of its
-reach.
+`/scratch` and `/storage` into every container, so every container here runs with `--containall`
+and `--no-mount bind-paths`. That flag turns off every `bind path` in `apptainer.conf`, which keeps
+the rest of scratch (including other projects' data) out of the agent's reach. The Codex container
+is the only one that needs the network, so only it binds `/etc/resolv.conf` and `/etc/hosts`,
+read-only. The Claude shell (`--net --network none`) and the Blender containers do not.
 
 1. **Build the image** in a terminal of the ICE session:
 
    ```bash
    module purge; G=$(readlink -f ~/scratch)/gator; mkdir -p $G/sif
    export APPTAINER_TMPDIR=${TMPDIR:-/tmp} APPTAINER_CACHEDIR=${TMPDIR:-/tmp}/apptainer_cache
-   apptainer build --fakeroot $G/sif/gator-agent.sif $G/gator_clone/containers/gator-agent.def
+   apptainer build --fakeroot $G/sif/harpor-agent.sif $G/gator_clone/containers/harpor-agent.def
    ```
 2. **Check the sandbox and the GPU render.** The first line must show that `/storage` and
    `/scratch` do not exist inside, and the second must save a frame rendered with OptiX:
 
    ```bash
-   AG="apptainer exec --nv --containall --no-mount /scratch --no-mount /storage $G/sif/gator-agent.sif"
+   AG="apptainer exec --nv --containall --no-mount bind-paths $G/sif/harpor-agent.sif"
    $AG bash -c 'ls /storage /scratch 2>&1 | head -2; nvidia-smi -L'
    $AG bash -c 'cd /tmp && blender -b --factory-startup -E CYCLES -o /tmp/smoke_#### -f 1 -- --cycles-device OPTIX 2>&1 | grep -iE "optix|saved|error" | head -5'
    ```
 
    Result on 2026-10-14: both paths are missing inside, the L40S is visible, and the OptiX frame
-   saved in 11 s.
-3. **API key.** You create `~/.config/gator/openai.env` with one line, `OPENAI_API_KEY=...`, and
+   saved in 11 s. ICE job 6710815 repeated the checks with `--no-mount bind-paths`: both paths are
+   missing, the GPU and OptiX work, an HTTPS request gets a 401 reply, and explicit `--bind` and
+   `--network none` still work. The container clock reads UTC.
+3. **API key.** You create `~/.config/harpor/openai.env` with one line, `OPENAI_API_KEY=...`, and
    `chmod 600` it. Apptainer reads it with `--env-file`, so the value must not contain spaces or
    quotes.
 4. **Long sessions** can be launched with `nohup setsid srun ...` on the login node, so a dropped
@@ -469,8 +471,7 @@ reach.
   `view_image` (PNG or JPEG under `/work`, downscaled to at most 2576 px, the Opus 5.5 limit; a PNG
   stays lossless while its base64 fits 2.5 MB, a larger image goes as JPEG, and a session shows at
   most 100 images and 24 MB). The system prompt is `harpor/agent/claude/SYSTEM.md`, the work-folder
-  manual; the paper's prompt is the first user message. `--image-side N` and `--system PATH` (and
-  `prepare_session(image_side=, system=)`) change the image cap and the manual for experiments.
+  manual; the paper's prompt is the first user message.
 - The key stays in the host process's memory. The container never sees it, and the log replaces
   it with `[redacted]`. The log, `session/claude.jsonl`, is outside the container's mounts.
   `result.json` adds the agent, model, turns, tokens and a cost estimate. Exit codes: 0 ended or
@@ -481,32 +482,35 @@ reach.
 - Every helper except `finish` ends its output with `time left: N s of the 600 s budget` (both
   agents). The Claude manual's Measured times come from the Opus sessions of 2026-10-17.
 - Opus is faster than Astra on the same Stage A meshes, stops sooner and calls more results
-  `complete`. On `photo_match` (note 6), the later Opus table sessions match or beat Astra on
-  several scores. The gap that remains is in how Opus finishes: it names leftover flaws as
+  `complete`. In the photo-match comparison (note 6), the later Opus table sessions match or beat
+  Astra on several scores. The gap that remains is in how Opus finishes: it names leftover flaws as
   limitations and still says `complete`, and it does not confirm fixes with `--clay` or `--detail`.
   On the table, the time-left lines, the Measured times and effort `max` cut its unused time from 402
   to 421 s to a median of 280 s, while restating the verdict rule changed nothing. A `finish` check
   that refuses `complete` while a filed defect has no later edit and review would have caught neither
   table session at effort `max`, because both fixed the defect they filed.
 
-### 6. Evaluation (`harpor/eval/`)
+### 6. Evaluation
 
-- `python -m harpor.eval.photo_match ROOT... [--dino] [--json OUT]` scores a session's renders against
-  its photos per view, with no reference mesh: mask IoU, colour ΔE inside the mask, pixel ΔE,
-  gradient correlation (edge), and the same two over the photo's background (bg_de, bg_edge; the
-  render is composited over the photo with the object area filled from nearby pixels).
+The photo-match scores were removed. `harpor/eval/photo_match.py` is in commit 91003c9.
 
 ### 7. Runtime environments (all on ICE, under `~/scratch/gator`)
 
 | Environment | Contents | Notes |
 |---|---|---|
 | `envs/sam3d` (micromamba) | SAM 3D Objects, MoGe, nvdiffrast (note 4), anthropic 1.15.0 (note 5) | MV-SAM3D runs here too, with its clone first on `sys.path` (note 4b); so does the agent controller |
-| `envs/da3` (venv) | Depth Anything 3, torch 2.14.1+cu130 (note 4b) | Separate so DA3's dependencies cannot change `envs/sam3d` |
+| `envs/da3` (venv) | Depth Anything 3, torch 2.14.1+cu130 (note 4b) | Separate so DA3's dependencies cannot change `envs/sam3d`. Built by `setup/mvsam3d.sh` |
 | `envs/web` (micromamba) | Python 3.12, fastapi 0.143.2, uvicorn 0.54.0, av 19.0.1, rosbags 0.11.8, anthropic 1.15.0 (note 10) | The web app's server; every stage runs in its own env |
 | `envs/sam3seg` (micromamba) | Python 3.12, torch 2.14.1+cu130, transformers 5.20.0 (note 3) | SAM 3 masks; transformers 5.20 needs torch 2.6 or newer, so it cannot go into `envs/sam3d` |
-| `sif/gator-agent.sif` (Apptainer) | Node.js 24.21.0, Codex CLI 0.162.1, Blender 5.2.2 | Built from `containers/gator-agent.def` with `--fakeroot` (note 5); run with `--nv` for Cycles OptiX |
-| `envs/mujoco` (micromamba) | Python 3.11, mujoco 3.16.0, coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF export; no pytest |
-| `envs/vomp11` (micromamba) | VoMP v1.1 (641a22d) in `VoMP/`, Python 3.11, torch 2.4.0+cu121, bpy 4.2.0, kaolin 0.18.0, spconv-cu121 2.3.8 (note 9) | Built by `runs/vomp11_setup/cmd.sh` |
+| `sif/harpor-agent.sif` (Apptainer) | Node.js 24.21.0, Codex CLI 0.162.1, Blender 5.2.2 | Built from `containers/harpor-agent.def` with `--fakeroot` (note 5); run with `--nv` for Cycles OptiX |
+| `envs/mujoco` (micromamba) | Python 3.11, mujoco 3.16.0, coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF export; no pytest. Built by `setup/mujoco.sh`, which has not been run as a recipe (note 9) |
+| `envs/vomp11` (micromamba) | VoMP v1.1 (641a22d) in `VoMP/`, Python 3.11, torch 2.4.0+cu121, bpy 4.2.0, kaolin 0.18.0, spconv-cu121 2.3.8 (note 9) | Built by `setup/vomp11.sh` |
+
+`setup/mvsam3d.sh` builds `envs/da3`, `setup/vomp11.sh` builds `envs/vomp11` and `setup/mujoco.sh` builds
+`envs/mujoco`, and they fetch the code and weights that go with them. Run them with `bash`. `setup/mvsam3d.sh` needs
+`envs/sam3d` from note 4 first, and the other two need nothing from it. They work under `$HARPOR_ROOT`, by default
+`~/scratch/gator`, and they are not tied to ICE. `setup/common.sh`, which they all source, runs `module purge` only
+where the `module` command exists, and it fetches micromamba when `tools/` has none.
 
 ICE limits that matter: 300 GB of scratch and 1 million files, 30 GB home, and GPU sessions of at
 most 16 h. Scratch is not backed up, and files untouched for 120 days are deleted at the end of the
@@ -568,12 +572,6 @@ Steps for one object:
      without a texture gets the mean vertex colour. omni.physx re-cooks hulls with more than 64
      polygons (most CoACD hulls) into hulls 0.3 to 4 mm smaller, so USD and MJCF colliders differ by
      that much. Normal and occlusion maps are not exported.
-6. **Combined scenes.** `python -m harpor.physics.combine_mjcf ROOT` lays all objects out on one floor
-   (`all_objects.xml`); with `--stack-on table --stack pan,plate,coffeecup,glass,knife,fork` it puts
-   the items in one column above the table, 4 cm apart, turned 40 degrees and tilted 8 degrees each, so
-   they fall onto each other (`table_stack.xml`, 1 ms timestep, implicitfast). Nothing touches at the
-   start. `python -m harpor.physics.usd_scene ROOT/<scene>.xml` writes the matching Isaac Sim scene with
-   the same body poses and `physxScene:timeStepsPerSecond` from the MuJoCo timestep.
 
 An articulated GLB (joints in its node extras) takes the same steps with links. Note 11 has the details.
 - **Align:** the joints move from W to S, and `--links-out DIR` also writes one GLB per link.
@@ -582,13 +580,21 @@ An articulated GLB (joints in its node extras) takes the same steps with links. 
 - **Mass:** `mass.combine` adds the links' rigid bodies into one for the whole object.
 - **MJCF:** one body per link, nested under its parent. A link gets a hinge or slide joint, or no
   joint when its joint is fixed or when it is a loose link welded to its holder. A world joint on the
-  root drops the root's free joint.
+  root or `--fixed-base` drops the root's free joint.
 - **USD:** an articulation root, one rigid body per link and one joint prim per joint.
 - **URDF:** `python -m harpor.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
   (in `envs/mujoco`) writes `model.urdf` from the MJCF's meshes and inertials. A rigid object gives one
   link.
 
-Setup traps on ICE (`runs/vomp11_setup/cmd.sh`):
+Setup traps (`setup/vomp11.sh` builds `envs/vomp11`, and `setup/mujoco.sh` builds `envs/mujoco`):
+- `setup/vomp11.sh` builds the CUDA extensions for the GPUs in `TORCH_CUDA_ARCH_LIST` (note 4). It takes
+  the list from the environment, or else from `nvidia-smi --query-gpu=compute_cap --format=csv,noheader`.
+  `nvidia-smi` lists only the GPUs of the machine that runs the script, so on a cluster with mixed GPUs
+  set the whole list by hand. On ICE, run `TORCH_CUDA_ARCH_LIST="8.9;9.0" bash setup/vomp11.sh`.
+- VoMP's `install_env.sh` installs the X and GL libraries with sudo apt. `setup/vomp11.sh` skips those
+  steps, so a machine without the libraries needs them first. ICE nodes have them.
+- `setup/mujoco.sh` was rebuilt on 2026-11-01 from the installed versions in `envs/mujoco`, and it has
+  not been run as a recipe. It pins the packages that HARPOR imports, and pip picks their dependencies.
 - VoMP's `install_env.sh` asks for `spconv-cu120==2.3.8` with CUDA 12.1, but spconv-cu120 stops
   at 2.3.6 on PyPI. We use `spconv-cu121==2.3.8`.
 - The renders use Cycles on the GPU with no CPU fallback, so step 2 must run on a GPU node.
@@ -674,7 +680,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    the request (`relay.build`). The server checks that it is one of the bag's LiDAR topics and stores
    it in job.json `calibration.lidar_topic` (null when none was given). Start then refuses another
    LiDAR topic, and the reason names both topics. The lidar stage refuses it too, so a retry or a run
-   from lidar cannot use it either. A calibration without `lidar_topic` (older jobs) is not checked.
+   from lidar cannot use it either. A calibration with a null `lidar_topic` is not checked.
    With LiDAR,
    `/selection` adds the record in short (`lidar_compact`) for the review page.
    The box "Make a 360 video" (off by default; job.json "turntable") adds the `turntable` stage at the
@@ -722,7 +728,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    from turntable (shown on a done job whose video failed) runs it and `package` again (`Runner.resume`).
    The render has `RENDER_TIMEOUT_S`. Fake mode runs the real stage with the fake Blender, whose frames are the GLB's
    outline. `tests/test_webapp_turntable.py` checks the upright turn, the binds, the render with the fake
-   Blender and the encode. Not checked on ICE yet: the upright turn, the render time and the file size.
+   Blender, the encode, and `blender/turntable.py` itself on stand-ins for `bpy`. Not checked on ICE yet: the upright turn, the render time and the file size.
 
 **UI** (`static/`, plain HTML, CSS and JS with no build step). What users see: `static/help.html`.
 - Tabs. A job page shows the header, the status line, the next step, the warnings,
@@ -821,8 +827,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
     calibration upload. The link line gives the TF topic and the chain of frames; or "Linked by the
     calibration <file>", with "(it replaces /tf_static: ...)" when TF links the topics too; or a
     warning when the calibration was made for another LiDAR topic; or "No TF link: upload a
-    calibration"; or, for a bag listed by an older version (no `camera_axes_from`), the hint "No TF
-    link in the bag's first 5 s: Start checks the whole bag". An uploaded calibration shows its summary (the LiDAR's distance from the camera in
+    calibration". An uploaded calibration shows its summary (the LiDAR's distance from the camera in
     cm and its turn in degrees, and the time offset when the file gives one, 0 included), with
     Replace and Remove.
   - The stage label is "metric scale (LiDAR)".
@@ -874,9 +879,9 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   at what time in the video (the kept frame before the view's frame when the preview skipped it).
   After `place`, the button "Mesh fit" swaps every image for place's overlay
   (`run/overlay_<i>.png`); it looks pressed while it is on, and the hint names the colors. A job
-  analyzed before previews says "No preview video.", and a job whose preview file is gone "Preview
-  video missing." Before the views are selected, and while a new selection runs, the strip says "No
-  views selected yet." The video is drawn once per preview file, so a refresh or a new selection
+  whose preview file is gone says "Preview video missing." Before the views are selected, and while
+  a new selection runs, the strip says "No views selected yet." The video is drawn once per preview
+  file, so a refresh or a new selection
   does not stop it. The views are drawn once per selection. On a running job's page, the event that
   says `select` is done draws the views, and the event that says `place` is done adds the toggle
   without drawing them again. A portrait preview gets a narrow box, without black bars. The video
@@ -885,7 +890,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   for a range past the end), so the browser can seek; the file route also answers HEAD.
   `GET /api/jobs/{id}` adds "preview" (`server.preview_of`): the record with "seek" (for each view of
   `selection.json`, the frame that the preview shows and its time in the preview), `{"error": ...}`,
-  `{"missing": true}`, or null for an older job.
+  `{"missing": true}`, or null before the frames stage ran.
 - LiDAR points: a job with LiDAR shows "LiDAR points" under the views, once they are selected
   (`app.js` `renderCloud`). A picker ("view 0", "view 2", ...) lists the views that have a file,
   view 0 first; Reset goes back to the start. The canvas draws the view's whole scan, the camera and
@@ -971,7 +976,7 @@ Decisions (2026-10-20, user):
   except that every job now also gets a URDF.
 
 **Formats.**
-- `job.json`: `articulated` (true or false; an older job lacks it, which means false) and
+- `job.json`: `articulated` (true or false) and
   `parts: {"mode": "vlm"|"vlm_edit"|"user", "list": [...], "confirmed": true|false}`. `confirmed` is
   false for a new job, turns true when the user confirms the list, and turns false again when
   `propose` runs.
@@ -1089,7 +1094,7 @@ Decisions (2026-10-20, user):
      area to the neighbour it shares the most edges with. A part left with less than 0.3% of the
      surface is `dropped_small`, and its faces go to their neighbours.
 4. **Split** (`envs/sam3d`; Blender 5.2.2 runs in the agent's SIF):
-   `python -m harpor.parts.stage split --job "$J" --sif $G/sif/gator-agent.sif` runs
+   `python -m harpor.parts.stage split --job "$J" --sif $G/sif/harpor-agent.sif` runs
    `harpor/agent/blender/split_parts.py` in a container that sees only `$J/run` and the Blender scripts
    (read-only), for at most 600 s, with the log in `run/parts/split.log`. The script imports
    `posed.glb`, bakes the transforms and joins the meshes. Each polygon gets its part by order when the
@@ -1115,7 +1120,7 @@ Decisions (2026-10-20, user):
    the one with the longest seam to the part. When that name was not found, the parent is the named
    part's own parent, and so on up to the base.
 6. **Agent, articulation mode** (`envs/sam3d`):
-   `python -m harpor.webapp.agent_step --job "$J" --sif $G/sif/gator-agent.sif --key-file F --agent astra|opus`.
+   `python -m harpor.webapp.agent_step --job "$J" --sif $G/sif/harpor-agent.sif --key-file F --agent astra|opus`.
    `agent_step` picks the mode `articulation` when the job is articulated and `run/parts.glb` exists.
    The original is `parts.glb`, `run/parts.json` becomes `work/input/parts.json`, and the budget is
    900 s (`agent_step.BUDGET_S`). Export time still moves the deadline by at most 600 s in total. The
@@ -1180,8 +1185,8 @@ Decisions (2026-10-20, user):
   occupied voxel). A skipped link is missing from `rigid_body`, and the MJCF gives it a hull inertial.
 - **Mass**: `mass.combine` adds the masses, weights the COM by mass and moves each inertia to the
   common COM (parallel axis theorem).
-- **MJCF** (`envs/mujoco`): `python -m harpor.physics.mjcf ...`. The root link is the
-  body `<name>`, with a free joint unless the GLB has a fixed base. Every
+- **MJCF** (`envs/mujoco`): `python -m harpor.physics.mjcf ... [--fixed-base]`. The root link is the
+  body `<name>`, with a free joint unless the GLB has a fixed base or `--fixed-base` is given. Every
   other link is the body `<name>_<link>`, nested under its parent at pos 0 (all links share frame S),
   with a `hinge` or `slide` joint at the joint's origin and axis, limited to [lower, upper], or with
   no joint (fixed). A loose link is welded, with a warning. CoACD runs per link
@@ -1326,15 +1331,11 @@ Decisions (2026-10-21, user):
    message. The listing reads them in the same pass as the camera topics, and it keeps one value of each
    link: the last value of a static link and the first value of a dynamic link. The stage reads all of
    `/tf` when the frames' windows hold no path (step 4), so the listing reads all of it too, and the two
-   agree. A listing made by an older version read only the first 5 s of `/tf`, and its camera topics
-   have no `camera_axes_from`. When its `tf_links` says no link and no calibration was uploaded, Start
-   (`jobs.lidar_settings`) checks the link on the bag's whole `/tf`, as the stage does. On a synthetic bag, 20,000 `/tf` messages of 2 links added about 0.5 s to the listing. Each
+   agree. On a synthetic bag, 20,000 `/tf` messages of 2 links added about 0.5 s to the listing. Each
    camera topic gains `frame_id`, `camera_axes`, `camera_axes_from` (the rule that decided the axes,
    step 5) and `tf_links` (`static`, `dynamic` or null for each LiDAR topic). LiDAR and TF problems never fail the
-   listing. A bag listed by an older version, whose `frames/topics.json` has no `lidar` key, is
-   listed again when the user chooses its camera topic. A job in review or done cannot choose a
-   topic, so its bag must be uploaded again. Choosing another camera topic deletes the calibration,
-   because its `T_cam_lidar` and `K` belong to the other camera.
+   listing. Choosing another camera topic deletes the calibration, because its `T_cam_lidar` and `K`
+   belong to the other camera.
 3. **Decoders.** `decode_pointcloud2` reads any field layout (offsets, `point_step`, `row_step`,
    `height`, `is_bigendian`). It keeps the finite points that are not at the origin. Per-point times
    come from a `t` field (uint32, ns after the stamp), a `time` field (float32, s after the stamp) or a
@@ -1828,9 +1829,6 @@ the job's current calibration (see the last bullet), it is the stage's done mark
   through the crop and the camera model. A Stray capture has no `da3`, since its K stays inside
   `stray_samples`. `scan` and `da3` hold at most about 1.5 MB, and `diff` adds 16 bytes a point. A
   file of the box run holds about 0.9 MB, against 0.2 MB without the comparison.
-  `python -m harpor.webapp.lidar clouds --job "$J"` writes the files and the `run/lidar/` copies again
-  from the stored samples, clouds, masks and DA3 output. It stops, before it writes, when that
-  estimate does not give `pool/lidar.json`'s s and each view's s and used points.
 - The stage removes `lidar/cloud/` first and writes `lidar/cloud/<view>.glb` with the check images,
   also when the record is not ok, before `pool/lidar.json`; a failed source writes none. `used` is
   `view_ratio`'s used rows of the view's camera points. `select` copies the picks' files to
@@ -1841,8 +1839,7 @@ the job's current calibration (see the last bullet), it is the stage's done mark
   (`server.pool_clouds`, which `server.resolve` follows): there are no views used then, so the Inputs
   tab shows each pool view's points by frame name, to check the calibration (up to about 55 MB with 32
   views). A found scale takes them off the site, since the worker drops what `resolve` no longer
-  serves. A job built before this has no points until its `lidar` stage runs again (the cache version
-  changed).
+  serves.
 
 **Steps** (`envs/web`, from `$G/gator_clone` on ICE, or from the repo root on the Mac).
 1. **Stage:** `python -m harpor.webapp.lidar scale --job "$J"` gathers the samples (from the cache
@@ -1913,9 +1910,4 @@ and in `physics/aligned.json`.
   points. The stage then fails with the coverage reason.
 - A camera frame with optical axes that neither its name nor its TF links show still needs the
   calibration. An example is a camera that looks backward.
-- A bag listed before 2026-10-28 keeps the listing of the `/tf` messages in its first 5 s, and its
-  camera topics have no `camera_axes_from`. A dynamic TF link that starts later shows as no link there,
-  so the link line says "No TF link in the bag's first 5 s: Start checks the whole bag". Start, Build,
-  Retry and Select again read the whole `/tf` for it at each check (`jobs.lidar_settings`), since the
-  result is not stored in `topics.json`.
 

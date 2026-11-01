@@ -226,11 +226,7 @@ def da3(J):
     from harpor.stage_a.mvsam3d import view_names
     from harpor.webapp import steps
 
-    try:
-        on = steps.lidar(json.loads((J / "job.json").read_text()))
-    except ValueError:  # a malformed setting: the lidar stage fails and says why
-        on = None
-    off = FAKE_DA3_SCALE if on else 1.0
+    off = FAKE_DA3_SCALE if steps.lidar(json.loads((J / "job.json").read_text())) else 1.0
     names = view_names(J / "pool")
     W, H = Image.open(J / "pool" / "input" / "images" / f"{names[0]}.png").size
     s = min(504, max(W, H)) / max(W, H)

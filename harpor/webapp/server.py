@@ -7,7 +7,7 @@ root (start_ice.sh starts it there, inside a Slurm job):
     python -m harpor.webapp [--runs DIR] [--host 127.0.0.1] [--port 0] [--fake] [--worker [--local-keys A]]
                            [--demos DIR]
 
-It makes a login token, writes ~/.config/gator/webapp.json (0600: node, port, token, url_path, and
+It makes a login token, writes ~/.config/harpor/webapp.json (0600: node, port, token, url_path, and
 slurm_job and slurm_node from SLURM_JOB_ID and SLURMD_NODENAME, so start_ice.sh reuses the server
 only in the same job, and worker), prints the URL and the port forward from another computer, and serves the app
 with one uvicorn worker. When the server stops (Ctrl-C or SIGTERM), it runs the hooks that on_stop
@@ -84,9 +84,8 @@ Routes (JSON unless said otherwise; {id} is a job id):
   POST   /api/jobs/{id}/start         {mode, prompt, n_views, picks, view0, auto_continue, agent, api_key,
                                       articulated?, parts_mode?, parts?, lidar?, turntable?} (agent astra: an
                                       OpenAI key; opus: an Anthropic key; none: no key, physics uses the Stage A
-                                      mesh; true and false mean astra and none). articulated (default
-                                      false) builds an object with moving parts; parts_mode
-                                      (steps.PARTS_MODES, default vlm) says who lists them, and parts is the
+                                      mesh). articulated (default false) builds an object with moving parts;
+                                      parts_mode (steps.PARTS_MODES, default vlm) says who lists them, and parts is the
                                       typed list of mode user ([{name, parent, joint, count}], checked with
                                       harpor.parts.propose); agent none means mode user. lidar is null,
                                       {"topic": T}, a LiDAR topic of a rosbag job, or {"kind": "stray"}, the
@@ -201,8 +200,8 @@ class Bad(Exception):
 
 
 def agent_of(b, job=None):
-    """The agent a body names ("agent": astra, opus, none, or true or false), else the job's (job: the
-    job.json dict, when given), else astra; 400 for anything else."""
+    """The agent a body names ("agent": astra, opus or none), else the job's (job: the job.json dict, when
+    given), else astra; 400 for anything else."""
     if job is not None and b.get("agent") is None:
         return steps.agent(job)
     try:
@@ -249,19 +248,15 @@ def calibration_summary(cal):
     """The short form of job.json "calibration" for the page, or None: name, bytes, translation_m (the
     length of T_cam_lidar's translation), rotation_deg (the angle of its rotation), has_intrinsics (K
     is given), camera_axes, time_offset_s (None when the file gives none) and lidar_topic (the LiDAR
-    topic it was uploaded for, or None). A calibration stored before lidar_topic was (an older job) holds
-    time_offset_s 0.0 also for a file without one, which the lidar stage reads as none, so there a 0
-    counts as none."""
+    topic it was uploaded for, or None)."""
     if not cal:
         return None
-    offset = cal.get("time_offset_s")
-    offset = None if "lidar_topic" not in cal and not offset else offset
     T = cal["T_cam_lidar"]
     c = max(-1.0, min(1.0, (T[0][0] + T[1][1] + T[2][2] - 1) / 2))
     return {"name": cal.get("name"), "bytes": cal.get("bytes"),
             "translation_m": round(math.hypot(T[0][3], T[1][3], T[2][3]), 4),
             "rotation_deg": round(math.degrees(math.acos(c)), 2), "has_intrinsics": cal.get("K") is not None,
-            "camera_axes": cal.get("camera_axes"), "time_offset_s": offset,
+            "camera_axes": cal.get("camera_axes"), "time_offset_s": cal.get("time_offset_s"),
             "lidar_topic": cal.get("lidar_topic")}
 
 
@@ -296,7 +291,7 @@ def lidar_compact(rec, stale=None):
 
 
 def preview_of(J):
-    """frames/meta.json "preview" for the page, or None for a job analyzed before the app made previews.
+    """frames/meta.json "preview" for the page, or None before the frames stage wrote meta.json.
     {"error": why} when the frames stage could not write the preview, {"missing": true} when the file is gone
     since. Else the record of video.Preview without "moved", and "seek": {pick's frame: {frame, at}} for every
     pick of selection.json: the frame that the preview shows for it (the kept frame at or before it, since the
@@ -318,14 +313,6 @@ def preview_of(J):
             k = f - f % stride
             seek[str(f)] = {"frame": k, "at": moved.get(str(k), round(max(0.0, times[k] - (rec.get("t0") or 0)), 4))}
     return {**out, "seek": seek}
-
-
-def lidar_of(job):
-    """steps.lidar of a job, or job.json's own value when it is malformed (the lidar stage says why)."""
-    try:
-        return steps.lidar(job)
-    except ValueError:
-        return job.get("lidar")
 
 
 def resolve(J, rel):
@@ -452,7 +439,7 @@ def parse_event_id(J, value):
     """The cursor (see tick) of a Last-Event-ID "<stage>:<offset>", else None."""
     stage, _, pos = (value or "").partition(":")
     ok = stage in steps.NAMES and re.fullmatch(r"[0-9]{1,15}", pos)  # not int("²"), nor a seek past what a file holds
-    t = jobs.load(J)["stages"].get(stage, {}).get("started") if ok else None
+    t = jobs.load(J)["stages"][stage]["started"] if ok else None
     return (stage, int(pos), t) if t else None  # a stage that was reset since: start over as a new client
 
 
@@ -534,12 +521,12 @@ def make_app(cfg, token, key_dir=None):
         include the camera_info, read from the bag when the calibration has no K, so they run outside the
         runner's lock, as Start's do. A calibration that another tab changes in between (which also makes
         the scale stale) is refused under the lock, by the sha256 that this check saw."""
-        if lidar_of(job) is None:
+        if steps.lidar(job) is None:
             return False, None
         stale = not steps.done("lidar", J)
         if stale or steps.NAMES.index(first) <= steps.NAMES.index("lidar"):
             try:
-                jobs.lidar_settings(J, job, job.get("lidar"))
+                jobs.lidar_settings(J, job, job["lidar"])
             except ValueError as e:
                 raise Bad(400, str(e)) from None
         return stale, {"sha256": (job.get("calibration") or {}).get("sha256")}
@@ -628,14 +615,13 @@ def make_app(cfg, token, key_dir=None):
     def get_job(job_id: str):
         J = job_dir(job_id)
         job = jobs.load(J)
-        # Also for jobs made before these fields; parts_review: the job waits for its part list.
-        job.update(source=steps.source(job), kind=steps.source(job)["kind"], agent=steps.agent(job),
-                   articulated=steps.articulated(job), parts_mode=steps.parts_mode(job),
-                   parts_review=steps.waits_for_parts(J, job), lidar=lidar_of(job),
+        # parts_review: the job waits for its part list.
+        job.update(kind=steps.source(job)["kind"], parts_mode=steps.parts_mode(job),
+                   parts_review=steps.waits_for_parts(J, job),
                    calibration=calibration_summary(job.get("calibration")), preview=preview_of(J))
         # The scale was found with the job's calibration as it is now (steps.done compares their sha256), and by
         # this estimator (lidar_scale.VERSIONS, by source); lidar_stale says which of the two changed.
-        ran = (job["stages"].get("lidar") or {}).get("status") == "done"
+        ran = job["stages"]["lidar"]["status"] == "done"
         job["lidar_current"] = steps.done("lidar", J) if job["lidar"] and ran else None
         job["lidar_stale"] = lidar_stale(J) if job["lidar_current"] is False else None
         job["progress"] = jobs.progress(J)
@@ -648,7 +634,7 @@ def make_app(cfg, token, key_dir=None):
         if r and "result.json" in (r.get("key_found_in") or []):  # the agent's own text held the key
             r = {**r, "reason": "left out: the agent's result held the API key", "limitations": []}
         keys = ("source", "verdict", "reason", "limitations", "exit")
-        # Older results lack some of them; joints_delivered is only in an articulation's result.
+        # turns, tokens and cost_usd are only in Claude's result, and joints_delivered only in an articulation's.
         extra = ("agent", "model", "turns", "tokens", "cost_usd", "mode", "counts", "joints_delivered")
         job["agent_result"] = {**{k: r.get(k) for k in keys}, **{k: r[k] for k in extra if k in r}} if r else None
         return job
@@ -731,7 +717,7 @@ def make_app(cfg, token, key_dir=None):
         except ValueError as e:
             raise Bad(400, part_reason(e)) from None
         # A Stray job keeps its own setting (on when it was made) unless the body says otherwise.
-        value = b.get("lidar") if "lidar" in b or steps.source(job)["kind"] != "stray" else lidar_of(job)
+        value = b.get("lidar") if "lidar" in b or steps.source(job)["kind"] != "stray" else steps.lidar(job)
         try:  # the LiDAR topic, its TF link (or the calibration) and the intrinsics
             lidar = jobs.lidar_settings(J, job, value)
         except ValueError as e:
@@ -766,7 +752,7 @@ def make_app(cfg, token, key_dir=None):
                                    "warnings": v.get("warnings") or []} for v in sam["views"]}
         sel["check_dir"] = f"scene/sam3_{job['slug']}/check"
         sel["overrides"], sel["view0"] = job["overrides"], job["view0"]
-        sel["lidar"] = lidar_compact(read_json(J / "pool" / "lidar.json"), lidar_stale(J)) if lidar_of(job) else None
+        sel["lidar"] = lidar_compact(read_json(J / "pool" / "lidar.json"), lidar_stale(J)) if steps.lidar(job) else None
         return sel
 
     def calibration_job(J, job_id):
@@ -782,7 +768,7 @@ def make_app(cfg, token, key_dir=None):
             raise Bad(409, "a Stray Scanner capture needs no calibration: its depth is aligned with the color camera")
         if kind != "rosbag":
             raise Bad(409, "a calibration is for the LiDAR of a rosbag job; this job's input is a video")
-        if lidar_of(job) is not None and steps.waits_for_parts(J, job):
+        if steps.lidar(job) is not None and steps.waits_for_parts(J, job):
             raise Bad(409, "the job waits for its part list; confirm the list or cancel the job first, then change "
                            "the calibration")
         return job
@@ -896,7 +882,7 @@ def make_app(cfg, token, key_dir=None):
         photo = f"scene/sam3_{job['slug']}/check/{anchor}.jpg" if job.get("slug") and isinstance(anchor, str) else None
         checks = sorted((J / "run" / "parts" / "sam3" / "check").glob("*.jpg"), key=lambda p: (len(p.stem), p.stem))
         return {"articulated": steps.articulated(job), "noun": job["prompt"],
-                "parts": {**jobs.PARTS, **(job.get("parts") or {}), "mode": steps.parts_mode(job)},
+                "parts": {**job["parts"], "mode": steps.parts_mode(job)},
                 "waiting": steps.waits_for_parts(J, job), "proposal": read_json(J / "run" / "proposal.json"),
                 "photo": photo if photo and resolve(J, photo) else None,
                 "checks": [rel for rel in (p.relative_to(J).as_posix() for p in checks) if resolve(J, rel)]}
@@ -945,7 +931,7 @@ def make_app(cfg, token, key_dir=None):
         first, agent, later = b.get("from") or "sam3d", agent_of(b, job), key_later(b)
         key = (b.get("api_key") or None) if agent != "none" else None  # no key when the agent is off
         if first == "frames":  # analyze the input again (it failed, was cancelled or the server stopped); no key
-            if job["stages"].get("frames", {}).get("status") == "done":
+            if job["stages"]["frames"]["status"] == "done":
                 raise Bad(409, "the input is already analyzed")
             if not Path(job["video"]["path"]).is_file():
                 raise Bad(409, "the uploaded file is not on the server; upload it again")
@@ -1048,7 +1034,7 @@ class TokenGate:
 
 
 def write_info(info):
-    """~/.config/gator/webapp.json (0600), replaced atomically, for start_ice.sh. The folder is made with
+    """~/.config/harpor/webapp.json (0600), replaced atomically, for start_ice.sh. The folder is made with
     mode 0700 when it is missing; an existing folder is used as it is."""
     d = config_dir()
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1095,7 +1081,7 @@ def main(argv=None):
                          "python -m harpor.webapp.worker login)")
     ap.add_argument("--local-keys", metavar="AGENTS",
                     help="with --worker: astra, opus or astra,opus, whose API key this machine keeps in "
-                         "~/.config/gator/openai.env or anthropic.env")
+                         "~/.config/harpor/openai.env or anthropic.env")
     ap.add_argument("--demos", metavar="DIR", help="a demos folder to show at /demos.html (default: WEBAPP_DEMOS)")
     a = ap.parse_args(argv)
     local_keys = ()

@@ -348,7 +348,7 @@ class Worker:
             stages = jobs.progress(J)
             first = relay.first_not_done({"stages": stages, "articulated": steps.articulated(job),
                                           "parts_mode": steps.parts_mode(job)},
-                                         (job.get("parts") or {}).get("confirmed") is True)
+                                         job["parts"]["confirmed"] is True)
             status = {s["name"]: s["status"] for s in stages}
             if row["status"] == "analyzing" and first != "frames":
                 continue

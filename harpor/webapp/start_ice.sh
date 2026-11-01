@@ -4,7 +4,7 @@
 #   bash ~/scratch/gator/gator_clone/harpor/webapp/start_ice.sh JOBID [PORT]
 #
 # The server runs on the job's compute node as a job step (srun --overlap), so the pipeline stages it
-# starts share the job's GPU. It writes ~/.config/gator/webapp.json (node, port, token, job); home is
+# starts share the job's GPU. It writes ~/.config/harpor/webapp.json (node, port, token, job); home is
 # shared between the login and compute nodes, so this script reads it here. PORT 0 (the default) lets
 # the server pick a free port. A server from an earlier start is reused only when webapp.json says it
 # runs in job JOBID on one of its nodes (slurm_job, slurm_node) and it still answers; a webapp.json
@@ -21,10 +21,10 @@ umask 077  # server.log and webapp.json hold the login token; job folders stay p
 JOB=${1:?usage: start_ice.sh JOBID [PORT]}
 PORT=${2:-0}
 [[ $JOB =~ ^[0-9]+$ && $PORT =~ ^[0-9]+$ ]] || { echo "JOBID and PORT must be numbers" >&2; exit 2; }
-G=${HARPOR_ROOT:-${GATOR_ROOT:-$(readlink -f ~/scratch)/gator}}
+G=${HARPOR_ROOT:-$(readlink -f ~/scratch)/gator}
 CODE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 PY=$G/envs/web/bin/python
-INFO=~/.config/gator/webapp.json
+INFO=~/.config/harpor/webapp.json
 LOG=$G/webapp_runs/server.log
 
 say() { echo "$@" >&2; }

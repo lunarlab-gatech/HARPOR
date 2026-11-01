@@ -69,7 +69,8 @@ def write_bag(path, topics=("/side/image_raw", "/cam/image_rect"), stamp=None):
 def job(tmp_path, video, **kw):
     d = tmp_path / "job"
     d.mkdir()
-    (d / "job.json").write_text(json.dumps({"video": {"name": video.name, "path": str(video)}, "mode": "auto", **kw}))
+    (d / "job.json").write_text(json.dumps({"video": {"name": video.name, "path": str(video)}, "mode": "auto",
+                                            "source": {"kind": "video", "topic": None}, **kw}))
     return d
 
 
@@ -281,7 +282,8 @@ def test_analyze_and_extract(tmp_path, capsys):
     a = np.asarray(Image.open(j / "scene" / "images" / f"f{snapped:05d}.png"))
     assert a.shape == (H, W, 3) and np.abs(a.astype(float) - picture(snapped)).mean() < 8
     # A rerun with other picks removes the frames that left the pool.
-    (j / "job.json").write_text(json.dumps({"video": {"path": str(path)}, "mode": "auto"}))
+    (j / "job.json").write_text(json.dumps({"video": {"path": str(path)}, "mode": "auto",
+                                            "source": {"kind": "video", "topic": None}}))
     V.main(["extract", "--job", str(j)])
     assert len(list((j / "scene" / "images").iterdir())) == len(meta["candidates"])
 

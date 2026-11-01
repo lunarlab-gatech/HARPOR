@@ -386,8 +386,8 @@ def test_app_js_job_page_where_and_queue_place():
     """The job page: #jid says where the job runs, a queued job shows its place; the status words are the tunnel's, and
     a status outside T.live opens no live view."""
     job = {"id": "j", "status": "uploaded", "video": {"name": "chair.mp4"}, "where": "on lab-box", "queue_pos": None,
-           "stages": {"frames": {"status": "pending"}}, "progress": [{"name": "frames", "status": "pending"}], "files": [],
-           "warnings": [], "agent": "opus", "key_ok": False, "current": None, "error": None, "source": {"kind": "video"},
+           "stages": {"frames": {"status": "pending"}, "select": {"status": "pending"}},
+           "progress": [{"name": "frames", "status": "pending"}], "files": [], "warnings": [], "agent": "opus", "key_ok": False, "current": None, "error": None, "source": {"kind": "video"},
            "kind": "video"}
     out = run_js("""
         V = { id: "j", picks: [] };
@@ -395,7 +395,7 @@ def test_app_js_job_page_where_and_queue_place():
         const page = { jid: $("#jid").textContent, status: text($("#jstatus")), next: $("#jnext").textContent,
           where: text($("#where")), es: !!V.es, title: document.title };
         V.job = { queue_pos: 2, video: { name: "chair.mp4" } };
-        renderState({ status: "queued", stages: [{ name: "frames", status: "done" }], warnings: [] }, false);
+        renderState({ status: "queued", agent: "opus", stages: [{ name: "frames", status: "done" }], warnings: [] }, false);
         out({ page, queued: text($("#jstatus").kids[0]), where: text($("#where")), title: document.title });
         """, setup='net["/api/jobs/j"] = [200, ' + json.dumps(job) + "];", config=None)
     assert out["page"]["jid"] == "job j, on lab-box" and out["page"]["es"] is False
@@ -1167,9 +1167,9 @@ def test_relay_refusals_and_a_machine_that_restarted():
 
 
 def test_the_sealed_agent_is_the_one_the_server_will_run():
-    """effectiveAgent follows server.agent_of: start names its agent (astra when it names none, true as astra);
+    """effectiveAgent follows server.agent_of: start names its agent (astra when it names none);
     overrides and continue name it or take the job's; parts always takes the job's."""
-    cases = [("start", {"mode": "auto"}, "astra"), ("start", {"agent": True}, "astra"), ("start", {"agent": "opus"}, "opus"),
+    cases = [("start", {"mode": "auto"}, "astra"), ("start", {"agent": "opus"}, "opus"),
              ("continue", {}, "opus"), ("continue", {"agent": "astra"}, "astra"), ("continue", {"agent": None}, "opus"),
              ("overrides", {"locked": []}, "opus"), ("parts", {"agent": "astra", "parts": []}, "opus")]
     out = run_js(f"""

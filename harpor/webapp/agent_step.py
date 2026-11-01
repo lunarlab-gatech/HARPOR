@@ -3,7 +3,7 @@ or gives the parts of an articulated job their joints (note 11).
 
 Runs in envs/sam3d from the repo root, with apptainer on the PATH:
 
-    python -m harpor.webapp.agent_step --job J --sif gator-agent.sif --key-file F [--agent astra|opus]
+    python -m harpor.webapp.agent_step --job J --sif harpor-agent.sif --key-file F [--agent astra|opus]
 
 It prepares a fresh session in J/agent/s from J/run, runs it with controller.run_container_session and
 writes a copy of J/agent/s/result.json, without the key, to J/agent/result.json. The session is a

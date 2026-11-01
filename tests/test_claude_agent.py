@@ -228,11 +228,11 @@ def test_request_parameters(root):
     assert call["tools"] == [
         {"type": "bash_20250124", "name": "bash"},
         {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool", "max_characters": 30000},
-        {"name": "view_image", "description": A.tool_list()[2]["description"], "eager_input_streaming": True,
+        {"name": "view_image", "description": A.TOOLS[2]["description"], "eager_input_streaming": True,
          "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
                           "additionalProperties": False}}]
-    assert call["tools"] == json.loads(json.dumps(A.tool_list(2576)))
-    desc = A.tool_list()[2]["description"]
+    assert call["tools"] == json.loads(json.dumps(A.TOOLS))
+    desc = A.TOOLS[2]["description"]
     for fact in ("larger than 2576 px on the long side", "lossless when it fits 2.5 MB as base64 (about 1.9 MB of file)",
                  "as JPEG", "at most 100 images and 24 MB of them"):
         assert fact in desc
@@ -534,13 +534,6 @@ def test_cli_needs_sif_without_host_shell(root, key_file):
     assert e.value.code == 2
 
 
-def temp_manual(tmp_path):
-    """A small system prompt file of its own, with a character outside ASCII."""
-    f = tmp_path / "manual.md"
-    f.write_text("A manual of its own: an image larger than 1568 px is shown downscaled. é\n", encoding="utf-8")
-    return f
-
-
 def cli(root, key_file, script, *args):
     client = FakeClient(script)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -549,64 +542,31 @@ def cli(root, key_file, script, *args):
     return code, client, log_lines(root)
 
 
-def test_cli_defaults_are_2576_px_and_the_manual(root, key_file):
+def test_cli_sends_the_manual_and_downscales_to_2576_px(root, key_file):
     png(root / "work" / "sheet.png", (3000, 1500))
     code, client, lines = cli(root, key_file, [msg(use("view_image", {"path": "sheet.png"}, "toolu_1")),
                                                msg(text("seen"), stop="end_turn")])
     assert code == 0 and client.calls[0]["system"][0]["text"] == A.SYSTEM_FILE.read_text(encoding="utf-8")
-    assert client.calls[0]["tools"] == json.loads(json.dumps(A.tool_list()))
+    assert client.calls[0]["tools"] == json.loads(json.dumps(A.TOOLS))
     assert results(client.calls[1])["toolu_1"]["content"][1]["text"] == "/work/sheet.png 3000x1500, shown at 2576x1288"
     start = of(lines, "start")[0]
     assert (start["image_side"], start["system"]) == (2576, str(A.SYSTEM_FILE))
 
 
-def test_cli_image_side_and_system_options(root, key_file, tmp_path):
-    """--image-side 1568 --system FILE: the file goes byte for byte, view_image downscales to 1568 px
-    and its description says so; the rest of the request is that of a default session."""
-    manual = temp_manual(tmp_path)
-    png(root / "work" / "sheet.png", (3000, 1500))
-
-    def script():
-        return [msg(use("view_image", {"path": "/work/sheet.png"}, "toolu_1")), msg(text("seen"), stop="end_turn")]
-
-    code, client, lines = cli(root, key_file, script(), "--image-side", "1568", "--system", str(manual))
-    first = client.calls[0]
-    assert code == 0 and first["system"] == [{"type": "text", "text": manual.read_text(encoding="utf-8"),
-                                              "cache_control": {"type": "ephemeral"}}]
-    assert first["system"][0]["text"].encode("utf-8") == manual.read_bytes()
-    assert first["tools"] == json.loads(json.dumps(A.tool_list(1568)))
-    desc = first["tools"][2]["description"]
-    assert "larger than 1568 px on the long side" in desc and "2576" not in desc
-    assert desc == A.tool_list()[2]["description"].replace("2576 px", "1568 px")
-    img, label = results(client.calls[1])["toolu_1"]["content"]
-    assert label["text"] == "/work/sheet.png 3000x1500, shown at 1568x784"
-    assert Image.open(io.BytesIO(base64.b64decode(img["source"]["data"]))).size == (1568, 784)
-    start = of(lines, "start")[0]
-    assert (start["image_side"], start["system"]) == (1568, str(manual.resolve()))
-    assert start["system_sha256"] == hashlib.sha256(manual.read_bytes()).hexdigest()
-    assert_append_only(client)
-    # Only the system prompt and view_image's description differ from a default session.
-    (root / "session" / "claude.jsonl").unlink()
-    _, default, _ = cli(root, key_file, script())
-    assert {k for k in first if first[k] != default.calls[0][k]} == {"system", "tools"}
-    assert [t for t in first["tools"] if t["name"] != "view_image"] == \
-        [t for t in default.calls[0]["tools"] if t["name"] != "view_image"]
+@pytest.mark.parametrize("option,value", [("--image-side", "1568"), ("--system", "manual.md")])
+def test_the_image_side_and_the_manual_are_fixed(root, key_file, capsys, option, value):
+    """The command line takes neither: every session sends SYSTEM_FILE and downscales to MAX_IMAGE_SIDE."""
+    with pytest.raises(SystemExit) as e:
+        cli(root, key_file, [], option, value)
+    assert e.value.code == 2 and f"unrecognized arguments: {option}" in capsys.readouterr().err
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        A.run(root, client=FakeClient([]), shell="host", **{option[2:].replace("-", "_"): value})
 
 
-def test_bad_image_side_is_refused(root, key_file, capsys):
-    for bad in ("0", "-5", "1.5", "big"):
-        with pytest.raises(SystemExit) as e:
-            A.main([str(root), "--sock-dir", "/tmp", "--key-file", str(key_file), "--shell", "host", "--image-side", bad],
-                   client=FakeClient([]))
-        assert e.value.code == 2 and "positive whole number of pixels" in capsys.readouterr().err
-    for side in (0, -1, 1.5, True, "1568"):
-        with pytest.raises(ValueError, match="image_side must be a positive number"):
-            A.run(root, client=FakeClient([]), shell="host", image_side=side)
-
-
-def test_missing_system_file_is_logged_then_raised(root, tmp_path):
+def test_missing_system_file_is_logged_then_raised(root, tmp_path, monkeypatch):
+    monkeypatch.setattr(A, "SYSTEM_FILE", tmp_path / "missing.md")
     with pytest.raises(FileNotFoundError):
-        run(root, [], system=tmp_path / "missing.md")
+        run(root, [])
     end = of(log_lines(root), "end")[0]
     assert (end["reason"], end["exit_code"]) == ("error", 1) and "missing.md" in end["message"]
 
@@ -908,16 +868,14 @@ def png(path, size, mode="RGB", **kw):
     return path
 
 
-@pytest.mark.parametrize("side,shown", [(None, (2576, 1288)), (2576, (2576, 1288)), (1568, (1568, 784))])
-def test_view_image_downscales_large_png(work, side, shown):
+def test_view_image_downscales_large_png(work):
     png(work / "sheet.png", (3000, 1500))
-    content, (W, H), (w, h) = A.view_image(A.WorkFiles(work), {"path": "/work/sheet.png"},
-                                           *([side] if side else []))
-    assert (W, H, w, h) == (3000, 1500, *shown)
+    content, (W, H), (w, h) = A.view_image(A.WorkFiles(work), {"path": "/work/sheet.png"})
+    assert (W, H, w, h) == (3000, 1500, 2576, 1288)
     img, label = content
     assert img["type"] == "image" and img["source"]["type"] == "base64" and img["source"]["media_type"] == "image/png"
-    assert Image.open(io.BytesIO(base64.b64decode(img["source"]["data"]))).size == shown
-    assert label == {"type": "text", "text": f"/work/sheet.png 3000x1500, shown at {shown[0]}x{shown[1]}"}
+    assert Image.open(io.BytesIO(base64.b64decode(img["source"]["data"]))).size == (2576, 1288)
+    assert label == {"type": "text", "text": "/work/sheet.png 3000x1500, shown at 2576x1288"}
 
 
 def test_view_image_small_jpeg_is_sent_as_is(work):
@@ -933,9 +891,6 @@ def test_view_image_tall_palette_png(work):
     content, size, shown = A.view_image(A.WorkFiles(work), {"path": "mask.png"})
     assert size == shown == (400, 2000)  # under 2576 px: as it is, byte for byte
     assert base64.b64decode(content[0]["source"]["data"]) == (work / "mask.png").read_bytes()
-    content, size, shown = A.view_image(A.WorkFiles(work), {"path": "mask.png"}, 1568)
-    assert shown == (314, 1568)
-    assert Image.open(io.BytesIO(base64.b64decode(content[0]["source"]["data"]))).size == (314, 1568)
     png(work / "tall.png", (400, 3000), mode="P")
     assert A.view_image(A.WorkFiles(work), {"path": "tall.png"})[2] == (343, 2576)
 
@@ -953,16 +908,15 @@ def test_view_image_rejects_other_files_and_inputs(work):
             A.view_image(files, inp)
 
 
-@pytest.mark.parametrize("side,shown", [(None, "2576x1288"), (1568, "1568x784")])
-def test_view_image_in_the_loop(root, side, shown):
+def test_view_image_in_the_loop(root):
     png(root / "work" / "sheet.png", (3000, 1500))
     code, client, lines, _ = run(root, [msg(use("view_image", {"path": "sheet.png"}, "toolu_1")),
-                                        msg(text("seen"), stop="end_turn")], **({"image_side": side} if side else {}))
+                                        msg(text("seen"), stop="end_turn")])
     r = results(client.calls[1])["toolu_1"]
     assert code == 0 and [b["type"] for b in r["content"]] == ["image", "text"] and "is_error" not in r
-    assert r["content"][1]["text"] == f"/work/sheet.png 3000x1500, shown at {shown}"
+    assert r["content"][1]["text"] == "/work/sheet.png 3000x1500, shown at 2576x1288"
     assert of(lines, "tool_result")[0]["output"] == "[image 3000x1500]"
-    assert f"larger than {side or 2576} px" in client.calls[0]["tools"][2]["description"]
+    assert "larger than 2576 px" in client.calls[0]["tools"][2]["description"]
 
 
 def noise(path, size, mode="RGB"):
@@ -1156,7 +1110,7 @@ def test_real_sdk_session_over_mock_transport(root, key_file):
     assert first["stream"] is True and first["model"] == "claude-opus-5-5" and first["max_tokens"] == 64000
     assert first["fallbacks"] == "default" and first["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert first["output_config"] == {"effort": "high"} and first["cache_control"] == {"type": "ephemeral"}
-    assert first["tools"] == json.loads(json.dumps(A.tool_list())) and "tool_choice" not in first and "speed" not in first
+    assert first["tools"] == json.loads(json.dumps(A.TOOLS)) and "tool_choice" not in first and "speed" not in first
     assert first["messages"] == [{"role": "user", "content": PROMPT}]
     assert second == third  # the re-issued turn is the same request
     assistant, user = second["messages"][1:]

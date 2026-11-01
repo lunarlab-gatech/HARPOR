@@ -326,7 +326,7 @@ def test_rosbag_upload_topic_choice_and_no_agent(client, tmp_path):
     r = c.get(f"/api/jobs/{job_id}/file/{found['topics'][0]['preview']}")
     assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
     assert c.get(f"/api/jobs/{job_id}/frames").status_code == 404
-    assert c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "box", "agent": False}).status_code == 409
+    assert c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "box", "agent": "none"}).status_code == 409
 
     for wrong in ({"topic": "/lidar/points"}, {"topic": None}, {}):
         assert c.post(f"/api/jobs/{job_id}/topic", json=wrong).status_code == 400, wrong
@@ -344,7 +344,7 @@ def test_rosbag_upload_topic_choice_and_no_agent(client, tmp_path):
     assert job["stages"]["topics"]["started"] == started["topics"]
     assert c.get(f"/api/jobs/{job_id}/frames").json()["video"]["topic"] == rect
 
-    start = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": False, "agent": False}
+    start = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": False, "agent": "none"}
     assert c.post(f"/api/jobs/{job_id}/start", json={**start, "agent": "no"}).status_code == 400
     r = c.post(f"/api/jobs/{job_id}/start", json=start)  # no api_key at all
     assert r.status_code == 200, r.text
@@ -554,14 +554,12 @@ def test_a_calibration_is_for_its_lidar_topic(client, tmp_path):
                                                         "choose /lidar/points, or upload a calibration for /depth/points")
     assert jobs.load(J)["status"] == "ready" and jobs.load(J)["lidar"] is None
 
-    # A calibration stored before lidar_topic was (an older job) holds time_offset_s 0.0 also when its file
-    # gives none, so the summary shows none there, also for a file that says 0. The lidar stage reads the file.
-    for extra, offset in (("", None), ("time_offset_s: 0\n", 0.0)):
-        assert c.put(url, params={"name": "calib.yaml", "lidar_topic": POINTS},
-                     content=calibration_yaml(T_CAM_LIDAR, extra)).json()["time_offset_s"] == offset
-        old = {k: v for k, v in jobs.load(J)["calibration"].items() if k != "lidar_topic"}
-        jobs.update(J, calibration={**old, "time_offset_s": 0.0})
-        assert c.get(f"/api/jobs/{job_id}").json()["calibration"]["time_offset_s"] is None, extra
+
+def test_the_calibration_summary_gives_the_stored_offset():
+    """A 0 is a given offset, also in a record without lidar_topic."""
+    T = np.eye(4).tolist()
+    assert server.calibration_summary({"T_cam_lidar": T, "time_offset_s": 0.0})["time_offset_s"] == 0.0
+    assert server.calibration_summary({"T_cam_lidar": T, "time_offset_s": None, "lidar_topic": None})["time_offset_s"] is None
 
 
 def test_the_calibration_cannot_change_while_the_part_list_waits(client, tmp_path):
@@ -1074,7 +1072,7 @@ def test_start_without_the_agent_needs_no_key(client, tmp_path):
     c, cfg = client
     login(c)
     job_id = uploaded(c, tmp_path)
-    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "box", "agent": False, "api_key": "not checked"})
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "box", "agent": "none", "api_key": "not checked"})
     assert r.status_code == 200 and r.json()["key"] == "no key: the agent is turned off"
     job = wait(c, job_id, "review", "failed")
     assert job["status"] == "review" and job["agent"] == "none" and job["key_ok"] is False
@@ -1336,11 +1334,11 @@ def test_main_writes_the_login_file(tmp_path, monkeypatch, capsys):
     import uvicorn
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("GATOR_ROOT", str(tmp_path / "G"))
+    monkeypatch.setenv("HARPOR_ROOT", str(tmp_path / "G"))
     monkeypatch.setenv("SLURM_JOB_ID", "4242")
     monkeypatch.setenv("SLURMD_NODENAME", "atl1-1-02-003-19-2")
     monkeypatch.setattr(jobs, "default_key_dir", lambda: tmp_path / "keys")
-    info = tmp_path / "home" / ".config" / "gator" / "webapp.json"
+    info = tmp_path / "home" / ".config" / "harpor" / "webapp.json"
     info.parent.mkdir(parents=True, mode=0o755)  # an existing folder is used as it is, whatever its mode
     ran = []  # (port, webapp.json, its mode) while the server runs
     monkeypatch.setattr(uvicorn.Server, "run", lambda self, sockets: ran.append(
@@ -1367,7 +1365,7 @@ def test_sigterm_deletes_the_login_file(tmp_path):
     import signal
 
     home = tmp_path / "home"
-    info = home / ".config" / "gator" / "webapp.json"
+    info = home / ".config" / "harpor" / "webapp.json"
     env = {**os.environ, "HOME": str(home), "TMPDIR": str(tmp_path), "PYTHONPATH": str(ROOT)}
     p = subprocess.Popen([sys.executable, "-m", "harpor.webapp", "--fake", "--runs", str(tmp_path / "runs"),
                           "--host", "127.0.0.1"], cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -1422,7 +1420,7 @@ def test_start_ice_reuses_only_a_server_of_the_same_job(tmp_path):
     other = http.server.HTTPServer(("127.0.0.1", 0), Gate)
     threading.Thread(target=other.serve_forever, daemon=True).start()
     port = other.server_address[1]
-    info = home / ".config" / "gator" / "webapp.json"
+    info = home / ".config" / "harpor" / "webapp.json"
     info.parent.mkdir(parents=True)
 
     def start(**recorded):
@@ -1445,7 +1443,7 @@ def test_start_ice_reuses_only_a_server_of_the_same_job(tmp_path):
 def test_start_ice_starts_a_server_that_the_login_node_can_reach(tmp_path):
     """start_ice.sh with stand-ins for squeue and setsid: its alive check calls http://$node:$port from the login
     node, so the server it starts listens on every address, not on the 127.0.0.1 default. The server runs from
-    this script's repo and gets the script's root by name: HARPOR_ROOT, else GATOR_ROOT, else ~/scratch/gator."""
+    this script's repo and gets the script's root by name: HARPOR_ROOT, else ~/scratch/gator."""
     home, bin_, argv = tmp_path / "home", tmp_path / "bin", tmp_path / "argv"
     home.mkdir()
     (tmp_path / "storage").mkdir()
@@ -1467,9 +1465,8 @@ def test_start_ice_starts_a_server_that_the_login_node_can_reach(tmp_path):
         assert (f"cd {ROOT} && HARPOR_ROOT={root} exec {web}/python -m harpor.webapp --host 0.0.0.0 --port 0"
                 in argv.read_text())
 
-    start((tmp_path / "storage").resolve() / "gator")
-    start(tmp_path / "old", GATOR_ROOT=str(tmp_path / "old"))
-    start(tmp_path / "new", HARPOR_ROOT=str(tmp_path / "new"), GATOR_ROOT=str(tmp_path / "old"))
+    start((tmp_path / "storage").resolve() / "gator", GATOR_ROOT=str(tmp_path / "old"))  # the old name is not read
+    start(tmp_path / "new", HARPOR_ROOT=str(tmp_path / "new"))
 
 
 def test_open_mac_reads_its_settings(tmp_path):
@@ -1500,7 +1497,7 @@ def test_open_mac_reads_its_settings(tmp_path):
     assert ran == [f"ssh {sock} -O check me@login",
                    f"ssh {sock} me@login bash ~/scratch/gator/gator_clone/harpor/webapp/start_ice.sh 222",
                    f"ssh {sock} -O forward -L 8765:n:7 me@login", "open http://localhost:8765/?token=tok"]
-    assert (home / ".config" / "gator").stat().st_mode & 0o777 == 0o700  # as fileio.private_folder asks
+    assert (home / ".config" / "harpor").stat().st_mode & 0o777 == 0o700  # as fileio.private_folder asks
     (bin_ / "xdg-open").write_text(record)  # some Linux systems have an unrelated open
     (bin_ / "xdg-open").chmod(0o755)
     p, ran = run(HARPOR_SSH_HOST="me@login", HARPOR_SSH_SOCKET="/s/cm", HARPOR_REMOTE_CODE="/code")
@@ -1581,8 +1578,8 @@ def test_frames_retry_analyzes_the_video_again(client, tmp_path):
 def test_preview_video_and_view_images_are_served(client, tmp_path):
     """The input's preview video is served as video/mp4 with byte ranges, so the page can seek in it: 206 with
     Content-Range for a range, 416 for one past the end; HEAD gets the headers alone. The job names it ("preview")
-    with where each view is in it ("seek"), says why a job has none or that its file is gone, or gives null for a
-    job read before previews. The run's view images and place's overlays are served, and nothing else around
+    with where each view is in it ("seek"), says why a job has none or that its file is gone, or gives null before
+    frames/meta.json is written. The run's view images and place's overlays are served, and nothing else around
     them."""
     c, cfg = client
     login(c)
@@ -1654,15 +1651,15 @@ def test_preview_video_and_view_images_are_served(client, tmp_path):
     assert seek["41"] == {"frame": 40, "at": 1.7} and seek["20"] == {"frame": 20, "at": pytest.approx(times[20] - 0.5)}
     (J / "selection.json").unlink()
 
-    # A preview that the frames stage could not write says why; one whose file is gone since says so; a job read
-    # before previews has none.
+    # A preview that the frames stage could not write says why; one whose file is gone since says so; without
+    # meta.json there is none.
     (J / "frames" / "meta.json").write_text(json.dumps({**meta, "preview": {"error": "ValueError: no libx264"}}))
     assert c.get(f"/api/jobs/{job_id}").json()["preview"] == {"error": "ValueError: no libx264"}
     (J / "frames" / "meta.json").write_text(json.dumps(meta))
     (J / "frames" / "preview.mp4").unlink()
     assert c.get(f"/api/jobs/{job_id}").json()["preview"] == {"missing": True}
     assert c.get(url).status_code == 404
-    (J / "frames" / "meta.json").write_text(json.dumps({k: v for k, v in meta.items() if k != "preview"}))
+    (J / "frames" / "meta.json").unlink()
     assert c.get(f"/api/jobs/{job_id}").json()["preview"] is None
 
     # Analyzing the input again deletes a half-written preview that a killed run left, and writes a new one.
@@ -1724,13 +1721,13 @@ def test_no_delete_while_uploading(tmp_path):
 def test_agent_of_and_key_later_at_module_level():
     """server.agent_of, now at module level so that a worker can ask it, answers as the routes always did;
     key_later is true only without a key."""
-    for b, job, want in [({}, None, "astra"), ({"agent": "opus"}, None, "opus"), ({"agent": True}, None, "astra"),
-                         ({"agent": False}, None, "none"), ({"agent": "none"}, None, "none"), ({}, {}, "astra"),
+    for b, job, want in [({}, None, "astra"), ({"agent": "opus"}, None, "opus"), ({"agent": "none"}, None, "none"),
                          ({}, {"agent": "opus"}, "opus"), ({"agent": None}, {"agent": "opus"}, "opus"),
-                         ({"agent": "astra"}, {"agent": "opus"}, "astra"), ({"agent": False}, {"agent": "opus"}, "none"),
-                         ({}, {"agent": False}, "none")]:
+                         ({"agent": "astra"}, {"agent": "opus"}, "astra"), ({"agent": "none"}, {"agent": "opus"}, "none"),
+                         ({}, {"agent": "none"}, "none")]:
         assert server.agent_of(b, job) == want, (b, job)
     for b, job in [({"agent": None}, None), ({"agent": 1}, None), ({"agent": 0}, None), ({"agent": []}, None),
+                   ({"agent": True}, None), ({"agent": False}, {"agent": "opus"}),
                    ({"agent": {}}, None), ({"agent": "Opus"}, None), ({"agent": "gpt"}, {"agent": "opus"})]:
         with pytest.raises(server.Bad) as e:
             server.agent_of(b, job)
@@ -1945,6 +1942,21 @@ def test_hostile_bodies_get_a_reason_never_a_crash(client, tmp_path):
     assert len(c.get("/api/jobs").json()) == 1
 
 
+def test_the_routes_read_job_json_as_it_is(client, tmp_path):
+    """create_job writes every field, so GET /api/jobs/{id} fills none in, and it and /parts take the job's own parts."""
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    J = cfg.runs / job_id
+    job = jobs.load(J)
+    jobs.save(J, {k: v for k, v in job.items() if k != "articulated"})
+    assert "articulated" not in c.get(f"/api/jobs/{job_id}").json()
+    jobs.save(J, {k: v for k, v in job.items() if k != "parts"})
+    for route in ("", "/parts"):
+        with pytest.raises(KeyError, match="parts"):
+            c.get(f"/api/jobs/{job_id}{route}")
+
+
 def test_hostile_calibration_files_are_refused_fast(client, tmp_path):
     """A calibration of nested YAML aliases (2^30 numbers once expanded) or of deep brackets is refused
     within a second, before the server parses it into lists."""
@@ -2094,7 +2106,7 @@ def test_app_js_view0_and_delete():
         (async () => {
           const view0 = [];
           for (const v of [25, "f00026", "f00045", "f00099", null]) {  // a pick, two pool names, a non-pick, none
-            V = { id: "j", picks: [], view0: null, job: { mode: "manual", picks: [5, 25, 45], view0: v, n_views: 6 } };
+            V = { id: "j", picks: [], view0: null, job: { mode: "manual", picks: [5, 25, 45], view0: v, n_views: 6, parts: { mode: "vlm", list: [] } } };
             await loadFrames();
             view0.push(V.view0);
           }
@@ -2118,7 +2130,7 @@ def test_app_js_topics_and_the_agent_off():
         "skipped": [{"topic": "/depth", "type": "Image", "why": "16UC1"}]}
     stages = [{"name": n, "status": "done"} for n in ("topics", "frames", "extract")] + [
         {"name": "agent", "status": "skipped", "note": "turned off: physics uses the Stage A mesh"}]
-    job = {"source": {"kind": "rosbag", "topic": None}, "agent": False, "agent_result": None, "files": ["run/posed.glb"],
+    job = {"source": {"kind": "rosbag", "topic": None}, "agent": "none", "agent_result": None, "files": ["run/posed.glb"],
            "stages": {"frames": {"status": "pending"}, "agent": stages[-1]}}
     out = run_app_js({"/api/jobs": [], "/api/jobs/j/file/frames/topics.json": topics}, """
         (async () => {
@@ -2126,7 +2138,7 @@ def test_app_js_topics_and_the_agent_off():
           await loadTopics(""" + json.dumps(job) + """);
           const table = [...texts];
           texts.length = 0;
-          renderState({ status: "done", stages: """ + json.dumps(stages) + """, agent: false });
+          renderState({ status: "done", stages: """ + json.dumps(stages) + """, agent: "none" });
           const state = [...texts];
           texts.length = 0;
           await renderResults(""" + json.dumps(job) + """);
@@ -2260,16 +2272,16 @@ def test_app_js_start_form_sends_the_parts():
 
 
 def test_app_js_360_video_setting():
-    """The Settings box "Make a 360 video" shows the job's choice (job.turntable; off for a job made before it), and
+    """The Settings box "Make a 360 video" shows the job's choice (job.turntable; off unless it is true), and
     Start sends it as true or false. The object name is the job's, and empty for a job without one (not the name of the
     job opened before)."""
     meta = frames_meta()
     out = run_form_js("""
         (async () => {
           const ticked = [], sent = [], names = [];
-          for (const [t, prompt] of [[true, "Wooden box"], [false, null], [undefined, undefined]]) {
+          for (const [t, prompt] of [[true, "Wooden box"], [false, null]]) {
             V = { id: "j", picks: [], view0: null, job: { id: "j", kind: "video", status: "ready", mode: "auto", picks: [],
-              n_views: 4, agent: "none", lidar: null, calibration: null, turntable: t, prompt } };
+              n_views: 4, agent: "none", lidar: null, calibration: null, turntable: t, prompt, parts: { mode: "vlm", list: [] } } };
             $("#turntable").checked = "stale";
             await loadFrames();
             ticked.push($("#turntable").checked);
@@ -2288,7 +2300,7 @@ def test_app_js_360_video_setting():
           console.log(JSON.stringify({ ticked, sent, names }));
         })()
         """, {"/api/jobs/j/frames": meta})
-    assert out == {"ticked": [True, False, False], "sent": [True, False], "names": ["Wooden box", "", ""]}
+    assert out == {"ticked": [True, False], "sent": [True, False], "names": ["Wooden box", ""]}
 
 
 def test_app_js_part_list_panel():
@@ -2435,6 +2447,7 @@ def test_app_js_results_of_an_articulated_job():
                "/api/jobs/k/file/physics/mjcf/mjcf.json": {"name": "wooden_box", "inertial": mjcf["inertial"]},
                "/api/jobs/k/file/physics/summary.json": summary}
     unchanged = {**job, "agent_result": {**job["agent_result"], "verdict": "unchanged", "joints_delivered": 0}}
+    no_counts = {**job, "agent_result": {k: v for k, v in job["agent_result"].items() if k != "counts"}}
     stages = [{"name": "frames", "status": "done"}] + [
         {"name": n, "status": "skipped", "note": "turned off: rigid object"} for n in ("propose", "parts")] + [
         {"name": "agent", "status": "done"}]
@@ -2456,9 +2469,12 @@ def test_app_js_results_of_an_articulated_job():
           texts.length = 0;
           V = { id: "j" };  // the agent kept the split parts as they were: no joints
           await renderResults(""" + json.dumps(unchanged) + """);
-          console.log(JSON.stringify({ art, dl, none, state, unchanged: [...texts] }));
+          const same = [...texts];
+          const read = await renderResults(""" + json.dumps(no_counts) + """).then(() => "read", (e) => e.name);
+          console.log(JSON.stringify({ art, dl, none, state, unchanged: same, no_counts: read }));
         })()
         """)
+    assert out["no_counts"] == "TypeError"  # controller.run_session always writes counts
     art = out["art"]
     for t in ("Split parts", "Parts with joints (Claude Opus 5.5)", "articulated (finish)",
               "Joints", "1", "Joint changes", "2", "Links", "2: body, lid", "Base", "body, free to move",
@@ -2502,27 +2518,35 @@ def frames_meta(**video):
                                               "codec": "h264", "bit_depth": 8, "hdr": None, **video}}
 
 
-def test_app_js_lidar_link_of_an_old_listing():
-    """A listing made before the camera topics had camera_axes_from read only the bag's first 5 s of /tf. Its
-    missing TF link is not final, since Start reads all of /tf then (jobs.lidar_settings), so the line asks for
-    no calibration."""
-    new = camera_entry({"/lidar/points": None})
-    old = {k: v for k, v in new.items() if k != "camera_axes_from"}
-    found = [{"lidar": [CLOUD], "tf": [], "topics": [t]} for t in (new, old)]
+def test_app_js_takes_no_older_form():
+    """A listing without "lidar" is a bag without LiDAR topics, and its topic in use says so. A camera topic without
+    camera_axes_from and without a link needs a calibration. An agent of false is not "none"."""
+    found = {"topics": [{k: v for k, v in camera_entry({"/lidar/points": None}).items() if k != "camera_axes_from"}],
+             "skipped": []}
+    job = {"id": "j", "kind": "rosbag", "status": "ready", "source": {"kind": "rosbag", "topic": CAM}, "agent": False,
+           "agent_result": None, "files": ["run/posed.glb"],
+           "stages": {"frames": {"status": "done"}, "agent": {"status": "skipped", "note": "the mesh was poor"}}}
     out = run_form_js("""
         (async () => {
-          const found = """ + json.dumps(found) + """;
-          console.log(JSON.stringify(found.map((f) => lidarLink(f, """ + json.dumps(CAM) + """, "/lidar/points", null))));
+          const found = """ + json.dumps(found) + """, job = """ + json.dumps(job) + """, cam = """ + json.dumps(CAM) + """;
+          V = { id: "j", job, topics: found };
+          lidarToggle();
+          const hint = $("#lidarhint").textContent, link = lidarLink(found, cam, "/lidar/points", null);
+          await loadTopics(job);
+          const table = texts.filter((t) => t === "Use" || t === "in use");
+          texts.length = 0;
+          await renderResults(job);
+          console.log(JSON.stringify({ hint, link, table, agent: texts.includes("skipped: the mesh was poor") }));
         })()
-        """)
-    assert out == [["No TF link: upload a calibration", True],
-                   ["No TF link in the bag's first 5 s: Start checks the whole bag", False]]
+        """, {"/api/jobs/j/file/frames/topics.json": found})
+    assert out == {"hint": "No LiDAR topic in this bag.", "link": ["No TF link: upload a calibration", True],
+                   "table": ["in use"], "agent": True}
 
 
 def test_app_js_calibration_summary_says_where_k_comes_from():
     """The summary names the source of K: the file, or the camera topic's camera_info. When the bag has no
     camera_info for the camera (topics.json camera_info null), a calibration without K is not enough, and the
-    summary says so; a listing from before camera_info was listed keeps the old text."""
+    summary says so. Without a camera topic in the listing (undefined), the summary keeps the first text."""
     cal = {"name": "c.yaml", "translation_m": 0.1, "rotation_deg": 90, "has_intrinsics": False, "camera_axes": "optical",
            "time_offset_s": None}
     out = run_form_js("""
@@ -2567,8 +2591,8 @@ def test_app_js_upload_kinds_and_the_jobs_list():
 def test_app_js_lidar_box_per_kind():
     """The LiDAR box of the start form and the start body's "lidar" for each kind of input: hidden for a
     video (null); a bag with one LiDAR topic preselects it, and its TF chain shows; a bag with two asks for
-    one and says when TF does not link it; a bag without LiDAR topics, or listed before they were, has the
-    box turned off with the reason (the box's hint says nothing else); a Stray capture starts with LiDAR on, and
+    one and says when TF does not link it; a bag without LiDAR topics has the box turned off with the reason
+    (the box's hint says nothing else); a Stray capture starts with LiDAR on, and
     its turn and depth show. A calibration links the topics in place of TF, and the line names it and the TF link
     it replaces; a calibration made for another LiDAR topic is a warning (one without lidar_topic is not checked)."""
     static_tf = [{"parent": "base_link", "child": "camera_link", "static": True, "T_parent_child": EYE},
@@ -2584,7 +2608,7 @@ def test_app_js_lidar_box_per_kind():
         "b2": {"topics": [camera_entry({"/lidar/points": None, "/livox/lidar": "dynamic"})], "skipped": [],
                "lidar": [LIVOX, CLOUD], "lidar_skipped": [], "tf": dynamic_tf},
         "b4": {"topics": [camera_entry({})], "skipped": [], "lidar": [], "lidar_skipped": skipped, "tf": []},
-        "b5": {"topics": [camera_entry({})], "skipped": []}}  # listed before LiDAR topics were
+        "b5": {"topics": [camera_entry({})], "skipped": [], "lidar": [], "lidar_skipped": [], "tf": []}}
     stray_video = {"kind": "stray", "rotation": 270, "rotation_source": "gravity", "container_rotation": 0, "n_depth": 19,
                    "n_confidence": 19, "n_odometry": 20, "depth_size": [256, 192], "upright_agreement": 0.9583,
                    "warnings": ["1 of the 20 frames have no depth image, so they have no LiDAR samples"]}
@@ -2595,7 +2619,7 @@ def test_app_js_lidar_box_per_kind():
                     "/api/jobs/s1/frames": frames_meta(**stray_video),
                     "/api/jobs/s2/frames": frames_meta(**{**stray_video, "rotation": 0, "upright_agreement": None, "warnings": []})})
     job = {"status": "ready", "mode": "auto", "picks": [], "n_views": 4, "auto_continue": True, "agent": "none",
-           "prompt": None, "lidar": None, "calibration": None}
+           "prompt": None, "lidar": None, "calibration": None, "parts": {"mode": "vlm", "list": []}}
     bag = {**job, "kind": "rosbag", "source": {"kind": "rosbag", "topic": CAM}}
     cal = {"name": "c.yaml", "bytes": 300, "translation_m": 0.1, "rotation_deg": 90.0, "has_intrinsics": False,
            "camera_axes": "optical", "time_offset_s": None, "lidar_topic": "/livox/lidar"}
@@ -2671,21 +2695,18 @@ def test_app_js_lidar_box_per_kind():
           await open("b1");
           out.b1.stray_hidden = $("#strayinfo").hidden;
           out.topics = requests.filter((r) => r.url.endsWith("topics.json")).map((r) => r.url.split("/")[3]);
-          // The camera topic table: an old listing offers the topic in use again, so that its LiDAR topics get listed.
-          const read = { source: JOBS.b1.source, stages: { frames: { status: "done" } } };
-          for (const id of ["b5", "b1"]) {
-            V = { id };
-            texts.length = 0;
-            await loadTopics(read);
-            out["table_" + id] = texts.filter((t) => t === "Use" || t === "in use");
-          }
+          // The camera topic table: the topic in use says so.
+          V = { id: "b1" };
+          texts.length = 0;
+          await loadTopics({ source: JOBS.b1.source, stages: { frames: { status: "done" } } });
+          out.table_b1 = texts.filter((t) => t === "Use" || t === "in use");
           await open("b7");
           out.b7 = box();
           await open("b8");
           out.b8 = { livox: box() };
           choose("/lidar/points");
           out.b8.cloud = box();
-          V.job.calibration = { ...V.job.calibration, lidar_topic: null };  // an older job's, or one uploaded before a topic
+          V.job.calibration = { ...V.job.calibration, lidar_topic: null };  // one uploaded before a topic
           lidarToggle();
           out.b8.any = box();
           console.log(JSON.stringify(out));
@@ -2715,14 +2736,13 @@ def test_app_js_lidar_box_per_kind():
     assert b2["sent"] == {"topic": "/livox/lidar"}
     assert (out["b3"]["on"], out["b3"]["topic"], out["b3"]["opts"]) == (True, "/livox/lidar", False)  # the job's own setting
 
-    no_lidar, old, old_done = out["b4"], out["b5"], out["b6"]
+    no_lidar, none, none_done = out["b4"], out["b5"], out["b6"]
     assert no_lidar["box"]["off"] is True and no_lidar["box"]["on"] is False and no_lidar["box"]["opts"] is True
     assert no_lidar["box"]["hint"] == "No LiDAR topic in this bag. Not usable: /ouster/points (no messages)."
-    assert old["box"]["off"] is True and old["box"]["hint"] == ("LiDAR topics not listed. In Inputs, pick the same camera "
-                                                                "topic again.")
-    assert old_done["box"]["hint"] == "LiDAR topics not listed. Upload the bag again to use LiDAR."
-    assert no_lidar["sent"] is None and old["sent"] is None and old_done["sent"] is None
-    assert old_done["checked_off"] == [True, None]
+    assert none["box"]["off"] is True and none["box"]["hint"] == "No LiDAR topic in this bag."
+    assert none_done["box"]["hint"] == "No LiDAR topic in this bag."
+    assert no_lidar["sent"] is None and none["sent"] is None and none_done["sent"] is None
+    assert none_done["checked_off"] == [True, None]
 
     s1 = out["s1"]
     assert s1["box"] == {"hidden": False, "on": True, "off": False, "hint": "", "opts": True, "topic": "", "link": None,
@@ -2737,7 +2757,7 @@ def test_app_js_lidar_box_per_kind():
     assert s2["facts"].startswith("No gravity data: frames as stored. Depth: 19/20 frames")
     # Only a bag's frames load its topics.json, once per load.
     assert out["topics"] == ["b1", "b2", "b3", "b4", "b5", "b6", "b1"]
-    assert out["table_b5"] == ["Use"] and out["table_b1"] == ["in use"]
+    assert out["table_b1"] == ["in use"]
     # The calibration links the topics, and it replaces the bag's TF link.
     assert (out["b7"]["on"], out["b7"]["warn"]) == (True, False)
     assert out["b7"]["link"] == ("Linked by the calibration c.yaml (it replaces /tf_static: camera_optical_frame <- camera_link <- "
@@ -2893,7 +2913,7 @@ def test_app_js_review_shows_the_lidar_scale():
     job = {"id": "j", "kind": "rosbag", "status": "review", "video": {"name": "scan.bag"}, "prompt": "box", "current": None,
            "error": None, "warnings": [], "key_ok": False, "agent": "none", "articulated": False, "parts_mode": "vlm",
            "parts_review": False, "mode": "auto", "picks": [], "view0": None, "n_views": 2, "auto_continue": False,
-           "parts": {}, "calibration": None, "lidar": {"kind": "rosbag", "topic": "/livox/lidar"},
+           "parts": {}, "calibration": None, "lidar": {"kind": "rosbag", "topic": "/livox/lidar"}, "preview": {"missing": True},
            "source": {"kind": "rosbag", "topic": CAM}, "files": ["selection.json", "pool/lidar.json"], "progress": stages,
            "stages": {x["name"]: {"status": "done"} for x in stages}}
     found = {"topics": [camera_entry({"/livox/lidar": "static"})], "skipped": [], "lidar": [LIVOX], "lidar_skipped": [], "tf": []}
@@ -3073,7 +3093,7 @@ def test_app_js_lidar_failure_panel():
             "agent": "none", "articulated": False, "parts_mode": "vlm", "parts_review": False, "mode": "auto", "picks": [],
             "view0": None, "n_views": 4, "auto_continue": True, "parts": {}, "calibration": None,
             "lidar": {"kind": "rosbag", "topic": "/lidar/points"}, "source": {"kind": "rosbag", "topic": CAM},
-            "stages": {x["name"]: {"status": x["status"]} for x in stages}}
+            "preview": {"missing": True}, "stages": {x["name"]: {"status": x["status"]} for x in stages}}
     done = {**full, "id": "d", "status": "done", "error": None, "progress": [{**x, "status": "done"} for x in stages],
             "stages": {x["name"]: {"status": "done"} for x in stages}}
     found = {"topics": [camera_entry({"/lidar/points": None})], "skipped": [], "lidar": [CLOUD], "lidar_skipped": [], "tf": []}
@@ -3155,7 +3175,7 @@ def test_app_js_changed_calibration_retries_from_lidar():
            "parts_mode": "vlm", "parts_review": False, "mode": "auto", "picks": [], "view0": None, "n_views": 4,
            "auto_continue": True, "parts": {}, "calibration": None, "lidar": {"kind": "rosbag", "topic": "/lidar/points"},
            "source": {"kind": "rosbag", "topic": CAM}, "files": ["selection.json", "pool/lidar.json"], "progress": stages,
-           "stages": {x["name"]: {"status": x["status"]} for x in stages}, "lidar_current": True}
+           "stages": {x["name"]: {"status": x["status"]} for x in stages}, "lidar_current": True, "preview": {"missing": True}}
     found = {"topics": [camera_entry({"/lidar/points": None})], "skipped": [], "lidar": [CLOUD], "lidar_skipped": [], "tf": []}
     summary = {"name": "c.yaml", "bytes": 300, "translation_m": 0.1, "rotation_deg": 90.0, "has_intrinsics": False,
                "camera_axes": "optical", "time_offset_s": None, "lidar_topic": "/lidar/points"}
@@ -3230,7 +3250,7 @@ def test_app_js_done_job_with_a_stale_scale_runs_again_from_lidar():
            "calibration": {"name": "c.yaml", "bytes": 300, "translation_m": 0.1, "rotation_deg": 90.0, "has_intrinsics": False,
                            "camera_axes": "optical", "time_offset_s": None, "lidar_topic": "/lidar/points"},
            "files": ["selection.json", "pool/lidar.json", "results.zip"], "progress": stages,
-           "stages": {x["name"]: {"status": x["status"]} for x in stages}, "lidar_current": True}
+           "stages": {x["name"]: {"status": x["status"]} for x in stages}, "lidar_current": True, "preview": {"missing": True}}
     found = {"topics": [camera_entry({"/lidar/points": None})], "skipped": [], "lidar": [CLOUD], "lidar_skipped": [], "tf": []}
     replies = {"/api/jobs/d/frames": frames_meta(), "/api/jobs/d/file/frames/topics.json": found,
                "/api/jobs/d/calibration?name=c.yaml&lidar_topic=%2Flidar%2Fpoints": {**job["calibration"], "bytes": 320},
@@ -3320,11 +3340,9 @@ def test_app_js_results_show_the_metric_scale():
                "/api/jobs/s/file/run/placement.json": {**place, "metric_scale": 1.25},
                "/api/jobs/s/file/pool/lidar.json": {"ok": True, "s": 1.25, "source": {"kind": "stray", "file": "c.zip"},
                                                     "combine": {"views_used": 6, "spread_rel": 0.004}},
-               "/api/jobs/n/file/run/placement.json": {**place, "metric_scale": None, "units": "DA3 units (meters)"},
-               "/api/jobs/o/file/run/placement.json": {"check": {"mean_mask_iou": 0.9}}}  # made before LiDAR
+               "/api/jobs/n/file/run/placement.json": {**place, "metric_scale": None, "units": "DA3 units (meters)"}}
     cases = {"j": {**base, "files": files}, "s": {**base, "id": "s", "kind": "stray", "lidar": {"kind": "stray"}, "files": files},
-             "n": {**base, "id": "n", "lidar": None, "files": [f for f in files if f != "pool/lidar.json"]},
-             "o": {**base, "id": "o", "lidar": None, "files": ["run/posed.glb", "run/placement.json"]}}
+             "n": {**base, "id": "n", "lidar": None, "files": [f for f in files if f != "pool/lidar.json"]}}
     out = run_app_js(replies, """
         (async () => {
           const out = {}, cases = """ + json.dumps(cases) + """;
@@ -3340,7 +3358,7 @@ def test_app_js_results_show_the_metric_scale():
         """)
     assert out["j"] == "×1.043 from LiDAR (/livox/lidar, 14 views, spread 2.1%)"
     assert out["s"] == "×1.250 from LiDAR (iPhone LiDAR depth, 6 views, spread 0.4%)"
-    assert out["n"] == out["o"] == "Depth Anything 3's estimate (no LiDAR)"
+    assert out["n"] == "Depth Anything 3's estimate (no LiDAR)"
 
 
 # ---- the input panel: the preview video and the views used ----
@@ -3396,7 +3414,7 @@ def test_app_js_input_panel_and_views():
     run = {**first, "files": ["selection.json", "run/placement.json"]}  # place has ended since
     old = input_job("m")  # a preview without "seek": the page seeks by the pick's time
     bag = input_job("k", kind="rosbag", video={"name": "scan.bag"}, source={"kind": "rosbag", "topic": "/cam/image_rect"},
-                    preview=None)
+                    preview={"error": "OSError: disk full"})
     stray = input_job("s", kind="stray", video={"name": "capture.zip"}, source={"kind": "stray"},
                       preview={"error": "ValueError: no libx264"})
     gone = input_job("g", preview={"missing": True})
@@ -3490,7 +3508,7 @@ def test_app_js_input_panel_and_views():
     assert out["again"] is True
     assert out["m"][0] == pytest.approx(30.1333 - 0.2 + 0.001) and out["m"][1] == "View 2, at 29.9 s"
     assert out["k"] == {"video": False, "tags": ["div"] * 3, "alt": "", "toggle": False,
-                        "p": ["scan.bag (rosbag, camera topic /cam/image_rect)", "No preview video.", "★ view 0"]}
+                        "p": ["scan.bag (rosbag, camera topic /cam/image_rect)", "No preview video: OSError: disk full", "★ view 0"]}
     assert out["s"]["p"][:2] == ["capture.zip (Stray capture)", "No preview video: ValueError: no libx264"]
     assert out["s"]["video"] is False and out["s"]["tags"] == ["div"] * 3
     assert out["g"]["p"][:2] == ["table.MOV (video)", "Preview video missing."]
@@ -4763,8 +4781,8 @@ def results_job():
     every = ["run/posed.glb", "run/parts.glb", "run/parts.json", "refined.glb", "run/placement.json", "pool/lidar.json",
              "physics/aligned.glb", "physics/summary.json", "physics/mjcf/mjcf.json", "physics/urdf/model.urdf", "results.zip",
              "selection.json"]
-    job = {"id": "a", "articulated": True, "agent": "opus", "files": every, "stages": {"agent": {"status": "done"}},
-           "agent_result": ART_RESULT}
+    job = {"id": "a", "articulated": True, "agent": "opus", "files": every, "agent_result": ART_RESULT,
+           "stages": {"agent": {"status": "done"}, "turntable": {"status": "done"}}}
     replies = {"/api/jobs/a/file/run/placement.json": place, "/api/jobs/a/file/pool/lidar.json": lidar,
                "/api/jobs/a/file/physics/summary.json": summary, "/api/jobs/a/file/run/parts.json": parts,
                "/api/jobs/a/parts": {"checks": ["run/parts/sam3/check/0.jpg"]},
@@ -5021,7 +5039,7 @@ def test_app_js_downloads_tab():
         "v": {"id": "v", "status": "review", "files": ["selection.json", "pool/lidar.json"], "sizes": DL_SIZES},
         "f": {"id": "f", "status": "failed", "files": ["selection.json", "run/posed.glb", "run/placement.json"]},
         "c": {"id": "c", "status": "cancelled", "files": ["selection.json"], "sizes": {}},
-        # A job from before the URDF stage: results.zip has no urdf/ (jobs.package zips what exists).
+        # No model.urdf in files: results.zip has no urdf/ (jobs.package zips what exists).
         "u": {"id": "u", "status": "done", "agent": "none", "agent_result": None,
               "files": [f for f in every if f not in ("physics/urdf/model.urdf", "run/parts.glb", "run/parts.json",
                                                       "turntable/turntable.mp4")]},
@@ -5093,7 +5111,7 @@ def test_app_js_downloads_tab():
         "Everything": ["results.zip"], "Meshes": ["posed.glb", "aligned.glb"], "Simulation": ["model.urdf"],
         "Records": ["placement.json", "summary.json", "selection.json", "mjcf.json"]}
     assert [(x["size"], x["kids"]) for x in r["groups"][1]["rows"]] == [("1.2 MB", 2), (None, 1)]
-    # A job without a URDF (from before the URDF stage): no Simulation group.
+    # Without model.urdf in files there is no Simulation group.
     assert [g["title"] for g in out["u"]["groups"]] == ["Everything", "Meshes", "Records"] and out["u"]["note"] is None
     # In review: the records alone; after a failure: what exists, without sizes when the server gave none. Without
     # results.zip, the first line says why the tab holds only these.

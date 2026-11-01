@@ -1,13 +1,11 @@
 """Trace of one agent session's refinement loop (build_plan.md note 5).
 
-    python3 harpor/agent/loop_trace.py RUN_DIR [--turntable-args OUT.json]
+    python3 harpor/agent/loop_trace.py RUN_DIR
 
 Prints the loop in order: the agent's messages and tool calls from its log (Codex: codex.jsonl;
 claude: claude.jsonl, as control/agent.json says), merged with the host's records of exports,
 reviews, joints, articulation reviews, checkpoints and finish (with seconds since the clock started),
-and the review numbers.
-With --turntable-args, writes arguments for blender/turntable.py that show the original and every
-successful export side by side. Standard library only.
+and the review numbers. Standard library only.
 """
 
 import argparse
@@ -25,9 +23,8 @@ def lines(path):
 
 
 def agent(s):
-    """"codex" or "claude", from control/agent.json; sessions from before it ran Codex."""
-    path = os.path.join(s, "control", "agent.json")
-    return json.load(open(path)).get("agent", "codex") if os.path.exists(path) else "codex"
+    """"codex" or "claude", from control/agent.json."""
+    return json.load(open(os.path.join(s, "control", "agent.json")))["agent"]
 
 
 def codex_trace(s):
@@ -78,7 +75,6 @@ def claude_trace(s, t0):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("run")
-    ap.add_argument("--turntable-args")
     a = ap.parse_args(argv)
     s = os.path.join(os.path.abspath(a.run.rstrip("/")), "s")
     t0 = json.load(open(os.path.join(s, "control", "budget.json")))["started_at"]
@@ -118,15 +114,6 @@ def main(argv=None):
     print("== result: %s from %s (%s), %.0f s on the clock" % (r["verdict"], r["source"], r["glb"], r["timings"]["wall_s"]))
     if r.get("tokens"):
         print("   %s: %s turns, tokens %s, about $%.2f" % (r.get("model"), r.get("turns"), r["tokens"], r.get("cost_usd") or 0))
-
-    if a.turntable_args:
-        assets = [{"path": os.path.join(s, "original.glb"), "label": "SAM 3D"}]
-        for e in events:
-            if e["event"] == "export_done" and e.get("ok"):
-                assets.append({"path": os.path.join(s, "work", e["glb"]), "label": "Export %s" % e["export"]})
-        json.dump({"assets": assets, "out": os.path.splitext(os.path.abspath(a.turntable_args))[0] + ".mp4",
-                   "frames": 180, "fps": 30, "panel": 512, "samples": 32}, open(a.turntable_args, "w"), indent=1)
-        print("turntable args:", a.turntable_args, len(assets), "panels")
 
 
 if __name__ == "__main__":

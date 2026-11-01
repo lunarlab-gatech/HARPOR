@@ -1,11 +1,29 @@
 """The shared file helpers (harpor/fileio.py): JSON read and write, replace, and the private files."""
 
 import os
+import re
 import stat
+from pathlib import Path
 
 import pytest
 
 from harpor import fileio
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_config_dir_is_the_harpor_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert fileio.config_dir() == tmp_path / ".config" / "harpor"
+
+
+def test_old_folder_and_image_names_are_gone():
+    """There is no fallback, so nothing may still send anyone to the old config folder or the old agent image."""
+    old = re.compile(r'\.config/gator|"\.config" / "gator"|gator-agent')
+    files = [ROOT / ".gitignore", ROOT / "README.md",
+             *(p for d in ("containers", "docs", "harpor") for p in (ROOT / d).rglob("*") if p.is_file() and p.suffix != ".pyc")]
+    assert [str(p.relative_to(ROOT)) for p in files if old.search(p.read_text(errors="ignore"))] == []
+    assert (ROOT / "containers" / "harpor-agent.def").is_file()
 
 
 def test_write_json_is_atomic_with_plain_or_private_permissions(tmp_path):

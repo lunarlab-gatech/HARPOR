@@ -4,13 +4,12 @@ The controller starts it as the session's agent process, from the repo root, wit
 interpreter:
 
     python -m harpor.agent.claude_agent ROOT --sif SIF --sock-dir DIR --key-file FILE
-           [--effort high] [--model claude-opus-5-5] [--image-side 2576] [--system PATH]
-           [--shell host]
+           [--effort high] [--model claude-opus-5-5] [--shell host]
 
 The key comes from FILE (a line ANTHROPIC_API_KEY=...) into memory only. It goes to the anthropic
 client and nowhere else: not to the shell, not to the log, not to stdout. The system prompt is the
-file PATH (default claude/SYSTEM.md) and the first user message is ROOT/session/prompt.txt, both
-unchanged. The model has three tools:
+file claude/SYSTEM.md and the first user message is ROOT/session/prompt.txt, both unchanged. The
+model has three tools:
 
   bash                         one persistent bash in the agent's container (controller.shell_command):
                                cwd /work, no network, at most 300 s per command, output cut to 30000
@@ -18,9 +17,9 @@ unchanged. The model has three tools:
   str_replace_based_edit_tool  view, create, str_replace and insert on text files under ROOT/work. It
                                runs on the host, so paths are confined to ROOT/work and no symlink is
                                followed out of it
-  view_image                   a PNG or JPEG under ROOT/work, downscaled to at most --image-side px
-                               on the long side (default 2576, the limit of Opus 5.5), within the size
-                               caps MAX_IMAGE_B64 and IMAGE_BUDGET_BYTES
+  view_image                   a PNG or JPEG under ROOT/work, downscaled to at most MAX_IMAGE_SIDE px
+                               on the long side (2576, the limit of Opus 5.5), within the size caps
+                               MAX_IMAGE_B64 and IMAGE_BUDGET_BYTES
 
 Each request is streamed with client.beta.messages.stream: adaptive thinking with summaries, the
 effort given (default high; the model's own default is medium), server-side refusal fallback
@@ -81,7 +80,7 @@ COMMAND_TIMEOUT_S = 300.0
 POLL_S, DRAIN_S = 0.5, 0.5  # how often a running command checks that the shell is alive; output read after it exited
 MAX_OUTPUT_CHARS, HEAD_CHARS = 30000, 2000
 MAX_VIEW_CHARS = 30000
-MAX_IMAGE_SIDE = 2576  # the long side of Opus 5.5's high-resolution images; --image-side changes it
+MAX_IMAGE_SIDE = 2576  # the long side of Opus 5.5's high-resolution images
 # A PNG whose base64 fits MAX_IMAGE_B64 after any downscaling is sent as PNG, lossless. A larger PNG,
 # and a JPEG that is downscaled or does not fit, goes as JPEG at the first of JPEG_QUALITIES that fits.
 MAX_IMAGE_B64, JPEG_QUALITIES = 2_500_000, (92, 80, 70)
@@ -113,26 +112,22 @@ API_ERRORS = (
     (anthropic.APIConnectionError, "could not reach the API, also after the SDK's retries"),
     (anthropic.APIError, "API error"),
 )
-
-def tool_list(side=MAX_IMAGE_SIDE):
-    """The tools of a request. Only view_image's description depends on side, the long side in px
-    that it downscales to."""
-    view_image = {
-        "name": "view_image",
-        "description": ("Look at a PNG or JPEG file under /work, for example a review sheet, a single review render, "
-                        "an input photo or a mask. Call it whenever you need to see an image: bash and the text editor "
-                        "cannot show images. The path is /work/... or relative to /work. Images larger than "
-                        f"{side} px on the long side are shown downscaled. A PNG is sent lossless when it fits "
-                        f"{MAX_IMAGE_B64 / 1e6:g} MB as base64 (about {MAX_IMAGE_B64 * 3 / 4e6:.1f} MB of file); larger "
-                        "images are sent as JPEG. Every image stays in the conversation, so a session can show at most "
-                        f"{MAX_IMAGES} images and {IMAGE_BUDGET_BYTES // 1_000_000} MB of them in all."),
-        "eager_input_streaming": True,
-        "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
-                         "additionalProperties": False},
-    }
-    return [{"type": "bash_20250124", "name": "bash"},
-            {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool", "max_characters": MAX_VIEW_CHARS},
-            view_image]
+# The tools of a request.
+TOOLS = [
+    {"type": "bash_20250124", "name": "bash"},
+    {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool", "max_characters": MAX_VIEW_CHARS},
+    {"name": "view_image",
+     "description": ("Look at a PNG or JPEG file under /work, for example a review sheet, a single review render, "
+                     "an input photo or a mask. Call it whenever you need to see an image: bash and the text editor "
+                     "cannot show images. The path is /work/... or relative to /work. Images larger than "
+                     f"{MAX_IMAGE_SIDE} px on the long side are shown downscaled. A PNG is sent lossless when it "
+                     f"fits {MAX_IMAGE_B64 / 1e6:g} MB as base64 (about {MAX_IMAGE_B64 * 3 / 4e6:.1f} MB of file); "
+                     "larger images are sent as JPEG. Every image stays in the conversation, so a session can show "
+                     f"at most {MAX_IMAGES} images and {IMAGE_BUDGET_BYTES // 1_000_000} MB of them in all."),
+     "eager_input_streaming": True,
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
+                      "additionalProperties": False}},
+]
 
 
 class ToolError(Exception):
@@ -657,9 +652,9 @@ class ImageBudget:
         self.used, self.n = self.used + size, self.n + 1
 
 
-def view_image(files, inp, side=MAX_IMAGE_SIDE):
-    """The view_image tool, downscaling to at most side px on the long side. Returns (tool_result
-    content, (W, H), shown (w, h)).
+def view_image(files, inp):
+    """The view_image tool, downscaling to at most MAX_IMAGE_SIDE px on the long side. Returns
+    (tool_result content, (W, H), shown (w, h)).
 
     The input is validated here, because eager input streaming skips the server's validation. A file
     goes as it is when it needs no downscaling and its base64 fits MAX_IMAGE_B64; everything else is
@@ -687,7 +682,7 @@ def view_image(files, inp, side=MAX_IMAGE_SIDE):
     except Exception as e:  # PIL raises many kinds for broken files
         raise ToolError(f"{shown} could not be read as an image: {e}") from None
     W, H = im.size
-    k = min(1.0, side / max(W, H))
+    k = min(1.0, MAX_IMAGE_SIDE / max(W, H))
     size = (max(1, round(W * k)), max(1, round(H * k)))
     note = ""
     if k < 1.0 or b64_size(len(data)) > MAX_IMAGE_B64:
@@ -716,12 +711,12 @@ def view_image(files, inp, side=MAX_IMAGE_SIDE):
 # ----------------------------------------------------------------------------------------------- loop
 
 
-def request_params(model, effort, system, image_side=MAX_IMAGE_SIDE):
+def request_params(model, effort, system):
     """Everything of a request but messages. Built once per session, so tools and system stay
     byte-stable and the cache and the thinking blocks stay valid."""
     return {"model": model, "max_tokens": MAX_TOKENS,
             "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            "tools": tool_list(image_side), "thinking": {"type": "adaptive", "display": "summarized"},
+            "tools": TOOLS, "thinking": {"type": "adaptive", "display": "summarized"},
             "output_config": {"effort": effort}, "cache_control": {"type": "ephemeral"}, "betas": list(BETAS),
             "fallbacks": "default"}
 
@@ -828,7 +823,7 @@ def _short(text, n=200):
     return text if len(text) <= n else text[:n] + "..."
 
 
-def run_tool(block, shell, editor, files, images=None, image_side=MAX_IMAGE_SIDE):
+def run_tool(block, shell, editor, files, images=None):
     """Run one tool_use block. Returns (content, is_error, log text). Never raises a tool's error: every
     tool_use gets its result. images: the session's ImageBudget."""
     try:
@@ -837,7 +832,7 @@ def run_tool(block, shell, editor, files, images=None, image_side=MAX_IMAGE_SIDE
         elif block.name == "str_replace_based_edit_tool":
             text, is_error = editor(block.input), False
         elif block.name == "view_image":
-            content, (W, H), (w, h) = view_image(files, block.input, image_side)
+            content, (W, H), (w, h) = view_image(files, block.input)
             (images or ImageBudget()).take(content)
             return content, False, f"[image {W}x{H}]"
         else:
@@ -856,18 +851,15 @@ def _interrupt(signum, frame):
 
 
 def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", model=MODEL, shell="container",
-        image_side=MAX_IMAGE_SIDE, system=SYSTEM_FILE, client=None, command_timeout=COMMAND_TIMEOUT_S, out=None):
+        client=None, command_timeout=COMMAND_TIMEOUT_S, out=None):
     """Run the session in root (prepared by controller.prepare_session). Returns the exit code.
 
-    image_side: the long side in px that view_image downscales to. system: the file of the system
-    prompt, sent byte for byte. client: an anthropic.Anthropic or a stand-in with beta.messages.stream;
-    by default one is made with the key from key_file. The key from key_file, when given, is also
-    redacted from the log, stdout and the tool results.
+    client: an anthropic.Anthropic or a stand-in with beta.messages.stream; by default one is made with
+    the key from key_file. The key from key_file, when given, is also redacted from the log, stdout and
+    the tool results.
     """
     if effort not in EFFORTS:
         raise ValueError(f"effort must be one of {EFFORTS}")
-    if not (_index(image_side) and image_side > 0):
-        raise ValueError(f"image_side must be a positive number of pixels, not {image_side!r}")
     root, out = Path(root).resolve(), out or sys.stdout
     key = read_key(key_file) if key_file else None
     log = Log(root / "session" / "claude.jsonl", key)
@@ -896,11 +888,11 @@ def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", model=MO
                 if not key:
                     return end("no_key", EXIT["api_error"], message=f"no ANTHROPIC_API_KEY= line in {key_file}")
                 client = anthropic.Anthropic(api_key=key, max_retries=MAX_RETRIES)
-            system_text = Path(system).read_text(encoding="utf-8")
-            params = request_params(model, effort, system_text, image_side)
+            system_text = SYSTEM_FILE.read_text(encoding="utf-8")
+            params = request_params(model, effort, system_text)
             messages = [{"role": "user", "content": (root / "session" / "prompt.txt").read_text(encoding="utf-8")}]
             log.write("start", model=model, effort=effort, betas=params["betas"], shell=shell,
-                      max_tokens=MAX_TOKENS, image_side=image_side, system=str(Path(system).resolve()),
+                      max_tokens=MAX_TOKENS, image_side=MAX_IMAGE_SIDE, system=str(SYSTEM_FILE),
                       system_sha256=hashlib.sha256(system_text.encode("utf-8")).hexdigest())
             turn = pauses = 0
             while True:
@@ -957,7 +949,7 @@ def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", model=MO
                                "may be incomplete. Make it again.")
                         is_error, logged = True, res
                     else:
-                        res, is_error, logged = run_tool(b, sh, editor, files, images, image_side)
+                        res, is_error, logged = run_tool(b, sh, editor, files, images)
                     if isinstance(res, str):
                         res = redact(res, key)
                     results.append({"type": "tool_result", "tool_use_id": b.id, "content": res,
@@ -996,17 +988,6 @@ def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", model=MO
             signal.signal(s, signal.SIG_DFL if h is None else h)
 
 
-def _pixels(text):
-    """argparse type of --image-side: a whole number of pixels, at least 1."""
-    try:
-        n = int(text)
-    except ValueError:
-        n = 0
-    if n < 1:
-        raise argparse.ArgumentTypeError(f"{text!r} is not a positive whole number of pixels")
-    return n
-
-
 def main(argv=None, client=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("root", help="the session folder from controller.prepare_session")
@@ -1015,17 +996,12 @@ def main(argv=None, client=None):
     ap.add_argument("--key-file", required=True, help="a file with the line ANTHROPIC_API_KEY=...")
     ap.add_argument("--effort", choices=EFFORTS, default="high")
     ap.add_argument("--model", default=MODEL)
-    ap.add_argument("--image-side", type=_pixels, default=MAX_IMAGE_SIDE, metavar="N",
-                    help=f"view_image downscales to at most N px on the long side (default {MAX_IMAGE_SIDE})")
-    ap.add_argument("--system", default=SYSTEM_FILE, metavar="PATH",
-                    help="the system prompt, sent byte for byte (default harpor/agent/claude/SYSTEM.md)")
     ap.add_argument("--shell", choices=("container", "host"), default="container",
                     help="host: bash on the host in ROOT/work, for tests and local runs only")
     a = ap.parse_args(argv)
     if a.shell == "container" and not a.sif:
         ap.error("--sif is required unless --shell host")
-    return run(a.root, a.sif, a.sock_dir, a.key_file, effort=a.effort, model=a.model, shell=a.shell,
-               image_side=a.image_side, system=a.system, client=client)
+    return run(a.root, a.sif, a.sock_dir, a.key_file, effort=a.effort, model=a.model, shell=a.shell, client=client)
 
 
 if __name__ == "__main__":

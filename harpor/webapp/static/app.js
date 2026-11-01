@@ -15,7 +15,6 @@ const AGENTS = { astra: { key: "OpenAI API key", placeholder: "sk-..." },
   opus: { key: "Anthropic API key", placeholder: "sk-ant-..." }, none: { key: null, placeholder: "" } };
 const RAN = { codex: "GPT-6-Astra", claude: "Claude Opus 5.5" };  // agent_result.agent, the controller's name
 const VLM = { astra: RAN.codex, opus: RAN.claude };  // proposal.json "agent": the model that listed the parts
-const agentOf = (a) => a === false ? "none" : a === true || a == null ? "astra" : a;  // older jobs hold true or false
 // What each stage does, shown muted next to its name.
 const STAGE_LABEL = { topics: "camera topics", frames: "frame analysis", extract: "extract frames", masks: "SAM 3 masks",
   prep: "prepare views", da3: "depth (Depth Anything 3)", lidar: "metric scale (LiDAR)", select: "view selection",
@@ -24,7 +23,6 @@ const STAGE_LABEL = { topics: "camera topics", frames: "frame analysis", extract
 // A stage's label; the agent's names its task.
 const stageLabel = (name, articulated) => name !== "agent" ? STAGE_LABEL[name] || ""
   : articulated ? "agent sets the joints" : STAGE_LABEL.agent;
-const PARTS_MODES = ["vlm", "vlm_edit", "user"];  // steps.PARTS_MODES
 const JOINTS = ["revolute", "prismatic", "fixed", "unknown"];  // harpor.parts.propose.JOINTS
 // agent_result.verdict of an articulation (the agent sets joints); a refinement's verdicts show as they are.
 const VERDICT = { unchanged: "unchanged (no joints)", needs_review: "needs review" };
@@ -398,7 +396,7 @@ async function refresh() {
   try { await drawJob(job); } finally { if (V.job === job) { followStatus(job.status); helpAt(); } }
 }
 async function drawJob(job) {  // refresh's panels: the waiting panels and what the tabs show
-  const analyzed = job.stages.frames.status === "done", rosbag = job.source && job.source.kind === "rosbag";
+  const analyzed = job.stages.frames.status === "done", rosbag = job.source.kind === "rosbag";
   // The lidar stage failed: its record (pool/lidar.json, ok false) with the check images; the status line gives the
   // reason. The panel is drawn first and shows only once drawn, so it does not come late or grow above the tabs.
   const lidarFail = lidarFailed(job.status, job.progress);
@@ -406,7 +404,7 @@ async function drawJob(job) {  // refresh's panels: the waiting panels and what 
   $("#lidarfail").hidden = !lidarFail;
   // A rosbag job chooses its camera topic when it has several, after a failed frames run, or on "Change topic".
   const idle = !ACTIVE.includes(job.status) && !["review", "done"].includes(job.status);
-  $("#topics").hidden = !rosbag || !job.stages.topics || job.stages.topics.status !== "done" || !(job.status === "choose_topic" ||
+  $("#topics").hidden = !rosbag || job.stages.topics.status !== "done" || !(job.status === "choose_topic" ||
     (idle && (V.pickTopic || (["failed", "cancelled"].includes(job.status) && !analyzed))));
   if (!$("#topics").hidden) await loadTopics(job).catch((e) => { say($("#topicmsg"), e.message); });
   $("#tkeep").hidden = !(V.pickTopic && analyzed);
@@ -443,7 +441,7 @@ async function drawJob(job) {  // refresh's panels: the waiting panels and what 
   $("#resultsnone").textContent = ["failed", "cancelled"].includes(job.status) ? RESULTS_STOPPED : RESULTS_LATER;
   // The input's preview video, and the views used once they are selected (in review, during the build and after).
   V.inputAsked = false;
-  V.selected = (job.stages.select || {}).status === "done";
+  V.selected = job.stages.select.status === "done";
   if (analyzed) await renderInput(job).catch((e) => fill($("#inputviews"), h("p", { class: "msg" }, e.message)));
   else clearInput();
   $("#inputbody").hidden = !analyzed;
@@ -542,8 +540,7 @@ $("#tabs").onkeydown = (e) => {  // Left and Right go to the tab before or after
 
 async function loadTopics(job) {
   const r = await api(file("frames/topics.json")), cur = job.source.topic;
-  // A listing from before LiDAR topics were listed (no "lidar"): choosing the current topic again lists them.
-  const inUse = job.stages.frames.status === "done" && Array.isArray(r.lidar);
+  const inUse = job.stages.frames.status === "done";
   const lens = (t) => badge(t.rectified === true ? "rectified" : t.rectified === false ? "raw" : "unknown");
   $("#ttable tbody").replaceChildren(...r.topics.map((t) => h("tr", { class: t.topic === cur ? "current" : null, "aria-current": t.topic === cur ? "true" : null },
     h("td", {}, t.preview ? h("img", { src: file(t.preview), alt: "", loading: "lazy" }) : ""),
@@ -667,10 +664,10 @@ function renderState(st, follow) {
     : from === "propose" && (st.stages.find((y) => y.name === "propose") || {}).status === "done" ? "Back to part list"
       : "Retry from " + from;
   // A rerun from lidar runs the agent stage again, and a done job's key is gone (jobs.Runner._status).
-  const agent = agentOf(st.agent);
+  const agent = st.agent;
   $("#keyrow").hidden = st.key_ok || agent === "none" || !(["review", "failed", "cancelled"].includes(st.status) || rerun) ||
     from === "frames" || !!T.keyless(V.id, agent);  // the machine that runs the job holds the key
-  $("#key2name").textContent = (AGENTS[agent] || AGENTS.astra).key || "API key";
+  $("#key2name").textContent = AGENTS[agent].key || "API key";
   // The key goes next to the button that sends it.
   const home = st.status === "review" ? partList ? $("#partsbar") : $("#revbar") : $("#actions");
   if ($("#keyrow").parentElement !== home) home.prepend($("#keyrow"));
@@ -684,7 +681,7 @@ function retryFrom(st) {  // "frames" analyzes the input again (no key needed); 
   if (stage("extract").status === "pending") return null;
   // A job stopped before its part list was confirmed goes back to that list (the server resumes from propose).
   const unconfirmed = st.articulated === true && st.parts_mode === "vlm_edit" && (stage("propose") || {}).status === "done"
-    && !(V.job && V.job.parts && V.job.parts.confirmed === true);
+    && !(V.job && V.job.parts.confirmed === true);
   const name = x.name === "parts" && unconfirmed ? "propose" : x.name;
   // A stale scale (V.scaleStale): the server starts from lidar (Runner.resume).
   return V.scaleStale === true && BUILD.indexOf(name) > BUILD.indexOf("lidar") ? "lidar" : name;
@@ -819,15 +816,14 @@ async function loadFrames() {
     // The public site offers only astra and opus, and only the agents the account may use (supa.js disables the others):
     // a job of another agent starts from the first agent offered.
     const radios = [...document.querySelectorAll("input[name=agent]")];
-    for (const r of radios) r.checked = r.value === agentOf(job.agent) && r.disabled !== true;
+    for (const r of radios) r.checked = r.value === job.agent && r.disabled !== true;
     if (!radios.some((r) => r.checked)) {
       const first = radios.find((r) => r.disabled !== true);
       if (first) first.checked = true;
     }
-    const parts = job.parts || {};  // older jobs lack it, and "articulated"
     $("#articulated").checked = job.articulated === true;
-    partsPick = PARTS_MODES.includes(parts.mode) ? parts.mode : "vlm";
-    $("#partlist").value = formatParts(parts.list);
+    partsPick = job.parts.mode;
+    $("#partlist").value = formatParts(job.parts.list);
     agentToggle();
     lidarSetup(job);
     document.querySelector(`input[name=mode][value=${V.manual ? "manual" : job.mode || "auto"}]`).checked = true;
@@ -912,9 +908,6 @@ $("#articulated").onchange = partsToggle;
 
 // ---- 2b. LiDAR for the metric scale: a bag's LiDAR topic with its TF link or the calibration; a Stray capture's depth ----
 
-// topics.json from before LiDAR topics were listed (lidar.OLD_TOPICS); POST /topic lists them, but not in review or done.
-const OLD_TOPICS = { idle: "LiDAR topics not listed. In Inputs, pick the same camera topic again.",
-  late: "LiDAR topics not listed. Upload the bag again to use LiDAR." };
 // A topics.json "lidar" entry: "/livox/lidar (Livox, 10 Hz, livox_frame)".
 const lidarLabel = (t) => `${t.topic} (${t.type === "CustomMsg" ? "Livox" : t.type || "?"}, ` +
   `${t.rate_hz != null ? Number(Number(t.rate_hz).toFixed(1)) + " Hz" : "rate unknown"}, ${t.frame_id || "no frame_id"})`;
@@ -943,25 +936,23 @@ function tfChain(edges, target, source) {
 }
 // The status line of the camera topic's link to a LiDAR topic: [text, true when the user must act]. A calibration
 // replaces the bag's TF (lidar.extrinsic). One uploaded for another LiDAR topic (its lidar_topic) is refused at the start
-// (jobs.lidar_settings); one without lidar_topic is not checked. A listing made before the camera topics had
-// camera_axes_from read only the bag's first 5 s of /tf, so its missing link is not final: Start reads all of /tf.
+// (jobs.lidar_settings); one without lidar_topic is not checked.
 function lidarLink(found, camTopic, lidarTopic, cal) {
   if (!lidarTopic) return ["", false];
   const cam = (found.topics || []).find((t) => t.topic === camTopic), lid = (found.lidar || []).find((t) => t.topic === lidarTopic);
-  const how = cam && (cam.tf_links || {})[lidarTopic];
+  const how = cam && cam.tf_links[lidarTopic];
   const chain = how && ((lid && tfChain(found.tf || [], cam.frame_id, lid.frame_id)) || [cam.frame_id, lid ? lid.frame_id : lidarTopic]);
   const tf = how ? `${how === "static" ? "/tf_static" : "/tf"}: ${chain.join(" <- ")}` : null;
   if (cal && cal.lidar_topic && cal.lidar_topic !== lidarTopic)
     return [`The calibration ${cal.name} is for ${cal.lidar_topic}: choose that topic, or upload a calibration for ${lidarTopic}`, true];
   if (cal) return [`Linked by the calibration ${cal.name}` + (tf ? ` (it replaces ${tf})` : ""), false];
   if (tf) return ["Linked by " + tf, false];
-  return cam && !("camera_axes_from" in cam) ? ["No TF link in the bag's first 5 s: Start checks the whole bag", false]
-    : ["No TF link: upload a calibration", true];
+  return ["No TF link: upload a calibration", true];
 }
 // job.json "calibration" in short (server.calibration_summary): the LiDAR's distance from the camera and its turn. A
 // time_offset_s of 0 is a given offset (the two header clocks are one); null means that the file gives none. info is
 // the camera topic's camera_info in topics.json: null when the bag has none, so K must come from the file
-// (jobs.lidar_settings refuses the start); undefined in a listing from before it was listed.
+// (jobs.lidar_settings refuses the start).
 const calText = (c, info) => [`${c.name}: ${(100 * c.translation_m).toFixed(1)} cm, ${Number(c.rotation_deg).toFixed(1)}°.`,
   c.has_intrinsics ? "K from file." : info === null ? "No K: the bag has no camera_info, so give K in the file."
     : "K from camera_info.", c.camera_axes === "body" ? "Body axes." : null,
@@ -979,7 +970,7 @@ function lidarToggle() {  // the LiDAR box follows the input kind, the checkbox,
   const job = V.job || {}, kind = job.kind, stray = kind === "stray", found = V.topics || {};
   $("#lidarbox").hidden = !stray && kind !== "rosbag";  // a video has no LiDAR
   if ($("#lidarbox").hidden) return;
-  const list = Array.isArray(found.lidar) ? found.lidar : null, usable = stray || (!!list && list.length > 0);
+  const list = found.lidar || [], usable = stray || list.length > 0;
   $("#uselidar").disabled = !usable;
   if (!usable) $("#uselidar").checked = false;
   const on = $("#uselidar").checked === true;
@@ -987,18 +978,17 @@ function lidarToggle() {  // the LiDAR box follows the input kind, the checkbox,
   // Only why the box is off: what LiDAR on and off do is in help.html.
   $("#lidarhint").textContent = usable ? ""
     : found.error ? "Cannot read the bag's topics: " + found.error
-      : !list ? OLD_TOPICS[["review", "done"].includes(job.status) ? "late" : "idle"]
-        : "No LiDAR topic in this bag." + (skipped ? " Not usable: " + skipped + "." : "");
+      : "No LiDAR topic in this bag." + (skipped ? " Not usable: " + skipped + "." : "");
   // The topic, its link and the calibration: a bag's only. No "required" on the select: lidarChoice says what to do.
   $("#lidaropts").hidden = stray || !usable || !on;
   if ($("#lidaropts").hidden) return;
   const cal = job.calibration || null;
-  const [link, act] = lidarLink(found, job.source && job.source.topic, $("#lidartopic").value, cal);
+  const [link, act] = lidarLink(found, job.source.topic, $("#lidartopic").value, cal);
   if ($("#lidarlink").textContent !== link) $("#lidarlink").textContent = link;  // a live region: only a change is read out
   $("#lidarlink").className = act ? "warn" : "hint";
   $("#lidarskipped").textContent = skipped ? "Not usable: " + skipped : "";
   $("#calsum").hidden = !cal;
-  const camera = (found.topics || []).find((t) => t.topic === (job.source && job.source.topic));
+  const camera = (found.topics || []).find((t) => t.topic === job.source.topic);
   $("#calsum").textContent = cal ? calText(cal, camera ? camera.camera_info : undefined) : "";
   $("#calbtn").textContent = cal ? "Replace calibration" : "Upload calibration";
   $("#calremove").hidden = !cal;
@@ -1486,10 +1476,10 @@ async function renderResults(job) {
     mvDefined().then((ok) => { if (!ok) failed(); });
     return fig;
   };
-  const off = agentOf(job.agent) === "none", a = job.agent_result, art = job.articulated === true;
-  const ran = a && RAN[a.agent];  // results from before the Opus agent do not name theirs
+  const off = job.agent === "none", a = job.agent_result, art = job.articulated === true;
+  const ran = a && RAN[a.agent];
   const rigged = !!a && a.mode === "articulation";  // the agent set the joints of the split parts
-  const by = (title) => ran ? `${title} (${ran})` : title;
+  const by = (title) => `${title} (${ran})`;
   const notRefined = art ? "off (parts welded into one body)" : "off";
   const refined = has("refined.glb") ? viewer("refined.glb", !rigged ? by("Refined")
     : by(a.joints_delivered > 0 ? "Parts with joints" : "Agent result, no joints")) : null;
@@ -1511,11 +1501,11 @@ async function renderResults(job) {
   if (lost.length) rows.push(["Parts not split off", lost.map((x) => `${x.prompt} (${x.why || x.status.replace("_", " ")})`).join("; ")]);
   if (job.stages.agent.status === "skipped") rows.push(["Agent", off ? notRefined : "skipped: " + job.stages.agent.note]);
   else if (a) {
-    if (a.model) rows.push(["Agent", `${ran || a.agent} (${a.model})`]);
+    rows.push(["Agent", `${ran} (${a.model})`]);
     rows.push(["Agent verdict", `${rigged && VERDICT[a.verdict] || a.verdict} (${a.source})`], ["Agent reason", a.reason || ""]);
     for (const l of a.limitations || []) rows.push(["Limitation", l]);
     if (rigged) rows.push(["Joints", a.joints_delivered != null ? String(a.joints_delivered) : "?"]);
-    if (rigged && a.counts && a.counts.joints != null) rows.push(["Joint changes", String(a.counts.joints)]);
+    if (rigged) rows.push(["Joint changes", String(a.counts.joints)]);
     if (a.tokens) {
       const t = a.tokens;
       rows.push(["Agent tokens", `${count(t.input_tokens)} input, ${count(t.output_tokens)} output, ` +
@@ -1607,13 +1597,12 @@ function renderDownloads(job) {
 // ---- 5b. the input: its preview video and the views the build used ----
 
 // job.preview (server.preview_of): the record of frames/preview.mp4 (video.Preview) with "seek", where each view is in
-// it; {error} when the frames stage could not write it; {missing} when the file is gone since; or null for a job read
-// before the app made previews.
-const NO_PREVIEW = "No preview video.";
+// it; {error} when the frames stage could not write it; {missing} when the file is gone since. It is null until the
+// frames are read, and renderInput runs only after that.
 const MISSING_PREVIEW = "Preview video missing.";
 // The input's name and kind: "table.MOV (video)", "run.bag (rosbag, camera topic /cam/image_rect)".
 function inputLabel(job) {
-  const src = job.source || {}, kind = job.kind || src.kind || "video";
+  const src = job.source, kind = job.kind;
   return `${job.video.name} (${KIND_LABEL[kind] || kind}${kind === "rosbag" && src.topic ? ", camera topic " + src.topic : ""})`;
 }
 // Where the preview p shows view pick pk: {frame, at}, the frame it shows (the preview keeps every stride-th frame, so a
@@ -1636,10 +1625,10 @@ function clearInput() {  // the frames are read again, or another job opens: the
 // The Inputs tab once the frames are read: the preview video, and the views used once they are selected, with their
 // LiDAR points for a job with LiDAR.
 async function renderInput(job) {
-  const p = job.preview && job.preview.file ? job.preview : null;
+  const p = job.preview.file ? job.preview : null;
   // The video is drawn once per preview file, so a refresh or a new selection does not stop it. Its "seek" follows the
   // selection, so it does not count.
-  const vkey = JSON.stringify([job.id, job.preview && { ...job.preview, seek: null }]);
+  const vkey = JSON.stringify([job.id, { ...job.preview, seek: null }]);
   if (vkey !== V.videoKey) {
     V.videoKey = vkey;
     V.inputKey = null;  // the views are buttons only next to a video
@@ -1647,12 +1636,12 @@ async function renderInput(job) {
       playsinline: true, muted: true, width: p.width, height: p.height, style: `--ar: ${p.width} / ${p.height}`,
       "aria-label": "Preview of " + job.video.name }) : null;
     if (video) video.muted = true;  // the attribute only sets the default
-    const why = !job.preview ? NO_PREVIEW : job.preview.missing ? MISSING_PREVIEW : `No preview video: ${job.preview.error}`;
+    const why = job.preview.missing ? MISSING_PREVIEW : `No preview video: ${job.preview.error}`;
     fill($("#inputvideo"), video ? h("figure", { class: "inputfig" }, video, h("figcaption", {}, inputLabel(job)))
       : [h("p", {}, inputLabel(job)), h("p", { class: "hint" }, why)]);
   }
   V.inputPlaced = job.files.includes("run/placement.json");  // place drew run/overlay_<i>.png for every view first
-  if ((job.stages.select || {}).status !== "done") {  // no views yet, or a new selection runs: the old views go
+  if (job.stages.select.status !== "done") {  // no views yet, or a new selection runs: the old views go
     const pool = job.lidar ? poolClouds(job) : [];  // a LiDAR scale that failed: the points of the pool's views
     const key = pool.length ? "pool " + pool.map((x) => x.path).join() : "none";
     if (V.inputKey !== key) {
@@ -1671,7 +1660,7 @@ async function renderInput(job) {
   }
   // The views are drawn once per selection, and again when the files of their LiDAR points change (the public site
   // gets them after the selection). A place run that ends or goes changes only the heading (its mesh fit toggle).
-  const key = JSON.stringify([job.id, (job.stages.select || {}).ended, vkey, usedClouds(job).map((x) => x.path).join()]);
+  const key = JSON.stringify([job.id, job.stages.select.ended, vkey, usedClouds(job).map((x) => x.path).join()]);
   if (key === V.inputKey) {
     if (V.input && V.input.placed !== V.inputPlaced) {
       V.input.placed = V.inputPlaced;
@@ -2148,7 +2137,7 @@ function clearSpin() {  // another job opens, or a new build hides the results: 
 // it cannot play, the caption stays and a line offers the file, as for a viewer.
 function renderSpin(job) {
   if (!job.files.includes(SPIN)) return clearSpin();
-  const key = JSON.stringify([job.id, (job.stages.turntable || {}).ended, (job.sizes || {})[SPIN]]);
+  const key = JSON.stringify([job.id, job.stages.turntable.ended, (job.sizes || {})[SPIN]]);
   if (key === V.spinKey) return;
   V.spinKey = key;
   V.spinOn = !reducedMotion();

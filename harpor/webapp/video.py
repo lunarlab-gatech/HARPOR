@@ -7,10 +7,10 @@ Runs in envs/web (PyAV, rosbags, numpy, pillow), from the repo root:
     python -m harpor.webapp.video analyze --job J
     python -m harpor.webapp.video extract --job J
 
-The input is the file named by J/job.json "video", read as job.json "source" says: {"kind": "video"}
-(also when "source" is missing), {"kind": "rosbag", "topic": T}, the camera topic T of a bag
-(rosbag.py), or {"kind": "stray"}, a zipped Stray Scanner export (stray.py), unpacked into
-J/video/stray/export the first time it is read. Everything below is the same for every kind.
+The input is the file named by J/job.json "video", read as job.json "source" says: {"kind": "video"},
+{"kind": "rosbag", "topic": T}, the camera topic T of a bag (rosbag.py), or {"kind": "stray"}, a zipped
+Stray Scanner export (stray.py), unpacked into J/video/stray/export the first time it is read. Everything
+below is the same for every kind.
 
 topics (rosbags only) lists the bag's camera image topics in J/frames/topics.json {"topics": [{topic,
 type, count, duration_s, rate_hz, width, height, format, rectified, camera_info, distortion,

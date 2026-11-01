@@ -6,7 +6,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import struct
 import sys
 from pathlib import Path
@@ -531,127 +530,22 @@ def test_clouds_compare_with_da3(points_bag, tmp_path, monkeypatch):
         assert read_diff(J / "lidar" / "cloud" / f"{v['name']}.glb")[1]["s"] == v["s"]
 
 
-def old_clouds(J):
-    """The job's clouds as a build before the comparison left them: scan and used only."""
-    for f in (J / "lidar" / "cloud").glob("*.glb"):
-        c = read_glb(f)
-        f.write_bytes(L.cloud_glb({"scan": opencv(c["scan"]), "used": opencv(c["used"])}))
+def test_scale_is_the_only_command(tmp_path, capsys):
+    with pytest.raises(SystemExit) as e:
+        L.main(["clouds", "--job", str(tmp_path)])
+    assert e.value.code == 2 and "invalid choice: 'clouds'" in capsys.readouterr().err
 
 
-def job_files(J):
-    """{path in J: (bytes, mtime)} of every file but the clouds and their run copies."""
-    out = {}
-    for f in sorted(J.rglob("*")):
-        rel = f.relative_to(J).as_posix()
-        if f.is_file() and not rel.startswith(("lidar/cloud/", "run/lidar/")):
-            out[rel] = (f.read_bytes(), f.stat().st_mtime_ns)
-    return out
-
-
-def test_the_clouds_command(points_bag, tmp_path, capsys):
-    """clouds gives an old job the files that the stage writes now, also when the bag has left the server, with the
-    run's copies by pick (each from its view's cloud), and changes nothing else, not even a file's time. It stops
-    before it writes while the job is busy, and when the stored data no longer gives pool/lidar.json's scale or a
-    view's result, is damaged or is not there."""
-    from harpor.webapp import views
-
-    J = make_job(tmp_path, points_bag)
-    rec = scaled(J)
-    new = cloud_files(J)
-    picks = mvsam3d.view_names(J / "pool")[3:6]
-    old_clouds(J)
-    views.build_run(J / "pool", picks, J / "run", metric=rec["s"], clouds=J / "lidar" / "cloud")
-    set_job(J, video={"name": "gone.bag", "path": str(tmp_path / "gone.bag")})
-    before = job_files(J)
-    assert sorted(p.name for p in (J / "run" / "lidar").glob("*.glb")) == ["0.glb", "1.glb", "2.glb"]
-    capsys.readouterr()
-    L.main(["clouds", "--job", str(J)])
-    assert "wrote the clouds of 10 views and 3 copies in run/lidar" in capsys.readouterr().out
-    assert cloud_files(J) == new and job_files(J) == before
-    for i, n in enumerate(picks):
-        assert (J / "run" / "lidar" / f"{i}.glb").read_bytes() == new[f"{n}.glb"]
-    assert not list((J / "run" / "lidar").glob(".*")) and not list((J / "lidar" / "cloud").glob(".*"))
-
-    old_clouds(J)
-    stale = cloud_files(J)
-    rewritten = {p.name: p.read_bytes() for p in (J / "run" / "lidar").glob("*.glb")}
-    set_job(J, status="running")
-    with pytest.raises(SystemExit, match="the job is busy"):
-        L.main(["clouds", "--job", str(J)])
-    set_job(J, status="done")
-    assert cloud_files(J) == stale
-    good = (J / "pool" / "lidar.json").read_text()
-    (J / "pool" / "lidar.json").write_text(json.dumps({**json.loads(good), "s": rec["s"] * 1.001}))
-    with pytest.raises(SystemExit, match=r"the stored data gives s .* but pool/lidar.json has s .*nothing was written"):
-        L.main(["clouds", "--job", str(J)])
-    assert cloud_files(J) == stale and {p.name: p.read_bytes() for p in (J / "run" / "lidar").glob("*.glb")} == rewritten
-    (J / "pool" / "lidar.json").write_text(good)
-    da3 = J / "pool" / "da3_output.npz"
-    keep = da3.read_bytes()
-    with np.load(da3) as f:
-        arrays = dict(f)
-    np.savez(da3, **{**arrays, "depth": arrays["depth"] * 1.01})  # DA3 ran again
-    with pytest.raises(SystemExit, match="changed after the lidar stage"):
-        L.main(["clouds", "--job", str(J)])
-    da3.write_bytes(keep[:len(keep) // 2])  # a copy cut short
-    with pytest.raises(SystemExit, match="the stored data cannot be used"):
-        L.main(["clouds", "--job", str(J)])
-    da3.write_bytes(keep)
-    assert cloud_files(J) == stale
-    mask = J / "pool" / "masks" / "f00000.png"
-    keep = mask.read_bytes()
-    cut = np.array(Image.open(mask))
-    cut[:, :cut.shape[1] // 2] = 0
-    Image.fromarray(cut).save(mask)  # the median view's s stays, so the combined s does, and the file would lie
-    s = rec["s"]
-    with pytest.raises(SystemExit, match=rf"gives s {s} but pool/lidar.json has s {s}, and other results for f00000, so"):
-        L.main(["clouds", "--job", str(J)])
-    mask.write_bytes(keep)
-    assert cloud_files(J) == stale
-    samples = (J / "lidar" / "samples.json").read_text()
-    (J / "lidar" / "samples.json").unlink()
-    with pytest.raises(SystemExit, match="no stored LiDAR samples"):
-        L.main(["clouds", "--job", str(J)])
-    (J / "lidar" / "samples.json").write_text(samples)
-    (J / "pool" / "lidar.json").unlink()
-    with pytest.raises(SystemExit, match="no pool/lidar.json"):
-        L.main(["clouds", "--job", str(J)])
-    (J / "pool" / "lidar.json").write_text(good)
-    set_job(J, lidar=None)
-    with pytest.raises(SystemExit, match="no LiDAR"):
-        L.main(["clouds", "--job", str(J)])
-
-
-def test_changed_views():
-    """A view that one side lacks, or whose s or used points differ past SAME_S. A view with no s on both sides is the
-    same."""
-    views = [{"name": "a", "s": 1.25, "points_used": 300}, {"name": "b", "s": None, "points_used": 0}]
-    rec = {"views": views}
-
-    def one(**kw):
-        return {"views": [{**views[0], **kw}, views[1]]}
-
-    assert L.changed_views(rec, rec) == [] and L.changed_views(one(s=1.25 * (1 + L.SAME_S / 2)), rec) == []
-    assert L.changed_views(one(s=1.2501), rec) == ["a"] and L.changed_views(one(points_used=299), rec) == ["a"]
-    assert L.changed_views({"views": [{**views[0], "s": None}, views[1]]}, rec) == ["a"]
-    assert L.changed_views({"views": [views[1]]}, rec) == ["a"] and L.changed_views(rec, {"views": views[:1]}) == ["b"]
-    assert L.changed_views(rec, {"views": [views[0], {**views[1], "s": 1.0}]}) == ["b"]
-    assert L.changed_views({"views": [views[0], {**views[1], "points_used": 5}]}, rec) == ["b"]  # against a 0
-
-
-def test_the_clouds_command_on_a_failed_scale_and_a_run_without_lidar(points_bag, tmp_path, monkeypatch):
-    """A job whose scale failed gets its pool's clouds at each view's own s. A run built without the LiDAR scale has
-    no copies, and gets none."""
-    from harpor.webapp import views
-
-    J = make_job(tmp_path, points_bag)
-    monkeypatch.setattr(lidar_scale, "MAX_IQR_REL", -1.0)
-    failed(J)
-    new = cloud_files(J)
-    old_clouds(J)
-    views.build_run(J / "pool", mvsam3d.view_names(J / "pool")[:3], J / "run")
-    L.rewrite_clouds(J)
-    assert cloud_files(J) == new and not (J / "run" / "lidar").exists()
+def test_rays_take_every_frame_of_the_samples():
+    """_rosbag_samples gives each frame its ray and its cloud, so a frame without them is not left out."""
+    intr = {"K": np.eye(3).tolist(), "D": [], "model": "plumb_bob", "size": [4, 4], "source": "test"}
+    info = {"intrinsics": intr, "rays": {"f00000": {"origin": [0.0, 0.0, 0.0], "size": [4, 4]}}}
+    xyz = np.zeros((1, 3))
+    assert L.rays(info, {"f00000": (xyz, xyz)})["f00000"]["points"] is xyz
+    with pytest.raises(KeyError, match="f00000"):
+        L.rays(info, {})
+    with pytest.raises(KeyError, match="intrinsics"):
+        L.rays({}, {})
 
 
 def test_a_dynamic_tf_link_and_a_livox_window(tmp_path):
@@ -897,6 +791,9 @@ def sweep_job(root, period, phase, late, rate_hz=None):
     if rate_hz is not None:
         found["lidar"][0]["rate_hz"] = rate_hz
     (J / "frames" / "topics.json").write_text(json.dumps(found))
+    st = {}
+    clock = rosbag.probe(bag, CAMERA, stamps_out=st)["clock"]
+    (J / "frames" / "stamps.json").write_text(json.dumps({"topic": CAMERA, "clock": clock, **st}))
     (J / "scene" / "images").mkdir(parents=True)
     Image.fromarray(picture(0, SIZE)).save(J / "scene" / "images" / "f00000.png")
     job = {"video": {"name": bag.name, "path": str(bag)}, "source": {"kind": "rosbag", "topic": CAMERA},
@@ -1203,10 +1100,6 @@ def test_the_samples_cache(points_bag, tmp_path, monkeypatch):
     upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist()})
     assert scaled(J)["source"]["cache"] == "miss" and len(reads) == 3
     assert scaled(J)["source"]["cache"] == "hit" and len(reads) == 3
-    # The stamps of the frames come from the camera topic again when stamps.json is missing.
-    (J / "lidar" / "samples.json").unlink()
-    (J / "frames" / "stamps.json").unlink()
-    assert scaled(J)["s"] == pytest.approx(first["s"], rel=1e-6)
 
 
 def test_each_failure_says_why(points_bag, tmp_path):
@@ -1246,12 +1139,23 @@ def test_each_failure_says_why(points_bag, tmp_path):
     assert failed(J) == "the calibration file calib.json is missing; upload it again"
     set_job(J, calibration=None)
 
-    # A raw topic whose camera_info has an unknown distortion model (its stamps are read again).
+    # A raw topic whose camera_info has an unknown distortion model.
     raw = write_scene_bag(root / "raw.bag", topic="/cam/image_raw", model="weird_model")
+    stamps = (J / "frames" / "stamps.json").read_text()
+    (J / "frames" / "stamps.json").write_text(json.dumps({**json.loads(stamps), "topic": "/cam/image_raw"}))
     set_job(J, video={**job["video"], "path": str(raw)}, source={"kind": "rosbag", "topic": "/cam/image_raw"})
     assert failed(J) == ("/cam/camera_info: unknown distortion model 'weird_model'; use plumb_bob, rational_polynomial or "
                          "equidistant; use a rectified topic or give K and D in the calibration")
+    (J / "frames" / "stamps.json").write_text(stamps)
     set_job(J, video=job["video"], source=job["source"])
+
+    # The stamps of frames/stamps.json are for another topic, or the file is gone: the analysis must run again.
+    why = "frames/stamps.json is missing or for another topic; choose the camera topic again to analyze the bag again"
+    (J / "frames" / "stamps.json").write_text(json.dumps({**json.loads(stamps), "topic": "/cam/image_raw"}))
+    assert failed(J) == why
+    (J / "frames" / "stamps.json").unlink()
+    assert failed(J) == why
+    (J / "frames" / "stamps.json").write_text(stamps)
 
     # The scans were logged long after the frames. The listing's LiDAR scans at 4 Hz, so the stage reads
     # 0.55 s from each frame (read_span).
@@ -1263,15 +1167,14 @@ def test_each_failure_says_why(points_bag, tmp_path):
     assert failed(J) == "the bag has no topic /lidar/points"
     set_job(J, video=job["video"])
 
-    # Another topic, and a bag listed before the LiDAR listing.
+    # Another topic.
     set_job(J, lidar={"kind": "rosbag", "topic": "/nope"})
     assert failed(J) == "/nope is not a LiDAR topic of the bag"
     set_job(J, lidar=job["lidar"])
-    topics = json.loads((J / "frames" / "topics.json").read_text())
-    (J / "frames" / "topics.json").write_text(json.dumps({k: v for k, v in topics.items() if k != "lidar"}))
-    assert failed(J) == L.OLD_TOPICS == ("the bag was listed before LiDAR topics were; choose its camera topic again "
-                                         "to list them (for a job in review or done: upload the bag again)")
-    (J / "frames" / "topics.json").write_text(json.dumps(topics))
+    topics = (J / "frames" / "topics.json").read_text()
+    (J / "frames" / "topics.json").write_text(json.dumps({k: v for k, v in json.loads(topics).items() if k != "lidar"}))
+    assert failed(J) == f"{POINTS} is not a LiDAR topic of the bag"
+    (J / "frames" / "topics.json").write_text(topics)
 
     # T_lidar_cam given as T_cam_lidar: the points miss the object; the estimate says so, with check images.
     upload(J, {"T_cam_lidar": np.linalg.inv(T_CAM_LIDAR).tolist()})
@@ -1291,15 +1194,9 @@ def test_each_failure_says_why(points_bag, tmp_path):
     assert failed(J) == f"{prep['views'][0]['name']} is not in {J / 'pool' / 'prep.json'}; rerun prep"
     (J / "pool" / "prep.json").write_text(json.dumps(prep))
 
-    # A job without LiDAR has no such stage; a malformed setting says so.
+    # A job without LiDAR has no such stage.
     set_job(J, lidar=None)
     with pytest.raises(SystemExit, match="this job has no LiDAR"):
-        L.scale(J)
-    set_job(J, lidar={"kind": "rosbag"})
-    F.da3(J)  # the fake DA3 takes it as no LiDAR; the lidar stage says why
-    assert F.run_scale(J / "pool", "f00000") == 1.0
-    with pytest.raises(SystemExit, match=re.escape('job.json: lidar is null, {"kind": "rosbag", "topic": T} or '
-                                                   '{"kind": "stray"}')):
         L.scale(J)
     # Stray's LiDAR on a bag job says why.
     set_job(J, lidar={"kind": "stray"})
@@ -1445,9 +1342,6 @@ def test_clouds_of_a_stray_capture(tmp_path):
         m, extras = read_diff(J / "lidar" / "cloud" / f"{v['name']}.glb")
         assert "da3" not in c and len(c["diff"]) == len(m) >= len(used)
         assert extras["s"] == rec["s"] and extras["used"] == v["points_used"] and abs(extras["median_m"]) < 0.02
-    first = cloud_files(J)
-    L.main(["clouds", "--job", str(J)])
-    assert cloud_files(J) == first
 
     # An export without intrinsics: no odometry columns for them, and a camera_matrix.csv that is not one.
     lines = (root / "odometry.csv").read_text().splitlines()

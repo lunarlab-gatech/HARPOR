@@ -1,6 +1,6 @@
 # Agent image for Stage B (build_plan.md notes 5 and 7): Node.js, Codex CLI and Blender.
 # Built on an ICE compute node without root:
-#   apptainer build --fakeroot gator-agent.sif gator-agent.def
+#   apptainer build --fakeroot harpor-agent.sif harpor-agent.def
 Bootstrap: docker
 From: ubuntu:24.04
 

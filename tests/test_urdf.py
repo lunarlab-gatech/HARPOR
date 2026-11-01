@@ -77,6 +77,21 @@ def test_urdf_of_a_rigid_box_and_of_a_fixed_base(tmp_path):
     assert np.allclose(xyz(world), [0, 0, mj["start_z"]]) and mj["start_z"] > 0
 
 
+def test_urdf_of_a_base_fixed_by_the_mjcf_flag(tmp_path):
+    """--fixed-base leaves the GLB without a world joint, so the URDF has only mjcf.json to go by."""
+    pytest.importorskip("trimesh")
+    from harpor.physics.mjcf import build as build_mjcf
+    from harpor.physics.urdf import build, check
+
+    glb, summary, _, _ = two_box_hinge(tmp_path)
+    mj = build_mjcf(glb, summary, tmp_path / "mjcf", "chest", decompose=hull_parts, fixed_base=True)
+    report = build(glb, summary, tmp_path / "mjcf", tmp_path / "urdf", "chest")
+    c = check(tmp_path / "urdf")
+    assert report["fixed_base"] and c["links"] == 3 and c["joint_types"] == {"world_joint": "fixed", "lid_joint": "revolute"}
+    world = ET.parse(tmp_path / "urdf" / "model.urdf").getroot().find("joint[@name='world_joint']")
+    assert np.allclose(xyz(world), [0, 0, mj["start_z"]])
+
+
 def test_urdf_welds_a_loose_part_to_its_parent_node(tmp_path):
     pytest.importorskip("trimesh")
     from harpor.physics.mjcf import build as build_mjcf

@@ -95,7 +95,7 @@ class ToolServer:
                 p.wait(TERM_GRACE_S)
             except subprocess.TimeoutExpired:
                 pass
-            with contextlib.suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(p.pid, signal.SIGKILL)
         if self._thread is not None:
             self._server.shutdown()

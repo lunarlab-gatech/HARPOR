@@ -166,7 +166,7 @@ HELP_PUBLIC = {
     port first with <code>ssh -L 8767:127.0.0.1:8767 &lt;machine&gt;</code>, add <code>--no-browser</code>, and open
     the address that it prints on your own computer.</li>
   <li>Start HARPOR there: <code>python -m harpor.webapp --worker</code>. Add <code>--local-keys opus</code> to use the
-    Anthropic key in <code>~/.config/gator/anthropic.env</code> on the machine, or <code>--local-keys astra</code> for
+    Anthropic key in <code>~/.config/harpor/anthropic.env</code> on the machine, or <code>--local-keys astra</code> for
     the OpenAI key in <code>openai.env</code>. This site then asks for no key for the machine's jobs.</li>
   <li>Add jobs on the machine: see <a href="#add-job">Add a job</a>.</li>
 </ol>

@@ -152,7 +152,7 @@ def test_help_page_holds_the_method_numbers():
                         f"full at {span_mm} mm", f"A 1% gap is {span_mm} mm at {int(span_mm) / 10:g} m",
                         f"within {L.RAY_SPAN:.0%} of the point's range", "the largest differences do not show",
                         "Turn the box off to see the whole scan", "read the object's dots and the median",
-                        "outside the mask", "harpor.webapp.lidar clouds"],
+                        "outside the mask"],
              "results": [f"Below {iou}", "view 0's camera frame", "aligned.glb", "larger than", "mean over the views",
                          "360 video", "reduced motion"],
              "joints": ["A ? means", "With 0", "nearest part above it", "fixed to the world", "one rigid body"],

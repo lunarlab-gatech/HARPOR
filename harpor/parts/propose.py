@@ -289,7 +289,7 @@ def propose_user(job):
     """The proposal of the list the user typed (job.json parts.list)."""
     from harpor.webapp import steps
 
-    items = (job.get("parts") or {}).get("list") or []
+    items = job["parts"]["list"]
     if not items:
         raise SystemExit("the job has no part list; type the parts")
     try:

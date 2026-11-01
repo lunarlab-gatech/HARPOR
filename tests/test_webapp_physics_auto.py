@@ -231,7 +231,7 @@ def test_align_job_writes_the_links_of_an_articulated_job(tmp_path):
     j = tmp_path / "job"
     write_run(j / "run", *plane_view())
     box_glb(j / "run" / "posed.glb")
-    (j / "job.json").write_text(json.dumps({"articulated": True}))
+    (j / "job.json").write_text(json.dumps({"articulated": True, "agent": "astra"}))
     write_glb(j / "run" / "parts.glb", "parts", 0.2)
     A.main(["align", "--job", str(j)])
     up = json.loads((j / "physics" / "up.json").read_text())
@@ -260,7 +260,7 @@ def test_align_job_writes_the_links_of_an_articulated_job(tmp_path):
     # The agent stage skipped (no result): the split parts again. A rigid job writes no links.
     (j / "agent" / "result.json").unlink()
     assert A.pick_glb(j) == (j / "run" / "parts.glb", "no agent result")
-    (j / "job.json").write_text(json.dumps({"articulated": False}))
+    (j / "job.json").write_text(json.dumps({"articulated": False, "agent": "astra"}))
     (j / "physics" / "links").rename(tmp_path / "old_links")
     A.main(["align", "--job", str(j)])
     assert json.loads((j / "physics" / "up.json").read_text())["glb"] == str(j / "run" / "posed.glb")

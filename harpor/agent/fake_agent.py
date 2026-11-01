@@ -124,7 +124,7 @@ def set_joint(blend, out, child, spec):
 
 
 def turntable_frames(args, side=96):
-    """blender/turntable.py with frames_dir, without bpy: args["frames"] PNGs of side px (0001.png, ...) on the
+    """blender/turntable.py without bpy: args["frames"] PNGs of side px (0001.png, ...) on the
     0.82-gray background, each the convex hull of the GLB's vertices in dark gray, seen orthographically as the
     real camera sees it (along +z of W after the asset's matrix, args["elevation"] degrees from above), as the
     asset turns once about W's y."""
@@ -134,7 +134,7 @@ def turntable_frames(args, side=96):
 
     from harpor.physics.align import load_w
 
-    assert len(args["assets"]) == 1 and args.get("frames_dir"), "frames_dir takes exactly one asset"
+    assert len(args["assets"]) == 1 and args.get("frames_dir"), "turntable.py takes exactly one asset and frames_dir"
     a, out, n = args["assets"][0], Path(args["frames_dir"]), args["frames"]
     M = np.eye(4) if a.get("matrix") is None else np.asarray(a["matrix"], float)
     v = load_w(a["path"])[0] @ M[:3, :3].T + M[:3, 3]  # glTF -> W is Blender's import

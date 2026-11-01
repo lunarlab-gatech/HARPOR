@@ -166,8 +166,6 @@
 <p>Not usable lists the topics that cannot be used, each with the reason.</p>
 <p>To change the topic later, press Change topic in the Inputs tab. It shows while the job is not running, in review
   or done. The table opens again, with in use next to the current topic. Keep the current topic closes it.</p>
-<p>A bag read before the app listed LiDAR topics shows none. To list them, press Change topic and choose the same
-  camera topic again. When the job is in review or done, this is not possible: add the bag again as a new job.</p>
 </section>
 
 <section id="settings">
@@ -438,9 +436,7 @@ drawer x3 &gt; cabinet body : prismatic</pre>
 <h3>The link between LiDAR and camera</h3>
 <p>For a rosbag, choose the LiDAR topic. The line under it says how the LiDAR links to the camera: linked by
   /tf_static (or /tf) with the chain of frames, Linked by the calibration with the file's name (and the TF link that it
-  replaces, when the bag has one), or No TF link: upload a calibration. For a bag that an older version of the app
-  listed, it may say No TF link in the bag's first 5 s: Start checks the whole bag. That listing read only the start
-  of the bag's TF, so Start looks at all of it before it asks for a calibration.</p>
+  replaces, when the bag has one), or No TF link: upload a calibration.</p>
 <p>Upload calibration takes a .yaml, .yml or .json file, and it replaces the bag's TF. Its keys:</p>
 <dl>
   <dt><code>T_cam_lidar</code></dt>
@@ -505,8 +501,8 @@ time_offset_s: 0.0</pre>
   views that the build used and, for a job with LiDAR, their LiDAR points.</p>
 
 <h3>Preview and views</h3>
-<p>The app makes the preview video when it reads the input. A job read before the app made previews has none. The
-  preview keeps only some frames, so it can show the nearest kept frame before the one you ask for.</p>
+<p>The app makes the preview video when it reads the input. The preview keeps only some frames, so it can show the
+  nearest kept frame before the one you ask for.</p>
 <p>Under Views used, click a view to see its frame in the video. The line under the video gives the view, its frame
   and its time. ★ marks view 0.</p>
 <p>After the place stage, Mesh fit draws the posed mesh in red and the outline of the SAM 3 mask in green on each view.
@@ -537,15 +533,11 @@ time_offset_s: 0.0</pre>
   the median difference of the points that the scale used, in mm. A positive median means that the LiDAR reads farther
   than DA3.</p>
 <p>A view whose file has no comparison shows its usual points and a line that says so. A view without a scale has no
-  comparison. A job built before this view gets one with
-  <code>python -m harpor.webapp.lidar clouds --job J</code>, where J is the job's folder. The command needs no GPU, does
-  not rerun any stage and changes only the point files. It stops while the job runs, and when the job's stored data no
-  longer gives the job's scale and the same result in each view.</p>
+  comparison.</p>
 <p>The view starts where the camera stood, so it looks like the photo. The small pyramid marks the camera. Drag to turn,
   and use the wheel or pinch to zoom. On a focused view, the arrow keys turn and + and - zoom. Reset goes back to the
   start.</p>
-<p>A Stray capture needs the camera's intrinsics (in odometry.csv, or camera_matrix.csv) for its points. A job built
-  before this view has no LiDAR points until its lidar stage runs again.</p>
+<p>A Stray capture needs the camera's intrinsics (in odometry.csv, or camera_matrix.csv) for its points.</p>
 
 <h3>Frame facts</h3>
 <p>The Video line (Stray capture for a Stray Scanner capture) opens the facts: frames, length, frame rate, size, codec
@@ -819,7 +811,7 @@ time_offset_s: 0.0</pre>
     again, then reload the page.</dd>
   <dt>Not logged in. Open the ?token= link the server printed.</dt>
   <dd>This browser has no login for this server, for example after the server restarted with a new token. Open the
-    URL with ?token= that the server printed. The server also writes it to ~/.config/gator/webapp.json. The app and
+    URL with ?token= that the server printed. The server also writes it to ~/.config/harpor/webapp.json. The app and
     the demos page need this login; this help page opens without it.</dd>
   <dt>live log lost</dt>
   <dd>The live log stopped. Reload the page.</dd>

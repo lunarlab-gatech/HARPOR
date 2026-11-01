@@ -29,8 +29,9 @@ Session layout:
                       of its system prompt, which its shell container does not see (the cost and the
                       tool calls in result.json come from that log)
 
-The container also sees the helper client at /opt/gator/bin and the tool server's socket folder at
-/opt/gator/sock, both read-only. It never sees root/control.
+Both containers also see the helper client at /opt/gator/bin and the tool server's socket folder at
+/opt/gator/sock, read-only. The Codex container also sees DNS_FILES, read-only. Neither container
+sees root/control.
 """
 
 import contextlib
@@ -66,7 +67,9 @@ HELPER_ENV = {"GATOR_SOCKET": "/opt/gator/sock/tools.sock", "PREPEND_PATH": "/op
 CODEX_MODEL, CLAUDE_MODEL, EFFORTS = tools.CODEX_MODEL, tools.CLAUDE_MODEL, tools.EFFORTS
 CLAUDE_EFFORT = "xhigh"  # the effort of the Astra comparison runs; Opus 5.5's own default is medium, so it is always sent
 LOGS = {"codex": "codex.jsonl", "claude": "claude.jsonl"}  # each agent's event log, in root/session
-CONTAINER = ["apptainer", "exec", "--nv", "--containall", "--no-mount", "/scratch", "--no-mount", "/storage"]
+# --no-mount bind-paths turns off every bind path in the site's apptainer.conf: on ICE, /scratch and /storage.
+CONTAINER = ["apptainer", "exec", "--nv", "--containall", "--no-mount", "bind-paths"]
+DNS_FILES = ("/etc/resolv.conf", "/etc/hosts")  # only the Codex container binds these, since only it needs the network
 # Shell commands that reach the network. Nothing in the container blocks them, so result.json lists
 # the ones that ran.
 NETWORK = re.compile(
@@ -114,34 +117,30 @@ def _env_flags(env):
 
 
 def apptainer_command(root, sif, key_file, sock_dir, agent=None):
-    """The codex agent's container (note 5): /work and /session writable, the helper client and the
-    socket folder read-only, no /scratch or /storage, GPU for Blender. agent replaces the CLI command
-    in tests."""
-    return [*CONTAINER, *_mounts(root, sock_dir), "--env-file", str(key_file),
-            *_env_flags({**CODEX_ENV, **HELPER_ENV}), "--pwd", "/work", str(sif),
+    """The codex agent's container (note 5): /work and /session writable, the helper client, the
+    socket folder and DNS_FILES read-only, no /scratch or /storage, GPU for Blender. agent replaces
+    the CLI command in tests."""
+    return [*CONTAINER, *_mounts(root, sock_dir), *(a for p in DNS_FILES for a in _bind(p, p, ro=True)),
+            "--env-file", str(key_file), *_env_flags({**CODEX_ENV, **HELPER_ENV}), "--pwd", "/work", str(sif),
             *(agent or [*CODEX_KEY_WRAPPER, *codex_command()])]
 
 
 def shell_command(root, sif, sock_dir):
     """The claude agent's shell (note 5): one `bash --noprofile --norc` in a container with the mounts
-    and helper variables of apptainer_command, but no /session, no key file and no network (--network
-    none; with --containall the container keeps only loopback). root/session holds claude_agent's log,
-    which result.json takes the cost and the tool calls from, so the model's commands must not reach
-    it. claude_agent writes the commands to its stdin."""
+    and helper variables of apptainer_command, but no /session, no DNS_FILES, no key file and no
+    network (--network none; with --containall the container keeps only loopback). root/session holds
+    claude_agent's log, which result.json takes the cost and the tool calls from, so the model's
+    commands must not reach it. claude_agent writes the commands to its stdin."""
     return [*CONTAINER, "--net", "--network", "none", *_mounts(root, sock_dir, session=False),
             *_env_flags(HELPER_ENV), "--pwd", "/work", str(sif), "bash", "--noprofile", "--norc"]
 
 
-def claude_command(root, sif, sock_dir, key_file, effort=CLAUDE_EFFORT, image_side=None, system=None):
+def claude_command(root, sif, sock_dir, key_file, effort=CLAUDE_EFFORT):
     """The claude agent (note 5): harpor.agent.claude_agent with the controller's own interpreter, on
     the host. It reads the key from key_file into its memory and starts its shell with shell_command.
-    image_side and system go to --image-side and --system when given; else claude_agent's defaults
-    hold (2576 px, harpor/agent/claude/SYSTEM.md). Paths are absolute, because it runs from the
-    repository and not from the work folder."""
+    Paths are absolute, because it runs from the repository and not from the work folder."""
     return [sys.executable, "-m", "harpor.agent.claude_agent", os.path.abspath(root), "--sif", os.path.abspath(sif),
-            "--sock-dir", str(sock_dir), "--key-file", os.path.abspath(key_file), "--effort", effort,
-            *(["--image-side", str(image_side)] if image_side is not None else []),
-            *(["--system", os.path.abspath(system)] if system is not None else [])]
+            "--sock-dir", str(sock_dir), "--key-file", os.path.abspath(key_file), "--effort", effort]
 
 
 def sif_blender(sif, rw=(), ro=(), aliases=()):
@@ -173,8 +172,7 @@ def cli_exit(returncode, agent="codex"):
 
 
 def agent_info(root):
-    """control/agent.json: agent, model, effort, and image_side and system when prepare_session got
-    them."""
+    """control/agent.json: agent, model and effort."""
     return json.loads((Path(root) / "control" / "agent.json").read_text())
 
 
@@ -183,50 +181,37 @@ def codex_config():
     return (AGENT_DIR / "codex" / "config.toml").read_text()
 
 
-def agent_record(agent, effort=None, image_side=None, system=None):
-    """control/agent.json (agent, model, effort; for claude also image_side and the absolute system
-    path when given) for prepare_session, or ValueError for a setting the agent does not take."""
+def agent_record(agent, effort=None):
+    """control/agent.json (agent, model, effort) for prepare_session, or ValueError for a setting the
+    agent does not take."""
     if agent == "codex":
-        if effort not in (None, "xhigh") or image_side is not None or system is not None:
-            raise ValueError("effort, image_side and system are settings of the claude agent; Codex runs at "
-                             "xhigh (codex/config.toml)")
+        if effort not in (None, "xhigh"):
+            raise ValueError("effort is a setting of the claude agent; Codex runs at xhigh (codex/config.toml)")
         return {"agent": "codex", "model": CODEX_MODEL, "effort": "xhigh"}
     if agent != "claude":
         raise ValueError(f"agent is codex or claude, not {agent!r}")
     effort = CLAUDE_EFFORT if effort is None else effort
     if effort not in EFFORTS:
         raise ValueError(f"effort is one of {', '.join(EFFORTS)}, not {effort!r}")
-    if image_side is not None and not (type(image_side) is int and image_side > 0):
-        raise ValueError(f"image_side is a positive number of pixels, not {image_side!r}")
-    if system is not None and not Path(system).is_file():
-        raise ValueError(f"system {system} is not a file")
-    return {"agent": "claude", "model": CLAUDE_MODEL, "effort": effort,
-            **({"image_side": image_side} if image_side is not None else {}),
-            **({"system": os.path.abspath(system)} if system is not None else {})}
+    return {"agent": "claude", "model": CLAUDE_MODEL, "effort": effort}
 
 
-def prepare_session(root, mode, prompt, views, *, source, metric, depth_scale=1.0, confidence=None,
-                    original=None, previews=(), agent="codex", effort=None, image_side=None, system=None,
+def prepare_session(root, mode, prompt, views, *, source, metric, original=None, agent="codex", effort=None,
                     parts=None):
     """Write the session folder for mode 'refinement' or 'articulation'.
 
     Articulation (build_plan.md note 11) works like refinement on the split parts.glb as the original,
     and parts (run/parts.json of the parts stage) goes to work/input/parts.json, which the manifest names.
     prompt: None for the mode's prompt (harpor.agent.prompts). views: dicts with K, w2c
-    (OpenCV world-to-camera in W), width, height, image and mask files, and optional depth (.npy,
-    optical-axis z) and confidence (.npy) files. previews: PNGs of the original; without them,
-    run_session renders them before the clock starts. agent: "codex" (GPT-6-Astra through the Codex
-    CLI, at the xhigh effort of codex/config.toml) or "claude" (Claude Opus 5.5 through claude_agent
-    at effort, default xhigh).
-    image_side (the long side in px that view_image downscales to) and system (the system prompt
-    file) are claude settings; given, they go to control/agent.json and claude_agent's command,
-    else claude_agent's defaults hold (2576 px, harpor/agent/claude/SYSTEM.md).
+    (OpenCV world-to-camera in W), width, height, and image and mask files. agent: "codex" (GPT-6-Astra
+    through the Codex CLI, at the xhigh effort of codex/config.toml) or "claude" (Claude Opus 5.5
+    through claude_agent at effort, default xhigh).
     """
     if mode not in tools.VERDICTS:
         raise ValueError(f"mode is one of {', '.join(tools.VERDICTS)}, not {mode!r}")
     if (parts is not None) != (mode == "articulation"):
         raise ValueError("parts (run/parts.json) goes with the articulation mode, and only with it")
-    record = agent_record(agent, effort, image_side, system)
+    record = agent_record(agent, effort)
     prompt = prompts.load(mode) if prompt is None else prompt
     root, work = Path(root), Path(root) / "work"
     for d in ("input", "exports", "reviews", "checkpoints"):
@@ -240,18 +225,17 @@ def prepare_session(root, mode, prompt, views, *, source, metric, depth_scale=1.
         (root / "session" / "codex_home" / "config.toml").write_text(codex_config())
         shutil.copyfile(AGENT_DIR / "codex" / "AGENTS.md", work / "AGENTS.md")
     else:  # claude_agent sends this file as the system prompt; the copy is the record
-        shutil.copyfile(record.get("system", AGENT_DIR / "claude" / "SYSTEM.md"), root / "session" / "system.md")
+        shutil.copyfile(AGENT_DIR / "claude" / "SYSTEM.md", root / "session" / "system.md")
     (root / "session" / "prompt.txt").write_text(prompt, encoding="utf-8")
     entries = []
     for i, v in enumerate(views):
         e = {"index": i, "K": np.asarray(v["K"], float).tolist(), "w2c": np.asarray(v["w2c"], float).tolist(),
              "width": v["width"], "height": v["height"]}
-        for key, folder in (("image", "images"), ("mask", "masks"), ("depth", "depth"), ("confidence", "confidence")):
-            if v.get(key):
-                dst = work / "input" / folder / f"{i:03d}{Path(v[key]).suffix}"
-                dst.parent.mkdir(exist_ok=True)
-                shutil.copyfile(v[key], dst)
-                e[key] = str(dst.relative_to(work))
+        for key, folder in (("image", "images"), ("mask", "masks")):
+            dst = work / "input" / folder / f"{i:03d}{Path(v[key]).suffix}"
+            dst.parent.mkdir(exist_ok=True)
+            shutil.copyfile(v[key], dst)
+            e[key] = str(dst.relative_to(work))
         entries.append(e)
     m = {
         "mode": mode,
@@ -261,9 +245,6 @@ def prepare_session(root, mode, prompt, views, *, source, metric, depth_scale=1.
         "cameras": "K and OpenCV world-to-camera w2c (4x4, column vectors); pixel centers at integer coordinates",
         "source": source,
         "units": "meters" if metric else "relative: one unknown scale shared by all views",
-        "depth": "float32 .npy of optical-axis z; times depth_scale gives W units; invalid if non-finite or <= 0",
-        "depth_scale": depth_scale,
-        "confidence": confidence,
         "views": entries,
     }
     if parts is not None:
@@ -274,8 +255,6 @@ def prepare_session(root, mode, prompt, views, *, source, metric, depth_scale=1.
     shutil.copyfile(original, root / "original.glb")
     (work / "original" / "previews").mkdir(parents=True)
     shutil.copyfile(original, work / "original" / "original.glb")
-    for p in previews:
-        shutil.copyfile(p, work / "original" / "previews" / Path(p).name)
     return work
 
 
@@ -311,7 +290,7 @@ def deadline(t0, budget_s, events, now):
 
 
 def _signal_group(proc, sig):
-    with contextlib.suppress(ProcessLookupError):
+    with contextlib.suppress(ProcessLookupError, PermissionError):  # macOS refuses a group of finished processes
         os.killpg(proc.pid, sig)
 
 
@@ -602,10 +581,8 @@ def run_session(root, cmd, env=None, *, blender, sock_dir, **watchdog):
     mode = json.loads((root / "control" / "manifest.json").read_text())["mode"]
     info = agent_info(root)
     log = root / "session" / LOGS[info["agent"]]
-    previews = None
     candidate = build_candidate(root, blender)
-    if not any((work / "original" / "previews").glob("*.png")):
-        previews = make_previews(root, blender)
+    previews = make_previews(root, blender)
     server = ToolServer(Path(sock_dir) / "tools.sock", work, root / "control", blender).start()
     try:
         run = run_agent(root, cmd, env, **watchdog)
@@ -644,8 +621,7 @@ def run_container_session(root, sif, key_file, agent=None, **watchdog):
     sock_dir = tempfile.mkdtemp(prefix="gator-")  # short path: Unix socket paths are limited to 107 bytes
     try:
         if info["agent"] == "claude":
-            cmd = agent or claude_command(root, sif, sock_dir, key_file, info["effort"], info.get("image_side"),
-                                          info.get("system"))
+            cmd = agent or claude_command(root, sif, sock_dir, key_file, info["effort"])
         else:
             cmd = apptainer_command(root, sif, key_file, sock_dir, agent)
         result = run_session(root, cmd, blender=blender_command(root, sif), sock_dir=sock_dir, **watchdog)

@@ -1,9 +1,15 @@
 """harpor/webapp/turntable.py, the 360 video of a web-app job: the GLB that physics used and its upright turn, the
-container's binds, the render with the fake Blender of harpor.agent.fake_agent, and the PyAV encode."""
+container's binds, the render with the fake Blender of harpor.agent.fake_agent, and the PyAV encode. Also
+blender/turntable.py itself, on stand-ins for bpy and mathutils."""
+import importlib.util
 import json
+import math
+import runpy
 import shlex
 import signal
 import sys
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -12,12 +18,14 @@ pytest.importorskip("av")
 pytest.importorskip("trimesh")
 from test_webapp_physics_auto import box_glb, plane_view, write_run  # noqa: E402
 
-from harpor.agent import tools  # noqa: E402
+from harpor.agent import fake_agent, tools  # noqa: E402
+from harpor.agent.blender import crop  # noqa: E402
 from harpor.physics.align import load_w  # noqa: E402
 from harpor.webapp import physics_auto  # noqa: E402
 from harpor.webapp import turntable as T  # noqa: E402
 
 FAKE_BLENDER = [sys.executable, "-m", "harpor.agent.fake_agent", "--blender"]
+POINTS = np.array([[-0.1, -0.4, -0.2], [0.3, 0.0, 0.2]])  # the box of the stand-in asset, in W
 
 
 def aligned_job(tmp_path):
@@ -67,8 +75,8 @@ def test_blender_command_binds_only_the_folder_the_glb_and_the_scripts(tmp_path)
 
     J = tmp_path / "job"
     glb = J / "agent" / "s" / "work" / "exports" / "003.glb"
-    cmd = T.blender_command(J, glb, "/G/sif/gator-agent.sif")
-    assert cmd[:len(controller.CONTAINER)] == controller.CONTAINER and cmd[-2:] == ["/G/sif/gator-agent.sif", "blender"]
+    cmd = T.blender_command(J, glb, "/G/sif/harpor-agent.sif")
+    assert cmd[:len(controller.CONTAINER)] == controller.CONTAINER and cmd[-2:] == ["/G/sif/harpor-agent.sif", "blender"]
     binds = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--bind"]
     out = (J / "turntable").resolve()
     assert binds == [f"{out}:{out}", f"{glb}:{glb}:ro", f"{tools.BLENDER_SCRIPTS}:{tools.BLENDER_SCRIPTS}:ro"]
@@ -101,6 +109,69 @@ def test_render_writes_the_frames_and_its_record(tmp_path):
     assert a[0, 0].tolist() == [209, 209, 209]
     ys, xs = np.nonzero(a[..., 0] < 100)
     assert np.ptp(xs) > 1.5 * np.ptp(ys) > 0
+
+
+def run_blender_script(tmp_path, monkeypatch, args):
+    """blender/turntable.py with args, on stand-ins for bpy and mathutils. render_common is the real one, except for
+    its GLB import and its points. Returns (bpy, the objects the script made by name, the asset, the pivot's keys)."""
+    asset, pivot, keys = MagicMock(matrix_world=np.eye(4)), MagicMock(), []
+    asset.parent = None
+    pivot.keyframe_insert.side_effect = lambda path, frame: keys.append((path, frame, pivot.rotation_euler))
+    made = {"pivot": pivot}
+    bpy = MagicMock()
+    bpy.data.objects.new.side_effect = lambda name, data: made.setdefault(name, MagicMock())
+    bpy.context.scene.render.image_settings = SimpleNamespace()  # holds only what the script sets
+    monkeypatch.setitem(sys.modules, "bpy", bpy)
+    monkeypatch.setitem(sys.modules, "mathutils", SimpleNamespace(
+        Matrix=np.array, Vector=MagicMock(side_effect=lambda v: MagicMock(xyz=list(v)))))
+    monkeypatch.setitem(sys.modules, "crop", crop)
+    spec = importlib.util.spec_from_file_location("render_common", tools.BLENDER_SCRIPTS / "render_common.py")
+    common = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(common)
+    common.import_glb, common.points = (lambda path: [asset]), (lambda objs: POINTS)
+    monkeypatch.setitem(sys.modules, "render_common", common)
+    (tmp_path / "args.json").write_text(json.dumps(args))
+    monkeypatch.setattr(sys, "argv", ["blender", "--", str(tmp_path / "args.json")])
+    monkeypatch.setattr(sys, "path", list(sys.path))  # the script puts its folder first
+    runpy.run_path(str(tools.BLENDER_SCRIPTS / "turntable.py"))
+    return bpy, made, asset, keys
+
+
+def test_blender_script_turns_the_asset_once_as_png_frames(tmp_path, monkeypatch):
+    """The real turntable.py on the arguments of the stage. The asset goes through its matrix and onto the pivot at
+    its center, the pivot turns once about y, and the camera looks at the center along +z of W, from ELEVATION_DEG
+    above, at the distance that fits the turning asset. One render of the animation writes 8-bit PNG frames."""
+    J = aligned_job(tmp_path)
+    T.render(J, blender=FAKE_BLENDER)
+    args = json.loads((J / "turntable" / "args.json").read_text())
+    bpy, made, asset, keys = run_blender_script(tmp_path, monkeypatch, args)
+    scene, pivot, cam = bpy.context.scene, made["pivot"], made["camera"]
+    settings = scene.render.image_settings
+    assert vars(settings) == {"media_type": "IMAGE", "file_format": "PNG", "color_mode": "RGB", "color_depth": "8"}
+    assert scene.render.filepath == args["frames_dir"] + "/"
+    assert (scene.frame_start, scene.frame_end, scene.render.fps) == (1, T.FRAMES, T.FPS)
+    assert (scene.render.resolution_x, scene.render.resolution_y, scene.render.resolution_percentage) == (T.SIDE, T.SIDE, 100)
+    assert scene.cycles.samples == T.SAMPLES and scene.render.use_persistent_data is True and scene.camera is cam
+    assert np.array_equal(asset.matrix_world, np.array(args["assets"][0]["matrix"])) and asset.parent is pivot
+    center, r = POINTS.mean(0), np.linalg.norm(np.ptp(POINTS, axis=0)) / 2
+    assert np.allclose(pivot.location.xyz, center) and pivot.rotation_mode == "XYZ"
+    assert keys == [("rotation_euler", 1, (0.0, 0.0, 0.0)), ("rotation_euler", T.FRAMES + 1, (0.0, -2 * math.pi, 0.0))]
+    dist, e = 1.3 * r / math.tan(math.radians(15)), math.radians(T.ELEVATION_DEG)
+    assert np.allclose(cam.matrix_world[:3, 3], center + dist * np.array([0.0, -math.sin(e), -math.cos(e)]))
+    assert np.allclose(-cam.matrix_world[:3, 2], [0.0, math.sin(e), math.cos(e)])  # a Blender camera looks along its -z
+    assert np.allclose(cam.matrix_world[:3, 0], [1.0, 0.0, 0.0])  # image right is +x of W
+    assert (cam.data.clip_start, cam.data.clip_end) == pytest.approx((1e-3 * dist, 1e3 * dist))
+    bpy.ops.render.render.assert_called_once_with(animation=True)
+
+
+@pytest.mark.parametrize("args", [{"assets": [{"path": "a.glb"}, {"path": "b.glb"}], "frames_dir": "f", "out": "v.mp4"},
+                                  {"assets": [{"path": "a.glb"}], "out": "v.mp4"}])
+def test_blender_script_takes_one_asset_and_frames_dir(tmp_path, monkeypatch, args):
+    """Anything else stops the script before it renders, in the real script and in the fake Blender."""
+    with pytest.raises(AssertionError, match="exactly one asset and frames_dir"):
+        run_blender_script(tmp_path, monkeypatch, args)
+    with pytest.raises(AssertionError, match="exactly one asset and frames_dir"):
+        fake_agent.turntable_frames(args)
 
 
 def test_render_fails_with_the_reason(tmp_path):

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import sys
@@ -17,6 +18,7 @@ import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -106,7 +108,7 @@ SESSIONS = {
     "deadline_kill": ("refinement", 1.0, [{"do": "ignore_sigint"}, SLEEP]),
     "budget_tamper": ("refinement", 1.0, [{"do": "write", "path": "run_budget.json",
                                            "text": '{"deadline": 99999999999}'}, SLEEP]),
-    "deadline_extension": ("refinement", 1.5, [edit(1.75, seconds=2.0), EXPORT, REVIEW, finish("complete")]),
+    "deadline_extension": ("refinement", 5.0, [edit(1.75, seconds=5.5), EXPORT, REVIEW, finish("complete")]),
     "export_cache": ("refinement", LONG, [edit(1.25), EXPORT, EXPORT, REVIEW, finish("complete")]),
     "nan_finish": ("refinement", LONG, [edit(1.3), EXPORT, edit(1.3, "nan"), REVIEW, finish("complete")]),
     "no_material_checkpoint": ("refinement", LONG, [edit(1.4), REVIEW, checkpoint("old"), edit(1.4, "no_material"),
@@ -137,10 +139,9 @@ def make_views(folder, n=2):
     for i in range(n):
         (folder / f"img{i}.png").write_bytes(b"png %d" % i)
         (folder / f"mask{i}.png").write_bytes(b"mask %d" % i)
-        np.save(folder / f"depth{i}.npy", np.full((48, 64), 2.0 + i, np.float32))
         w2c = F.rigid(np.eye(3), [0.0, 0.0, 0.5 * i])
-        views.append({"image": folder / f"img{i}.png", "mask": folder / f"mask{i}.png",
-                      "depth": folder / f"depth{i}.npy", "K": K, "w2c": w2c, "width": 64, "height": 48})
+        views.append({"image": folder / f"img{i}.png", "mask": folder / f"mask{i}.png", "K": K, "w2c": w2c,
+                      "width": 64, "height": 48})
     return views
 
 
@@ -154,9 +155,8 @@ def prepare(root, mode, **agent):
         parts.write_text(json.dumps(PARTS))
     else:
         write_glb(original, "good", ORIGINAL_SIZE)
-    (root / "in" / "front.png").write_bytes(b"preview")
     return C.prepare_session(root / "s", mode, PROMPT, make_views(root / "in"), source="sensor depth", metric=True,
-                             original=original, previews=[root / "in" / "front.png"], parts=parts, **agent)
+                             original=original, parts=parts, **agent)
 
 
 def run_scripted(root, mode, budget_s, script):
@@ -190,7 +190,7 @@ def agent_log(root):
 def test_finish_refinement(runs):
     root, r = runs["finish_refine"]
     assert r["candidate_built"] is True
-    assert r["previews_built"] is None  # previews were supplied
+    assert r["previews_built"] is True and (root / "work" / "original" / "previews" / "sheet.png").is_file()
     assert (r["source"], r["verdict"], r["exit"]) == ("finish", "complete", "exited")
     assert r["reason"] == "fixed the handle" and r["limitations"] == ["seam on the back", "thin lid"]
     assert r["glb"] == "work/exports/001.glb" and edge(root / r["glb"]) == 1.2
@@ -299,13 +299,34 @@ def test_deadline_extended_by_export_time(runs):
     root, r = runs["deadline_extension"]
     assert (r["exit"], r["source"], r["verdict"]) == ("exited", "finish", "complete")
     t = r["timings"]
-    assert t["wall_s"] > t["budget_s"] and t["excluded_s"] >= 2.0
+    assert t["wall_s"] > t["budget_s"] and t["excluded_s"] >= 5.5
     assert t["deadline_s"] == pytest.approx(t["budget_s"] + t["excluded_s"])
     done = [e for e in T.read_events(root / "control") if e["event"] == "export_done"]
     budget = json.loads((root / "work" / "run_budget.json").read_text())
     assert len(done) == 1 and budget["excluded_s"] == done[0]["seconds"] == t["excluded_s"]
     assert budget["deadline"] == pytest.approx(budget["started_at"] + t["budget_s"] + t["excluded_s"])
     assert budget["exports"] == [{"export": 1, "seconds": done[0]["seconds"]}]
+
+
+def test_a_group_of_finished_processes_is_no_error(tmp_path, monkeypatch):
+    """macOS answers a signal to a group of finished processes with EPERM, where Linux sends it to nobody, and that
+    is the normal end of a session whose agent has just exited."""
+    def refused(pgid, sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    p = SimpleNamespace(pid=12345, send_signal=lambda sig: None, wait=lambda timeout=None: 0)
+    work = prepare(tmp_path, "refinement")
+    with tempfile.TemporaryDirectory(prefix="gator-") as d:
+        server = ToolServer(os.path.join(d, "tools.sock"), work, work.parent / "control", FAKE_BLENDER)
+        monkeypatch.setattr(os, "killpg", refused)
+        C._signal_group(p, signal.SIGINT)
+        T._kill_group(p)
+        server._proc = p
+        server.stop()
+    monkeypatch.setattr(T, "_children", [p])
+    with pytest.raises(SystemExit) as e:
+        T._on_sigterm(signal.SIGTERM, None)
+    assert e.value.code == 128 + signal.SIGTERM
 
 
 def test_unchanged_scene_returns_cached_export(runs):
@@ -317,7 +338,7 @@ def test_unchanged_scene_returns_cached_export(runs):
 
 def test_helpers_print_time_left(runs):
     # export_cache: export, cached export, review, finish. checkpoint_fallback: review, checkpoint, export.
-    # deadline_extension: a 2 s export, review, finish.
+    # deadline_extension: a 5.5 s export, review, finish.
     for name, n in (("export_cache", 3), ("checkpoint_fallback", 3), ("deadline_extension", 2)):
         root, r = runs[name]
         t = r["timings"]
@@ -422,13 +443,17 @@ def test_manifest_and_layout(tmp_path):
     assert (root / "control" / "events.jsonl").exists() and not (work / ".gator").exists()
     assert json.loads((root / "control" / "manifest.json").read_text()) == json.loads((work / "input" / "manifest.json").read_text())
     m = json.loads((work / "input" / "manifest.json").read_text())
-    assert m["mode"] == "refinement" and m["units"] == "meters" and m["depth_scale"] == 1.0
+    assert m["mode"] == "refinement" and m["units"] == "meters"
+    assert set(m) == {"mode", "frame", "glb_axes", "w_from_gltf", "cameras", "source", "units", "views"}
     assert np.allclose(m["w_from_gltf"], F.W_FROM_GLTF)
     v = m["views"][1]
     assert v["image"] == "input/images/001.png" and (work / v["image"]).read_bytes() == b"png 1"
-    assert np.load(work / v["depth"])[0, 0] == 3.0 and "confidence" not in v
+    assert set(v) == {"index", "K", "w2c", "width", "height", "image", "mask"}
+    assert sorted(p.name for p in (work / "input").iterdir()) == ["images", "manifest.json", "masks"]
     assert np.allclose(v["w2c"], F.rigid(np.eye(3), [0, 0, 0.5])) and v["K"][0][2] == 31.5
-    assert (work / "original" / "previews" / "front.png").exists()
+    assert not any((work / "original" / "previews").iterdir())  # run_session renders them
+    for manual in (work / "AGENTS.md", C.AGENT_DIR / "claude" / "SYSTEM.md"):  # what each input view holds
+        assert "under `input/` (`image` and `mask`)" in " ".join(manual.read_text().split())
     assert T.sha256(work / "original" / "original.glb") == T.sha256(work.parent / "original.glb")
     assert (work.parent / "session" / "prompt.txt").read_bytes() == PROMPT.encode("utf-8")
 
@@ -649,8 +674,9 @@ def test_apptainer_command_keeps_control_out(tmp_path):
     cmd = C.apptainer_command(root, "/sif/agent.sif", "/home/u/key.env", "/tmp/gator-x")
     binds = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--bind"]
     assert binds == [f"{root.resolve()}/work:/work", f"{root.resolve()}/session:/session",
-                     f"{C.AGENT_DIR}/bin:/opt/gator/bin:ro", "/tmp/gator-x:/opt/gator/sock:ro"]
-    assert cmd[:8] == C.CONTAINER and "--containall" in cmd and "control" not in " ".join(binds)
+                     f"{C.AGENT_DIR}/bin:/opt/gator/bin:ro", "/tmp/gator-x:/opt/gator/sock:ro",
+                     "/etc/resolv.conf:/etc/resolv.conf:ro", "/etc/hosts:/etc/hosts:ro"]
+    assert cmd[:len(C.CONTAINER)] == C.CONTAINER and "--containall" in cmd and "control" not in " ".join(binds)
     envs = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--env"]
     assert envs == ["CODEX_HOME=/session/codex_home", "GATOR_SOCKET=/opt/gator/sock/tools.sock",
                     "PREPEND_PATH=/opt/gator/bin"]
@@ -668,11 +694,29 @@ def test_apptainer_command_keeps_control_out(tmp_path):
 def test_note_5_command_is_the_controllers(tmp_path):
     text = (Path(__file__).resolve().parents[1] / "docs" / "build_plan.md").read_text()
     block = text.split("### 5. Stage B", 1)[1].split("```bash\n", 1)[1].split("```", 1)[0]
-    root, sock, key, sif = tmp_path / "s", "/tmp/gator-x", "/home/u/.config/gator/openai.env", "/sif/gator-agent.sif"
+    root, sock, key, sif = tmp_path / "s", "/tmp/gator-x", "/home/u/.config/harpor/openai.env", "/sif/harpor-agent.sif"
     doc = (block.replace("\\\n", " ").replace("<root>", str(root.resolve())).replace("<socket dir>", sock)
-           .replace("~/.config/gator/openai.env", key).replace(" harpor/agent/bin:", f" {C.AGENT_DIR}/bin:")
-           .replace(" gator-agent.sif", f" {sif}"))
+           .replace("~/.config/harpor/openai.env", key).replace(" harpor/agent/bin:", f" {C.AGENT_DIR}/bin:")
+           .replace(" harpor-agent.sif", f" {sif}"))
     assert shlex.split(doc) == C.apptainer_command(root, sif, key, sock)
+    assert f'AG="{shlex.join(C.CONTAINER)} $G/sif/harpor-agent.sif"' in text  # the sandbox check runs the same flags
+
+
+def test_only_the_codex_container_binds_the_dns_files(tmp_path):
+    """--no-mount bind-paths turns off the site's binds in every container. The Codex CLI needs the network, so its
+    container binds the two files itself. The claude shell and the Blender containers get CONTAINER alone."""
+    root = tmp_path / "s"
+
+    def binds(cmd):
+        return [cmd[i + 1] for i, a in enumerate(cmd) if a == "--bind"]
+
+    assert C.CONTAINER == ["apptainer", "exec", "--nv", "--containall", "--no-mount", "bind-paths"]
+    codex = C.apptainer_command(root, "/sif/agent.sif", "/home/u/key.env", "/tmp/gator-x")
+    assert binds(codex)[-2:] == ["/etc/resolv.conf:/etc/resolv.conf:ro", "/etc/hosts:/etc/hosts:ro"]
+    others = (C.shell_command(root, "/sif/agent.sif", "/tmp/gator-x"), C.blender_command(root, "/sif/agent.sif"),
+              C.sif_blender("/sif/agent.sif", rw=["/data"], ro=["/in.glb"]))
+    for cmd in others:
+        assert cmd[:len(C.CONTAINER)] == C.CONTAINER and not [b for b in binds(cmd) if b.startswith("/etc/")]
 
 
 def test_cli_exit_names():
@@ -782,7 +826,7 @@ def test_review_passes_the_detail_rig(tmp_path, monkeypatch):
             T.review(work, control, FAKE_BLENDER, detail=bad)
 
 
-def test_previews_are_rendered_when_none_are_supplied(tmp_path, monkeypatch):
+def test_make_previews_writes_the_sheet(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str(REPO))
     original = tmp_path / "original.glb"
     write_glb(original, size=2.0)
@@ -793,12 +837,46 @@ def test_previews_are_rendered_when_none_are_supplied(tmp_path, monkeypatch):
     assert (previews / "sheet.png").exists() and not (previews / "args.json").exists()
 
 
+def test_a_session_always_renders_its_previews(tmp_path, monkeypatch):
+    """Nothing supplies previews any more, so a PNG that is already in the folder does not stop the render."""
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    work = prepare(tmp_path, "refinement")
+    (work / "original" / "previews" / "old.png").write_bytes(b"")
+    with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
+        r = C.run_session(work.parent, [sys.executable, "-c", "pass"], blender=FAKE_BLENDER, sock_dir=sock_dir,
+                          budget_s=LONG, **FAST)
+    assert r["previews_built"] is True and (work / "original" / "previews" / "sheet.png").is_file()
+
+
+@pytest.mark.parametrize("gone", [{"depth_scale": 2.0}, {"confidence": "per pixel"}, {"previews": ()}, {"image_side": 1568},
+                                  {"system": "manual.md"}])
+def test_prepare_session_takes_no_comparison_inputs(tmp_path, gone):
+    original = tmp_path / "original.glb"
+    write_glb(original)
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        C.prepare_session(tmp_path / "s", "refinement", "p", [], source="s", metric=False, original=original, **gone)
+    assert not (tmp_path / "s").exists()
+    with pytest.raises(TypeError, match="positional"):
+        C.claude_command("s", "a.sif", "/tmp/x", "/k.env", "xhigh", 1568)
+
+
+@pytest.mark.parametrize("key", ["image", "mask"])
+def test_a_view_without_its_image_or_mask_stops_the_session(tmp_path, key):
+    """SYSTEM.md and AGENTS.md tell the agent that every view has both files."""
+    views = make_views(tmp_path / "in")
+    del views[1][key]
+    write_glb(tmp_path / "in" / "o.glb")
+    with pytest.raises(KeyError, match=key):
+        C.prepare_session(tmp_path / "s", "refinement", "p", views, source="s", metric=True,
+                          original=tmp_path / "in" / "o.glb")
+
+
 def test_articulation_session(runs):
     """edit, export, set_joint, review_articulation and finish articulated: the delivered GLB holds the
     joint, and every helper prints at most 20 lines."""
     root, r = runs["articulation_finish"]
     assert (r["mode"], r["source"], r["verdict"], r["exit"]) == ("articulation", "finish", "articulated", "exited")
-    assert r["candidate_built"] is True and r["previews_built"] is None and r["rejected"] == []
+    assert r["candidate_built"] is True and r["previews_built"] is True and r["rejected"] == []
     assert r["glb"] == "work/exports/002.glb" and edge(root / r["glb"]) == PARTS_SIZE and C.check_glb(root / r["glb"]) is None
     assert J.load(root / r["glb"]) == ({"lid": lid_joint(HINGE)}, ["body", "lid"])
     assert r["counts"] == {"exports": 2, "reviews": 0, "checkpoints": 0, "joints": 1, "articulation_reviews": 1}
@@ -1151,7 +1229,6 @@ def test_articulation_prompt_and_session_layout(tmp_path):
     assert json.loads((work / "input" / "parts.json").read_text()) == PARTS
     assert T.sha256(work.parent / "original.glb") == T.sha256(work / "original" / "original.glb")
     assert J.load(work / "original" / "original.glb")[1] == ["body", "lid"]
-    assert (work / "original" / "previews" / "front.png").exists()
     with pytest.raises(ValueError, match="parts"):
         C.prepare_session(tmp_path / "x", "articulation", None, [], source="s", metric=True,
                           original=work / "original" / "original.glb")
@@ -1275,7 +1352,7 @@ CLAUDE_SCRIPT = [
                  bash("toolu_1", "env > env.txt; printf '{\"kind\": \"good\", \"size\": 1.2, \"seconds\": 0}' > candidate.blend"
                                  " && review")],
      "stop_reason": "tool_use", "usage": usage(1200, 300, write=5000)},
-    {"content": [{"type": "tool_use", "id": "toolu_2", "name": "view_image", "input": {"path": "/work/original/previews/front.png"}},
+    {"content": [{"type": "tool_use", "id": "toolu_2", "name": "view_image", "input": {"path": "/work/original/previews/sheet.png"}},
                  bash("toolu_3", 'finish --receipt "$(ls reviews | tail -1)" --verdict complete --reason "fixed the handle"')],
      "stop_reason": "tool_use", "usage": usage(400, 200, read=5000, write=900)},
     {"content": [{"type": "text", "text": "Done."}], "stop_reason": "end_turn", "usage": usage(10, 5, read=5900)},
@@ -1313,7 +1390,6 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     cmd = built[0]
     assert cmd[:4] == [sys.executable, "-m", "harpor.agent.claude_agent", str(root.resolve())]
     assert cmd[cmd.index("--key-file") + 1] == str(key_file) and cmd[-2:] == ["--effort", "xhigh"]
-    assert "--image-side" not in cmd and "--system" not in cmd  # claude_agent's defaults: 2576 px, SYSTEM.md
     assert (r["agent"], r["model"], r["effort"]) == ("claude", "claude-opus-5-5", "xhigh")
     assert (r["source"], r["verdict"], r["reason"], r["glb"]) == ("finish", "complete", "fixed the handle", "work/exports/001.glb")
     assert edge(root / r["glb"]) == 1.2 and r["rejected"] == [] and r["candidate_built"] is True
@@ -1348,23 +1424,39 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     loop_trace.main([str(tmp_path)])
     trace = capsys.readouterr().out
-    assert "== agent (claude), in order" in trace and "views: /work/original/previews/front.png [" in trace
+    assert "== agent (claude), in order" in trace and "views: /work/original/previews/sheet.png [" in trace
     assert "runs: finish --receipt" in trace and "ended: finished after 2 turns" in trace
     assert "finish complete: fixed the handle" in trace and "claude-opus-5-5: 2 turns" in trace
 
 
+def test_loop_trace_of_a_codex_session(runs, tmp_path, capsys):
+    """The trace reads the agent from control/agent.json and takes no turntable arguments. A session folder without
+    that file is an error: it is not taken for a Codex session."""
+    from harpor.agent import loop_trace
+
+    root = runs["finish_refine"][0]
+    loop_trace.main([str(root.parent)])
+    trace = capsys.readouterr().out
+    assert "== agent (codex), in order" in trace and "finish complete: fixed the handle" in trace
+    with pytest.raises(SystemExit) as e:
+        loop_trace.main([str(root.parent), "--turntable-args", str(tmp_path / "args.json")])
+    assert e.value.code == 2 and not (tmp_path / "args.json").exists()
+    shutil.copytree(root, tmp_path / "s")
+    (tmp_path / "s" / "control" / "agent.json").unlink()
+    with pytest.raises(FileNotFoundError, match="agent.json"):
+        loop_trace.main([str(tmp_path)])
+
+
 def test_claude_session_with_every_tool(tmp_path, monkeypatch):
-    """A claude session at effort low, with the baseline's image side (1568 px) and its own
-    manual, through prepare_session and run_container_session: the shell keeps its directory and
-    variables across turns, the text editor views a file and edits another, view_image shows a PNG
-    that a command made, and finish ends the session. Every request repeats the one before it and
-    appends to it, and the key the shell prints reaches neither the model nor any file."""
+    """A claude session at effort low, through prepare_session and run_container_session: the shell
+    keeps its directory and variables across turns, the text editor views a file and edits another,
+    view_image shows a PNG that a command made, and finish ends the session. Every request repeats the
+    one before it and appends to it, and the key the shell prints reaches neither the model nor any
+    file."""
     pytest.importorskip("anthropic")  # the Claude client
     monkeypatch.setenv("PYTHONPATH", str(REPO))
-    manual = tmp_path / "opus_dig" / "system_v1.md"
-    manual.parent.mkdir()
-    manual.write_text("The old manual: an image larger than 1568 px is shown downscaled. é\n" * 80, encoding="utf-8")
-    root = prepare(tmp_path, "refinement", agent="claude", effort="low", image_side=1568, system=manual).parent
+    manual = C.AGENT_DIR / "claude" / "SYSTEM.md"
+    root = prepare(tmp_path, "refinement", agent="claude", effort="low").parent
     key_file = tmp_path / "anthropic.env"
     key_file.write_text(f"ANTHROPIC_API_KEY={ANTHROPIC_KEY}\n")
     (tmp_path / "stand_in.py").write_text(STAND_IN)
@@ -1403,9 +1495,8 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "blender_command", lambda root, sif: FAKE_BLENDER)
     r = C.run_container_session(root, "/sif/agent.sif", key_file, **{**FAST, "finish_wait_s": 10.0})
 
-    assert built[0][-6:] == ["--effort", "low", "--image-side", "1568", "--system", str(manual)]
-    assert C.agent_info(root) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "low", "image_side": 1568,
-                                  "system": str(manual)}
+    assert built[0][-2:] == ["--effort", "low"]
+    assert C.agent_info(root) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "low"}
     assert (root / "session" / "system.md").read_bytes() == manual.read_bytes()
     assert (r["agent"], r["model"], r["effort"], r["source"], r["verdict"]) == ("claude", "claude-opus-5-5", "low", "finish", "complete")
     assert r["glb"] == "work/exports/001.glb" and edge(root / r["glb"]) == 1.2 and r["counts"]["reviews"] == 1
@@ -1421,7 +1512,7 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
                and q["betas"] == ["server-side-fallback-2026-07-01"] for q in reqs)
     assert all(q["system"] == [{"type": "text", "text": manual.read_text(encoding="utf-8"),
                                 "cache_control": {"type": "ephemeral"}}] for q in reqs)
-    assert all("larger than 1568 px on the long side" in q["view_image"] for q in reqs)
+    assert all("larger than 2576 px on the long side" in q["view_image"] for q in reqs)
     hist = reqs[-1]["history"]
     assert [q["history"] for q in reqs[:-1]] == [hist[:1], hist[:3]]  # append-only
     assert hist[0] == {"role": "user", "content": PROMPT}
@@ -1442,7 +1533,7 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     results = {e["tool_use_id"]: e for e in T.read_jsonl(log) if e.get("type") == "tool_result"}
     assert (results["t8"]["is_error"], results["t8"]["output"]) == (False, "[image 3000x1500]")
     start = next(e for e in T.read_jsonl(log) if e.get("type") == "start")
-    assert (start["image_side"], start["system"]) == (1568, str(manual))
+    assert (start["image_side"], start["system"]) == (2576, str(manual))
     assert results["t9"]["output"].startswith("finished: complete, exports/001.glb")
     assert r["key_found_in"] == [] and r["network_commands"] == []
     assert [p for p in all_files(tmp_path) if ANTHROPIC_KEY.encode() in p.read_bytes()] == [key_file]
@@ -1459,58 +1550,23 @@ def test_claude_session_layout_and_agent_record(tmp_path):
     assert C.agent_info(root)["effort"] == "max"
     codex = prepare(tmp_path / "codex", "refinement").parent
     assert C.agent_info(codex) == {"agent": "codex", "model": "gpt-6-astra", "effort": "xhigh"}
-    manual = tmp_path / "system_v1.md"
-    manual.write_text("old manual\n")
     for bad, why in [({"agent": "gpt"}, "agent is codex or claude"), ({"agent": "claude", "effort": "extreme"}, "effort is one of"),
-                     ({"effort": "high"}, "settings of the claude agent"),
-                     ({"image_side": 1568}, "settings of the claude agent"), ({"system": manual}, "settings of the claude agent"),
-                     *[({"agent": "claude", "image_side": side}, "image_side is a positive number of pixels")
-                       for side in (0, -1, 1.5, True, "1568")],
-                     ({"agent": "claude", "system": tmp_path / "missing.md"}, "is not a file"),
-                     ({"agent": "claude", "system": tmp_path}, "is not a file")]:
+                     ({"effort": "high"}, "effort is a setting of the claude agent")]:
         with pytest.raises(ValueError, match=why):
             C.prepare_session(tmp_path / "bad", "refinement", "p", [], source="s", metric=False, **bad)
         assert not (tmp_path / "bad").exists()
-
-
-def test_claude_image_side_and_system_go_to_the_record(tmp_path, monkeypatch):
-    """image_side and system are written to control/agent.json when given (system as an absolute path,
-    copied to session/system.md), and run_container_session passes them to claude_command; without them
-    the record and the command are as before."""
-    (tmp_path / "runs" / "opus_dig").mkdir(parents=True)
-    (tmp_path / "runs" / "opus_dig" / "system_v1.md").write_text("old manual, 1568 px\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    original = tmp_path / "original.glb"
-    write_glb(original)
-    work = C.prepare_session(tmp_path / "s", "refinement", "p", [], source="s", metric=False, original=original,
-                             agent="claude", image_side=1568, system="runs/opus_dig/system_v1.md")
-    root, manual = work.parent, str(tmp_path / "runs" / "opus_dig" / "system_v1.md")
-    assert json.loads((root / "control" / "agent.json").read_text()) == {
-        "agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh", "image_side": 1568, "system": manual}
-    assert (root / "session" / "system.md").read_text(encoding="utf-8") == "old manual, 1568 px\n"
-    assert C.agent_record("claude", image_side=2576) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh",
-                                                         "image_side": 2576}
-    plain = C.prepare_session(tmp_path / "p", "refinement", "p", [], source="s", metric=False, original=original,
-                              agent="claude").parent
-    assert C.agent_info(plain) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "xhigh"}
-    assert (plain / "session" / "system.md").read_bytes() == (C.AGENT_DIR / "claude" / "SYSTEM.md").read_bytes()
-    built = []
-    monkeypatch.setattr(C, "run_session", lambda root, cmd, **kw: built.append(cmd) or {})
-    (tmp_path / "key.env").write_text(f"ANTHROPIC_API_KEY={ANTHROPIC_KEY}\n")
-    for r in (root, plain):
-        C.run_container_session(r, "/sif/agent.sif", tmp_path / "key.env")
-    assert built[0][-6:] == ["--effort", "xhigh", "--image-side", "1568", "--system", manual]
-    assert built[1][-2:] == ["--effort", "xhigh"] and "--image-side" not in built[1] and "--system" not in built[1]
 
 
 def test_claude_shell_and_agent_commands(tmp_path):
     root = tmp_path / "s"
     shell = C.shell_command(root, "/sif/agent.sif", "/tmp/gator-x")
     codex = C.apptainer_command(root, "/sif/agent.sif", "/home/u/key.env", "/tmp/gator-x")
-    assert shell[:8] == C.CONTAINER and shell[8:11] == ["--net", "--network", "none"]
+    n = len(C.CONTAINER)
+    assert shell[:n] == C.CONTAINER and shell[n:n + 3] == ["--net", "--network", "none"]
     binds = [shell[i + 1] for i, a in enumerate(shell) if a == "--bind"]
-    # Codex's binds without /session: claude_agent's log is there, and result.json trusts it.
-    assert binds == [b for i, a in enumerate(codex) if a == "--bind" for b in [codex[i + 1]] if ":/session" not in b]
+    # Codex's binds without /session (claude_agent's log is there, and result.json trusts it) and without the DNS files.
+    assert binds == [b for i, a in enumerate(codex) if a == "--bind" for b in [codex[i + 1]]
+                     if ":/session" not in b and not b.startswith("/etc/")]
     assert binds == [f"{root.resolve()}/work:/work", f"{C.AGENT_DIR}/bin:/opt/gator/bin:ro", "/tmp/gator-x:/opt/gator/sock:ro"]
     assert "control" not in " ".join(binds) and "session" not in " ".join(shell)
     envs = [shell[i + 1] for i, a in enumerate(shell) if a == "--env"]
@@ -1521,10 +1577,6 @@ def test_claude_shell_and_agent_commands(tmp_path):
     assert cmd == [sys.executable, "-m", "harpor.agent.claude_agent", os.path.abspath("s"), "--sif", os.path.abspath("agent.sif"),
                    "--sock-dir", "/tmp/gator-x", "--key-file", os.path.abspath("key.env"), "--effort", "xhigh"]
     assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "low")[-2:] == ["--effort", "low"]
-    assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "low", 1568, "v1.md")[-6:] == \
-        ["--effort", "low", "--image-side", "1568", "--system", os.path.abspath("v1.md")]
-    assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", image_side=2576)[-4:] == \
-        ["--effort", "xhigh", "--image-side", "2576"]
     assert [C.cli_exit(c, "claude") for c in (0, 2, 3, 130, 1, -signal.SIGKILL)] == \
         ["ended", "refusal", "api_error", "interrupted", "exit 1", "signal SIGKILL"]
 

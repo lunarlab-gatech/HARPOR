@@ -28,7 +28,8 @@ Open the "on this machine" link it prints, then add a short video.
 the header of `harpor/webapp/start_ice.sh`, and
 an OpenAI or Anthropic key if you want the agent. Clone the repo anywhere, set `HARPOR_ROOT` to the folder with
 `envs/`, `sif/` and the model clones (by default `~/scratch/gator`), and run `python -m harpor.webapp` from the repo
-with the Python of `envs/web`.
+with the Python of `envs/web`. `setup/mvsam3d.sh`, `setup/vomp11.sh` and `setup/mujoco.sh` build the environments of
+notes 4b and 9 in that folder.
 
 ## More
 

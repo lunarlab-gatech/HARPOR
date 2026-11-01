@@ -24,17 +24,17 @@ ROOT = Path(__file__).resolve().parents[1]
 KEY = "sk-fake-" + secrets.token_hex(16)
 ICE = steps.Config(G=Path("/storage/ice1/5/0/ali497/gator"), runs=Path("/storage/ice1/5/0/ali497/gator/webapp_runs"),
                    code=Path("/storage/ice1/5/0/ali497/gator/gator_clone"))
-JOB = {"id": "20261015-120000-abcdef", "prompt": "coffee cup", "slug": "coffee_cup",
+JOB = {"id": "20261015-120000-abcdef", "prompt": "coffee cup", "slug": "coffee_cup", "agent": "astra",
        "overrides": {"locked": [], "excluded": [], "instance": {"f00012": "1", "f00020": "none"}}}
 ART = {**JOB, "articulated": True, "parts": {"mode": "vlm", "list": [], "confirmed": False}}  # an articulated job
-# The spec's environment lines, copied from our ICE scripts.
+# The spec's environment lines, copied from our ICE scripts, with the thread count open to the server's environment.
 STAGE_A = ('HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions '
-           'OMP_NUM_THREADS=16 CONDA_PREFIX=$G/envs/sam3d '
+           'OMP_NUM_THREADS=${OMP_NUM_THREADS:-16} CONDA_PREFIX=$G/envs/sam3d '
            'CPATH=$G/envs/sam3d/targets/x86_64-linux/include '
            'LIBRARY_PATH=$G/envs/sam3d/targets/x86_64-linux/lib:$G/envs/sam3d/lib PATH=$G/envs/sam3d/bin:$PATH')
 VOMP = ('eval "$($G/tools/micromamba shell hook -s bash)"; micromamba activate $G/envs/vomp11',
         'export CUDA_HOME=$CONDA_PREFIX HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch '
-        'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 OMP_NUM_THREADS=16 '
+        'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 OMP_NUM_THREADS=${OMP_NUM_THREADS:-16} '
         'CPATH=$CONDA_PREFIX/targets/x86_64-linux/include LIBRARY_PATH=$CONDA_PREFIX/targets/x86_64-linux/lib:$CONDA_PREFIX/lib')
 
 
@@ -98,7 +98,7 @@ def test_commands_have_the_ice_environment():
     assert sc["da3"].endswith('$G/envs/da3/bin/python -m harpor.stage_a.mvsam3d da3 --da3-root $G/Depth-Anything-3 --out "$J/pool"')
     assert sc["sam3d"].endswith("$G/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d sam3d --mv-root $G/MV-SAM3D "
                                 '--sam3d-root $G/sam-3d-objects --out "$J/run"')
-    assert sc["agent"].endswith('-m harpor.webapp.agent_step --job "$J" --sif $G/sif/gator-agent.sif '
+    assert sc["agent"].endswith('-m harpor.webapp.agent_step --job "$J" --sif $G/sif/harpor-agent.sif '
                                 "--key-file /dev/shm/gator-webapp-1/k.env --agent astra")
     opus = steps.command("agent", {**JOB, "agent": "opus"}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
     assert opus == sc["agent"][:-len("astra")] + "opus"
@@ -111,7 +111,7 @@ def test_commands_have_the_ice_environment():
     assert sc["turntable"].endswith(
         f'\nrm -rf "$J/turntable"\nexport {STAGE_A}\n'
         'cd $C && $G/envs/sam3d/bin/python -m harpor.webapp.turntable render --job "$J" '
-        '--sif $G/sif/gator-agent.sif\ncd $C && $G/envs/web/bin/python -m harpor.webapp.turntable encode --job "$J"')
+        '--sif $G/sif/harpor-agent.sif\ncd $C && $G/envs/web/bin/python -m harpor.webapp.turntable encode --job "$J"')
     assert sc["lidar"] == ('set -eo pipefail\nG=/storage/ice1/5/0/ali497/gator\n'
                            'J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n'
                            'C=/storage/ice1/5/0/ali497/gator/gator_clone\n'
@@ -143,7 +143,7 @@ def test_commands_have_the_ice_environment():
         '\nrm -f "$J/run/parts.json" "$J/run/parts.glb"\nexport HF_HOME=$G/.cache/huggingface\n'
         'cd $C && $G/envs/sam3seg/bin/python -m harpor.stage_a.part_masks --run "$J/run" '
         '--proposal "$J/run/proposal.json" --out "$J/run/parts/sam3"\n'
-        f'export {STAGE_A}\n{stage}vote --job "$J"\n{stage}split --job "$J" --sif $G/sif/gator-agent.sif\n'
+        f'export {STAGE_A}\n{stage}vote --job "$J"\n{stage}split --job "$J" --sif $G/sif/harpor-agent.sif\n'
         f'{stage}finish --job "$J"')
     # An articulated job's VoMP runs per link, into physics/vomp; a rigid job's command is as before.
     assert steps.command("vomp", ART, ICE)[0][2] == sc["vomp"].replace(
@@ -189,12 +189,15 @@ def test_physics_commands_name_the_object():
 def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
     """The scripts run as written: stand-in interpreters and micromamba report what they were given."""
     monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
     G = tmp_path / "G"
     report = textwrap.dedent("""\
         #!/bin/bash
         echo "ran $0 $*"
         echo "pwd $(pwd -P)"
-        for v in HF_HOME CONDA_PREFIX TORCH_CUDA_ARCH_LIST TORCH_EXTENSIONS_DIR CPATH LIBRARY_PATH CUDA_HOME; do echo "$v=${!v}"; done
+        for v in HF_HOME CONDA_PREFIX TORCH_CUDA_ARCH_LIST TORCH_EXTENSIONS_DIR CPATH LIBRARY_PATH CUDA_HOME OMP_NUM_THREADS; do
+          echo "$v=${!v}"
+        done
         echo "PATH0=${PATH%%:*}"
         """)
     for env in ("sam3d", "sam3seg", "vomp11"):
@@ -231,6 +234,15 @@ def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
     assert env["TORCH_EXTENSIONS_DIR"] == f"{G}/.cache/torch_extensions_vomp11" and env["TORCH_CUDA_ARCH_LIST"] == ""
     assert env["CPATH"] == f"{G}/envs/vomp11/targets/x86_64-linux/include" and env["HF_HOME"] == f"{G}/.cache/huggingface"
 
+    # The thread count is 16 unless the server's environment sets it, in the Stage A line and in VoMP's after activation.
+    for stage in ("prep", "vomp"):
+        assert run(stage)[0]["OMP_NUM_THREADS"] == "16"
+        monkeypatch.setenv("OMP_NUM_THREADS", "")
+        assert run(stage)[0]["OMP_NUM_THREADS"] == "16"
+        monkeypatch.setenv("OMP_NUM_THREADS", "4")
+        assert run(stage)[0]["OMP_NUM_THREADS"] == "4"
+        monkeypatch.delenv("OMP_NUM_THREADS")
+
     # The parts stage: part masks in envs/sam3seg with HF_HOME only, then three steps in envs/sam3d.
     argv, cwd, env = steps.command("parts", ART, cfg)
     p = subprocess.run(argv, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True)
@@ -240,16 +252,15 @@ def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
     sam3d = f"ran {G}/envs/sam3d/bin/python -m harpor.parts.stage"
     assert ran == [f"ran {G}/envs/sam3seg/bin/python -m harpor.stage_a.part_masks --run {J}/run --proposal "
                    f"{J}/run/proposal.json --out {J}/run/parts/sam3", f"{sam3d} vote --job {J}",
-                   f"{sam3d} split --job {J} --sif {G}/sif/gator-agent.sif", f"{sam3d} finish --job {J}"]
-    blocks = [dict(line.split("=", 1) for line in out[k + 2:k + 10]) for k, line in enumerate(out) if line.startswith("ran ")]
+                   f"{sam3d} split --job {J} --sif {G}/sif/harpor-agent.sif", f"{sam3d} finish --job {J}"]
+    blocks = [dict(line.split("=", 1) for line in out[k + 2:k + 11]) for k, line in enumerate(out) if line.startswith("ran ")]
     assert all(b["HF_HOME"] == f"{G}/.cache/huggingface" for b in blocks)
     assert blocks[0]["PATH0"] != f"{G}/envs/sam3d/bin" and blocks[0]["TORCH_EXTENSIONS_DIR"] != f"{G}/.cache/torch_extensions"
     assert all(b["CONDA_PREFIX"] == f"{G}/envs/sam3d" and b["PATH0"] == f"{G}/envs/sam3d/bin" for b in blocks[1:])
 
 
 def test_config_from_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("GATOR_ROOT", str(tmp_path))
-    monkeypatch.delenv("HARPOR_ROOT", raising=False)
+    monkeypatch.setenv("HARPOR_ROOT", str(tmp_path))
     monkeypatch.delenv("WEBAPP_RUNS", raising=False)
     monkeypatch.setenv("WEBAPP_FAKE", "1")
     cfg = steps.config_from_env()
@@ -260,18 +271,17 @@ def test_config_from_env(monkeypatch, tmp_path):
     assert [s["name"] for s in steps.STAGES if s["gpu"]] == ["masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable"]
 
 
-def test_config_from_env_prefers_harpor_root(monkeypatch, tmp_path):
-    monkeypatch.setenv("HARPOR_ROOT", str(tmp_path / "new"))
+def test_config_from_env_takes_only_harpor_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HARPOR_ROOT", raising=False)
     monkeypatch.setenv("GATOR_ROOT", str(tmp_path / "old"))
-    monkeypatch.delenv("WEBAPP_RUNS", raising=False)
-    cfg = steps.config_from_env()
-    assert cfg.G == tmp_path / "new" and cfg.runs == tmp_path / "new" / "webapp_runs"
+    assert steps.config_from_env().G == (tmp_path / "scratch").resolve() / "gator"
 
 
 def test_done_markers_guard_and_skip(tmp_path):
     J = tmp_path / "job"
     J.mkdir()
-    (J / "job.json").write_text(json.dumps({"prompt": "coffee cup", "slug": "coffee_cup"}))
+    (J / "job.json").write_text(json.dumps({"prompt": "coffee cup", "slug": "coffee_cup", "agent": "astra", "turntable": False}))
     assert not any(steps.done(s, J) for s in steps.NAMES)
     (J / "frames").mkdir()
     (J / "frames" / "pool.json").write_text('{"pool": [3')  # a marker that does not parse is not done
@@ -301,11 +311,9 @@ def test_done_markers_guard_and_skip(tmp_path):
     assert not steps.done("select", J)
     (J / "selection.json").write_text(json.dumps({"ok": True}))
     assert steps.done("select", J)
-    # The 360 video: skipped unless the job asks for it (older jobs do not); done when turntable.json is there.
+    # The 360 video: skipped unless the job asks for it; done when turntable.json is there.
     assert steps.skip("turntable", J) == "turned off" and not steps.turntable({"turntable": "yes"})
-    (J / "job.json").write_text(json.dumps({"prompt": "coffee cup", "slug": "coffee_cup", "turntable": False}))
-    assert steps.skip("turntable", J) == "turned off"
-    (J / "job.json").write_text(json.dumps({"prompt": "coffee cup", "slug": "coffee_cup", "turntable": True}))
+    (J / "job.json").write_text(json.dumps({"prompt": "coffee cup", "slug": "coffee_cup", "agent": "astra", "turntable": True}))
     assert steps.skip("turntable", J) is None and steps.turntable(jobs.load(J))
     (J / "turntable").mkdir()
     (J / "turntable" / "turntable.mp4").write_bytes(b"")
@@ -325,10 +333,10 @@ def test_done_markers_guard_and_skip(tmp_path):
 
 def test_parts_stages_done_skip_and_pause(tmp_path):
     J = tmp_path
-    job = {"prompt": "toy box", "slug": "toy_box", "agent": "astra"}
+    job = {"prompt": "toy box", "slug": "toy_box", "agent": "astra", "articulated": False, "parts": dict(jobs.PARTS)}
     (J / "job.json").write_text(json.dumps(job))
     (J / "run").mkdir()
-    assert steps.skip("propose", J) == steps.skip("parts", J) == "turned off: rigid object"  # also an older job
+    assert steps.skip("propose", J) == steps.skip("parts", J) == "turned off: rigid object"
     assert not steps.articulated(job) and steps.needs_key("agent", job) and not steps.needs_key("propose", job)
     assert steps.parts_mode(job) == "vlm" and not steps.needs_key("masks", job)
     for mode, key in (("vlm", True), ("vlm_edit", True), ("user", False)):
@@ -384,19 +392,20 @@ def test_parts_stages_done_skip_and_pause(tmp_path):
 
 def test_lidar_stage_done_skip_guard_and_derived(tmp_path):
     J = tmp_path
-    (J / "job.json").write_text(json.dumps({"prompt": "box", "slug": "box"}))  # an older job: no "lidar"
-    assert steps.lidar({}) is None and steps.lidar({"lidar": None}) is None and steps.lidar({"lidar": False}) is None
+    (J / "job.json").write_text(json.dumps({"prompt": "box", "slug": "box", "lidar": None}))
+    assert steps.lidar({"lidar": None}) is None
     assert steps.skip("lidar", J) == "turned off: no LiDAR" and not steps.done("lidar", J) and steps.guard("lidar", J) is None
     on = {"kind": "rosbag", "topic": "/livox/lidar"}
     assert steps.lidar({"lidar": {**on, "extra": 1}}) == on
     assert steps.lidar({"lidar": {"kind": "stray"}}) == steps.lidar({"lidar": {"kind": "stray", "x": 1}}) == {"kind": "stray"}
-    for bad in ({"kind": "video"}, {"kind": "rosbag"}, {"kind": "rosbag", "topic": ""}, "yes", True, ["/x"], "stray"):
+    for bad in ({"kind": "video"}, {"kind": "rosbag"}, {"kind": "rosbag", "topic": ""}, "yes", True, False, ["/x"], "stray"):
         with pytest.raises(ValueError, match=re.escape('lidar is null, {"kind": "rosbag", "topic": T} or {"kind": "stray"}')):
             steps.lidar({"lidar": bad})
+    (J / "job.json").write_text(json.dumps({"prompt": "box", "lidar": {"kind": "rosbag"}}))
+    with pytest.raises(ValueError, match="lidar is null"):
+        steps.skip("lidar", J)
     (J / "job.json").write_text(json.dumps({"prompt": "box", "lidar": on}))
     assert steps.skip("lidar", J) is None
-    (J / "job.json").write_text(json.dumps({"prompt": "box", "lidar": {"kind": "rosbag"}}))
-    assert steps.skip("lidar", J) is None  # malformed: the stage runs and says why
     (J / "pool").mkdir()
     why = "the bag's TF does not link cam to lidar; upload the calibration"
     (J / "pool" / "lidar.json").write_text(json.dumps({"ok": False, "s": None, "reason": why}))
@@ -459,7 +468,7 @@ def test_lidar_settings_and_the_build_that_stores_them(make_runner, tmp_path, mo
     pytest.importorskip("rosbags")
     from test_webapp_lidar import CAMERA, LIVOX, POINTS, T_CAM_LIDAR, upload, write_scene_bag
 
-    from harpor.webapp import fake_steps, lidar, rosbag
+    from harpor.webapp import fake_steps, rosbag
 
     runner, cfg = make_runner()
 
@@ -483,17 +492,17 @@ def test_lidar_settings_and_the_build_that_stores_them(make_runner, tmp_path, mo
     bags.mkdir()
     job_id, J, job = job_for(write_scene_bag(bags / "tf.bag", n=3))
     on = {"kind": "rosbag", "topic": POINTS}
-    assert jobs.lidar_settings(J, job, None) is None and jobs.lidar_settings(J, job, False) is None
+    assert jobs.lidar_settings(J, job, None) is None
     assert jobs.lidar_settings(J, job, {"topic": POINTS}) == on and jobs.lidar_settings(J, job, on) == on
     assert reason(J, job, {"topic": "/nope"}) == "/nope is not a LiDAR topic of the bag; its LiDAR topics are /lidar/points"
-    for bad in ({"topic": ""}, {"kind": "stray", "topic": POINTS}, POINTS, True):
+    for bad in ({"topic": ""}, {"kind": "stray", "topic": POINTS}, POINTS, True, False):
         assert reason(J, job, bad) == 'lidar is null or {"topic": T}, a LiDAR topic of the bag', bad
     assert reason(J, {**job, "source": {"kind": "video", "topic": None}}, on) == \
         "LiDAR needs a rosbag or a Stray Scanner input; this job's input is a video, so turn LiDAR off"
     assert reason(J, {**job, "source": {"kind": "rosbag", "topic": None}}, on) == "choose the bag's camera topic first"
     topics = json.loads((J / "frames" / "topics.json").read_text())
     (J / "frames" / "topics.json").write_text(json.dumps({k: v for k, v in topics.items() if k != "lidar"}))
-    assert reason(J, job, on) == lidar.OLD_TOPICS
+    assert reason(J, job, on) == "/lidar/points is not a LiDAR topic of the bag; the bag has none"
     (J / "frames" / "topics.json").write_text(json.dumps(
         {**topics, "lidar": [], "lidar_skipped": [{"topic": POINTS, "type": "PointCloud2", "why": "no messages"}]}))
     assert reason(J, job, on) == "the LiDAR topic /lidar/points cannot be used: no messages"
@@ -519,7 +528,7 @@ def test_lidar_settings_and_the_build_that_stores_them(make_runner, tmp_path, mo
                 "image_size": [192, 128]})
     assert jobs.lidar_settings(J2, jobs.load(J2), on) == on
     # A calibration uploaded for another LiDAR topic (its lidar_topic) is refused, also in submit_build's check
-    # under the lock; one for this topic passes, and one that names none (older jobs) is not checked.
+    # under the lock; one for this topic passes, and one that names none is not checked.
     cal = jobs.load(J2)["calibration"]
     jobs.update(J2, calibration={**cal, "lidar_topic": LIVOX})
     why = ("the calibration calib.json is for /livox/lidar, not /lidar/points; choose /livox/lidar, or upload a "
@@ -557,51 +566,26 @@ def test_lidar_settings_and_the_build_that_stores_them(make_runner, tmp_path, mo
                                                                "note": "turned off: no LiDAR"}
 
 
-def test_lidar_settings_of_a_listing_that_read_only_the_start_of_tf(tmp_path, monkeypatch):
-    """A listing made before the listing read all of /tf read only its first 5 s, so its tf_links can say no
-    link for a link that starts later on /tf. Such a listing has no camera_axes_from. lidar_settings then
-    checks the link on the bag's whole TF, as the stage does, and lets Start pass; under the lock
-    (read_bag False) it leaves that to Start. A new listing is not checked on the bag."""
+def test_lidar_settings_takes_the_tf_link_from_the_listing(tmp_path):
+    """The listing reads all of /tf, so lidar_settings believes its tf_links and does not read the bag's TF. This bag's
+    link starts late on /tf, and the listing here says no link and has no camera_axes_from."""
     pytest.importorskip("rosbags")
     from test_webapp_lidar import POINTS, write_scene_bag
 
     from harpor.webapp import rosbag
 
-    def job_for(bag, old):
-        """A rosbag job whose listing says that TF does not link the LiDAR; old: as an old listing writes it."""
-        job_id, path = jobs.create_job(tmp_path, "scene.bag")
-        J = tmp_path / job_id
-        path.write_bytes(bag.read_bytes())
-        found = rosbag.image_topics(path)
-        for t in found["topics"]:
-            t["tf_links"] = {POINTS: None}
-            if old:
-                del t["camera_axes_from"]
-        (J / "frames").mkdir()
-        (J / "frames" / "topics.json").write_text(json.dumps(found))
-        return J, jobs.update(J, source={"kind": "rosbag", "topic": found["topics"][0]["topic"]})
-
-    def reason(J, job, **kw):
-        with pytest.raises(ValueError) as e:
-            jobs.lidar_settings(J, job, {"topic": POINTS}, **kw)
-        return str(e.value)
-
-    on = {"kind": "rosbag", "topic": POINTS}
-    why = "the bag's TF does not link camera_optical_frame to lidar; upload the calibration"
-    late = write_scene_bag(tmp_path / "late.bag", n=12, dt=1.0, tf="dynamic", tf_late_s=5.5)
-    reads = []
-    transforms = rosbag.transforms
-    monkeypatch.setattr(rosbag, "transforms", lambda r, windows=None: reads.append(windows) or transforms(r, windows))
-    J, job = job_for(late, old=True)
-    assert jobs.lidar_settings(J, job, {"topic": POINTS}) == on and reads == [None]  # all of /tf
-    assert jobs.lidar_settings(J, job, {"topic": POINTS}, read_bag=False) == on and reads == [None]
-    J, job = job_for(late, old=False)
-    assert reason(J, job) == why and reads == [None]
-    bare = write_scene_bag(tmp_path / "bare.bag", n=3, tf=None)
-    J, job = job_for(bare, old=True)
-    assert reason(J, job) == why and reads == [None, None]
-    Path(job["video"]["path"]).unlink()
-    assert reason(J, job) == "the uploaded bag scene.bag is not on the server; upload it again"
+    job_id, path = jobs.create_job(tmp_path, "scene.bag")
+    J = tmp_path / job_id
+    path.write_bytes(write_scene_bag(tmp_path / "late.bag", n=12, dt=1.0, tf="dynamic", tf_late_s=5.5).read_bytes())
+    found = rosbag.image_topics(path)
+    for t in found["topics"]:
+        t["tf_links"] = {POINTS: None}
+        del t["camera_axes_from"]
+    (J / "frames").mkdir()
+    (J / "frames" / "topics.json").write_text(json.dumps(found))
+    job = jobs.update(J, source={"kind": "rosbag", "topic": found["topics"][0]["topic"]})
+    with pytest.raises(ValueError, match="the bag's TF does not link camera_optical_frame to lidar; upload the calibration"):
+        jobs.lidar_settings(J, job, {"topic": POINTS})
 
 
 def test_lidar_settings_of_a_stray_capture(tmp_path):
@@ -614,7 +598,7 @@ def test_lidar_settings_of_a_stray_capture(tmp_path):
     job = jobs.load(J)
     on = {"kind": "stray"}
     assert jobs.lidar_settings(J, job, on) == jobs.lidar_settings(J, job, {"kind": "stray", "x": 1}) == on
-    assert jobs.lidar_settings(J, job, None) is None and jobs.lidar_settings(J, job, False) is None
+    assert jobs.lidar_settings(J, job, None) is None
     assert jobs.lidar_settings(J, job, on, read_bag=False) == on
     path.unlink()
     with pytest.raises(ValueError, match="^the uploaded export capture.zip is not on the server; upload it again$"):
@@ -720,25 +704,17 @@ def test_progress_reads_the_newest_run_of_the_log(tmp_path):
     (J / "logs" / "da3.log").write_text("== da3 earlier\nPROGRESS 0.9\n== da3 now\nloading\n")
     assert jobs.last_progress(J / "logs" / "da3.log") is None
 
-    # A rigid job made before the part stages lacks their records: they show as skipped, urdf as pending.
-    # A job made before LiDAR lacks the lidar stage's record and its job.json fields: skipped too.
-    # A job made before the 360 video lacks the turntable stage's record and job.json "turntable": skipped too.
-    old = jobs.load(J)
-    for s in ("propose", "parts", "urdf", "lidar", "turntable"):
-        del old["stages"][s]
-    del old["articulated"], old["parts"], old["lidar"], old["calibration"], old["turntable"]
-    jobs.save(J, old)
-    st = {s["name"]: s for s in jobs.progress(J)}
-    assert st["propose"]["status"] == st["parts"]["status"] == "skipped"
-    assert st["parts"]["note"] == "turned off: rigid object" and st["urdf"]["status"] == "pending"
-    assert (st["lidar"]["status"], st["lidar"]["note"], st["lidar"]["gpu"]) == ("skipped", "turned off: no LiDAR", False)
-    assert (st["turntable"]["status"], st["turntable"]["note"], st["turntable"]["gpu"]) == ("skipped", "turned off", True)
-    jobs.save(J, {**old, "turntable": True})
-    assert {s["name"]: s["status"] for s in jobs.progress(J)}["turntable"] == "pending"
-    jobs.save(J, {**old, "articulated": True})
-    assert {s["name"]: s["status"] for s in jobs.progress(J)}["propose"] == "pending"
-    jobs.save(J, {**old, "lidar": {"kind": "rosbag", "topic": "/points"}})  # with LiDAR on it is not skipped
-    assert {s["name"]: s["status"] for s in jobs.progress(J)}["lidar"] == "pending"
+
+def test_every_stage_has_its_record(tmp_path):
+    """create_job writes a record of every stage, and no later write drops one, so a job without one is not read."""
+    J = tmp_path / jobs.create_job(tmp_path, "clip.mp4")[0]
+    job = jobs.load(J)
+    del job["stages"]["turntable"]
+    jobs.save(J, job)
+    with pytest.raises(KeyError, match="turntable"):
+        jobs.progress(J)
+    with pytest.raises(KeyError, match="turntable"):
+        jobs.update_stage(J, "turntable", status="done")
 
 
 def test_check_key(monkeypatch):
@@ -764,12 +740,18 @@ def test_check_key(monkeypatch):
 OPUS_KEY = "sk-ant-fake-" + secrets.token_hex(16)
 
 
-def test_agent_choice_reads_older_jobs():
-    assert [steps.agent(j) for j in ({}, {"agent": True}, {"agent": False}, {"agent": "opus"}, {"agent": "none"})] == \
-        ["astra", "astra", "none", "opus", "none"]
-    for bad in ("gpt", 1, None, ["opus"]):
+def test_agent_choice():
+    assert [steps.agent({"agent": a}) for a in steps.AGENTS] == ["astra", "opus", "none"]
+    for job in ({}, *({"agent": bad} for bad in ("gpt", 1, None, ["opus"], True, False))):
         with pytest.raises(ValueError, match="agent is one of astra, opus, none"):
-            steps.agent({"agent": bad})
+            steps.agent(job)
+
+
+def test_source_is_job_jsons_own():
+    src = {"kind": "rosbag", "topic": "/cam"}
+    assert steps.source({"source": src}) == src
+    with pytest.raises(KeyError, match="source"):  # not a video
+        steps.source({})
 
 
 def test_check_anthropic_key(monkeypatch):
@@ -881,8 +863,8 @@ def test_runner_opus_key_and_a_change_of_agent(make_runner, tmp_path, monkeypatc
     assert job["stages"]["place"]["started"] == place_started and job["stages"]["package"]["status"] == "done"
     log = (J / "logs" / "agent.log").read_text()
     assert log.count("== agent ") == 2 and log.index("ANTHROPIC_API_KEY") < log.index("key file 0o600 OPENAI_API_KEY")
-    # And no agent (an older client's false): no key, and the agent stage is skipped.
-    runner.resume(job_id, "align", agent=False)
+    # And no agent: no key, and the agent stage is skipped.
+    runner.resume(job_id, "align", agent="none")
     job = wait(J, "done")
     assert job["agent"] == "none" and job["stages"]["agent"]["status"] == "skipped"
     assert not list(runner.key_dir.iterdir())
@@ -1100,7 +1082,7 @@ def test_runner_pauses_for_the_part_list_and_confirms_it(make_runner, tmp_path, 
     assert job["parts"]["mode"] == "user" and [p["name"] for p in job["parts"]["list"]] == ["base", "door"]
     assert job["stages"]["agent"]["status"] == "skipped" and "key file" not in (J / "logs" / "propose.log").read_text()
 
-    # A rigid job skips both stages; an older job without the parts records resumes too.
+    # A rigid job skips both stages.
     job_id, J = ready_job(cfg, auto_continue=True)
     runner.submit_build(job_id, KEY)
     job = wait(J, "done")
@@ -1108,14 +1090,6 @@ def test_runner_pauses_for_the_part_list_and_confirms_it(make_runner, tmp_path, 
     for s in ("propose", "parts"):
         assert job["stages"][s] == {**jobs.STAGE, "status": "skipped", "note": "turned off: rigid object"}
     assert job["stages"]["urdf"]["status"] == "done" and not list(runner.key_dir.iterdir())
-    old = jobs.load(J)
-    for s in ("propose", "parts", "urdf"):
-        del old["stages"][s]
-    del old["articulated"], old["parts"]
-    jobs.save(J, {**old, "status": "failed"})
-    runner.resume(job_id, "sam3d", api_key=KEY)
-    job = wait(J, "done")
-    assert job["stages"]["propose"]["status"] == "skipped" and job["stages"]["urdf"]["status"] == "done"
     assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))
 
 
@@ -1357,16 +1331,16 @@ def test_runner_rosbag_topics_and_the_agent_off(make_runner, monkeypatch):
     monkeypatch.setattr(steps, "done", lambda stage, J: real_done(stage, J) if stage in ("topics", "frames")
                         else (Path(J) / "scene" / f"done_{stage}").exists())
 
-    def listing(J, topics, skipped=(), lidar=True):
-        """topics.json as the topics stage writes it; lidar False: as before LiDAR topics were listed."""
+    def listing(J, topics, skipped=()):
+        """topics.json as the topics stage writes it."""
         skipped = [{"topic": t, "type": "Image", "why": "16UC1"} for t in skipped]
         (J / "topics_in.json").write_text(json.dumps({"topics": [{"topic": t} for t in topics], "skipped": skipped,
-                                                      **({"lidar": [], "lidar_skipped": []} if lidar else {})}))
+                                                      "lidar": [], "lidar_skipped": []}))
 
-    def upload(name, topics, skipped=(), lidar=True):
+    def upload(name, topics, skipped=()):
         job_id, path = runner.new_upload(name)
         J = cfg.runs / job_id
-        listing(J, topics, skipped, lidar)
+        listing(J, topics, skipped)
         path.write_bytes(b"bag")
         runner.upload_done(job_id, 3)
         return job_id, J
@@ -1394,7 +1368,7 @@ def test_runner_rosbag_topics_and_the_agent_off(make_runner, monkeypatch):
 
     # A build without the agent: no key, and the agent stage is skipped.
     jobs.update(J, prompt="box", auto_continue=True)
-    runner.submit_build(job_id, None, agent=False)
+    runner.submit_build(job_id, None, agent="none")
     job = wait(J, "done")
     assert job["stages"]["agent"] == {**jobs.STAGE, "status": "skipped", "note": "turned off: physics uses the Stage A mesh"}
     assert job["agent"] == "none" and job["key_ok"] is False and job_id not in runner._keys
@@ -1402,7 +1376,7 @@ def test_runner_rosbag_topics_and_the_agent_off(make_runner, monkeypatch):
     with pytest.raises(ValueError, match="is done"):
         runner.submit_analyze(job_id, topic="/a/image_rect")
     with pytest.raises(ValueError, match="API key"):  # None would queue it without a key (the key comes later)
-        runner.submit_build(job_id, "", agent=True)
+        runner.submit_build(job_id, "", agent="astra")
 
     # Another topic after a failed build: frames runs on it, and the build's outputs, records and picks are gone;
     # so is the calibration, whose T and K were the other camera's.
@@ -1413,25 +1387,10 @@ def test_runner_rosbag_topics_and_the_agent_off(make_runner, monkeypatch):
     assert all(job["stages"][s] == jobs.STAGE for s in jobs.BUILD) and job["picks"] == [] and job["view0"] is None
     assert job["calibration"] is None and not (J / "lidar" / "calibration").exists()
 
-    # A bag listed before LiDAR topics were: a topic choice lists it again (topics.json then has "lidar").
-    job_id, J = upload("old.bag", ["/a/image_rect", "/b/image_raw"], lidar=False)
-    job = wait(J, "choose_topic")
-    topics_started = job["stages"]["topics"]["started"]
-    listing(J, ["/a/image_rect", "/b/image_raw"])  # what the topics stage of today writes
-    runner.submit_analyze(job_id, topic="/a/image_rect")
-    job = wait(J, "ready")
-    assert job["stages"]["topics"]["started"] > topics_started and job["stages"]["topics"]["status"] == "done"
-    assert "lidar" in json.loads((J / "frames" / "topics.json").read_text())
-    topics_started = job["stages"]["topics"]["started"]
-    runner.submit_analyze(job_id, topic="/b/image_raw")  # listed already: topics does not run again
-    assert wait(J, "ready")["stages"]["topics"]["started"] == topics_started
-
-    # A video skips topics, also a job made before rosbag input (no "source", no topics stage).
+    # A video skips topics.
     job_id, J = upload("clip.MOV", [])
     wait(J, "ready")
-    old = jobs.load(J)
-    del old["source"], old["agent"], old["stages"]["topics"]
-    jobs.save(J, {**old, "status": "failed"})
+    jobs.update(J, status="failed")
     jobs.update_stage(J, "frames", status="failed")
     runner.submit_analyze(job_id)
     job = wait(J, "ready")
@@ -1692,7 +1651,7 @@ def run_folder(J, n=2):
                      "height": 48, "image": str(img), "mask": str(m)})
     (run / "cameras.json").write_text(json.dumps(cams))
     glb_file(run / "posed.glb")
-    (J / "job.json").write_text(json.dumps({"id": "x", "prompt": "toy box"}))
+    (J / "job.json").write_text(json.dumps({"id": "x", "prompt": "toy box", "source": {"kind": "video", "topic": None}}))
     (J / "key.env").write_text(f"OPENAI_API_KEY={KEY}\n")
     return J
 
