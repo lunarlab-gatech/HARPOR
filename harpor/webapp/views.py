@@ -26,6 +26,17 @@ user's frames that have masks. Both modes honour job.json's view0 and its overri
 are always in, "excluded" views never (pool names such as "f00012"). Picks that end up closer than
 15 deg get a warning.
 
+A long object needs views that show two of its sides. A view that looks straight at one side shows
+that side's length but not the depth behind it, and MV-SAM3D makes the hidden side about as long as
+the one it sees, so a box comes out close to a square (build_plan.md note 4b). When the cameras go
+around the object (no gap over 120 deg) and the smallest rectangle around the object's points, seen
+from above, is at least 1.2 times as long as it is wide (footprint()), a view within 25 deg of a
+side's normal is "face_on". A mask that touches the image border also harms a long object: one such
+view among six corner views brought the box back to a square at 2 seeds of 5. So auto mode leaves out
+the face-on and the "truncated" views, or only the face-on ones, while at least four others remain,
+but never a locked view or job.json's view0. Both modes warn about such picks, and about a face-on
+view 0, whose pose can come out a quarter turn off.
+
 build_run() copies the picks into J/run as views 0..N-1 (view 0 = the anchor) with DA3's arrays
 sliced to them, so the mvsam3d sam3d and place steps run on it as on any run folder. With a LiDAR
 scale it also copies each pick's LiDAR points, J/lidar/cloud/<name>.glb (lidar.py), to
@@ -35,7 +46,8 @@ A job with LiDAR (job.json "lidar"): select stops before it removes anything unl
 is ok, and build_run applies its scale s (build_plan.md note 12, Where the scale enters).
 
 selection.json "ring" places every camera center on the best-fit plane of the camera centers, seen
-from above (u right, v up; flip v for SVG), with the object center as "center".
+from above (u right, v up; flip v for SVG), with the object center as "center". selection.json
+"footprint" is {"long_short", "face_on": [names]}, or None when the cameras do not go around the object.
 """
 
 import argparse
@@ -52,6 +64,10 @@ from harpor.webapp import steps
 MIN_AREA = 0.01
 MIN_CONSISTENCY = 0.5
 MIN_SPACING_DEG = 15.0
+MAX_GAP_DEG = 120.0  # a wider gap between the cameras leaves a side of the object unseen
+LONG_FOOTPRINT = 1.2
+FACE_ON_DEG = 25.0
+MIN_CORNER_VIEWS = 4
 
 
 def pool_name(x):
@@ -89,17 +105,23 @@ def camera_centers(E):
     return -np.einsum("nij,ni->nj", E[:, :3, :3], E[:, :3, 3])
 
 
-def object_center(pointmaps, conf, masks, E):
-    """Median of the masked points whose conf is at or above their view's median, in DA3's world."""
-    pts = []
+def masked_points(pointmaps, conf, masks, E):
+    """The masked points whose conf is at or above their view's median, in DA3's world."""
+    pts = [np.zeros((0, 3))]
     for P, cf, m, e in zip(pointmaps, conf, masks, E):
         m = at_size(m, P.shape[:2]) & valid(P)
         if m.any():
             c = cf[m]
             pts.append(to_world(P[m][c >= np.median(c)], e))
-    if not pts:
+    return np.concatenate(pts)
+
+
+def object_center(pointmaps, conf, masks, E):
+    """Median of masked_points(), in DA3's world."""
+    pts = masked_points(pointmaps, conf, masks, E)
+    if not len(pts):
         raise SystemExit("no masked DA3 points in any view")
-    return np.median(np.concatenate(pts), axis=0)
+    return np.median(pts, axis=0)
 
 
 def consistency(pointmaps, masks, E, K, dilate_frac=0.02, budget=100000):
@@ -200,15 +222,52 @@ def thin(S, D, q, fixed=(), min_deg=MIN_SPACING_DEG, keep=3):
     return S
 
 
-def ring(centers, E, c):
-    """Camera centers and the object center on the best-fit plane of the camera centers, normal up."""
+def ring_plane(centers, E):
+    """The mean of the camera centers and the 3x2 basis of their best-fit plane, normal up."""
     mu = centers.mean(0)
     vt = np.linalg.svd(centers - mu)[2] if len(centers) > 1 else np.eye(3)
     e1, n = vt[0], np.cross(vt[0], vt[1])
     up = -np.asarray(E, float)[:, 1, :3].mean(0)  # OpenCV y is down
     n = n if n @ up >= 0 else -n
-    B = np.stack([e1, np.cross(n, e1)], 1)
+    return mu, np.stack([e1, np.cross(n, e1)], 1)
+
+
+def ring(centers, E, c):
+    """Camera centers and the object center on the best-fit plane of the camera centers, normal up."""
+    mu, B = ring_plane(centers, E)
     return np.round((c - mu) @ B, 4).tolist(), np.round((centers - mu) @ B, 4).tolist()
+
+
+def footprint(points, B):
+    """The smallest rectangle around the points, flattened onto the plane with basis B, with 1% of the points
+    left out at each end: (long side / short side, angle of the long side in the plane, in degrees)."""
+    xy = np.asarray(points)[::max(1, len(points) // 20000)] @ B
+
+    def sides(deg):
+        c, s = np.cos(np.radians(deg)), np.sin(np.radians(deg))
+        lo, hi = np.percentile(xy @ np.array([[c, -s], [s, c]]), (1, 99), axis=0)
+        return hi - lo
+
+    deg = min(range(90), key=lambda d: np.prod(sides(d)))
+    a, b = sides(deg)
+    return max(a, b) / max(min(a, b), 1e-9), float(deg if a >= b else deg + 90)
+
+
+def face_on_views(names, view, good):
+    """The views of names that look straight at one side of a long object, and selection.json's "footprint".
+    view: {name: view facts}. good: the views whose points are trusted."""
+    E = np.array([view[n]["E"] for n in names])
+    B = ring_plane(camera_centers(E), E)[1]
+    d = np.array([view[n]["dir"] for n in names]) @ B
+    az = np.degrees(np.arctan2(d[:, 1], d[:, 0]))
+    ring_order = np.sort(az)
+    if np.diff(np.append(ring_order, ring_order[0] + 360.0)).max() > MAX_GAP_DEG:
+        return [], None
+    ratio, long_deg = footprint(masked_points([v["P"] for v in good], [v["conf"] for v in good], [v["mask"] for v in good],
+                                              np.array([v["E"] for v in good])), B)
+    off = np.abs((az - long_deg + 45.0) % 90.0 - 45.0)  # the angle to the nearest side's normal
+    face_on = [n for n, a in zip(names, off) if a < FACE_ON_DEG] if ratio >= LONG_FOOTPRINT else []
+    return face_on, {"long_short": round(float(ratio), 2), "face_on": face_on}
 
 
 def build_run(pool_dir, names, run_dir, metric=None, clouds=None):
@@ -338,6 +397,7 @@ def select(job_dir):
     for n in used:
         status[n] = ("small" if view[n]["area"] < MIN_AREA
                      else "inconsistent" if view[n]["consistency"] < MIN_CONSISTENCY else "available")
+    side, out["footprint"] = face_on_views(used, view, good)
     for n in locked:
         if n not in view:
             warn(f"locked view {n} has no mask; left out")
@@ -374,6 +434,13 @@ def select(job_dir):
             fail(job_dir, out, status, f"only {len(avail)} usable views of {prompt!r}")
         if view0 not in avail and view0 is not None:
             warn(f"view 0 ({view0}) is not usable; took the best view")
+        corner = [n for n in avail if n not in side or n in locked or n == view0]
+        clean = [n for n in corner if not (side and view[n]["truncated"]) or n in locked or n == view0]
+        for keep in (clean, corner):
+            if len(keep) >= MIN_CORNER_VIEWS:
+                status.update({n: "face_on" if n in side else "truncated" for n in avail if n not in keep})
+                avail = keep
+                break
         whole = [n for n in avail if not view[n]["truncated"]]
         if not whole:
             warn("every usable mask touches the image border; the object may be cut off")
@@ -393,6 +460,16 @@ def select(job_dir):
                  f"instead of {len(first)}")
         picks = [avail[i] for i in S]
     picks = [anchor] + [n for n in picks if n != anchor]
+    flat = [str(frame_of(n)) for n in picks if n in side]
+    cut = [str(frame_of(n)) for n in picks if side and view[n]["truncated"]]
+    if flat:
+        warn(f"frames that look straight at one side of this long object: {', '.join(flat)}; "
+             "views that see two sides give better proportions")
+    if cut:
+        warn(f"frames that cut this long object off at the image border: {', '.join(cut)}; "
+             "views of the whole object give better proportions")
+    if anchor in side:
+        warn(f"view 0 (frame {frame_of(anchor)}) looks straight at one side; its pose can come out a quarter turn off")
 
     build_run(job_dir / "pool", picks, job_dir / "run", metric=metric,
               clouds=None if metric is None else job_dir / "lidar" / "cloud")
@@ -443,7 +520,7 @@ def record(out, status, picks=(), anchor=None):
             "coverage_deg": round(float(max(covered)), 1) if covered else None,
             "min_spacing_deg": round(float(pair.min()), 1) if len(pair) else None,
             "ring": {"center": center, "points": [uv.get(n) for n in names]},
-            "metric_scale": out.get("metric_scale"), "warnings": list(out["warnings"])}
+            "footprint": out.get("footprint"), "metric_scale": out.get("metric_scale"), "warnings": list(out["warnings"])}
 
 
 def fail(job_dir, out, status, msg):

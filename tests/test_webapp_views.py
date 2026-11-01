@@ -38,6 +38,19 @@ def sphere(E, r=0.4):
     return (d * s[..., None]).astype(np.float32), hit
 
 
+def cuboid(E, half=(0.6, 0.2, 0.2)):
+    """Pointmap (camera coords) and mask of a box at the origin, long along world x; background at depth 10."""
+    v, u = np.mgrid[0:H, 0:W]
+    d = np.stack([(u - K[0, 2]) / K[0, 0], (v - K[1, 2]) / K[1, 1], np.ones((H, W))], -1)
+    R, t = E[:, :3], E[:, 3]
+    o, dw = -R.T @ t, d @ R
+    with np.errstate(divide="ignore"):
+        a, b = (-np.array(half) - o) / dw, (np.array(half) - o) / dw
+    near, far = np.minimum(a, b).max(-1), np.maximum(a, b).min(-1)
+    hit = near < far
+    return (d * np.where(hit, near, 10.0)[..., None]).astype(np.float32), hit
+
+
 def corner_mask():
     v, u = np.mgrid[0:H, 0:W]
     return (u - 8) ** 2 + (v - 8) ** 2 < 36
@@ -64,15 +77,17 @@ def make_pool(root, names, E, masks, P):
              image_files=np.array([str(root / "input" / "images" / f"{n}.png") for n in names]), process_res=504)
 
 
-def make_job(tmp_path, n=24, arc=360.0, bad=(), big=(), small=(), no_mask=(), scores=None, **job):
-    """A job after masks, prep and da3: pool frames 0, 10, 20, ... on a circle around a sphere."""
+def make_job(tmp_path, n=24, arc=360.0, bad=(), big=(), small=(), edge=(), no_mask=(), scores=None, shape=sphere, **job):
+    """A job after masks, prep and da3: pool frames 0, 10, 20, ... on a circle around a sphere or another shape."""
     j = tmp_path / "job"
     frames = [10 * i for i in range(n)]
     names = [f"f{f:05d}" for f in frames]
     E = [look_at(C) for C in circle(n, arc)]
-    P, masks = zip(*(sphere(e) for e in E))
+    P, masks = zip(*(shape(e) for e in E))
     masks = [corner_mask() if i in bad else lower_mask() if i in big
-             else np.pad(np.ones((2, 2), bool), ((23, 23), (31, 31))) if i in small else m for i, m in enumerate(masks)]
+             else np.pad(np.ones((2, 2), bool), ((23, 23), (31, 31))) if i in small
+             else m | (np.arange(H) == 0)[:, None] & (np.arange(W) == 0)[None, :] if i in edge else m
+             for i, m in enumerate(masks)]
     keep = [i for i in range(n) if i not in no_mask]
     make_pool(j / "pool", [names[i] for i in keep], [E[i] for i in keep], [masks[i] for i in keep], [P[i] for i in keep])
     scores = scores or {}
@@ -123,6 +138,17 @@ def test_thin_goes_on_past_a_close_fixed_pair():
     kept = V.thin(range(6), D, np.ones(6), fixed=[0, 1])
     assert kept[:2] == [0, 1] and len(kept) == 5 and len({2, 3} & set(kept)) == 1
     assert V.thin([0, 1, 4], D, np.ones(6), fixed=[0, 1], keep=2) == [0, 1, 4]
+
+
+def test_footprint_finds_the_long_side():
+    r = np.random.default_rng(0)
+    pts = r.uniform(-1, 1, (30000, 3)) * [1.0, 0.25, 0.5]
+    B = np.eye(3)[:, :2]
+    for deg in (0, 30, 75, 120):
+        c, s = np.cos(np.radians(deg)), np.sin(np.radians(deg))
+        ratio, angle = V.footprint(pts @ np.array([[c, s, 0], [-s, c, 0], [0, 0, 1]]), B)
+        assert ratio == pytest.approx(4.0, abs=0.1) and abs((angle - deg + 90) % 180 - 90) <= 1
+    assert V.footprint(r.uniform(-1, 1, (30000, 3)), B)[0] < 1.05  # a square has no long side
 
 
 def test_consistency_flags_a_wrong_mask():
@@ -208,6 +234,7 @@ def test_select_auto(tmp_path):
     assert np.allclose(r, 2.0, atol=0.3)  # the cameras' circle around the object, seen from above
     uv = np.array([p for p in sel["ring"]["points"] if p]) - sel["ring"]["center"]
     assert (np.diff(np.unwrap(np.arctan2(uv[:, 1], uv[:, 0]))) > 0).all()  # counterclockwise, as in the world
+    assert sel["footprint"]["long_short"] < 1.1 and sel["footprint"]["face_on"] == []  # a sphere has no sides
     assert json.loads((j / "selection.json").read_text()) == sel
     assert M.view_names(j / "run") == [str(i) for i in range(6)] and len(M.cameras(j / "run")) == 6
     prep = json.loads((j / "run" / "prep.json").read_text())
@@ -223,10 +250,81 @@ def test_select_auto(tmp_path):
     assert any("f00090 is small" in w for w in sel["warnings"])
 
 
+def from_side(sel):
+    """Each pick's angle to the nearest wall normal of the box in cuboid(), in degrees."""
+    d = np.array([p["dir"] for p in sel["picks"]])
+    return np.abs((np.degrees(np.arctan2(d[:, 1], d[:, 0])) + 45) % 90 - 45)
+
+
+def test_select_leaves_face_on_views_of_a_long_object_out(tmp_path):
+    j, *_ = make_job(tmp_path, shape=cuboid)
+    sel = V.select(j)
+    st = {c["frame"]: c["status"] for c in sel["candidates"]}
+    assert sel["footprint"]["long_short"] > 2 and len(sel["picks"]) == 6 and from_side(sel).min() >= 25
+    assert sel["footprint"]["face_on"] == [f"f{10 * i:05d}" for i in range(24) if i % 6 in (0, 1, 5)]
+    assert all(st[10 * i] == "face_on" for i in range(24) if i % 6 in (0, 1, 5))
+    assert sum(s == "picked" for s in st.values()) == 6 and not sel["warnings"]
+    assert sel["coverage_deg"] < 30  # the left-out views do not count against the coverage
+    assert sel["ring"]["points"][0] is not None  # they stay on the ring, as crosses
+
+
+def test_select_keeps_face_on_views_that_the_user_chose(tmp_path):
+    j, *_ = make_job(tmp_path, shape=cuboid, view0=60, overrides={"locked": ["f00000"]})
+    sel = V.select(j)
+    names = [p["name"] for p in sel["picks"]]
+    assert names[:2] == ["f00060", "f00000"] and from_side(sel)[2:].min() >= 25
+    assert any(w.startswith("frames that look straight at one side of this long object: 60, 0;") for w in sel["warnings"])
+    assert any(w.startswith("view 0 (frame 60) looks straight at one side") for w in sel["warnings"])
+
+    j, *_ = make_job(tmp_path / "b", shape=cuboid, edge=(9,), mode="manual", picks=[30, 0, 90, 150], view0=30)
+    sel = V.select(j)
+    assert [p["name"] for p in sel["picks"]] == ["f00030", "f00000", "f00090", "f00150"]
+    assert any(w.startswith("frames that look straight at one side of this long object: 0;") for w in sel["warnings"])
+    assert any(w.startswith("frames that cut this long object off at the image border: 90;") for w in sel["warnings"])
+    assert not any("view 0" in w for w in sel["warnings"])
+    assert not any(c["status"] in ("face_on", "truncated") for c in sel["candidates"])  # manual mode only warns
+
+
+def test_select_leaves_truncated_views_of_a_long_object_out(tmp_path):
+    corners = [i for i in range(24) if i % 6 in (2, 3, 4)]
+    j, *_ = make_job(tmp_path, shape=cuboid, edge=(3, 9, 15, 21))  # the middle view of each corner
+    sel = V.select(j)
+    st = {c["frame"]: c["status"] for c in sel["candidates"]}
+    assert all(st[f] == "truncated" for f in (30, 90, 150, 210)) and st[0] == "face_on"
+    assert len(sel["picks"]) == 6 and from_side(sel).min() >= 25 and not sel["warnings"]
+
+    # Too few whole corner views remain, so the truncated ones stay, and they get a warning.
+    j, *_ = make_job(tmp_path / "b", shape=cuboid, edge=corners[:10])
+    sel = V.select(j)
+    assert from_side(sel).min() >= 25 and not any(c["status"] == "truncated" for c in sel["candidates"])
+    assert any(w.startswith("frames that cut this long object off at the image border:") for w in sel["warnings"])
+
+    # A truncated view of a round object stays, as before.
+    j, *_ = make_job(tmp_path / "c", edge=range(24))
+    assert not any(c["status"] == "truncated" for c in V.select(j)["candidates"])
+
+
+def test_select_keeps_face_on_views_when_too_few_others_remain(tmp_path):
+    j, *_ = make_job(tmp_path, n=4, shape=cuboid)  # the four cameras look straight at the four walls
+    sel = V.select(j)
+    assert len(sel["picks"]) == 4 and len(sel["footprint"]["face_on"]) == 4
+    assert any("look straight at one side" in w for w in sel["warnings"])
+    assert any(w.startswith("view 0 (frame ") for w in sel["warnings"])
+    assert not any(c["status"] == "face_on" for c in sel["candidates"])
+
+
+def test_select_ignores_the_footprint_when_cameras_miss_a_side(tmp_path):
+    j, *_ = make_job(tmp_path, n=16, arc=180, shape=cuboid)  # half a circle: the far side is never seen
+    sel = V.select(j)
+    assert sel["footprint"] is None and not any("straight at one side" in w for w in sel["warnings"])
+    assert not any(c["status"] == "face_on" for c in sel["candidates"])
+
+
 def test_select_thins_a_short_arc(tmp_path):
     j, *_ = make_job(tmp_path, n=12, arc=44)
     sel = V.select(j)
     assert sel["ok"] and len(sel["picks"]) == 3 and sel["picks"][0]["name"] == "f00000"
+    assert sel["footprint"] is None
     assert sel["min_spacing_deg"] >= 15  # 13.8 when the guard dropped views by q instead of rerunning k-center
     assert any("covers only 50 deg" in w and "kept 3 views instead of 6" in w for w in sel["warnings"])
     assert not any("only" in w and "apart" in w for w in sel["warnings"])

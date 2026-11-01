@@ -1238,7 +1238,7 @@ const candStatus = (c, sel) => c.status === "picked" && sel.overrides.locked.inc
   : c.status.replace("_", " ");
 // The cameras seen from above, as this selection ran: view 0 is a star, a pick a filled dot (a locked pick a square),
 // each with its view number outward from the object, an available view a hollow dot, and a view that the app leaves
-// out (small or inconsistent) a cross. style.css (#ring) gives the colors; the attributes here use only currentColor,
+// out (small, inconsistent, face-on or truncated) a cross. style.css (#ring) gives the colors; the attributes here use only currentColor,
 // so the marks still read without the stylesheet.
 function ring(sel) {
   const svg = $("#ring"), c = sel.ring.center, pts = sel.ring.points;

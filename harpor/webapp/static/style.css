@@ -140,7 +140,8 @@ label.button:focus-within { outline: 2px solid var(--accent); outline-offset: 2p
 .badge.failed::before, .badge.inconsistent::before, .badge.no_mask::before { background: var(--bad); }  /* cancelled keeps the neutral mark */
 .badge.failed { color: var(--bad); }
 .badge.running::before, .badge.analyzing::before, .badge.uploading::before { background: var(--fg); }
-.badge.review::before, .badge.small::before, .badge.excluded::before, .badge.choose_topic::before, .badge.raw::before {
+.badge.review::before, .badge.small::before, .badge.face_on::before, .badge.truncated::before, .badge.excluded::before,
+.badge.choose_topic::before, .badge.raw::before {
   background: var(--warn); }
 .badge.pending, .badge.skipped { color: var(--muted); }
 .badge.pending::before { background: transparent; box-shadow: inset 0 0 0 1px var(--line-strong); }

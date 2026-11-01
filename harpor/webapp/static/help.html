@@ -59,8 +59,9 @@
 
 <section id="capture">
 <h2>Record a capture</h2>
-<p>Capture one object. Walk around it and keep it in frame the whole time. Record with HDR off: HDR video gives flat
-  colors, so the textures look washed out.</p>
+<p>Capture one object. Walk around it and keep it in frame the whole time. Go all the way around a long object, so that
+  the capture has views of its corners. Record with HDR off: HDR video gives flat colors, so the textures look washed
+  out.</p>
 <table>
   <thead><tr><th>Input</th><th>Files</th><th>Notes</th></tr></thead>
   <tbody>
@@ -180,7 +181,9 @@
   <dt>Manual</dt>
   <dd>Open Candidate frames and click a frame to pick it. Click it again to unpick it. A click snaps to the sharpest
     frame within 0.25 s. Pick 2 to 12 frames. The list under the frames gives each pick with its frame and time, and
-    the buttons make view 0 and remove.</dd>
+    the buttons make view 0 and remove. For a long object, pick frames that show two of its sides at once. A frame that
+    looks straight at one side hides the depth behind it, so the object can come out too square. Also keep the whole
+    object in each frame.</dd>
   <dt>View 0</dt>
   <dd>In manual mode, view 0 is the pick that you make view 0 (★), or else the pick with the best quality. In auto
     mode, the app takes the best view whose mask stays off the image border. View 0 sets the frame of every mesh, and
@@ -216,7 +219,8 @@
   <li>■ a square: a pick set to always use</li>
   <li>★ a star: view 0</li>
   <li>○ a hollow dot: a view that can be used but is not picked</li>
-  <li>× a cross: a view left out, because its mask is small or inconsistent</li>
+  <li>× a cross: a view left out, because its mask is small or inconsistent, or because it looks straight at one side
+    of a long object or cuts the object off</li>
   <li>+ the object</li>
 </ul>
 <p>Views set to never use, and views with no mask, are not shown.</p>
@@ -254,6 +258,14 @@
   <dt><span class="badge inconsistent">inconsistent</span></dt>
   <dd>agree is below 0.5, so the view is left out. SAM 3 found something else or more than the object, or DA3 placed
     the camera wrong.</dd>
+  <dt><span class="badge face_on">face on</span></dt>
+  <dd>The object is at least 1.2 times as long as it is wide, and the view looks straight at one side, so auto mode
+    leaves the view out while at least four other views remain. Such a view hides the depth behind that side, and a box
+    can come out too square. To use the view anyway, set it to always use. In manual mode, your picks stay and you get
+    a warning.</dd>
+  <dt><span class="badge truncated">truncated</span></dt>
+  <dd>The object is long and the mask touches the image border, so the frame cuts the object off. Auto mode leaves the
+    view out while at least four other views remain. As with face on, always use keeps it, and manual mode warns.</dd>
   <dt><span class="badge excluded">excluded</span></dt>
   <dd>The view is set to never use.</dd>
   <dt><span class="badge no_mask">no mask</span></dt>

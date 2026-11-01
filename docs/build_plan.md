@@ -315,6 +315,27 @@ Results on ICE (L40S):
 - DA3 could not register a round table's views by the background alone. The table looks the same
   from every side, and in one photo set DA3's cameras did not agree with each other.
 
+Views and proportions, tested on the box job 20261030-115120-5529a9 (one object, 2026-11-01):
+- A view that looks straight at one side shows that side's length but not the depth behind it, and
+  MV-SAM3D makes the hidden side about as long as the one it sees. The real box has long/short 1.5.
+  Its six mostly face-on manual picks gave 1.03 to 1.22 in Stage 1 over 5 seeds. Four corner views
+  gave 1.29 to 1.69 and six corner views 1.31 to 1.69, each over 8 seeds. Full rebuilds with corner
+  views came within about 3% on the walls, with a mean mask IoU of 0.91 to 0.93 over all pool frames,
+  against 0.81.
+- Sets that mixed corner and face-on views collapsed to a square at about one seed in three, so
+  `views.select` leaves face-on views out instead of only preferring corner views. The rule applies
+  when the object's footprint is at least 1.2 times as long as it is wide and the cameras leave no
+  gap over 120 degrees. A view within 25 degrees of a side's normal counts as face-on. I took the 25
+  from this one pool, and no test separates it from 20.
+- A frame that cuts the object off does the same harm. One such frame in place of a whole corner view
+  collapsed the six corner views at 2 seeds of 5 (1.08 to 1.71), so `select` leaves those frames out
+  of a long object too.
+- Of the five jobs on ICE on 2026-11-01, the rule changes only the box. The pallet and the tables have
+  footprints of 1.01 to 1.09, and the globe's capture leaves a gap.
+- The entropy weights are not the cause, and they help on corner views. View 0's pose does not reach
+  the shape: putting another view first changed no voxel. A face-on view 0 can put the pose a
+  quarter turn off, which `fit_pose` cannot repair, so `select` warns about it.
+
 ### 5. Stage B: agent (`harpor/agent/`)
 
 The default agent is GPT-6-Astra through the Codex CLI (Decisions). Claude Opus 5.5 through our own
@@ -689,8 +710,10 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    `lidar` stage finds the metric scale on all of them when LiDAR is on (note 12), and
    `views.select` picks the views. Auto mode drops frames without a mask, with a mask under 1% of
    the frame, or whose mask disagrees with the other views' DA3 points (both directions, under
-   50%). It then spreads the picks by camera angle around the object (k-center plus swaps, view 0
-   = the best untruncated frame) and keeps them at least 15 degrees apart. The DA3 output is
+   50%). For a long object it also drops the frames that look straight at one side or cut the object
+   off (note 4b, Views and proportions). It then spreads the picks by camera angle around the object (k-center plus
+   swaps, view 0 = the best untruncated frame) and keeps them at least 15 degrees apart. Manual mode
+   keeps the user's picks and warns about those frames. The DA3 output is
    sliced to the picks, so DA3 does not run again. With LiDAR, `select` also multiplies the picks'
    DA3 depth, pointmaps and camera translations by the scale, and it stops with the reason when the
    scale failed. Time spacing alone gave two near-duplicate views on `table.MOV`, which circles the
