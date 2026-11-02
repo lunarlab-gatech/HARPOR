@@ -18,6 +18,9 @@ yuv420p, crf CRF, preset veryfast, a keyframe every 2 s) in MP4 with the index f
 FRAMES / FPS s long and loops. It deletes the frames, then writes J/turntable/turntable.json, the stage's done
 marker, last: render.json with the file's codec, pixel format, size, frames, length (seconds), bytes and
 encode_s. envs/web has no trimesh, so encode must not import harpor.agent.controller.
+
+The soft-part video (harpor.webapp.softvideo) takes the same GLB, matrix, Blender script (run_blender), container
+(blender_command with its own folder, since the container sees only that one) and encode, in J/softvideo.
 """
 
 import argparse
@@ -61,30 +64,58 @@ def source(job_dir):
     return glb.resolve(), UPRIGHT_TO_W @ T.astype(float), up.get("glb_rule")
 
 
-def blender_command(job_dir, glb, sif):
-    """Blender in the agent's SIF, in a container that sees only J/turntable (read-write), the GLB and the Blender
-    scripts (read-only), each at its host path (controller.sif_blender)."""
+def blender_command(job_dir, glb, sif, folder="turntable"):
+    """Blender in the agent's SIF, in a container that sees only J/<folder> (read-write; the soft-part video's is
+    J/softvideo), the GLB and the Blender scripts (read-only), each at its host path (controller.sif_blender)."""
     from harpor.agent import controller
 
-    return controller.sif_blender(sif, rw=[(Path(job_dir) / "turntable").resolve()], ro=[glb])
+    return controller.sif_blender(sif, rw=[(Path(job_dir) / folder).resolve()], ro=[glb])
 
 
-def _count(frames, stop, every=2.0):
-    """Print PROGRESS (up to 0.9) as Blender writes the frames, every `every` s, until stop is set."""
+def _count(frames, stop, every=2.0, total=FRAMES):
+    """Print PROGRESS (up to 0.9) as Blender writes the total frames, every `every` s, until stop is set."""
     last = None
     while not stop.wait(every):
-        p = round(0.9 * min(len(list(frames.glob("*.png"))), FRAMES) / FRAMES, 2)
+        p = round(0.9 * min(len(list(frames.glob("*.png"))), total) / total, 2)
         if p != last:
             print(f"PROGRESS {p:.2f}", flush=True)
             last = p
 
 
+def run_blender(out, blender, args, timeout=RENDER_TIMEOUT_S):
+    """Blender (a list) on blender/turntable.py with args, as out/args.json, and its log out/blender.log; PROGRESS
+    follows the frames. SystemExit with the reason when Blender fails, passes the timeout or writes fewer than
+    args["frames"] frames into args["frames_dir"]."""
+    from harpor.agent import tools
+
+    frames, total, log_rel = Path(args["frames_dir"]), args["frames"], f"{out.name}/blender.log"
+    (out / "args.json").write_text(json.dumps(args, indent=1))
+    cmd = tools.blender_argv(blender, "turntable.py", out / "args.json")
+    stop = threading.Event()
+    counter = threading.Thread(target=_count, args=(frames, stop), kwargs={"total": total}, daemon=True)
+    counter.start()
+    try:
+        with open(out / "blender.log", "w") as log:
+            try:
+                code = tools._run(cmd, log, timeout)
+            except subprocess.TimeoutExpired:
+                raise SystemExit(f"Blender took longer than {timeout:g} s; see {log_rel}") from None
+            except OSError as e:  # a Blender that does not start
+                raise SystemExit(f"Blender did not start: {e}") from None
+    finally:
+        stop.set()
+        counter.join()
+    if code != 0:
+        raise SystemExit(f"Blender failed (exit {code}); see {log_rel}")
+    n = len(list(frames.glob("*.png")))
+    if n < total:
+        raise SystemExit(f"Blender wrote {n} of {total} frames; see {log_rel}")
+
+
 def render(job_dir, sif=None, blender=None, timeout=RENDER_TIMEOUT_S):
     """The frames and render.json (see the module docstring), in a fresh J/turntable. blender: the command that
     stands for Blender (a list or a shell string), else blender_command(J, the GLB, sif). SystemExit with the reason
-    when Blender fails, passes the timeout or writes fewer than FRAMES frames."""
-    from harpor.agent import tools
-
+    when Blender fails, passes the timeout or writes fewer than FRAMES frames (run_blender)."""
     J = Path(job_dir).resolve()
     if blender is None and sif is None:
         raise SystemExit("render needs --sif or --blender")
@@ -95,27 +126,7 @@ def render(job_dir, sif=None, blender=None, timeout=RENDER_TIMEOUT_S):
     blender = shlex.split(blender) if isinstance(blender, str) else blender or blender_command(J, glb, sif)
     args = {"assets": [{"path": str(glb), "matrix": matrix.tolist()}], "frames_dir": str(out / "frames"),
             "frames": FRAMES, "fps": FPS, "panel": SIDE, "samples": SAMPLES, "elevation": ELEVATION_DEG}
-    (out / "args.json").write_text(json.dumps(args, indent=1))
-    cmd = tools.blender_argv(blender, "turntable.py", out / "args.json")
-    stop = threading.Event()
-    counter = threading.Thread(target=_count, args=(out / "frames", stop), daemon=True)
-    counter.start()
-    try:
-        with open(out / "blender.log", "w") as log:
-            try:
-                code = tools._run(cmd, log, timeout)
-            except subprocess.TimeoutExpired:
-                raise SystemExit(f"Blender took longer than {timeout:g} s; see turntable/blender.log") from None
-            except OSError as e:  # a Blender that does not start
-                raise SystemExit(f"Blender did not start: {e}") from None
-    finally:
-        stop.set()
-        counter.join()
-    if code != 0:
-        raise SystemExit(f"Blender failed (exit {code}); see turntable/blender.log")
-    n = len(list((out / "frames").glob("*.png")))
-    if n < FRAMES:
-        raise SystemExit(f"Blender wrote {n} of {FRAMES} frames; see turntable/blender.log")
+    run_blender(out, blender, args, timeout)
     rec = {"glb": glb.relative_to(J).as_posix(), "glb_rule": rule, "matrix": matrix.tolist(), "frames": FRAMES,
            "side": SIDE, "fps": FPS, "elevation_deg": ELEVATION_DEG, "render_s": round(time.time() - t, 1)}
     write_json(out / "render.json", rec, indent=1)
@@ -138,20 +149,21 @@ def probe(mp4):
                 "seconds": round(seconds, 3)}
 
 
-def encode(job_dir):
-    """turntable.mp4 from the frames, then turntable.json last (see the module docstring)."""
+def encode(job_dir, folder="turntable"):
+    """<folder>.mp4 from the frames in J/<folder>, then <folder>.json last (see the module docstring); the soft-part
+    video's folder is softvideo (harpor.webapp.softvideo)."""
     from fractions import Fraction
 
     import av
     from PIL import Image
 
-    from harpor.webapp import video
+    from harpor.webapp import steps, video
 
-    out = Path(job_dir) / "turntable"
+    out = Path(job_dir) / folder
     rec, names = read_json(out / "render.json"), sorted((out / "frames").glob("*.png"))
     if not isinstance(rec, dict) or not names:
         raise SystemExit("no frames to encode: the render step did not finish")
-    t, tmp, mp4 = time.time(), out / ".tmp_turntable.mp4", out / "turntable.mp4"
+    t, tmp, mp4 = time.time(), out / f".tmp_{folder}.mp4", out / f"{folder}.mp4"
     with Image.open(names[0]) as im:
         w, h = im.size[0] - im.size[0] % 2, im.size[1] - im.size[1] % 2  # yuv420p needs even sides
     with av.open(str(tmp), "w", format="mp4", options={"movflags": "+faststart"}) as c:
@@ -172,10 +184,10 @@ def encode(job_dir):
     os.replace(tmp, mp4)
     shutil.rmtree(out / "frames")
     done = {**rec, **facts, "bytes": mp4.stat().st_size, "encode_s": round(time.time() - t, 1)}
-    write_json(out / "turntable.json", done, indent=1)
+    write_json(out / f"{folder}.json", done, indent=1)
     print("PROGRESS 1", flush=True)
     size = f"{done['bytes'] / 1e6:.1f} MB" if done["bytes"] >= 1e6 else f"{done['bytes'] / 1e3:.0f} KB"
-    print(f"360 video: {done['frames']} frames, {w}x{h}, {done['seconds']:.1f} s, {size}", flush=True)
+    print(f"{steps.OPTIONAL[folder]}: {done['frames']} frames, {w}x{h}, {done['seconds']:.1f} s, {size}", flush=True)
     return done
 
 

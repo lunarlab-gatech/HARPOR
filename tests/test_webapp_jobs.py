@@ -87,7 +87,7 @@ def test_commands_have_the_ice_environment():
                                   "J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n"
                                   "C=/storage/ice1/5/0/ali497/gator/gator_clone\n")
         assert ("export " + STAGE_A in argv[2]) == (s in ("prep", "da3", "sam3d", "place", "propose", "parts", "agent",
-                                                          "align", "turntable")), s
+                                                          "align", "turntable", "softvideo")), s
         assert env == {"PYTHONUNBUFFERED": "1"} and KEY not in argv[2]
     sc = {s: v[0][2] for s, v in scripts.items()}
     assert sc["masks"].endswith("\nexport HF_HOME=$G/.cache/huggingface\nrm -f \"$J/scene/sam3_coffee_cup/sam3.json\"\n"
@@ -100,6 +100,8 @@ def test_commands_have_the_ice_environment():
                                 '--sam3d-root $G/sam-3d-objects --out "$J/run"')
     assert sc["agent"].endswith('-m harpor.webapp.agent_step --job "$J" --sif $G/sif/harpor-agent.sif '
                                 "--key-file /dev/shm/gator-webapp-1/k.env --agent astra")
+    # The host's check of each round runs MuJoCo in envs/mujoco (agent_step stops without it).
+    assert [s for s, text in sc.items() if "export GATOR_MUJOCO=$G/envs/mujoco/bin/python\n" in text] == ["agent"]
     opus = steps.command("agent", {**JOB, "agent": "opus"}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
     assert opus == sc["agent"][:-len("astra")] + "opus"
     assert "\n".join(VOMP) in sc["vomp"] and sc["vomp"].endswith(
@@ -112,6 +114,11 @@ def test_commands_have_the_ice_environment():
         f'\nrm -rf "$J/turntable"\nexport {STAGE_A}\n'
         'cd $C && $G/envs/sam3d/bin/python -m harpor.webapp.turntable render --job "$J" '
         '--sif $G/sif/harpor-agent.sif\ncd $C && $G/envs/web/bin/python -m harpor.webapp.turntable encode --job "$J"')
+    # The soft-part video: MuJoCo presses the part in envs/mujoco, then the frames and the MP4 as for the 360 video.
+    assert sc["softvideo"].endswith(
+        '\nrm -rf "$J/softvideo"\ncd $C && $G/envs/mujoco/bin/python -m harpor.webapp.softvideo motion --job "$J"\n'
+        f'export {STAGE_A}\ncd $C && $G/envs/sam3d/bin/python -m harpor.webapp.softvideo render --job "$J" '
+        '--sif $G/sif/harpor-agent.sif\ncd $C && $G/envs/web/bin/python -m harpor.webapp.softvideo encode --job "$J"')
     assert sc["lidar"] == ('set -eo pipefail\nG=/storage/ice1/5/0/ali497/gator\n'
                            'J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n'
                            'C=/storage/ice1/5/0/ali497/gator/gator_clone\n'
@@ -268,7 +275,8 @@ def test_config_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("WEBAPP_RUNS", str(tmp_path / "r"))
     monkeypatch.delenv("WEBAPP_FAKE")
     assert steps.config_from_env().runs == tmp_path / "r" and not steps.config_from_env().fake
-    assert [s["name"] for s in steps.STAGES if s["gpu"]] == ["masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable"]
+    assert [s["name"] for s in steps.STAGES if s["gpu"]] == ["masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable",
+                                                            "softvideo"]
 
 
 def test_config_from_env_takes_only_harpor_root(monkeypatch, tmp_path):
@@ -320,12 +328,24 @@ def test_done_markers_guard_and_skip(tmp_path):
     assert not steps.done("turntable", J)
     (J / "turntable" / "turntable.json").write_text("{}")
     assert steps.done("turntable", J) and steps.guard("turntable", J) is None
-    assert steps.OPTIONAL == {"turntable": "360 video"} and jobs.DERIVED["turntable"] == ("turntable",)
+    assert steps.OPTIONAL == {"turntable": "360 video", "softvideo": "soft-part video"}
+    assert jobs.DERIVED["turntable"] == ("turntable",) and jobs.DERIVED["softvideo"] == ("softvideo",)
     (J / "physics" / "mjcf").mkdir(parents=True)
     (J / "physics" / "mjcf" / "mjcf.json").write_text(json.dumps({"name": "x"}))
     assert not steps.done("mjcf", J)
     (J / "physics" / "mjcf" / "mjcf.json").write_text(json.dumps({"name": "x", "compiled": {}}))
     assert steps.done("mjcf", J)
+    # The soft-part video: skipped unless the MuJoCo model has a soft part; done when softvideo.json is there.
+    assert steps.skip("softvideo", J) == "no soft part"
+    (J / "physics" / "mjcf" / "mjcf.json").write_text(json.dumps({"name": "x", "compiled": {}, "soft": {}}))
+    assert steps.skip("softvideo", J) == "no soft part"
+    (J / "physics" / "mjcf" / "mjcf.json").write_text(json.dumps({"name": "x", "compiled": {}, "soft": {"pad": {}}}))
+    assert steps.skip("softvideo", J) is None and not steps.done("softvideo", J)
+    (J / "softvideo").mkdir()
+    (J / "softvideo" / "softvideo.mp4").write_bytes(b"")
+    assert not steps.done("softvideo", J)
+    (J / "softvideo" / "softvideo.json").write_text("{}")
+    assert steps.done("softvideo", J) and steps.guard("softvideo", J) is None
     assert steps.skip("agent", J) is None
     (J / "run" / "placement.json").write_text(json.dumps({"check": {"mean_mask_iou": 0.31}}))
     assert "0.31 is below 0.5" in steps.skip("agent", J) and steps.skip("align", J) is None
@@ -936,7 +956,7 @@ def test_runner_key_file_lives_only_during_the_agent_stage(make_runner, tmp_path
     job_id, J = ready_job(cfg, auto_continue=True)
     runner.submit_build(job_id, KEY)
     job = wait(J, "done")
-    skipped = ("lidar", "propose", "parts", "turntable")  # a video has no LiDAR, a rigid object no parts, no 360 video
+    skipped = ("lidar", "propose", "parts", "turntable", "softvideo")  # no LiDAR, parts, 360 video or soft part
     assert all(job["stages"][s]["status"] == ("skipped" if s in skipped else "done") for s in ["frames", *jobs.BUILD])
     assert job["key_ok"] is False
     assert job["slug"] == "box" and job_id not in runner._keys
@@ -1021,7 +1041,7 @@ def test_runner_pauses_for_the_part_list_and_confirms_it(make_runner, tmp_path, 
     proposal = json.loads((J / "run" / "proposal.json").read_text())
     assert proposal["confirmed"] and proposal["edited"] and [p["name"] for p in proposal["parts"]] == ["body", "top lid", "latch"]
     assert job["parts"] == {"mode": "vlm_edit", "list": proposal["parts"], "confirmed": True}
-    assert all(job["stages"][s]["status"] == ("skipped" if s == "turntable" else "done")
+    assert all(job["stages"][s]["status"] == ("skipped" if s in ("turntable", "softvideo") else "done")
                for s in steps.NAMES[steps.NAMES.index("parts"):])
     assert (J / "logs" / "propose.log").read_text().count("== propose ") == 1
     with pytest.raises(ValueError, match="does not wait for its part list"):
@@ -1415,6 +1435,66 @@ def test_restart_fails_interrupted_jobs(make_runner):
     assert {s["name"]: s["seconds"] for s in jobs.progress(J)}["da3"] == 30.0  # not still counting
 
 
+def test_restart_gives_an_older_job_the_newer_stages(make_runner):
+    """A job folder of an earlier version has no record of the newer stages, which load does not make up (it stays
+    strict). Every start of the server adds each one, skipped, so that a done job still looks done and progress finds
+    every stage; a job that ran is also failed, and its stages keep their records."""
+    runner, cfg = make_runner()
+    done_id, done = ready_job(cfg)
+    ran_id, ran = ready_job(cfg)
+    for J, status in ((done, "done"), (ran, "running")):
+        job = jobs.load(J)
+        job["stages"] = {s: {**jobs.STAGE, "status": "done"} for s in steps.NAMES if s != "softvideo"}
+        jobs.save(J, {**job, "status": status})
+    jobs.update_stage(ran, "turntable", status="running", started=time.time() - 5)
+    with pytest.raises(KeyError, match="softvideo"):
+        jobs.progress(done)
+    make_runner()
+    older = {**jobs.STAGE, "status": "skipped", "note": "older than this stage"}
+    job = jobs.load(done)
+    assert job["status"] == "done" and job["stages"]["softvideo"] == older
+    assert all(job["stages"][s]["status"] == "done" for s in steps.NAMES if s != "softvideo")
+    assert [s["name"] for s in jobs.progress(done)] == steps.NAMES
+    job = jobs.load(ran)
+    assert job["status"] == "failed" and job["stages"]["softvideo"] == older
+    assert job["stages"]["turntable"]["note"] == "the server stopped" and job["stages"]["package"]["status"] == "done"
+    make_runner()  # once there, the record stays as it is
+    assert jobs.load(done)["stages"]["softvideo"] == older
+
+
+def test_runner_warns_when_the_soft_part_video_fails(make_runner, monkeypatch):
+    """softvideo is optional too, and the runner asks at the start of the stage whether to skip it: after mjcf, whose
+    MuJoCo model has a soft part here. Its failure warns "soft-part video: <why>", and the build goes on to package."""
+    runner, cfg = make_runner()
+
+    def command(stage, job, cfg, key_file=None):
+        J = cfg.runs / job["id"]
+        script = f"touch {J}/done_{stage}"
+        if stage == "mjcf":
+            script += f"; mkdir -p {J}/physics/mjcf && echo '{{\"soft\": {{\"pad\": {{}}}}}}' > {J}/physics/mjcf/mjcf.json"
+        if stage == "softvideo":
+            script = "echo the soft part has no press direction; exit 1"
+        return ["bash", "-c", script], str(J), {}
+
+    monkeypatch.setattr(steps, "command", command)
+    monkeypatch.setattr(steps, "done", lambda stage, J: (Path(J) / f"done_{stage}").exists() or stage == "frames")
+    job_id, J = ready_job(cfg, auto_continue=True)
+    runner.submit_build(job_id, None, agent="none")
+    job = wait(J, "done", "failed")
+    sv = job["stages"]["softvideo"]
+    assert (job["status"], job["error"], sv["status"], sv["returncode"]) == ("done", None, "failed", 1)
+    assert job["warnings"] == ["soft-part video: exit 1: the soft part has no press direction"]
+    assert job["stages"]["turntable"]["note"] == "turned off" and job["stages"]["package"]["status"] == "done"
+    # Without a soft part the stage is skipped.
+    (J / "physics" / "mjcf" / "mjcf.json").write_text("{}")
+    monkeypatch.setattr(steps, "command", lambda stage, job, cfg, key_file=None: (
+        ["bash", "-c", f"touch {cfg.runs / job['id']}/done_{stage}"], str(cfg.runs / job["id"]), {}))
+    runner.resume(job_id, "softvideo")
+    job = wait(J, "done", "failed")
+    assert job["stages"]["softvideo"] == {**jobs.STAGE, "status": "skipped", "note": "no soft part"}
+    assert job["warnings"] == []
+
+
 def stub_stages(monkeypatch, hold=()):
     """Stage commands that touch J/done_<stage> (frames counts as done); a stage in hold first waits until
     J/go_<stage> exists."""
@@ -1613,24 +1693,36 @@ def test_package_leaves_out_key_files(tmp_path, capsys):
     (J / "physics" / "mjcf" / "assets" / "visual_0.obj").write_text("v 0 0 0\n")
     (J / "turntable").mkdir()
     (J / "turntable" / "turntable.mp4").write_bytes(b"\0\0\0\x18ftypmp42")
+    (J / "softvideo").mkdir()
+    (J / "softvideo" / "softvideo.mp4").write_bytes(b"\0\0\0\x18ftypmp42 soft")
+    (J / "softvideo" / "motion.npz").write_bytes(b"not packaged")
     (J / "physics" / "up.json").write_text(json.dumps({"glb": str(J / "agent/s/work/exports/001.glb")}))
     r = {"source": "finish", "verdict": "complete", "glb": "work/exports/001.glb", "key_found_in": []}
     (J / "agent" / "result.json").write_text(json.dumps(r))
     jobs.package(J)
     names = set(zipfile.ZipFile(J / "results.zip").namelist())
-    assert names == {"posed.glb", "refined.glb", "aligned.glb", "turntable.mp4", "summary.json", "placement.json",
-                     "selection.json", "lidar.json", "agent_result.json", "mjcf/mjcf.json", "mjcf/assets/visual_0.obj",
-                     "usd/usd.json"}
+    assert names == {"posed.glb", "refined.glb", "aligned.glb", "turntable.mp4", "softvideo.mp4", "summary.json",
+                     "placement.json", "selection.json", "lidar.json", "agent_result.json", "mjcf/mjcf.json",
+                     "mjcf/assets/visual_0.obj", "usd/usd.json"}
     with zipfile.ZipFile(J / "results.zip") as z:
         assert z.read("refined.glb") == (J / "agent/s/work/exports/001.glb").read_bytes()
         assert z.read("turntable.mp4") == (J / "turntable" / "turntable.mp4").read_bytes()
-    # The agent wrote the key into its GLB: neither it nor what physics made from it (the 360 video too) is packaged.
+        assert z.read("softvideo.mp4") == (J / "softvideo" / "softvideo.mp4").read_bytes()
+    # The agent wrote the key into its GLB: neither it nor what physics made from it (the videos too) is packaged.
     (J / "agent" / "result.json").write_text(json.dumps({**r, "key_found_in": ["work/exports/001.glb", "session/x.log"]}))
     jobs.main(["package", "--job", str(J)])
     assert set(zipfile.ZipFile(J / "results.zip").namelist()) == {"posed.glb", "summary.json", "placement.json",
                                                                   "selection.json", "lidar.json", "agent_result.json"}
     assert "hold the API key" in capsys.readouterr().out
     assert not list(J.glob(".results*"))
+    # The agent's evidence goes in, unless its source, the session's control/evidence.json, held the key.
+    (J / "agent" / "evidence.json").write_text(json.dumps({"version": 1}))
+    jobs.package(J)
+    assert "evidence.json" in zipfile.ZipFile(J / "results.zip").namelist()
+    (J / "agent" / "result.json").write_text(json.dumps({**r, "key_found_in": ["control/evidence.json"]}))
+    jobs.package(J)
+    assert set(zipfile.ZipFile(J / "results.zip").namelist()) == names
+    assert "left out (they hold the API key): ['evidence.json']" in capsys.readouterr().out
 
 
 def run_folder(J, n=2):
@@ -1734,6 +1826,59 @@ def test_agent_step_runs_an_articulation_session(tmp_path, monkeypatch, capsys):
     assert agent_step.mode(J, job) == "refinement"
 
 
+def test_agent_step_prints_the_agents_text_on_clean_lines(tmp_path, monkeypatch, capsys):
+    """A result.json from before the helpers cleaned the agent's text still prints its reason, each limitation and
+    each rejected GLB's reason as one line without control characters, plain text and accents kept."""
+    import tempfile
+
+    from harpor.agent import controller as C
+    from test_agent_controller import CLEAN, DIRTY
+
+    J = run_folder(tmp_path)
+
+    def container(root, sif, key_file, budget_s):
+        r = C.run_session(root, [sys.executable, "-c", "pass"], blender=FAKE_BLENDER,
+                          sock_dir=tempfile.mkdtemp(prefix="gator-"))
+        r.update(reason=DIRTY, limitations=[DIRTY, "plain text, é and ü"], key_found_in=[],
+                 rejected=[{"from": "finish", "glb": "work/exports/001.glb", "why": f"bad joints: {DIRTY}"}])
+        write_json(Path(root) / "result.json", r)
+        return r
+
+    monkeypatch.setattr(C, "run_container_session", container)
+    agent_step.run(J, "/sif/agent.sif", J / "key.env")
+    out = capsys.readouterr().out
+    assert (f"  reason: {CLEAN}\n  limitation: {CLEAN}\n  limitation: plain text, é and ü\n"
+            f"  rejected finish work/exports/001.glb: bad joints: {CLEAN}\n") in out
+    assert [c for c in out if not c.isprintable() and c != "\n"] == []
+
+
+def test_agent_step_redacts_a_key_that_cleaning_joins(tmp_path, monkeypatch, capsys):
+    """A key split by a character that tools.printable drops (ESC, a zero-width space, BEL) is not the key while the
+    result is scrubbed, and whole once its line is cleaned: a link name of the agent's GLB in a rejected GLB's reason,
+    or an older result's reason and limitations. Each line is scrubbed again after the cleaning."""
+    import tempfile
+
+    from harpor.agent import controller as C
+
+    J = run_folder(tmp_path)
+
+    def container(root, sif, key_file, budget_s):
+        r = C.run_session(root, [sys.executable, "-c", "pass"], blender=FAKE_BLENDER,
+                          sock_dir=tempfile.mkdtemp(prefix="gator-"))
+        r.update(reason=f"done {KEY[:9]}\x1b{KEY[9:]}", limitations=[f"{KEY[:12]}​{KEY[12:]}"], key_found_in=[],
+                 rejected=[{"from": "export", "glb": "work/exports/001.glb",
+                            "why": f"bad joints: the joints have 2 roots (c, {KEY[:20]}\x07{KEY[20:]})"}])
+        write_json(Path(root) / "result.json", r)
+        return r
+
+    monkeypatch.setattr(C, "run_container_session", container)
+    agent_step.run(J, "/sif/agent.sif", J / "key.env")
+    out = capsys.readouterr().out
+    assert KEY not in out and KEY[9:] not in out
+    assert ("  reason: done [redacted API key]\n  limitation: [redacted API key]\n  rejected export work/exports/001.glb: "
+            "bad joints: the joints have 2 roots (c, [redacted API key])\n") in out
+
+
 def test_agent_step_names_the_jobs_real_input(tmp_path, monkeypatch):
     """The manifest's source line says what the job started from, as job.json has it."""
     from harpor.agent import controller as C
@@ -1796,8 +1941,173 @@ def test_fake_agent_stage_stands_in_for_both_agents(tmp_path):
         r = json.loads((J / "agent" / "result.json").read_text())
         assert (r["model"], r["cli_exit"], r["verdict"]) == (model, cli, "complete") and ("tokens" in r) == (which == "opus")
     assert r["cost_usd"] > 0 and r["turns"] == 12
+    # A refinement reports its surface (harpor.agent.surface) and has no rounds, so no evidence.
+    assert r["surface"]["shares"]["present"] == 1.0 and "rounds" not in r and "simulations" not in r
+    assert not (J / "agent" / "evidence.json").exists()
     with pytest.raises(SystemExit, match="no OPENAI_API_KEY line"):
         fake_steps.agent(J, key, "astra")
+
+
+def test_fake_agent_stage_alone_skips_the_round_code(tmp_path, monkeypatch, capsys):
+    """For an articulation whose parts.json has a found requirement, the fake agent stage writes the result keys of a
+    session in rounds and agent/evidence.json without the round code: neither the controller's rounds nor the host's
+    check run. The part's joint_guess soft gives a soft joint of its requirement's material, and the GLB stays where
+    the fake agent left it."""
+    from harpor.agent import controller as C
+    from harpor.agent import validate
+    from harpor.agent.fake_agent import write_glb
+    from harpor.webapp import fake_steps
+
+    J = run_folder(tmp_path)
+    (J / "job.json").write_text(json.dumps({**json.loads((J / "job.json").read_text()), "articulated": True}))
+    write_glb(J / "run" / "parts.glb", "parts", 0.2)
+    pad = {"id": "r1", "part": "lid", "prompt": "lid", "parent": "body", "kind": "soft", "joint": "soft",
+           "material": "gel", "text": "dents", "action": {"type": "press", "toward": "support"},
+           "scope": {"start": "mesh pose"}, "test": {}, "source": "vlm", "status": "found", "required": True}
+    lost = {**pad, "id": "r2", "part": None, "prompt": "knob", "status": "not_found"}
+    parts = {"version": 1, "frame": "W", "glb": "parts.glb", "base": "body", "noun": "toy box", "seams": [],
+             "parts": [{"name": "body", "parent": None, "joint_guess": "fixed", "status": "found"},
+                       {"name": "lid", "parent": "body", "joint_guess": "soft", "status": "found"}],
+             "requirements": [pad, lost]}
+    (J / "run" / "parts.json").write_text(json.dumps(parts))
+
+    def not_here(*a, **kw):
+        raise AssertionError("the fake agent stage runs no round code")
+
+    for name in ("run_session", "run_rounds", "run_round", "check_round", "store_candidate", "select_candidate"):
+        monkeypatch.setattr(C, name, not_here)
+    monkeypatch.setattr(validate, "check", not_here)
+    key = J / "fake.env"
+    key.write_text(f"OPENAI_API_KEY={KEY}\n")
+    key.chmod(0o600)
+    (J / "agent").mkdir()
+    (J / "agent" / "evidence.json").write_text("of an earlier try")
+    fake_steps.agent(J, key, "astra")
+    r = json.loads((J / "agent" / "result.json").read_text())
+    glb = "work/exports/001.glb"
+    assert (r["verdict"], r["glb"], r["reason"], r["simulations"]) == ("articulated", glb, "fake agent: lid is soft (gel) on body", 0)
+    assert r["requirements"] == {"pass": 1, "fail": 0, "inconclusive": 0, "unassessed": 1}
+    assert r["candidate"] == {"version": 1, "round": 1, "kind": "build", "from": glb, "agent_verdict": "articulated",
+                              "outcome": "pass", "why": "the only eligible candidate"}
+    assert r["rounds"] == [{"round": 1, "kind": "build", "budget_s": 900.0, "exit": "finish_sigint", "wall_s": 0.2,
+                            "candidate": {"version": 1, "source": "finish", "verdict": "articulated", "glb": glb,
+                                          "sha256": r["sha256"]}, "outcome": "pass", "scope": "none", "findings": []}]
+    assert r["surface"]["shares"]["present"] == 1.0 and steps.agent_glb(J) == J / "agent" / "s" / glb
+    ev = json.loads((J / "agent" / "evidence.json").read_text())
+    assert ev == json.loads((J / "agent" / "s" / "control" / "evidence.json").read_text())
+    assert (ev["object"], ev["requirements"], ev["rounds"], ev["selected"]["unresolved"]) == ("toy box", [pad, lost],
+                                                                                              r["rounds"], ["r2"])
+    (c,) = ev["candidates"]
+    assert c["mechanisms"] == [{"id": "m1", "link": "lid", "parent": "body", "type": "soft", "origin_w": None,
+                                "axis_w": None, "range": None, "reference_range": None,
+                                "assumptions": {"material": "gel", "young": 1e5, "poisson": 0.3, "density": 900.0,
+                                                "support": "parent"}}]
+    assert [(x["requirement"], x["outcome"], x["measured"].get("dmax_m")) for x in c["records"]] == [
+        ("r1", "pass", 0.004), ("r2", "unassessed", None)]
+    out = capsys.readouterr().out
+    assert "round 1 build: pass, scope none, candidate v01 (articulated)" in out
+    assert "requirements: 1 pass, 0 fail, 0 inconclusive, 1 unassessed" in out
+
+
+def test_agent_step_publishes_the_evidence_of_its_rounds(tmp_path, monkeypatch, capsys):
+    """The real agent_step.run on an articulation whose parts.json has a found requirement: the session runs in rounds,
+    the fake agent exports in round 1 (the lid has no joint yet) and hinges the lid in round 2 with the API key in its
+    reason, and harpor.agent.fake_agent --sim stands in for MuJoCo. agent/evidence.json is control/evidence.json
+    without the key and as strict JSON: a number that is not finite (here the diagonal) is null. The stage log prints
+    the rounds, and the server's view of the job takes the result's round keys. Since control/evidence.json held the
+    key, the file route and results.zip leave the evidence out; a result without that finding serves it. Without
+    GATOR_MUJOCO the step stops before the session runs."""
+    for m in ("rtree", "fastapi", "av"):  # rtree: the clearance check (tools.penetration)
+        pytest.importorskip(m)
+    import math
+    import shlex
+    import tempfile
+
+    from fastapi.testclient import TestClient
+    from test_agent_controller import (CRASH, EXPORT, FAKE_SIM, FAST, HINGE, LID, PARTS, PARTS_SIZE, REVIEW_ART, edit,
+                                       set_joint, tool)
+
+    from harpor.agent import controller as C
+    from harpor.agent import evidence
+    from harpor.agent.fake_agent import write_glb
+    from harpor.webapp import server
+
+    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=True)
+    job_id, _ = jobs.create_job(cfg.runs, "lid.mp4")
+    J = cfg.runs / job_id
+    job = jobs.load(J)
+    run_folder(J)
+    jobs.save(J, {**job, "prompt": "toy box", "articulated": True, "status": "done"})
+    write_glb(J / "run" / "parts.glb", "parts", PARTS_SIZE)
+    (J / "run" / "parts.json").write_text(json.dumps({**PARTS, "requirements": [LID]}))
+    finish = tool("finish", "--receipt", "{areceipt}", "--verdict", "articulated", "--reason", f"hinged; key {KEY}")
+    script = tmp_path / "script.json"
+    script.write_text(json.dumps({"rounds": [[edit(PARTS_SIZE, "parts"), EXPORT, CRASH],
+                                             [set_joint("lid", "body", "revolute", HINGE), REVIEW_ART, finish]]}))
+
+    def container(root, sif, key_file, budget_s):  # the controller's own session with the fake agent's rounds
+        with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
+            env = {**os.environ, "PYTHONPATH": str(ROOT), "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
+            r = C.run_session(root, [sys.executable, "-m", "harpor.agent.fake_agent", str(script)], env,
+                              blender=FAKE_BLENDER, sock_dir=sock_dir, budget_s=20.0, **FAST)
+        r["key_found_in"] = C.find_key(root, key_file)
+        write_json(Path(root) / "result.json", r)
+        return r
+
+    monkeypatch.setattr(C, "run_container_session", container)
+    for value in (None, "/no/such/python -I", "'unclosed"):
+        if value is None:
+            monkeypatch.delenv("GATOR_MUJOCO", raising=False)
+        else:
+            monkeypatch.setenv("GATOR_MUJOCO", value)
+        with pytest.raises(SystemExit, match="not the python of envs/mujoco"):
+            agent_step.run(J, "/sif/agent.sif", J / "key.env")
+        assert not (J / "agent" / "s" / "result.json").exists()
+    monkeypatch.setenv("GATOR_MUJOCO", shlex.join(FAKE_SIM))
+    monkeypatch.delenv("GATOR_FAKE_SIM", raising=False)  # every run passes
+    monkeypatch.setattr(evidence, "diagonal", lambda original: math.nan)  # as a NaN of MuJoCo's states would be
+    (J / "agent" / "evidence.json").write_text("of an earlier try")
+    r = agent_step.run(J, "/sif/agent.sif", J / "key.env")
+    root = J / "agent" / "s"
+    assert (r["verdict"], r["glb"], r["reason"]) == ("articulated", "control/candidates/v02/candidate.glb",
+                                                     f"hinged; key {agent_step.REDACTED}")
+    assert [(x["kind"], x["outcome"], x["scope"]) for x in r["rounds"]] == [("build", "fail", "local"),
+                                                                           ("repair", "pass", "none")]
+    assert {"result.json", "control/evidence.json"} <= set(r["key_found_in"])
+    raw, published = (root / "control" / "evidence.json").read_text(), (J / "agent" / "evidence.json").read_text()
+    assert KEY in raw and "NaN" in raw and KEY not in published and agent_step.REDACTED in published
+
+    def strict(text):  # as a browser's JSON.parse reads it
+        return json.loads(text, parse_constant=lambda c: pytest.fail(f"{c} in the published evidence"))
+
+    ev = strict(published)
+    assert ev == agent_step.finite(agent_step.scrub(json.loads(raw), [KEY])) and ev["diagonal_m"] is None
+    assert [c["reason"] for c in ev["candidates"]] == ["uninspected export recovered; the session ended without finish",
+                                                       f"hinged; key {agent_step.REDACTED}"]
+    assert ev["selected"]["version"] == 2 and ev["rounds"] == r["rounds"]
+    out = capsys.readouterr().out
+    assert KEY not in out and "round 1 build: fail, scope local, candidate v01 (needs_review); findings: " in out
+    assert "round 2 repair: pass, scope none, candidate v02 (articulated)" in out
+    assert "requirements: 1 pass, 0 fail, 0 inconclusive, 0 unassessed" in out
+    assert "delivered candidate v02 of round 2: " in out
+
+    token = "tok-" + secrets.token_hex(16)
+    with TestClient(server.make_app(cfg, token, key_dir=tmp_path / "keys")) as c:
+        assert c.get(f"/?token={token}", follow_redirects=False).status_code == 303
+        a = c.get(f"/api/jobs/{job_id}").json()["agent_result"]
+        assert {k: a[k] for k in ("rounds", "requirements", "candidate", "surface", "simulations")} == {
+            k: r[k] for k in ("rounds", "requirements", "candidate", "surface", "simulations")}
+        assert a["candidate"]["version"] == 2 and a["requirements"]["pass"] == 1
+        assert "agent/evidence.json" not in c.get(f"/api/jobs/{job_id}").json()["files"]
+        assert c.get(f"/api/jobs/{job_id}/file/agent/evidence.json").status_code == 404
+        for p in ("agent/s/control/evidence.json", "agent/result.json", "agent/evidence.json/../result.json"):
+            assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
+        jobs.package(J)
+        assert "evidence.json" not in zipfile.ZipFile(J / "results.zip").namelist()
+        write_json(J / "agent" / "result.json", {**r, "key_found_in": []})  # as a session whose evidence held no key
+        assert "agent/evidence.json" in c.get(f"/api/jobs/{job_id}").json()["files"]
+        got = c.get(f"/api/jobs/{job_id}/file/agent/evidence.json")
+        assert got.headers["content-type"] == "application/json" and strict(got.text) == ev
 
 
 def test_agent_step_scrubs_the_key_from_the_result(tmp_path, monkeypatch, capsys):
@@ -1935,8 +2245,9 @@ def test_fake_build_end_to_end(make_runner, tmp_path):
     job = wait(J, "done")
     rigid = ("propose", "parts")  # a rigid object skips the parts stages, and a video the LiDAR
     assert [s for s in steps.NAMES if job["stages"][s]["status"] != "done"] == ["topics", "lidar", "propose", "parts",
-                                                                                "turntable"]
+                                                                                "turntable", "softvideo"]
     assert job["stages"]["turntable"]["note"] == "turned off" and not (J / "turntable").exists()
+    assert job["stages"]["softvideo"]["note"] == "no soft part" and not (J / "softvideo").exists()
     assert all(job["stages"][s]["note"] == "turned off: rigid object" for s in rigid)
     placement = json.loads((J / "run" / "placement.json").read_text())
     assert placement["metric_scale"] is None and placement["units"] == "DA3 units (meters)"
@@ -1951,7 +2262,7 @@ def test_fake_build_end_to_end(make_runner, tmp_path):
             "urdf/model.urdf", "urdf/urdf.json"} <= names and not {"parts.glb", "parts.json"} & names
     urdf = json.loads((J / "physics" / "urdf" / "urdf.json").read_text())
     assert urdf["checked"]["links"] == 1 and urdf["checked"]["joints"] == 0 and urdf["checked"]["missing"] == []
-    skipped = ("topics", "lidar", *rigid, "turntable")  # topics and lidar: video input; no 360 video asked for
+    skipped = ("topics", "lidar", *rigid, "turntable", "softvideo")  # video input; no 360 video, no soft part
     assert all(s["seconds"] is not None for s in jobs.progress(J) if s["name"] not in skipped)
     assert not list(runner.key_dir.iterdir())
     assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))
@@ -1993,7 +2304,8 @@ def test_fake_articulated_build_end_to_end(make_runner, tmp_path, mode, agent):
     job = wait(J, "done", "failed")
     assert job["status"] == "done", (job["error"], (J / "logs" / f"{job['error'].split(':')[0]}.log").read_text()[-3000:]
                                      if job["error"] else "")
-    skipped = {"topics", "lidar"} | ({"agent"} if agent == "none" else set()) | ({"turntable"} if mode != "vlm" else set())
+    skipped = {"topics", "lidar", "softvideo"} | ({"agent"} if agent == "none" else set()) | (
+        {"turntable"} if mode != "vlm" else set())
     assert all(job["stages"][s]["status"] == ("skipped" if s in skipped else "done") for s in steps.NAMES), job["stages"]
     assert job["parts"]["mode"] == mode and job["parts"]["confirmed"] is (mode == "vlm_edit")
 
@@ -2026,11 +2338,15 @@ def test_fake_articulated_build_end_to_end(make_runner, tmp_path, mode, agent):
         assert job["stages"]["agent"]["note"].startswith("turned off: without the agent the parts get no joints")
         assert steps.next_glb(J) == J / "run" / "parts.glb" and steps.agent_glb(J) is None
         assert aligned["joints"] == {} and "links" not in mj and (urdf["links"], urdf["joints"]) == (1, 0)
-        assert "refined.glb" not in zipped
+        assert not {"refined.glb", "evidence.json"} & zipped
     else:
         r = json.loads((J / "agent" / "result.json").read_text())
         assert (r["mode"], r["verdict"], r["joints_delivered"]) == ("articulation", "articulated", 1)
         assert set(r["counts"]) == {"exports", "reviews", "checkpoints", "joints", "articulation_reviews"}
+        # The lid's requirement is found, so the result has the keys of a session in rounds, and the evidence.
+        assert [x["kind"] for x in r["rounds"]] == ["build"] and r["requirements"]["pass"] == 1
+        assert [q["part"] for q in parts["requirements"] if q["status"] == "found"] == [lid]
+        assert "evidence.json" in zipped
         assert steps.next_glb(J) == steps.agent_glb(J) == J / "agent" / "s" / "work" / "exports" / "001.glb"
         assert joint_spec.read_joints(read_glb(steps.next_glb(J))[0])[lid]["frame"] == "W"
         assert set(aligned["joints"]) == {lid} and aligned["joints"][lid]["frame"] == "S"
@@ -2043,3 +2359,54 @@ def test_fake_articulated_build_end_to_end(make_runner, tmp_path, mode, agent):
         assert [j["type"] for j in usd["joints"]] == ["PhysicsRevoluteJoint"] and "refined.glb" in zipped
     assert not list(runner.key_dir.iterdir())
     assert not any(k.encode() in p.read_bytes() for p in all_files(tmp_path) for k in (KEY, OPUS_KEY))
+
+
+def test_fake_build_with_a_soft_part_end_to_end(make_runner, tmp_path):
+    """The typed list "body / pad > body : soft" runs the whole fake path: the pad's requirement is soft (foam, the
+    default), the fake agent makes the pad soft on the body, MuJoCo gets its flex (the real harpor.physics.mjcf), URDF
+    and USD keep it rigid, the softvideo stage presses it, and the result, the evidence of a session in rounds and the
+    soft-part video go into results.zip."""
+    for m in ("av", "trimesh", "mujoco", "scipy", "harpor.webapp.video", "harpor.webapp.views", "harpor.webapp.physics_auto"):
+        pytest.importorskip(m)
+    from test_webapp_server import write_video
+
+    from harpor.webapp import softvideo
+
+    runner, cfg = make_runner()
+    job_id, upload = jobs.create_job(cfg.runs, "pad clip.mov")
+    J = cfg.runs / job_id
+    write_video(upload)
+    runner.submit_analyze(job_id)
+    wait(J, "ready")
+    jobs.update(J, mode="auto", prompt="Wooden box", n_views=4, auto_continue=True)
+    typed = [{"name": "body"}, {"name": "pad", "parent": "body", "joint": "soft"}]
+    runner.submit_build(job_id, KEY, agent="astra", articulated=True, parts={"mode": "user", "list": typed})
+    job = wait(J, "done", "failed")
+    assert job["status"] == "done", (job["error"], (J / "logs" / f"{job['error'].split(':')[0]}.log").read_text()[-3000:]
+                                     if job["error"] else "")
+    (req,) = json.loads((J / "run" / "parts.json").read_text())["requirements"]
+    assert (req["part"], req["kind"], req["material"], req["status"], req["source"]) == ("pad", "soft", "foam", "found",
+                                                                                          "default")
+    r = json.loads((J / "agent" / "result.json").read_text())
+    assert (r["verdict"], r["reason"], r["joints_delivered"]) == ("articulated", "fake agent: pad is soft (foam) on body", 1)
+    assert r["requirements"] == {"pass": 1, "fail": 0, "inconclusive": 0, "unassessed": 0}
+    ev = json.loads((J / "agent" / "evidence.json").read_text())
+    assert ev["candidates"][0]["mechanisms"][0]["assumptions"]["material"] == "foam"
+    mj = json.loads((J / "physics" / "mjcf" / "mjcf.json").read_text())
+    assert [(j["child"], j["parent"], j["type"]) for j in mj["joints"]] == [("pad", "body", "soft")]
+    assert mj["soft"]["pad"]["material"] == "foam" and mj["soft_rigid"] == {} and mj["compiled"]["soft_mass"]
+    urdf = json.loads((J / "physics" / "urdf" / "urdf.json").read_text())
+    assert urdf["soft_as_rigid"] == {"pad": "rigid here, soft in MuJoCo"} and urdf["checked"]["joints"] == 1
+    usd = json.loads((J / "physics" / "usd" / "usd.json").read_text())["checked"]
+    assert [j["type"] for j in usd["joints"]] == ["PhysicsFixedJoint"]
+    assert {"evidence.json", "agent_result.json", "mjcf/soft/pad.npz", "refined.glb", "softvideo.mp4"} <= set(
+        zipfile.ZipFile(J / "results.zip").namelist())
+    # The soft-part video, of the GLB that physics used, without the 360 video that the job did not ask for: MuJoCo's
+    # press (the real harpor.webapp.softvideo.motion), the fake Blender's frames and a real MP4 of FRAMES frames.
+    rec = json.loads((J / "softvideo" / "softvideo.json").read_text())
+    assert job["stages"]["softvideo"]["status"] == "done" and job["stages"]["turntable"]["note"] == "turned off"
+    assert (rec["link"], rec["glb"], rec["codec"], rec["frames"], rec["seconds"]) == (
+        "pad", "agent/s/work/exports/001.glb", "h264", softvideo.FRAMES, softvideo.FRAMES / softvideo.FPS)
+    assert rec["dent_m"] >= rec["target_m"] and not rec["cap_limited"] and job["warnings"] == []
+    assert not (J / "softvideo" / "frames").exists()
+    assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))

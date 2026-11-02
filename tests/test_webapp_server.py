@@ -267,9 +267,11 @@ def test_upload_review_overrides_and_results(client, tmp_path):
     assert c.post(f"/api/jobs/{job_id}/continue", json={}).json() == {"status": "queued", "from": "sam3d"}
     job = wait(c, job_id, "done", "failed")
     assert job["status"] == "done", job["error"]
-    # A rigid object without LiDAR or the 360 video has every output but the split parts, the LiDAR record and the video.
+    # A rigid object without LiDAR or the 360 video has every output but the split parts, the LiDAR record, the videos
+    # and the evidence of an articulation's rounds.
     assert set(job["files"]) == set(server.OUTPUTS) - {"run/parts.glb", "run/parts.json", "pool/lidar.json",
-                                                      "turntable/turntable.mp4"}
+                                                      "turntable/turntable.mp4", "softvideo/softvideo.mp4",
+                                                      "agent/evidence.json"}
     assert job["turntable"] is False and job["stages"]["turntable"]["note"] == "turned off"
     # The Downloads tab's sizes: the bytes that the file route sends for each file (refined.glb is the agent's GLB).
     assert set(job["sizes"]) == set(job["files"])
@@ -1141,7 +1143,7 @@ def test_start_takes_the_parts_of_an_articulated_object(client, tmp_path):
                        ({"parts_mode": "user", "parts": [{"name": "wooden box"}]},
                         "part 'wooden box' has the name of the whole object; call its main body 'Wooden box body'"),
                        ({"parts_mode": "user", "parts": [TYPED[0], {**TYPED[1], "joint": "hinge"}], "api_key": "bad"},
-                        "part 'lid': joint is one of revolute, prismatic, fixed, unknown, not 'hinge'")]:
+                        "part 'lid': joint is one of revolute, prismatic, fixed, soft, unknown, not 'hinge'")]:
         r = c.post(f"/api/jobs/{job_id}/start", json={**start, **wrong})
         assert r.status_code == 400 and r.json()["detail"] == why, (wrong, r.text)
     assert c.get(f"/api/jobs/{job_id}").json()["status"] == "ready"
@@ -1220,10 +1222,17 @@ def test_part_list_review_confirms_or_edits_the_list(client, tmp_path):
     assert job["status"] == "done", job["error"]
     proposal = json.loads((J / "run" / "proposal.json").read_text())
     assert (proposal["confirmed"], proposal["edited"], job["parts"]["confirmed"], job["parts_review"]) == (True, False, True, False)
-    assert set(server.OUTPUTS) - {"pool/lidar.json", "turntable/turntable.mp4"} <= set(job["files"])  # but LiDAR, video
+    assert set(server.OUTPUTS) - {"pool/lidar.json", "turntable/turntable.mp4", "softvideo/softvideo.mp4"} <= set(
+        job["files"])  # but LiDAR and the videos
     a = job["agent_result"]
     assert (a["mode"], a["verdict"], a["joints_delivered"]) == ("articulation", "articulated", 1)
     assert set(a["counts"]) == {"exports", "reviews", "checkpoints", "joints", "articulation_reviews"}
+    # The VLM's lid has a requirement, so the fake agent's result has the keys of a session in rounds, and its evidence.
+    assert ([x["outcome"] for x in a["rounds"]], a["requirements"]["pass"], a["candidate"]["round"], a["simulations"]) == (
+        ["pass"], 1, 1, 0)
+    assert a["surface"]["shares"]["present"] == 1.0
+    ev = c.get(f"/api/jobs/{job_id}/file/agent/evidence.json")
+    assert ev.headers["content-type"] == "application/json" and ev.json()["selected"]["verdict"] == "articulated"
     assert c.get(f"/api/jobs/{job_id}/file/refined.glb").content == (J / "agent/s/work/exports/001.glb").read_bytes()
     r = c.post(f"/api/jobs/{job_id}/parts", json={"parts": [{"name": "body"}]})
     assert r.status_code == 409 and r.json()["detail"] == "the job does not wait for its part list"
@@ -1271,7 +1280,8 @@ def test_articulated_job_without_an_agent_and_the_new_files(client, tmp_path):
     assert job["status"] == "done", job["error"]
     assert (job["articulated"], job["parts_mode"], job["agent_result"]) == (True, "user", None)
     assert job["stages"]["agent"]["note"].startswith("turned off: without the agent the parts get no joints")
-    assert set(job["files"]) == set(server.OUTPUTS) - {"refined.glb", "pool/lidar.json"}
+    assert set(job["files"]) == set(server.OUTPUTS) - {"refined.glb", "pool/lidar.json", "agent/evidence.json",
+                                                      "softvideo/softvideo.mp4"}  # the lid is not soft
     assert (job["turntable"], job["stages"]["turntable"]["status"], job["warnings"]) == (True, "done", [])
     mp4 = (J / "turntable" / "turntable.mp4").read_bytes()
     r = c.get(f"/api/jobs/{job_id}/file/turntable/turntable.mp4")
@@ -1519,6 +1529,63 @@ def test_job_api_leaves_out_agent_text_that_held_the_key(client):
     assert c.get(f"/api/jobs/{job_id}").json()["agent_result"] == {
         "source": "finish", "verdict": "complete", "reason": "left out: the agent's result held the API key",
         "limitations": [], "exit": "finished"}
+
+
+def test_the_job_api_serves_the_evidence_and_the_round_keys(client):
+    """agent/evidence.json (agent_step's scrubbed copy of the session's control/evidence.json) is an output while its
+    source does not hold the key; the session folder stays unserved. The view takes the result's rounds,
+    requirements, candidate, surface and simulations, and a result without them (an older job) gives none."""
+    c, cfg = client
+    login(c)
+    job_id, _ = jobs.create_job(cfg.runs, "v.mp4")
+    J = cfg.runs / job_id
+    (J / "agent" / "s" / "control").mkdir(parents=True)
+    (J / "agent" / "s" / "control" / "evidence.json").write_text('{"version": 1, "reason": "raw"}')
+    (J / "agent" / "evidence.json").write_text('{"version": 1, "reason": "scrubbed"}')
+    rounds = [{"round": 1, "kind": "build", "budget_s": 900.0, "exit": "exited", "wall_s": 3.0, "candidate": None,
+               "outcome": "fail", "scope": "local", "findings": [{"code": "joint_missing", "requirement": "r1",
+                                                                   "link": "lid", "measured": None, "expected": "revolute"}]}]
+    new = {"rounds": rounds, "requirements": {"pass": 0, "fail": 1, "inconclusive": 0, "unassessed": 0}, "candidate": None,
+           "surface": {"shares": {"present": 1.0}, "findings": [], "blocks": False}, "simulations": 2}
+    r = {"source": "fallback_original", "verdict": "fallback_original", "reason": "x", "limitations": [], "exit": "exited",
+         "mode": "articulation", "key_found_in": [], **new}
+    (J / "agent" / "result.json").write_text(json.dumps(r))
+    job = c.get(f"/api/jobs/{job_id}").json()
+    assert {k: job["agent_result"][k] for k in new} == new and "agent/evidence.json" in job["files"]
+    got = c.get(f"/api/jobs/{job_id}/file/agent/evidence.json")
+    assert got.status_code == 200 and got.headers["content-type"] == "application/json" and got.json()["reason"] == "scrubbed"
+    for p in ("agent/s/control/evidence.json", "agent/s/result.json", "agent/evidence.json/", "agent/Evidence.json"):
+        assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
+    # The key was in the session's evidence: its copy is left out too, as agent/result.json is.
+    (J / "agent" / "result.json").write_text(json.dumps({**r, "key_found_in": ["control/evidence.json"]}))
+    assert "agent/evidence.json" not in c.get(f"/api/jobs/{job_id}").json()["files"]
+    assert c.get(f"/api/jobs/{job_id}/file/agent/evidence.json").status_code == 404
+    assert server.resolve(J, "agent/evidence.json") is None and server.key_in(J, "control/evidence.json")
+    (J / "agent" / "result.json").write_text(json.dumps({k: v for k, v in r.items() if k not in new}))
+    assert not set(new) & set(c.get(f"/api/jobs/{job_id}").json()["agent_result"])
+
+
+def test_the_soft_part_video_is_an_output_and_its_records_are_not(client):
+    """softvideo/softvideo.mp4 is served as video/mp4, with 206 for a Range request, and listed with its size; the
+    stage's records and its motion stay on the server."""
+    c, cfg = client
+    login(c)
+    job_id, _ = jobs.create_job(cfg.runs, "v.mp4")
+    J = cfg.runs / job_id
+    (J / "softvideo").mkdir()
+    mp4 = b"\0\0\0\x18ftypmp42" + bytes(range(256))
+    (J / "softvideo" / "softvideo.mp4").write_bytes(mp4)
+    records = ("softvideo.json", "render.json", "motion.json", "motion.npz", "args.json", "blender.log")
+    for f in records:
+        (J / "softvideo" / f).write_text("{}")
+    job = c.get(f"/api/jobs/{job_id}").json()
+    assert "softvideo/softvideo.mp4" in job["files"] and job["sizes"]["softvideo/softvideo.mp4"] == len(mp4)
+    r = c.get(f"/api/jobs/{job_id}/file/softvideo/softvideo.mp4")
+    assert r.status_code == 200 and r.headers["content-type"] == "video/mp4" and r.content == mp4
+    r = c.get(f"/api/jobs/{job_id}/file/softvideo/softvideo.mp4", headers={"Range": "bytes=0-99"})
+    assert r.status_code == 206 and r.content == mp4[:100]
+    for p in [f"softvideo/{f}" for f in records] + ["softvideo/../job.json", "softvideo/turntable.mp4"]:
+        assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
 
 
 def test_events_send_a_rerun_stage_once(tmp_path):
@@ -2201,9 +2268,9 @@ def test_app_js_parse_parts():
                            "knob x2 > door : unknown")
     assert out["again"][:3] == out["parts"][:3] and out["again"][3]["joint"] == "unknown"
     assert out["errors"] == ["line 1: write the parent's name after >",
-                             "line 1: the joint is one of revolute, prismatic, fixed, unknown",
+                             "line 1: the joint is one of revolute, prismatic, fixed, soft, unknown",
                              "line 1: the part needs a name", "line 1: write the part as name > parent : joint",
-                             "line 2: the joint is one of revolute, prismatic, fixed, unknown"]
+                             "line 2: the joint is one of revolute, prismatic, fixed, soft, unknown"]
     assert out["empty"] == [] and out["box"] == [{"name": "box x", "parent": None, "joint": None, "count": 1}]
 
 
@@ -2265,7 +2332,7 @@ def test_app_js_start_form_sends_the_parts():
         {"name": "box body", "parent": None, "joint": None, "count": 1},
         {"name": "lid", "parent": "box body", "joint": "revolute", "count": 1},
         {"name": "drawer", "parent": "box body", "joint": "prismatic", "count": 2}]
-    assert bad == "line 2: the joint is one of revolute, prismatic, fixed, unknown"
+    assert bad == "line 2: the joint is one of revolute, prismatic, fixed, soft, unknown"
     assert (none["agent"], none["api_key"], none["parts_mode"]) == ("none", None, "user")
     assert none["parts"] == [{"name": "box body", "parent": None, "joint": None, "count": 1},
                              {"name": "lid", "parent": "box body", "joint": None, "count": 1}]
@@ -2365,7 +2432,7 @@ def test_app_js_part_list_panel():
             {"name": "body", "parent": None, "joint": None, "count": 1},
             {"name": "lid", "parent": "body", "joint": "revolute", "count": 1, "axis_hint": "a hinge along the back top edge"},
             {"name": "flap", "parent": "body", "joint": "prismatic", "count": 1}]}}]
-    assert out["error"] == "line 2: the joint is one of revolute, prismatic, fixed, unknown"
+    assert out["error"] == "line 2: the joint is one of revolute, prismatic, fixed, soft, unknown"
     assert out["colon"] == [{"url": "/api/jobs/j/continue", "body": {"api_key": None}},
                             {"url": "/api/jobs/j/parts", "body": {"api_key": None, "parts": [
                                 {"name": "body", "parent": None, "joint": None, "count": 1},
@@ -4835,6 +4902,118 @@ def test_app_js_results_facts_rows():
     assert "call it the Stage A mesh" in (server.STATIC / "help.html").read_text()
 
 
+def test_app_js_results_names_a_soft_joint():
+    """mjcf.json keeps a soft joint's type, so its row says so and not that the part is fixed."""
+    job, replies = results_job()
+    key = "/api/jobs/a/file/physics/mjcf/mjcf.json"
+    soft = {"child": "pad", "parent": "door", "type": "soft", "pos": [0, 0, 0], "axis": [1, 0, 0], "range": [0, 0]}
+    replies[key] = {**replies[key], "joints": [*replies[key]["joints"], soft]}
+    out = run_dom_js("""
+        (async () => {
+          V = { id: "a" };
+          await renderResults(""" + json.dumps(job) + """);
+          console.log(JSON.stringify($("#facts2").kids[0].kids.map((k) => k.textContent)));
+        })()
+        """, replies)
+    assert out[out.index("Joint of pad") + 1] == "soft on door"
+
+
+ROUNDS_RESULT = {
+    **ART_RESULT,
+    "rounds": [{"round": 1, "kind": "build", "outcome": "fail", "scope": "structural", "candidate": None, "findings": []},
+               {"round": 2, "kind": "replan", "outcome": None, "scope": None, "candidate": None, "findings": []},
+               {"round": 3, "kind": "repair", "outcome": "pass", "scope": "none", "findings": [],
+                "candidate": {"version": 2, "source": "finish", "verdict": "articulated"}}],
+    "candidate": {"version": 2, "round": 3, "kind": "repair", "outcome": "pass", "why": "the only eligible candidate"},
+    "requirements": {"pass": 2, "fail": 0, "inconclusive": 1, "unassessed": 2}, "simulations": 4,
+    "surface": {"shares": {"present": 0.995, "retained": 0.98, "modified": 0.015, "unresolved": 0.0},
+                "findings": [{"code": "surface_uv"}, {"code": "surface_uv"}], "blocks": False}}
+EVIDENCE = {"version": 1, "requirements": [{"id": f"r{k}", "prompt": p} for k, p in enumerate(
+    ["door", "drawer", "pad", "knob", "door"], 1)],
+    "candidates": [{"version": 1, "records": [{"requirement": "r1", "target": ["door"], "joint": "revolute",
+                                                "outcome": "fail", "measured": {}}]},
+                   {"version": 2, "records": [
+                       {"requirement": "r1", "target": ["door"], "kind": "joint", "joint": "revolute", "required": True,
+                        "outcome": "pass", "measured": {"type": "revolute", "achieved": [0.0, 1.5], "states": 3}},
+                       {"requirement": "r2", "target": ["drawer"], "kind": "joint", "joint": "prismatic", "required": True,
+                        "outcome": "inconclusive", "measured": {"type": "prismatic", "achieved": [0.0, 0.3]}},
+                       {"requirement": "r3", "target": ["<img src=x onerror=alert(1)>"], "kind": "soft", "joint": "soft",
+                        "required": True, "outcome": "pass", "measured": {"type": "soft", "dmax_m": 0.004}},
+                       {"requirement": "r4", "target": [], "kind": "joint", "joint": "unknown", "required": True,
+                        "outcome": "unassessed", "measured": {}},
+                       {"requirement": "r5", "target": ["door_2"], "kind": "joint", "joint": "revolute", "required": False,
+                        "outcome": "unassessed", "measured": {}}, "not a record"]}],
+    "selected": {"version": 2}}
+
+
+def test_app_js_results_of_a_session_in_rounds():
+    """An articulation that ran in rounds adds Rounds, Requirements (met of total), one row per requirement of
+    agent/evidence.json (the delivered candidate's records, with the outcome and what the check measured) and Surface
+    retained after the agent's joint changes, and each soft link of mjcf.json a Soft part row after the joints. Agent
+    and VLM text stays text. The rows read every field defensively: a refinement's surface alone, a result whose keys
+    are not of the expected kinds (a view stored on the public site) and an evidence file that does not parse leave
+    out what they cannot give, never the other rows."""
+    job, replies = results_job()
+    mj = "/api/jobs/a/file/physics/mjcf/mjcf.json"
+    replies[mj] = {**replies[mj], "soft": {"<b>pad</b>": {"material": "foam", "young": 3e4}, "grip": {"material": "rubber",
+                                                                                                    "young": 1e6}},
+                   "soft_rigid": {"cushion": {"code": "soft_untestable", "reason": "no usable hex mesh"}}}
+    replies["/api/jobs/a/file/agent/evidence.json"] = EVIDENCE
+    rounds = {**job, "files": [*job["files"], "agent/evidence.json"], "agent_result": ROUNDS_RESULT}
+    odd = {**rounds, "agent_result": {**ROUNDS_RESULT, "rounds": "3", "requirements": None, "candidate": 5,
+                                      "surface": {"error": "TypeError: x"}}}
+    refined = {"id": "s", "articulated": False, "agent": "astra", "files": ["run/posed.glb", "refined.glb"],
+               "stages": {"agent": {"status": "done"}},
+               "agent_result": {"source": "finish", "verdict": "complete", "reason": "ok", "limitations": [], "agent": "codex",
+                                "model": "gpt-6-astra", "mode": "refinement", "surface": {
+                                    "shares": {"present": 1.0, "retained": 0.0, "modified": 0.0, "unresolved": 1.0},
+                                    "findings": [], "blocks": True}}}
+    out = run_dom_js("""
+        (async () => {
+          const out = {}, rows = () => $("#facts2").kids[0].kids.map((k) => [k.textContent, k.kids.every((x) => typeof x === "string")]);
+          for (const [name, job] of Object.entries(""" + json.dumps({"rounds": rounds, "odd": odd, "refined": refined}) + """)) {
+            V = { id: job.id };
+            await renderResults(job);
+            out[name] = rows();
+          }
+          const fetch0 = T.fetch;  // an evidence file that does not parse, as JSON.parse refuses NaN
+          T.fetch = async (url, opts) => url.endsWith("/agent/evidence.json")
+            ? { json: async () => { throw new SyntaxError("Unexpected token N in JSON"); } } : fetch0(url, opts);
+          V = { id: "a" };
+          await renderResults(""" + json.dumps(rounds) + """);
+          out.unread = rows();
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    assert all(text for name in out for _, text in out[name])  # each dt and dd holds only text
+    pairs = lambda name: [(out[name][i][0], out[name][i + 1][0]) for i in range(0, len(out[name]), 2)]  # noqa: E731
+    got = pairs("rounds")
+    at = got.index(("Joint changes", "4"))
+    assert got[at + 1:at + 10] == [
+        ("Rounds", "3 (build fail, replan, repair pass); delivered round 3's candidate"),
+        ("Requirements", "2 of 5 met"),
+        ("Requirement r1", "door, revolute: pass, clear from 0° to 86°"),
+        ("Requirement r2", "drawer, prismatic: inconclusive, clear from 0.0 to 30.0 cm"),
+        ("Requirement r3", "<img src=x onerror=alert(1)>, soft: pass, dents 4.0 mm"),
+        ("Requirement r4", "knob (not split off), unknown: unassessed"),
+        ("Requirement r5", "door_2, revolute: unassessed, not required"),
+        ("Surface retained", "99.5% kept: 98.0% as it was, 1.5% changed; surface_uv (report only)"),
+        ("Agent tokens", "1,000 input, 500 output, 9,000 cache read, 800 cache write in 9 turns")]
+    at = got.index(("Joint of knob", "none (welded to door)"))
+    assert got[at + 1:at + 5] == [("Soft part", "<b>pad</b>: foam, about 30 kPa; rigid in URDF and USD"),
+                                  ("Soft part", "grip: rubber, about 1,000 kPa; rigid in URDF and USD"),
+                                  ("Soft part", "cushion: rigid in MuJoCo too (no usable hex mesh)"), ("Mass", "12.5 kg")]
+    odd = pairs("odd")
+    assert ("Surface retained", "not compared (the check failed)") in odd
+    assert not [k for k, _ in odd if k in ("Rounds", "Requirements") or k.startswith("Requirement ")]
+    assert ("Surface retained", "100.0% kept: 0.0% as it was, 0.0% changed, 100.0% without UVs to check") in pairs("refined")
+    unread = pairs("unread")
+    assert ("Requirements", "2 of 5 met") in unread and not [k for k, _ in unread if k.startswith("Requirement ")]
+    assert [k for k, _ in unread] == [k for k, _ in got if not k.startswith("Requirement ")]
+    # The evidence downloads with the records, and help.html explains the rows (tests/test_help_page.py).
+    assert '["agent/evidence.json", "evidence.json"]' in (server.STATIC / "app.js").read_text()
+
+
 def test_app_js_viewer_says_while_its_mesh_loads():
     """Until its mesh shows, a viewer's box says "Loading the mesh" in model-viewer's poster slot, hidden from a
     screen reader, and its caption says "loading" where the size goes. Once the mesh loads, the caption gives its
@@ -4963,6 +5142,63 @@ def test_app_js_results_play_the_360_video():
     assert out["gone"] == [None, None]
 
 
+def test_app_js_results_play_the_soft_part_video_beside_the_360_video():
+    """The softvideo stage's video sits beside the 360 video, after it, and plays as it does: muted, looping, with a
+    name, stopping when the Results tab hides and playing again when it shows. A job stored on the site before the stage
+    has no record of it, and its video still draws. Each video is drawn once per file: a new soft-part video leaves the
+    360 video as it is. Without the 360 video, the soft-part video shows alone; when it cannot play, a line offers its
+    file, and without the file it goes."""
+    out = run_dom_js(WALK + """
+        (async () => {
+          Elem.prototype.pause = function () { (this.calls = this.calls || []).push("pause"); };
+          Elem.prototype.play = function () { (this.calls = this.calls || []).push("play"); };
+          const out = {}, mp4 = "turntable/turntable.mp4", soft = "softvideo/softvideo.mp4";
+          const job = { id: "j", prompt: "office chair", files: ["run/posed.glb", mp4, soft],
+            sizes: { [mp4]: 2100000, [soft]: 640000 }, stages: { turntable: { status: "done", ended: 1000.5 } } };
+          const vids = () => made.filter((e) => e.tag === "video");
+          V = { id: "j", tab: "results" };
+          renderSpin(job);
+          const [spin, video] = vids();
+          out.spin = $("#spin").kids.map((f) => [f.className, f.kids[0].textContent, f.kids[1].attrs.src]);
+          out.video = { ...video.attrs, muted: video.muted, calls: video.calls || [] };
+          renderSpin({ ...job, sizes: { ...job.sizes } });
+          out.again = vids().length;
+          renderSpin({ ...job, stages: { ...job.stages, softvideo: { status: "done", ended: 1001.5 } } });
+          const [a, b] = $("#spin").kids;
+          out.newsoft = [vids().length, V.spin === spin, V.soft === vids()[2], a.kids[1] === spin, b.kids[1] === V.soft];
+          spinTab("downloads");
+          V.tab = "downloads";
+          out.leave = [[...spin.calls], [...vids()[2].calls]];
+          spinTab("results");
+          out.back = [spin.calls, vids()[2].calls];
+          // No 360 video: the soft-part video alone, and its file when it cannot play.
+          made.length = 0;
+          V = { id: "k" };
+          clearSpin();
+          renderSpin({ ...job, id: "k", files: [soft] });
+          out.alone = [$("#spin").kids.length, V.spin, $("#spin").kids[0].kids[0].textContent];
+          vids()[0].onerror();
+          const fig = $("#spin").kids[0];
+          out.failed = [fig.textContent, fig.kids[1].kids[1].attrs, V.soft];
+          renderSpin({ ...job, id: "k", files: [] });
+          out.gone = [$("#spin").kids.length, V.softKey];
+          console.log(JSON.stringify(out));
+        })()
+        """)
+    assert out["spin"] == [["spinfig", "360 video", "/api/jobs/j/file/turntable/turntable.mp4"],
+                           ["spinfig", "Soft-part video", "/api/jobs/j/file/softvideo/softvideo.mp4"]]
+    assert out["video"] == {"src": "/api/jobs/j/file/softvideo/softvideo.mp4", "autoplay": "", "muted": True, "loop": "",
+                            "playsinline": "", "controls": "", "preload": "auto",
+                            "aria-label": "The soft part of the office chair, pressed and let go", "calls": []}
+    assert out["again"] == 2
+    assert out["newsoft"] == [3, True, True, True, True]
+    assert out["leave"] == [["pause"], ["pause"]] and out["back"] == [["pause", "play"], ["pause", "play"]]
+    assert out["alone"] == [1, None, "Soft-part video"]
+    assert out["failed"][0] == "Soft-part videoCould not play the video: download it."
+    assert out["failed"][1] == {"href": "/api/jobs/k/file/softvideo/softvideo.mp4", "download": "k_softvideo.mp4"}
+    assert out["failed"][2] is None and out["gone"] == [0, None]
+
+
 def test_app_js_retry_on_a_done_job_is_only_for_the_360_video():
     """A done job whose 360 video failed (steps.OPTIONAL) offers Retry from turntable, and the click asks the server for
     that stage; a done job with every stage done offers no Retry."""
@@ -5014,14 +5250,15 @@ def test_app_js_new_build_and_another_job_take_the_360_video_away():
 # ---- the Downloads tab (app.js renderDownloads) ----
 
 DL_SIZES = {"results.zip": 12_345_678, "run/posed.glb": 1_234_567, "run/parts.glb": 987_654, "refined.glb": 2_500_000,
-            "physics/aligned.glb": 1_300_000, "turntable/turntable.mp4": 2_100_000, "physics/urdf/model.urdf": 4_321, "run/placement.json": 5_678,
+            "physics/aligned.glb": 1_300_000, "turntable/turntable.mp4": 2_100_000, "softvideo/softvideo.mp4": 640_000,
+            "physics/urdf/model.urdf": 4_321, "run/placement.json": 5_678,
             "physics/summary.json": 3_210, "pool/lidar.json": 45_678, "selection.json": 23_456, "run/parts.json": 812,
-            "physics/mjcf/mjcf.json": 6_789}
+            "physics/mjcf/mjcf.json": 6_789, "agent/evidence.json": 4_235}
 
 
 def test_app_js_downloads_tab():
     """The Downloads tab lists the job's files that exist, in five groups, each under an h3: Everything (results.zip),
-    Meshes, Video (the 360 video), Simulation (model.urdf, which says that it needs the meshes in results.zip) and
+    Meshes, Video (the 360 video and the soft-part video), Simulation (model.urdf, which says that it needs the meshes in results.zip) and
     Records. Each row is the
     file name as a download link that saves as <job id>_<file>, and its size from job.sizes (none when the server
     gave none), and nothing else. Groups without files are left out, a file that the tab does not know is ignored,
@@ -5034,7 +5271,8 @@ def test_app_js_downloads_tab():
         "a": {**job, "status": "done", "files": every, "sizes": DL_SIZES},
         "r": {"id": "r", "status": "done", "agent": "none", "agent_result": None, "articulated": False,
               "files": [f for f in every if f not in ("run/parts.glb", "run/parts.json", "refined.glb", "pool/lidar.json",
-                                                      "turntable/turntable.mp4")]
+                                                      "turntable/turntable.mp4", "softvideo/softvideo.mp4",
+                                                      "agent/evidence.json")]
               + ["frames/preview.mp4"], "sizes": {k: v for k, v in DL_SIZES.items() if k != "physics/aligned.glb"}},
         "v": {"id": "v", "status": "review", "files": ["selection.json", "pool/lidar.json"], "sizes": DL_SIZES},
         "f": {"id": "f", "status": "failed", "files": ["selection.json", "run/posed.glb", "run/placement.json"]},
@@ -5042,7 +5280,8 @@ def test_app_js_downloads_tab():
         # No model.urdf in files: results.zip has no urdf/ (jobs.package zips what exists).
         "u": {"id": "u", "status": "done", "agent": "none", "agent_result": None,
               "files": [f for f in every if f not in ("physics/urdf/model.urdf", "run/parts.glb", "run/parts.json",
-                                                      "turntable/turntable.mp4")]},
+                                                      "turntable/turntable.mp4", "softvideo/softvideo.mp4",
+                                                      "agent/evidence.json")]},
         "y": {"id": "y", "status": "ready", "files": [], "sizes": {}},
         "z": {"id": "z", "status": "analyzing", "files": [], "sizes": {}},
         "n": {"id": "n", "status": "cancelled", "files": [], "sizes": {}},
@@ -5093,8 +5332,9 @@ def test_app_js_downloads_tab():
     rows = [r for g in a["groups"] for r in g["rows"]]
     assert [(r["name"], r["size"]) for r in rows] == [
         ("results.zip", "12.3 MB"), ("posed.glb", "1.2 MB"), ("parts.glb", "988 KB"), ("refined.glb", "2.5 MB"),
-        ("aligned.glb", "1.3 MB"), ("turntable.mp4", "2.1 MB"), ("model.urdf", "4.3 KB"), ("placement.json", "5.7 KB"), ("summary.json", "3.2 KB"),
-        ("lidar.json", "46 KB"), ("selection.json", "23 KB"), ("parts.json", "812 B"), ("mjcf.json", "6.8 KB")]
+        ("aligned.glb", "1.3 MB"), ("turntable.mp4", "2.1 MB"), ("softvideo.mp4", "640 KB"), ("model.urdf", "4.3 KB"), ("placement.json", "5.7 KB"), ("summary.json", "3.2 KB"),
+        ("lidar.json", "46 KB"), ("selection.json", "23 KB"), ("parts.json", "812 B"), ("mjcf.json", "6.8 KB"),
+        ("evidence.json", "4.2 KB")]
     by_name = {r["name"]: r for r in rows}
     assert sorted(r["href"] for r in rows) == sorted(f"/api/jobs/a/file/{p}" for p in every)
     assert all(r["href"].endswith("/" + r["name"]) for r in rows)  # each file downloads as its own name
@@ -5169,19 +5409,25 @@ def test_app_js_downloads_survive_a_results_file_that_does_not_parse():
 def test_style_css_360_video():
     """The 360 video is square and as tall as a viewer at most, never wider than the panel, on the viewers' background
     with their hairline; its caption is a viewer's; on a wide screen with one viewer it sits beside the viewer, 260 px
-    at most, above the facts, so the facts show on the first screen."""
+    at most, above the facts, so the facts show on the first screen. #spin is a flex box, in which margins do not
+    collapse: a figure keeps only its top margin there, so the gap above the viewers, or between the 360 video and the
+    soft-part video below it, is one margin (16 px), and beside the viewer only its bottom margin, above the facts."""
     import re
     css = (server.STATIC / "style.css").read_text()
     video = re.search(r"\n\.spinfig video \{([^}]*)\}", css).group(1)
     assert all(x in video for x in ("width: min(100%, clamp(260px, 45vh, 420px))", "aspect-ratio: 1", "height: auto",
                                     "var(--viewer-bg)", "1px solid var(--line)"))
     assert ".viewers figcaption, .spinfig figcaption {" in css
+    assert "display: flex" in re.search(r"\n#spin \{([^}]*)\}", css).group(1)
+    assert "margin-bottom: 0" in re.search(r"\n#spin > \.spinfig \{([^}]*)\}", css).group(1)
+    assert "margin: var(--s4) 0" in re.search(r"\n\.spinfig \{([^}]*)\}", css).group(1)
     wide = css[css.index("@media (min-width: 1100px)"):]
     wide = wide[:wide.index("\n}")]
     assert "#resultsbody.onefig > #spin { grid-column: 2; grid-row: 1; }" in wide
     assert "#resultsbody.onefig > #facts2 { grid-column: 2; grid-row: 2; margin-top: 0; }" in wide
     assert "grid-row: 1 / span 2" in wide and "grid-template-rows: auto 1fr" in wide
     assert "#resultsbody.onefig .spinfig video { width: min(100%, 260px); }" in wide
+    assert "#resultsbody.onefig .spinfig { margin: 0 0 var(--s4); }" in wide
 
 
 def test_style_css_downloads():

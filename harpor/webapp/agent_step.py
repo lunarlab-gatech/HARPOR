@@ -17,7 +17,18 @@ ANTHROPIC_API_KEY. The web app writes F to /dev/shm for this stage only.
 The Codex agent can read the key (from /proc), so its finish text or its commands may hold it. Every
 string of the result has each key of F (controller.read_keys) replaced by "[redacted API key]" before
 J/agent/result.json is written and before anything is printed (stdout is the stage's log, which the
-web app serves).
+web app serves). The agent's reason and limitations, and the reasons of rejected GLBs, which can name
+the agent's links, are printed as one line without control characters (tools.printable), with the keys
+replaced again after that cleaning: a key split by a control character that it drops is whole only
+then. The helpers already store the agent's text that way; this also cleans an older result.
+
+An articulation whose parts.json has a found requirement runs in rounds (controller.run_rounds), and the host
+checks each round's candidate with MuJoCo, the python of envs/mujoco that GATOR_MUJOCO names (steps.command
+exports it). Without that python every round would be sim_unavailable, so the step stops before the session runs.
+The session's evidence, root/control/evidence.json (harpor.agent.evidence), holds the agent's reason, limitations and
+link names, so it goes to J/agent/evidence.json, which the web app serves, only scrubbed as the result is, and as
+strict JSON (finite: browsers' JSON.parse takes no NaN or Infinity, which MuJoCo's states can give). It is written
+whether the session ends or stops, since the controller keeps it after every round; agent/result.json is finite too.
 
 SIGTERM (Cancel in the web app) ends the step as it ends a helper of harpor.agent.tools: the Blender
 processes the step started are killed, and SystemExit unwinds the controller, whose cleanup kills
@@ -28,11 +39,15 @@ J/agent/result.json.
 
 import argparse
 import json
+import math
+import os
+import shlex
 import shutil
 import signal
 from pathlib import Path
 
-from harpor.fileio import write_json
+from harpor.agent.tools import printable
+from harpor.fileio import read_json, write_json
 from harpor.webapp import steps
 
 REDACTED = "[redacted API key]"
@@ -54,6 +69,55 @@ def scrub(x, key):
     if isinstance(x, dict):
         return {scrub(k, keys): scrub(v, keys) for k, v in x.items()}
     return x
+
+
+def finite(x):
+    """JSON data x with None for every number that is not finite (NaN, Infinity), which Python's json writes and
+    browsers' JSON.parse refuses."""
+    if isinstance(x, float) and not math.isfinite(x):
+        return None
+    if isinstance(x, list):
+        return [finite(v) for v in x]
+    if isinstance(x, dict):
+        return {k: finite(v) for k, v in x.items()}
+    return x
+
+
+def publish_evidence(root, out, keys):
+    """root/control/evidence.json as out, without keys (scrub) and finite. A session without rounds has none, and
+    then out stays absent."""
+    ev = read_json(Path(root) / "control" / "evidence.json")
+    if ev is not None:
+        write_json(out, finite(scrub(ev, keys)))
+
+
+def check_mujoco():
+    """SystemExit unless GATOR_MUJOCO (split like a shell) names a python that exists (see the module docstring)."""
+    value = os.environ.get("GATOR_MUJOCO", "")
+    try:
+        python = shlex.split(value)
+    except ValueError:
+        python = []
+    if not python or shutil.which(python[0]) is None:
+        raise SystemExit(f"GATOR_MUJOCO is {value!r}, not the python of envs/mujoco: the host checks this "
+                         "articulation's requirements with MuJoCo there. Make it with setup/mujoco.sh")
+
+
+def print_rounds(r):
+    """Print the rounds of a result r in rounds, the outcome counts of its requirements and the stored candidate
+    that it delivered."""
+    for x in r["rounds"]:
+        c = x["candidate"] or {}
+        got = f"{x['outcome']}, scope {x['scope']}" if x["outcome"] else "no check"
+        if isinstance(c.get("version"), int):
+            got += f", candidate v{c['version']:02d} ({c['verdict']})"
+        found = list(dict.fromkeys(f["code"] for f in x["findings"]))
+        print(f"  round {x['round']} {x['kind']}: {got}" + (f"; findings: {', '.join(found)}" if found else ""))
+    n = r.get("requirements") or {}
+    print("  requirements: " + ", ".join(f"{n.get(k, 0)} {k}" for k in ("pass", "fail", "inconclusive", "unassessed")))
+    c = r.get("candidate")
+    print(f"  delivered candidate v{c['version']:02d} of round {c['round']}: {c['why']}" if c else
+          "  delivered no stored candidate")
 
 
 def source(prompt, n, kind, parts=False):
@@ -82,10 +146,11 @@ def run(job_dir, sif, key_file, agent="astra"):
         raise SystemExit(f"no key file {key_file}")
     keys = controller.read_keys(key_file)  # every key of the file, not only the one this agent uses
     job = steps.job(J)
-    root, out = J / "agent" / "s", J / "agent" / "result.json"
+    root, out, evidence = J / "agent" / "s", J / "agent" / "result.json", J / "agent" / "evidence.json"
     if root.exists():  # an earlier try that failed or was cancelled; prepare_session needs a fresh folder
         shutil.rmtree(root)
     out.unlink(missing_ok=True)
+    evidence.unlink(missing_ok=True)
     kind = mode(J, job)
     original, parts = J / "run" / "posed.glb", None
     if kind == "articulation":
@@ -97,8 +162,13 @@ def run(job_dir, sif, key_file, agent="astra"):
                                source=source(job["prompt"], len(views), steps.source(job)["kind"], parts is not None),
                                metric=True, original=original, parts=parts, agent=AGENTS[agent],
                                effort=EFFORT.get(agent))
-    controller.run_container_session(root, sif, key_file, budget_s=BUDGET_S[kind])
-    r = scrub(json.loads((root / "result.json").read_text()), keys)
+    if controller.has_rounds(root, kind):
+        check_mujoco()
+    try:
+        controller.run_container_session(root, sif, key_file, budget_s=BUDGET_S[kind])
+    finally:
+        publish_evidence(root, evidence, keys)
+    r = finite(scrub(json.loads((root / "result.json").read_text()), keys))
     write_json(out, r)
     print(f"agent: {r['source']}, verdict {r['verdict']}, exit {r['exit']} ({r['cli_exit']}), "
           f"{r['timings']['wall_s']:.0f} s, GLB {r['glb']}")
@@ -110,11 +180,13 @@ def run(job_dir, sif, key_file, agent="astra"):
         c = r.get("counts") or {}
         print(f"  articulation: {r.get('joints_delivered')} joints delivered, {c.get('joints', 0)} set_joint changes, "
               f"{c.get('articulation_reviews', 0)} articulation reviews")
-    print(f"  reason: {r.get('reason')}")
+    if r.get("rounds"):
+        print_rounds(r)
+    print(f"  reason: {scrub(printable(r.get('reason')), keys)}")
     for line in r.get("limitations") or []:
-        print(f"  limitation: {line}")
+        print(f"  limitation: {scrub(printable(line), keys)}")
     for x in r.get("rejected") or []:
-        print(f"  rejected {x['from']} {x['glb']}: {x['why']}")
+        print(f"  rejected {x['from']} {x['glb']}: {scrub(printable(x['why']), keys)}")
     if r.get("network_commands"):
         print(f"  network commands: {r['network_commands']}")
     if r.get("key_found_in"):

@@ -33,11 +33,13 @@ An articulated GLB (build_plan.md note 11) holds joint specs in its nodes' extra
 in frame W. They are checked and moved to S with T_s_from_w, and OUT.json adds joints (in S), links (the
 mesh nodes) and fixed_base; a rigid GLB gives {}, [] and false. --links-out DIR writes DIR/<link>.glb for
 every mesh node (the old *.glb there are removed first): OUT.glb with only that node's mesh and no joint,
-and the same BIN chunk, so VoMP sees each link with its textures.
+and the same BIN chunk, so VoMP sees each link with its textures. Its node names must be file names
+(safe_links).
 """
 
 import argparse
 import json
+import re
 import struct
 from pathlib import Path
 
@@ -45,6 +47,8 @@ import numpy as np
 
 from harpor import frames
 from harpor.parts import joints as joint_spec
+
+LINK_NAME = re.compile(r"[\w .-]+")  # the characters of a link name (safe_links)
 
 
 def _triangles(vertices_w, faces):
@@ -200,13 +204,25 @@ def link_doc(doc, node):
     return doc
 
 
+def safe_links(names):
+    """names, a GLB's mesh node names, when they are unique and each is a file name of LINK_NAME without a
+    leading dot. Raises ValueError otherwise. The agent chooses these names, and harpor.physics.mjcf makes
+    files and XML of them, also during the agent's session (harpor.agent.validate)."""
+    bad = [n for n in names if not isinstance(n, str) or not LINK_NAME.fullmatch(n) or n.startswith(".")]
+    if bad or len(set(names)) != len(names):
+        raise ValueError(f"the mesh node names must be unique file names of letters, digits, spaces, '_', '.' "
+                         f"and '-', not starting with '.': {names}")
+    return names
+
+
 def write_links(doc, binary, out_dir):
     """DIR/<link>.glb (link_doc) for every mesh node of an aligned glTF dict. Returns the link names."""
     out_dir = Path(out_dir)
     names = joint_spec.mesh_nodes(doc)
-    bad = [n for n in names if not n or "/" in n or "\\" in n or n.startswith(".")]
-    if bad or len(set(names)) != len(names):
-        raise SystemExit(f"--links-out needs unique mesh node names that are file names: {names}")
+    try:
+        safe_links(names)
+    except ValueError as e:
+        raise SystemExit(f"--links-out: {e}") from None
     out_dir.mkdir(parents=True, exist_ok=True)
     for old in out_dir.glob("*.glb"):
         old.unlink()

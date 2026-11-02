@@ -42,7 +42,9 @@ Routes (JSON unless said otherwise; {id} is a job id):
   GET    /api/jobs/{id}               job.json with "kind" (video, rosbag or stray), the stages' progress,
                                       the agent's verdict, model and, for opus, tokens and cost estimate
                                       ("agent_result"; "agent" is the job's choice: astra, opus or none;
-                                      an articulation result adds mode, counts and joints_delivered), the
+                                      an articulation result adds mode, counts, joints_delivered and
+                                      simulations, one in rounds also rounds, requirements, candidate and
+                                      surface, and a refinement's surface, controller.run_session), the
                                       output files that exist and then the LiDAR points of the run's views
                                       (run/lidar/<i>.glb, by i) and, while the scale has failed, of the
                                       pool's views (lidar/cloud/<view>.glb, pool_clouds) as "files", their
@@ -126,7 +128,8 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       lines of the running stage's log; id <stage>:<byte offset>, so a
                                       reconnect resumes with Last-Event-ID), "end" when the job stops
   GET    /api/jobs/{id}/file/{path}   only the paths that ALLOW matches; refined.glb is the agent's GLB
-                                      (steps.agent_glb), never the Stage A or split parts' GLB. A Range
+                                      (steps.agent_glb), never the Stage A or split parts' GLB, and
+                                      agent/evidence.json not when its source held the key (resolve). A Range
                                       request (a video's seek) gets 206 with Content-Range, and 416
                                       when it starts past the end (Starlette's FileResponse). HEAD gets the
                                       headers alone
@@ -173,18 +176,20 @@ ALLOW = re.compile(r"frames/thumbs/\d+\.jpg|frames/topic_previews/\d+\.jpg|frame
                    r"|scene/sam3_\w+/check/[\w-]+\.jpg"
                    r"|run/input/images/\d{1,3}\.png|run/lidar/\d{1,3}\.glb|run/overlay_\d+\.png|run/posed\.glb"
                    r"|run/parts\.glb|run/parts\.json|run/parts/sam3/check/\d+\.jpg"
-                   r"|refined\.glb|physics/aligned\.glb|turntable/turntable\.mp4|physics/summary\.json"
-                   r"|physics/mjcf/mjcf\.json|physics/urdf/model\.urdf|run/placement\.json|selection\.json|results\.zip"
-                   r"|logs/\w+\.log")
+                   r"|refined\.glb|physics/aligned\.glb|turntable/turntable\.mp4|softvideo/softvideo\.mp4"
+                   r"|physics/summary\.json|physics/mjcf/mjcf\.json|physics/urdf/model\.urdf|run/placement\.json"
+                   r"|selection\.json|results\.zip|agent/evidence\.json|logs/\w+\.log")
 TYPES = {".glb": "model/gltf-binary", ".jpg": "image/jpeg", ".png": "image/png", ".json": "application/json",
          ".zip": "application/zip", ".log": "text/plain; charset=utf-8", ".urdf": "application/xml",
          ".mp4": "video/mp4"}
 # run/parts.* exist only for an articulated job; mjcf.json and model.urdf for every job that got that far.
 # pool/lidar.json only for a job with LiDAR. turntable/turntable.mp4 only when the job asked for the 360 video and
-# its render worked.
+# its render worked; softvideo/softvideo.mp4 only when the MuJoCo model has a soft part and its video worked.
+# agent/evidence.json only for an articulation whose requirements ran in rounds.
 OUTPUTS = ("run/posed.glb", "run/parts.glb", "run/parts.json", "refined.glb", "physics/aligned.glb",
-           "turntable/turntable.mp4", "physics/summary.json", "physics/mjcf/mjcf.json", "physics/urdf/model.urdf",
-           "run/placement.json", "selection.json", "pool/lidar.json", "results.zip")
+           "turntable/turntable.mp4", "softvideo/softvideo.mp4", "physics/summary.json", "physics/mjcf/mjcf.json",
+           "physics/urdf/model.urdf", "run/placement.json", "selection.json", "pool/lidar.json", "agent/evidence.json",
+           "results.zip")
 INSTANCE = re.compile(r"none|\d{1,3}(,\d{1,3})*")
 MAX_CALIBRATION = 64 << 10  # bytes of a calibration file
 CALIBRATION_SUFFIXES = (".yaml", ".yml", ".json")
@@ -315,10 +320,19 @@ def preview_of(J):
     return {**out, "seek": seek}
 
 
+def key_in(J, rel):
+    """Whether the agent result of job folder J lists rel, a file of the session folder, in key_found_in."""
+    r = read_json(J / "agent" / "result.json")
+    return isinstance(r, dict) and rel in (r.get("key_found_in") or [])
+
+
 def resolve(J, rel):
     """The file that rel names in job folder J, if ALLOW has it and it stays inside J, else None. The pool's LiDAR
-    points (lidar/cloud/) only while the scale has failed (pool_clouds)."""
+    points (lidar/cloud/) only while the scale has failed (pool_clouds), and the agent's evidence (agent_step) only
+    while its source, the session's control/evidence.json, does not hold the API key."""
     if not ALLOW.fullmatch(rel) or rel.startswith("lidar/cloud/") and not scale_failed(J):
+        return None
+    if rel == "agent/evidence.json" and key_in(J, "control/evidence.json"):
         return None
     p = J / rel
     if rel == "refined.glb":
@@ -634,8 +648,11 @@ def make_app(cfg, token, key_dir=None):
         if r and "result.json" in (r.get("key_found_in") or []):  # the agent's own text held the key
             r = {**r, "reason": "left out: the agent's result held the API key", "limitations": []}
         keys = ("source", "verdict", "reason", "limitations", "exit")
-        # turns, tokens and cost_usd are only in Claude's result, and joints_delivered only in an articulation's.
-        extra = ("agent", "model", "turns", "tokens", "cost_usd", "mode", "counts", "joints_delivered")
+        # turns, tokens and cost_usd are only in Claude's result, joints_delivered and simulations only in an
+        # articulation's, rounds, requirements and candidate only in one that ran in rounds, and surface only in that
+        # one's and a refinement's (controller.run_session). An older result has none of the last five.
+        extra = ("agent", "model", "turns", "tokens", "cost_usd", "mode", "counts", "joints_delivered", "simulations",
+                 "rounds", "requirements", "candidate", "surface")
         job["agent_result"] = {**{k: r.get(k) for k in keys}, **{k: r[k] for k in extra if k in r}} if r else None
         return job
 

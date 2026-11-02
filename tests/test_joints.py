@@ -10,6 +10,8 @@ from harpor.physics.align import read_glb, write_glb
 
 HINGE = {"version": 1, "frame": "W", "parent": "body", "type": "revolute", "origin": [0.0, -0.3, 0.2],
          "axis": [-1.0, 0.0, 0.0], "lower": 0.0, "upper": 1.5}
+SOFT = {"version": 1, "frame": "W", "parent": "body", "type": "soft", "material": "foam", "young": 3e4, "poisson": 0.3,
+        "density": 120.0, "support": "parent"}
 
 
 def doc_with(*names):
@@ -70,6 +72,41 @@ def test_validate_accepts_a_tree_and_catches_each_fault():
     assert "reserved" in problems({}, ["world", "lid"])
 
 
+def test_validate_checks_the_fields_of_a_soft_joint():
+    links = ["body", "pad"]
+
+    def problems(**changed):
+        return " | ".join(J.validate({"pad": {**SOFT, **changed}}, links))
+
+    assert problems() == "" and J.TYPES == ("revolute", "prismatic", "fixed", "soft")
+    for material, numbers in J.SOFT_MATERIALS.items():
+        assert problems(material=material, **numbers) == ""
+    assert "only a fixed joint" in problems(parent="world")
+    for material in ("sponge", None, ["foam"]):  # an agent can store any JSON
+        assert "material must be one of foam, gel, rubber" in problems(material=material)
+    for young in (999.0, 1.1e6, float("nan"), "stiff", True, None):
+        assert "young must be within 1000 to 1e+06 Pa" in problems(young=young)
+    for poisson in (-0.1, 0.46, None):
+        assert "poisson must be within 0 to 0.45" in problems(poisson=poisson)
+    for density in (0, -120.0, float("inf"), None):
+        assert "density must be a positive number" in problems(density=density)
+    for support in ("child", None):
+        assert 'support must be "parent"' in problems(support=support)
+    assert problems(young=1e3, poisson=0) == "" and problems(young=1e6, poisson=0.45) == ""
+    # A soft joint is not a moving one: no origin, axis or range is needed, but those given must be good.
+    assert "must hold 0" in problems(lower=0.2, upper=0.5) and "unit vector" in problems(axis=[1, 1, 0])
+
+
+def test_no_part_hangs_from_a_soft_part():
+    links = ["body", "lid", "pad"]
+    why = "the joint of 'lid': a part cannot hang from a soft part ('pad')"
+    fixed = {"version": 1, "frame": "W", "parent": "pad", "type": "fixed"}
+    for child in ({**HINGE, "parent": "pad"}, fixed, {**SOFT, "parent": "pad"}):
+        assert J.validate({"pad": SOFT, "lid": child}, links) == [why]
+    # The other way round is the office chair: a cushion on a seat that turns.
+    assert J.validate({"lid": HINGE, "pad": {**SOFT, "parent": "lid"}}, links) == []
+
+
 def test_tree_finds_the_root_children_and_loose_links():
     links = ["lid", "body", "drawer", "knob"]
     joints = {"lid": HINGE, "drawer": {**HINGE, "type": "prismatic"}}
@@ -95,6 +132,27 @@ def test_a_loose_link_is_welded_to_its_nearest_mesh_ancestor():
     assert J.welds(joints, J.mesh_nodes(doc), "body") == {"tray": "body", "shelf": "body"}
 
 
+def test_a_cycle_of_nodes_is_refused_not_walked():
+    """glTF's nodes form trees. A cycle above a mesh node, through empty nodes or through mesh nodes, would loop the
+    walk up to its holder (and carriers, which follows the holders), so parents and holders raise on it, also on a
+    cycle that no scene reaches."""
+    doc = doc_with("body", "lid")
+    doc["nodes"] += [{"name": "a", "children": [0, 3]}, {"name": "b", "children": [2]}]  # body < a < b < a
+    with pytest.raises(ValueError, match=r"^the glTF nodes form a cycle: 2 -> 3 -> 2$"):
+        J.holders(doc)
+    doc = doc_with("body", "lid")
+    doc["nodes"][0]["children"], doc["nodes"][1]["children"] = [1], [0]  # body holds lid, and lid holds body
+    with pytest.raises(ValueError, match=r"cycle: 0 -> 1 -> 0"):
+        J.holders(doc)
+    doc = doc_with("body")
+    doc["nodes"] += [{"name": "a", "children": [1]}]  # a holds itself
+    with pytest.raises(ValueError, match=r"cycle: 1 -> 1"):
+        J.parents(doc)
+    doc = doc_with("body", "lid")
+    doc["nodes"][0]["children"] = [1]
+    assert J.parents(doc) == {1: 0} and J.holders(doc) == {"lid": "body"}
+
+
 def test_transform_moves_origin_and_axis_into_s():
     T = frames.rigid(Rotation.from_euler("xyz", [30, -20, 75], degrees=True).as_matrix(), [0.1, 0.2, 0.3])
     fixed = {"version": 1, "frame": "W", "parent": "body", "type": "fixed"}
@@ -105,6 +163,18 @@ def test_transform_moves_origin_and_axis_into_s():
     assert (out["lid"]["lower"], out["lid"]["upper"]) == (0.0, 1.5) and HINGE["frame"] == "W"
     assert np.allclose(out["knob"]["origin"], T[:3, 3]) and out["knob"]["lower"] == out["knob"]["upper"] == 0
     assert J.validate(out, ["body", "lid", "knob"]) == []
+
+
+def test_full_and_transform_keep_a_soft_joints_fields():
+    filled = J.full(SOFT)
+    assert filled == {**SOFT, **J.FIXED_DEFAULTS} and "origin" not in SOFT
+    assert filled["origin"] is not J.FIXED_DEFAULTS["origin"] and J.full(HINGE) == HINGE
+    T = frames.rigid(Rotation.from_euler("xyz", [30, -20, 75], degrees=True).as_matrix(), [0.1, 0.2, 0.3])
+    out = J.transform({"pad": SOFT}, T)["pad"]
+    assert {k: out[k] for k in SOFT if k != "frame"} == {k: v for k, v in SOFT.items() if k != "frame"}
+    assert out["frame"] == "S" and np.allclose(out["origin"], T[:3, 3]) and out["lower"] == out["upper"] == 0
+    assert J.validate({"pad": out}, ["body", "pad"]) == []
+    assert np.allclose(J.joint_transform(SOFT, 1.0), np.eye(4))
 
 
 def test_joint_transform_moves_a_point():

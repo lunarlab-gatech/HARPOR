@@ -1,6 +1,6 @@
-"""File helpers that the stages, the web app and the agent's helpers share: JSON read and write, an atomic
-replace, and the private files of ~/.config/harpor. Standard library only, since the stages run in different
-envs.
+"""File helpers that the stages, the web app and the agent's helpers share: JSON and text read and write, an
+atomic replace, and the private files of ~/.config/harpor. Standard library only, since the stages run in
+different envs.
 """
 
 import contextlib
@@ -19,20 +19,26 @@ def read_json(path):
         return None
 
 
-def write_json(path, obj, private=False, indent=2):
-    """Write a temp file in the same folder, then os.replace it, so readers never see a partial file.
+def write_text(path, text, private=False):
+    """Write text (UTF-8) to a temp file with a random name in the same folder, then os.replace it, so
+    readers never see a partial file.
 
     The temp file is created exclusively, and os.replace swaps the name itself, so neither follows a
-    symlink. It gets the usual umask permissions (not mkstemp's 0600), so the controller and the
-    agent can read each other's files when they run as different users. private: mode 0600. indent:
-    json.dumps's (the web app's files use 1).
+    symlink: a link at path is replaced, not written through. It gets the usual umask permissions (not
+    mkstemp's 0600), so the controller and the agent can read each other's files when they run as
+    different users. private: mode 0600.
     """
     path = Path(path)
-    text = json.dumps(obj, indent=indent)
     tmp = path.with_name(f".{path.name}.{os.urandom(6).hex()}")
-    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if private else 0o666), "w") as f:
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if private else 0o666), "w",
+                   encoding="utf-8") as f:
         f.write(text)
     os.replace(tmp, path)
+
+
+def write_json(path, obj, private=False, indent=2):
+    """obj as JSON through write_text. indent: json.dumps's (the web app's files use 1)."""
+    write_text(path, json.dumps(obj, indent=indent), private)
 
 
 def replace(path, save, /, *args, **kw):

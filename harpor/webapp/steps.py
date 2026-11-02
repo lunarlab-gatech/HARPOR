@@ -29,7 +29,8 @@ job folder J under G/webapp_runs:
   agent    envs/sam3d   agent_step --agent A    agent/result.json (skipped below 0.5 mask IoU, or when
                                                 the job's agent is "none"); it refines posed.glb (600 s),
                                                 or gives the parts of an articulated job their joints
-                                                (900 s)
+                                                (900 s, and the rounds of its requirements, whose host
+                                                check runs MuJoCo in envs/mujoco: GATOR_MUJOCO)
   align    envs/sam3d   physics_auto align      physics/aligned.json (and physics/links/ when articulated)
   vomp     envs/vomp11  physics/vomp_run.py     physics/summary.json (per link when articulated)
   mjcf     envs/mujoco  physics.mjcf            physics/mjcf/mjcf.json with "compiled"
@@ -39,6 +40,11 @@ job folder J under G/webapp_runs:
            envs/sam3d   turntable render        job.json "turntable"): a 360 video of the GLB that
                         (Blender in the SIF),   physics used, turned upright. Its failure warns and
            envs/web     turntable encode        does not fail the job (OPTIONAL)
+  softvideo                                     softvideo/softvideo.json, written last (skipped unless
+           envs/mujoco  softvideo motion        physics/mjcf/mjcf.json has a soft part, which skip
+           envs/sam3d   softvideo render        reads when the stage starts): a video of the soft part
+                        (Blender in the SIF),   pressed in MuJoCo and let go. Optional too, and apart
+           envs/web     softvideo encode        from turntable
   package  envs/web     jobs package            results.zip
 
 With WEBAPP_FAKE=1 every stage runs `python -m harpor.webapp.fake_steps STAGE --job J` instead,
@@ -55,10 +61,10 @@ from pathlib import Path
 from harpor.fileio import read_json
 
 NAMES = ["topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "place", "propose", "parts",
-         "agent", "align", "vomp", "mjcf", "usd", "urdf", "turntable", "package"]
-GPU = ("masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable")
+         "agent", "align", "vomp", "mjcf", "usd", "urdf", "turntable", "softvideo", "package"]
+GPU = ("masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable", "softvideo")
 # The stages whose failure leaves the job usable, each with the words that start its warning: the build goes on.
-OPTIONAL = {"turntable": "360 video"}
+OPTIONAL = {"turntable": "360 video", "softvideo": "soft-part video"}
 REVIEW_AFTER = "select"
 PARTS_AFTER = "propose"  # an unconfirmed "vlm_edit" part list pauses the job here (pause_after)
 STAGES = [{"name": n, "gpu": n in GPU} for n in NAMES]
@@ -72,6 +78,7 @@ STAGE_A_ENV = ('HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch TORCH_E
                'CPATH=$G/envs/sam3d/targets/x86_64-linux/include '
                'LIBRARY_PATH=$G/envs/sam3d/targets/x86_64-linux/lib:$G/envs/sam3d/lib PATH=$G/envs/sam3d/bin:$PATH')
 SAM3_ENV = "HF_HOME=$G/.cache/huggingface"
+MUJOCO_ENV = "GATOR_MUJOCO=$G/envs/mujoco/bin/python"
 VOMP_ACTIVATE = 'eval "$($G/tools/micromamba shell hook -s bash)"; micromamba activate $G/envs/vomp11'
 VOMP_ENV = ('CUDA_HOME=$CONDA_PREFIX HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch '
             'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 OMP_NUM_THREADS=${OMP_NUM_THREADS:-16} '
@@ -79,7 +86,8 @@ VOMP_ENV = ('CUDA_HOME=$CONDA_PREFIX HF_HOME=$G/.cache/huggingface TORCH_HOME=$G
 MARKERS = {"topics": "frames/topics.json", "frames": "frames/meta.json", "prep": "pool/prep.json",
            "sam3d": "run/pose.json", "place": "run/placement.json", "propose": "run/proposal.json",
            "parts": "run/parts.json", "agent": "agent/result.json", "align": "physics/aligned.json",
-           "vomp": "physics/summary.json", "turntable": "turntable/turntable.json", "package": "results.zip"}
+           "vomp": "physics/summary.json", "turntable": "turntable/turntable.json",
+           "softvideo": "softvideo/softvideo.json", "package": "results.zip"}
 MIN_IOU = 0.5
 # job.json "agent": GPT-6-Astra (Codex CLI), Claude Opus 5.5 (claude_agent) or no agent stage
 AGENTS = ("astra", "opus", "none")
@@ -205,6 +213,11 @@ def command(stage, job, cfg, key_file=None):
         step = run + '$G/envs/{}/bin/python -m harpor.webapp.turntable {} --job "$J"'
         lines += ['rm -rf "$J/turntable"', f"export {STAGE_A_ENV}",
                   step.format("sam3d", "render") + sif, step.format("web", "encode")]
+    elif stage == "softvideo":
+        # MuJoCo presses the soft part in envs/mujoco, then the frames and the MP4 as for the 360 video.
+        step = run + '$G/envs/{}/bin/python -m harpor.webapp.softvideo {} --job "$J"'
+        lines += ['rm -rf "$J/softvideo"', step.format("mujoco", "motion"), f"export {STAGE_A_ENV}",
+                  step.format("sam3d", "render") + sif, step.format("web", "encode")]
     elif stage == "parts":
         # One script in two envs: SAM 3 part masks in envs/sam3seg, then the vote, the split (Blender in the
         # agent's SIF) and parts.json, the done marker, in envs/sam3d. The old marker is removed first.
@@ -227,6 +240,8 @@ def command(stage, job, cfg, key_file=None):
                 "align": '-m harpor.webapp.physics_auto align --job "$J"'}[stage]
         if stage == "prep":  # a view that lost its mask must not stay in the pool from an earlier prep
             lines.append('rm -rf "$J/pool/input" "$J/pool/masks" "$J/pool/prep.json"')
+        if stage == "agent":  # the host's check of each round runs MuJoCo (harpor.agent.validate)
+            lines.append(f"export {MUJOCO_ENV}")
         lines.append(run + f"{py} {args}")
     return ["bash", "-c", "\n".join(lines)], str(cfg.code), env
 
@@ -316,7 +331,8 @@ def guard(stage, job_dir):
 def skip(stage, job_dir):
     """The reason to skip a stage, else None: topics for a video and a Stray Scanner capture, lidar without
     LiDAR, propose and parts for a rigid object, the agent when the job has none or on a poor Stage A
-    placement, and turntable unless the job asks for the 360 video. physics_auto also asks about the agent stage
+    placement, turntable unless the job asks for the 360 video, and softvideo unless the MuJoCo model of the mjcf
+    stage has a soft part (the runner asks when the stage starts). physics_auto also asks about the agent stage
     of a run folder without job.json: there only the placement decides."""
     job = _json(Path(job_dir) / "job.json")
     if stage == "topics":
@@ -327,6 +343,8 @@ def skip(stage, job_dir):
         return None if articulated(job) else "turned off: rigid object"
     if stage == "turntable":
         return None if turntable(job) else "turned off"
+    if stage == "softvideo":
+        return None if _json(Path(job_dir) / "physics" / "mjcf" / "mjcf.json").get("soft") else "no soft part"
     if stage != "agent":
         return None
     if job and agent(job) == "none":

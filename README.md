@@ -5,8 +5,11 @@ models out. It started as a re-implementation of GATOR (arXiv 2610.11215).
 
 Give it a phone video, a rosbag or a zipped Stray Scanner export. It builds a textured mesh, can split it into
 moving parts with joints, estimates mass and materials, and writes GLB, MJCF, USD and URDF files, with an optional
-360-degree video. LiDAR in a rosbag, or an iPhone's depth, sets the real-world scale. The app's Help page explains
-every setting.
+360-degree video. A part can also be soft, such as a seat cushion: it dents in the MuJoCo model, and a short video
+shows the dent. For an object with parts, the app checks the agent's joints in MuJoCo, and a new agent gets a repair
+round when the check finds a flaw, up to two repairs (after PhysAg3D). The soft parts and the repair rounds have run
+only in tests on a Mac so far. LiDAR in a rosbag, or an
+iPhone's depth, sets the real-world scale. The app's Help page explains every setting.
 
 ## Try it
 

@@ -24,7 +24,8 @@ every stage on PACE ICE or on a user's own GPU machine (note 10, Flow).
 - **Licenses:** SAM 3D Objects, MV-SAM3D and SAM 3 use the SAM License, and the Depth Anything 3 model we
   use is CC BY-NC 4.0. So this version is research-only.
 - **Articulated objects:** an optional toggle per job; the agent sets the joints of the mesh split
-  into parts (note 11).
+  into parts (note 11). A part can also be soft. When the part list says what the parts must do, the
+  host checks the agent's GLB in MuJoCo, and the agent gets repair rounds (note 11, after PhysAg3D).
 - **Metric scale:** an optional LiDAR per job, from a rosbag topic or a Stray Scanner capture, sets the
   scale only (note 12).
 
@@ -38,11 +39,15 @@ What works (the notes hold the main results; git history holds the run logs):
 - Stage B: GPT-6-Astra and Claude Opus 5.5 refine meshes under the controller's deadline (note 5).
 - Physics: VoMP v1.1 materials and MJCF, USD and URDF models (note 9).
 - Articulated objects: the office chair went through the stages from the command line (note 11).
+- Soft parts, requirements, repair rounds and the surface check (note 11): built, and they pass their
+  tests on the Mac. MuJoCo ran for real there, but Blender and the agent were the fake ones.
 - Metric scale: MV-SAM3D is scale-equivariant, and the `lidar` stage works in fake mode (note 12).
 
 Not verified yet:
 - No rosbag job is recorded end to end.
 - No articulated job has run through the web app (note 11).
+- Soft parts, requirements, repair rounds, the surface check and the soft-part video have not run on
+  ICE, in real Blender or with a real agent. Milestones 11 and 12 in note 11 list what is left.
 - No real rosbag with a LiDAR and no real Stray capture has run (note 12).
 - The 360 video has not run on ICE (note 10).
 - No real job has run through the public site (`docs/public_site.md`, step 9 and Live checks).
@@ -69,7 +74,7 @@ flowchart TB
     parts["propose and parts (articulated only, note 11)"]
     agent["agent: GPT-6-Astra or Claude Opus 5.5 in Blender (note 5)"]
     physics["align, vomp, mjcf, usd, urdf (note 9)"]
-    package["turntable (optional 360 video), then package: results.zip"]
+    package["turntable (optional 360 video), softvideo (a soft part only), then package: results.zip"]
   end
   input --> analyze --> lidar --> select --> stageA --> parts --> agent --> physics --> package
 ```
@@ -373,9 +378,9 @@ apptainer exec --nv --containall --no-mount bind-paths \
 - The helpers (`export_glb`, `review`, `checkpoint`, `finish`) run on the host, not in the agent's
   container. All but `finish` end their output with the seconds left before the deadline. The commands on the agent's PATH are a small client (`harpor/agent/bin/`) that sends the
   command line over a Unix socket to the controller's tool server (`harpor/agent/server.py`), which
-  runs `tools.py` with `root/control/`. That folder is never mounted. It holds the clock record, a
-  copy of the manifest and `events.jsonl`, the record of every export, review, checkpoint and
-  finish with the GLB's sha256. The deadline and the deliverable come only from these events, and
+  runs `tools.py` with `root/control/`. The agent's containers never mount that folder. It holds the
+  clock record, a copy of the manifest, the host's copy of every export in `exports/`, and
+  `events.jsonl`, the record of every export, review, checkpoint and finish with the GLB's sha256. The deadline and the deliverable come only from these events, and
   a GLB must still match its logged hash. A hand-written `finish.json`, receipt or GLB in `work/`
   is never delivered. A GLB whose box grew more than 2 times on every side, or shrank below 0.5
   times on every side, against `root/original.glb` is not delivered either (`controller.check_size`,
@@ -386,14 +391,53 @@ apptainer exec --nv --containall --no-mount bind-paths \
   has a repair that lengthens a side by more than the slip's inverse, and a rescale under 2 times.
   `finish` refuses such a GLB, so the agent sees the reason while it can still fix it. `result.json`
   lists one under `rejected`, and the fallback order goes on. Blender for the helpers runs in a second container that sees only the work
-  folder (at its host path and at `/work`) and the Blender scripts, with auto-run of scripts in the
-  `.blend` off. When the session ends, the server stops and kills a running helper and its Blender
-  before the deliverable is picked.
+  folder (at its host path and at `/work`), `control/staging` and `control/exports` (read-only), both
+  at their host paths, and the Blender scripts, with auto-run of scripts in the `.blend` off. The
+  tool server passes this command to the helpers as `GATOR_BLENDER`. The helpers resolve
+  `GATOR_WORK` and `GATOR_CONTROL` as this command binds them, so a session root reached through a
+  symlink (such as `~/scratch` on ICE) still works. When the session ends, the server stops and
+  kills a running helper and its Blender before the deliverable is picked.
+- Exports. `blender/export_glb.py` writes the GLB, imports it again to check it and only then
+  writes its report. Blender writes both into `control/staging/`, not into `work/`. After Blender
+  exits, the host reads each file once, hashes the GLB, moves both into `control/exports/` and only
+  then gives the agent its copies in `work/exports/`. So `export_done` logs the sha256 of the bytes
+  that Blender wrote, also when the agent renames its own file over `exports/NNN.glb` during the
+  export (an earlier version logged such a file as a checked export, and it could be delivered).
+  Blender writes through any link that the agent puts in `work/`, such as a review's `sheet.png`, so
+  its container sees `control/exports/` read-only: no Blender run can change the host's copies. A
+  file that such a run leaves at an export's names in `control/staging/` is removed before that
+  export runs. Each copy is
+  written under a new name and moved over its own with `os.replace`, through a descriptor of
+  `work/exports/` that is opened without following a link. A file or link that the agent put at
+  those names is replaced, never written through. The names are the host's (numbered from its
+  events), and the export is already good, so the host replaces the file and does not fail the
+  export. A folder that the agent swaps for a link while Blender runs gets nothing, and that export
+  fails. The export's log and the files of a review's receipt folder are also written through
+  descriptors of their folders, so a folder swapped for a link during the export or the render gets
+  nothing either. `review`, `review_articulation` and `simulate` hash, render and check the host's
+  copy. `checkpoint`, `finish` and the controller read the agent's copy once and compare it with the
+  logged sha256, because that copy is the one that is delivered. An unchanged scene reuses the last
+  export only while both copies are intact. Known limit: the `.blend` stays in `work/`, because
+  Blender resolves the agent's relative `//` paths against its folder. So the agent can still swap
+  the `.blend` between its hash and Blender's open. That only makes the agent's own export cache
+  stale. The export's bytes are still Blender's.
+- Agent text. `finish` stores its reason and each limitation, and `checkpoint` stores its defect, as
+  one line of printable text (`tools.printable`). Tabs and line breaks become spaces. Control
+  characters (ESC with them, so no OSC 52 clipboard write, OSC 0 title or CSI sequence), format
+  characters such as bidi overrides, surrogates and unassigned code points are dropped. Letters of any
+  script stay. `agent_step.py`, `run.py`, `loop_trace.py` and the stdout of `claude_agent.py` clean the
+  agent's text again when they print it, so an older result prints cleanly too. `agent_step.py`
+  replaces the keys again after that cleaning, since a key split by a dropped character is whole
+  only then. `loop_trace.py` skips lines and review files of another shape, and reads the files that
+  the agent can write without following a link or opening a FIFO. `session/claude.jsonl` is ASCII:
+  JSON escapes the model's control, bidi and zero-width characters. The tool server already caps
+  each argument at 4096 characters.
 - The helpers run on the host but act on a folder the agent controls, so they never follow
   symlinks there: output folders must be real folders, new files are created exclusively, and reads
   take regular files only. Every `export_started` gets an `export_done`, also on failure. Only the
   newest unfinished export can pause the clock, and export time moves the deadline by at most 600 s
-  in total.
+  in total. In the articulation mode the `simulate` helper runs off the clock too, within the same
+  600 s (note 11). A session in rounds has the 600 s once per round.
 - In refinement, the controller builds `candidate.blend` from the original with the stock glTF
   importer before the clock starts. `export_glb` exports the visible objects only.
 - On ICE we cannot limit the container's network, because users cannot set network rules. Codex's
@@ -433,10 +477,23 @@ apptainer exec --nv --containall --no-mount bind-paths \
 - Astra sessions on the teddy, the MV-SAM3D toy, the round table, the office chair and five tabletop
   objects took 215 to 633 s of wall time. On the teddy, the extents changed by under 1.5%. Mean mask
   IoU moved by at most about 0.02.
+- Rounds. An articulation whose `parts.json` has a requirement of a found part runs in rounds
+  (`controller.run_rounds`, note 11). Every other session is one round, as before. Each round is a
+  new agent process with its own tool server, budget and deadline. The `round_start` event begins a
+  round. The deadline, the `finish` that ends a round and the round's deliverable come only from the
+  events since then (`tools.round_events`). So a `finish` of round 1 does not end round 2, for Codex
+  or for Claude (the one change in `claude_agent.py`). `run_budget.json` adds `round` and `kind`.
+  When a round starts, the last round's logs and `prompt.txt` move to `session/rounds/NN/`. Then
+  `session/prompt.txt`, `work/AGENTS.md` and `codex_home/config.toml` are written again, so an edit
+  that an agent made to them does not reach the next agent. `result.json` stays flat: `exit`,
+  `returncode` and `cli_exit` are the last round's, and `timings`, `network_commands` and the Claude
+  usage cover every round. `loop_trace.py` prints the last round and says which one it is.
 - Videos: `harpor/agent/blender/turntable.py` renders a 360-degree turntable of one GLB in frame W
   into the PNG frames of `frames_dir`. The asset's optional `matrix` (4x4, row-major) maps the GLB's
   Blender world into W first, and `elevation` lifts the camera (degrees above the horizontal). The web
-  app's 360 video encodes these frames (note 10). `python3 harpor/agent/loop_trace.py RUN_DIR` prints
+  app's 360 video encodes these frames (note 10). With `soft`, the same script renders the soft-part
+  video instead: the asset does not turn, the camera frames the soft part, and each frame moves the
+  part's vertices to the positions of a MuJoCo press (note 11). `python3 harpor/agent/loop_trace.py RUN_DIR` prints
   a session's loop in order.
 
 #### Agent setup and pilot checks on ICE
@@ -524,7 +581,7 @@ The photo-match scores were removed. `harpor/eval/photo_match.py` is in commit 9
 | `envs/web` (micromamba) | Python 3.12, fastapi 0.143.2, uvicorn 0.54.0, av 19.0.1, rosbags 0.11.8, anthropic 1.15.0 (note 10) | The web app's server; every stage runs in its own env |
 | `envs/sam3seg` (micromamba) | Python 3.12, torch 2.14.1+cu130, transformers 5.20.0 (note 3) | SAM 3 masks; transformers 5.20 needs torch 2.6 or newer, so it cannot go into `envs/sam3d` |
 | `sif/harpor-agent.sif` (Apptainer) | Node.js 24.21.0, Codex CLI 0.162.1, Blender 5.2.2 | Built from `containers/harpor-agent.def` with `--fakeroot` (note 5); run with `--nv` for Cycles OptiX |
-| `envs/mujoco` (micromamba) | Python 3.11, mujoco 3.16.0, coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF export; no pytest. Built by `setup/mujoco.sh`, which has not been run as a recipe (note 9) |
+| `envs/mujoco` (micromamba) | Python 3.11, mujoco 3.16.0, coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF export, the host's MuJoCo check of the agent's rounds and the soft-part press (note 11); no pytest. Built by `setup/mujoco.sh`, which has not been run as a recipe (note 9) |
 | `envs/vomp11` (micromamba) | VoMP v1.1 (641a22d) in `VoMP/`, Python 3.11, torch 2.4.0+cu121, bpy 4.2.0, kaolin 0.18.0, spconv-cu121 2.3.8 (note 9) | Built by `setup/vomp11.sh` |
 
 `setup/mvsam3d.sh` builds `envs/da3`, `setup/vomp11.sh` builds `envs/vomp11` and `setup/mujoco.sh` builds
@@ -601,11 +658,14 @@ An articulated GLB (joints in its node extras) takes the same steps with links. 
 - **Mass:** `mass.combine` adds the links' rigid bodies into one for the whole object.
 - **MJCF:** one body per link, nested under its parent. A link gets a hinge or slide joint, or no
   joint when its joint is fixed or when it is a loose link welded to its holder. A world joint on the
-  root or `--fixed-base` drops the root's free joint.
-- **USD:** an articulation root, one rigid body per link and one joint prim per joint.
+  root or `--fixed-base` drops the root's free joint. Each hinge and slide also gets joint damping and
+  a position actuator. A soft link is a MuJoCo flex, a soft mesh pinned to its parent's body.
+- **USD:** an articulation root, one rigid body per link and one joint prim per joint. A soft link is
+  a rigid link with a fixed joint, and `usd.json` names it in `soft_as_rigid`.
 - **URDF:** `python -m harpor.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
   (in `envs/mujoco`) writes `model.urdf` from the MJCF's meshes and inertials. A rigid object gives one
-  link.
+  link. A soft link gets a fixed joint, with an XML comment, and `urdf.json` names it in
+  `soft_as_rigid`. URDF has no soft bodies.
 
 Setup traps (`setup/vomp11.sh` builds `envs/vomp11`, and `setup/mujoco.sh` builds `envs/mujoco`):
 - `setup/vomp11.sh` builds the CUDA extensions for the GPUs in `TORCH_CUDA_ARCH_LIST` (note 4). It takes
@@ -616,6 +676,12 @@ Setup traps (`setup/vomp11.sh` builds `envs/vomp11`, and `setup/mujoco.sh` build
   steps, so a machine without the libraries needs them first. ICE nodes have them.
 - `setup/mujoco.sh` was rebuilt on 2026-11-01 from the installed versions in `envs/mujoco`, and it has
   not been run as a recipe. It pins the packages that HARPOR imports, and pip picks their dependencies.
+  Its last check compiles a small `<flexcomp>` with `integrator="discrete"` and `solver="CG"`, steps
+  it 100 times and fails on a MuJoCo warning, because another MuJoCo version can change how a soft
+  part behaves (note 11). The soft parts need no new package. Run the script once with
+  `HARPOR_ROOT` set to a scratch folder before you run it on the real root.
+- `envs/mujoco` also runs the host's MuJoCo check of the agent's rounds (`harpor.physics.sim_check`)
+  and the press of the soft-part video (`harpor.webapp.softvideo motion`). Both are in note 11.
 - VoMP's `install_env.sh` asks for `spconv-cu120==2.3.8` with CUDA 12.1, but spconv-cu120 stops
   at 2.3.6 on PyPI. We use `spconv-cu121==2.3.8`.
 - The renders use Cycles on the GPU with no CPU fallback, so step 2 must run on a GPU node.
@@ -729,7 +795,8 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    after a cancel stops at the list again.
 7. The agent runs if it is on and the mean mask IoU is at least 0.5. For a rigid object it refines
    `posed.glb`, and when the agent is off or skipped, physics uses `posed.glb`. For an articulated
-   object it sets the joints of `parts.glb` within a 900 s budget (note 11). When the agent is off or
+   object it sets the joints of `parts.glb` within a 900 s budget, with repair rounds when the part
+   list has requirements (note 11). When the agent is off or
    skipped, or gives no usable GLB, physics uses `parts.glb`, and parts without joints become one
    body. Physics also uses `posed.glb` or `parts.glb` when the agent's GLB does not keep the size of
    the GLB it started from (`physics_auto.pick_glb`, `controller.check_size`). `physics/up.json`
@@ -737,7 +804,8 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    from the mean camera up when no plane fits, uses `--x footprint`, and adds `--opaque` when the GLB
    has transmission or alpha. For an articulated object, `align` also writes one GLB per link. Then
    VoMP (once per link for an articulated object), MJCF, USD, URDF, then the 360 video when the job
-   asked for one (the `turntable` stage; a failure warns), then `results.zip`.
+   asked for one (the `turntable` stage; a failure warns), then the soft-part video when the MuJoCo
+   model has a soft part (the `softvideo` stage, note 11; a failure warns), then `results.zip`.
 8. The 360 video (`harpor/webapp/turntable.py`): the GLB that physics used
    (`physics/up.json` "glb"), turned upright with `aligned.json` "T_s_from_w", so it shows aligned.glb's
    object and pose with all parts and the GLB's own materials. Blender renders `turntable.FRAMES` frames
@@ -975,8 +1043,11 @@ stamp and log time in ns). A Stray job unpacks its zip into `video/stray/` (`exp
 with an uploaded calibration, `calibration/<name>` (the uploaded file, mode 0600); `run/lidar/<i>.glb`
 holds the points of the views used. A job that asked for the 360 video adds `turntable/`:
 `turntable.mp4`, `turntable.json` (the done marker), `render.json`, `args.json` and `blender.log`.
+A job whose MuJoCo model has a soft part adds `softvideo/` (note 11), and an articulation in rounds
+adds `agent/evidence.json` (note 11).
 `results.zip` adds `urdf/` for every job, `parts.glb` and `parts.json` for an articulated job,
-`lidar.json` for a job with LiDAR, and `turntable.mp4` for a job with the 360 video.
+`lidar.json` for a job with LiDAR, `turntable.mp4` for a job with the 360 video, `softvideo.mp4` for
+a job with the soft-part video, and `evidence.json` for an articulation in rounds.
 
 ### 11. Articulated objects (`harpor/parts/`)
 
@@ -998,22 +1069,33 @@ Decisions (2026-10-20, user):
 - Articulation is an optional toggle per job. With it off, every stage and output stays as it was,
   except that every job now also gets a URDF.
 
+Since 2026-11-02 the articulated path also follows PhysAg3D (arXiv 2610.39924v1). A part can be soft,
+such as a seat cushion, and the MuJoCo model makes it a soft mesh that dents. Each moving or soft part
+gets a requirement, which says what the built model must do. The host checks each GLB that the agent
+hands off against the requirements, with a clearance sweep and MuJoCo. While the check finds something
+an agent can fix, a new agent gets a repair round. **Requirements and rounds** below has the details,
+and its *Tested so far* says what ran where.
+
 **Formats.**
 - `job.json`: `articulated` (true or false) and
   `parts: {"mode": "vlm"|"vlm_edit"|"user", "list": [...], "confirmed": true|false}`. `confirmed` is
   false for a new job, turns true when the user confirms the list, and turns false again when
   `propose` runs.
 - `run/proposal.json` (stage `propose`): `{source: vlm|user, agent, model, noun, base, parts: [{name,
-  parent, joint, count, axis_hint}], warnings, seconds, mode}`. A VLM's proposal adds `attempts` and
-  `answer`, and a list that the user confirmed adds `confirmed` and `edited`.
+  parent, joint, count, axis_hint}], requirements, warnings, seconds, mode}`. A VLM's proposal adds
+  `attempts` and `answer`, and a list that the user confirmed adds `confirmed` and `edited`.
   `harpor.parts.propose.validate` checks every list: 1 to 12 entries with the base included (so at most
   11 moving parts), unique slugs (`sam3_masks.slug`) that differ from the noun's and from `world`,
-  every parent in the list, exactly one part without a parent (the base), and no loops. `joint` is
-  revolute, prismatic, fixed or unknown. `count` (1 to 8) is the number of identical parts that one
+  every parent in the list, exactly one part without a parent (the base), no loops, and no part that
+  hangs from a soft part. `joint` is
+  revolute, prismatic, fixed, soft or unknown. `count` (1 to 8) is the number of identical parts that one
   name covers. Before the check, a VLM's answer is normalised. A part without a parent hangs from the
   base. A base named like the noun becomes "<noun> body", a part that repeats the base is left out,
   and a list of more than 11 moving parts is cut to the first 11. Each of these three changes adds a
-  warning.
+  warning. `requirements` has one entry for each part that is not fixed, so the base has none:
+  `{part, joint, text, range or material, source}`. `text` is a few words on the motion. `range` (not
+  for a soft part) is the full travel in degrees (revolute) or cm (prismatic), or null. `material` (a
+  soft part only) is foam, gel or rubber. `source` is `vlm` or `default`.
 - `run/parts/sam3/` (stage `parts`): `<slug>/<view>_<k>.png` for every SAM 3 instance of every part in
   every view, numbered by score with 0 for the highest; `part_masks.json` with the score, box, pixel
   count and file of each instance, and `not_found` for the parts with no instance in any view (not an
@@ -1035,13 +1117,19 @@ Decisions (2026-10-20, user):
   has one entry per pair of parts that touch: edges, length, center, the mean normal
   of each side, and up to 4 straight lines fitted to the cut (`p0`, `p1`, `direction`, `length`,
   `inlier_share`, and the normals of each side along the line). The lines are the candidates for
-  hinge axes.
+  hinge axes. The top-level `requirements` are described under **Requirements and rounds**.
 - The joint spec is `extras.gator_joint` on the child's glTF node, a JSON string:
-  `{"version": 1, "frame": "W"|"S", "parent": name|"world", "type": "revolute"|"prismatic"|"fixed",
+  `{"version": 1, "frame": "W"|"S", "parent": name|"world", "type": "revolute"|"prismatic"|"fixed"|"soft",
   "origin": [x, y, z], "axis": [unit], "lower": l, "upper": u}`. The mesh as it is is the pose q = 0,
   so `lower <= 0 <= upper` (rad or m), and a moving joint needs `lower < upper`. A fixed joint may
   leave out the origin, axis and range. `parent: "world"` with type fixed on the root marks a fixed
-  base. A link other than the root without a joint is loose: physics welds it to its nearest glTF
+  base. A soft joint holds a part that dents under a press and springs back. Like a fixed joint it has
+  no joint coordinate (`joints.STATIC`), so it may leave out the same keys. It adds `material`,
+  `young` (Pa), `poisson`, `density` (kg/m^3) and `"support": "parent"`. `joints.SOFT_MATERIALS` has
+  three materials, each with Poisson's ratio 0.3: foam (30 kPa, 120 kg/m^3), gel (100 kPa,
+  900 kg/m^3) and rubber (1 MPa, 1,100 kg/m^3). `joints.validate` needs one of them, a Young's modulus
+  from 1 kPa to 1 MPa, a Poisson's ratio from 0 to 0.45, a positive density and support `parent`. No
+  part may hang from a soft part, and only a fixed joint takes the parent `world`. A link other than the root without a joint is loose: physics welds it to its nearest glTF
   ancestor that holds a mesh, or else to the root. The spec is a string because Blender exports string
   custom properties as extras reliably; readers accept a dict too. `harpor/parts/joints.py` reads,
   writes, checks and moves the joints. The joints live inside the GLB, so the receipts, checkpoints,
@@ -1063,7 +1151,15 @@ Decisions (2026-10-20, user):
    or validate is asked again once, with the reason. The prompt asks for whole rigid pieces (an office
    chair's seat, backrest and armrests are one part, "seat and backrest"), for a base name that SAM 3
    can find apart from the parts ("chair base"), for one joint per part (its main motion), and to
-   leave out small parts (casters, levers, small buttons) unless nothing larger moves. The key goes
+   leave out small parts (casters, levers, small buttons) unless nothing larger moves. It also asks
+   for each soft part as a part of its own with joint soft, even when the soft part is fixed to a
+   moving part. The parent of a soft part is the part it sits on: an office chair's seat cushion hangs
+   from "seat and backrest". For each part the VLM also gives `motion` (a few words), `range` and
+   `material`. `requirements_from` keeps a range only when it is a finite number above 0 and at most
+   720, and a material only when it is foam, gel or rubber (else foam). A typed list gets
+   `default_requirements`: the default text, no range and foam. When the user confirms an edited list,
+   a part with the same name (by slug) and the same joint keeps its requirement, and every other part
+   gets the default (`reconcile`). The key goes
    from the key file into memory only. Every answer, output and error message passes through
    `agent_step.scrub` with every key of the file, and an API error reports only its kind or HTTP
    status.
@@ -1138,7 +1234,8 @@ Decisions (2026-10-20, user):
 5. **Finish** (`envs/sam3d`): `python -m harpor.parts.stage finish --job "$J"` checks `parts.glb` with
    `controller.check_glb`, and checks that its mesh nodes are the found parts as flat root nodes
    without transforms. It computes the boxes and the seams (`harpor/parts/geometry.py`: up to 4 lines
-   per seam, by greedy RANSAC on the cut edges) and writes `parts.json` last. A part's parent is the
+   per seam, by greedy RANSAC on the cut edges) and writes `parts.json` last, with the requirements
+   (see **Requirements and rounds**). A part's parent is the
    part that its proposal names. When that name was found more than once (two drawers), the parent is
    the one with the longest seam to the part. When that name was not found, the parent is the named
    part's own parent, and so on up to the base.
@@ -1146,16 +1243,22 @@ Decisions (2026-10-20, user):
    `python -m harpor.webapp.agent_step --job "$J" --sif $G/sif/harpor-agent.sif --key-file F --agent astra|opus`.
    `agent_step` picks the mode `articulation` when the job is articulated and `run/parts.glb` exists.
    The original is `parts.glb`, `run/parts.json` becomes `work/input/parts.json`, and the budget is
-   900 s (`agent_step.BUDGET_S`). Export time still moves the deadline by at most 600 s in total. The
+   900 s (`agent_step.BUDGET_S`). Export and `simulate` time still moves the deadline by at most
+   600 s in total. When `parts.json` has a requirement of a found part, the session runs in rounds
+   (see **Requirements and rounds**). The
    prompt, `harpor/agent/prompts/articulation_prompt.md`, is our own and has no recorded `CHANGES`. It
    tells the agent to compute every origin and axis in Python from the seam lines and the boxes, and
    never from an image. A door turns about the seam line on its hinged side, a lid about its back seam
    line, and a drawer slides along the thinnest axis of its obb. The agent chooses the sign of the axis
    so that the part opens away from the body. A base gets `--parent world --type fixed` only when the
    object is fixed in place. A drawer gets a cavity in the body and a tray with five faces. An object
-   parented to a part moves with that part.
-   - `set_joint --child N --parent N|world --type revolute|prismatic|fixed [--origin X Y Z --axis X Y Z --lower L --upper U]`
-     and `set_joint --child N --remove`. The host checks the arguments first: finite numbers, an axis
+   parented to a part moves with that part. A soft part gets a soft joint to the part it sits on. The
+   prompt's Requirements section names the requirements in `input/parts.json` and asks the agent to
+   run `simulate` before `finish`.
+   - `set_joint --child N --parent N|world --type revolute|prismatic|fixed [--origin X Y Z --axis X Y Z --lower L --upper U]`,
+     `set_joint --child N --parent N --type soft --material foam|gel|rubber` and
+     `set_joint --child N --remove`. A soft joint takes no origin, axis or range, and only a soft joint
+     takes `--material`. The host checks the arguments first: finite numbers, an axis
      within 0.001 of unit length (then normalized), `lower <= 0 <= upper` with `lower < upper`, a
      revolute range of at most 2 pi rad each way, and the parent `world` only for a fixed joint. Then
      `blender/set_joint.py` opens `candidate.blend` with `--disable-autoexec`, sets or deletes the
@@ -1167,9 +1270,11 @@ Decisions (2026-10-20, user):
      welded loose links when the tree is valid) and logs a `joint` event. Each Blender run has a 120 s
      limit.
    - `review_articulation [--states K] [--clay]`, with K from 2 to 5 (default 3), exports the scene and
-     reads the joints from the GLB. It stops when the GLB has no joint, when its joints are not a valid
-     tree, or when every joint is fixed. When no joint moves, the agent runs `review` and finishes with
-     that receipt. The receipt is `a<NNN>-<sha12>`, with the folder
+     reads the joints from the host's copy of the GLB in `control/exports/`, which it also checks and
+     renders (see *Exports* in note 5). It stops when the GLB has no joint, when its joints are not a valid
+     tree, or when every joint is fixed. A soft joint counts as one that it reviews. When no joint
+     moves and none is soft, the agent runs `review` and finishes with that receipt. The receipt is
+     `a<NNN>-<sha12>`, with the folder
      `work/reviews_articulation/<receipt>/`. Every joint moves from lower to upper in K steps, all
      joints at once. `blender/review_articulation.py` renders each state under every input view,
      cropped as in `review`, and from 2 orbit views (45 degrees to each side of the front, 25 degrees
@@ -1185,11 +1290,25 @@ Decisions (2026-10-20, user):
      `review`, except its export.
    - `checkpoint` and `finish` take `r...` and `a...` receipts. The verdicts are `articulated`,
      `unchanged` and `needs_review`. `finish --verdict articulated` needs a GLB with a valid joint tree
-     that `review_articulation` reviewed. `unchanged` delivers the controller's own copy of `parts.glb`
-     at the session root (`agent/s/original.glb` in a web-app job), without joints.
-     `controller.check_glb` checks the joint tree of every GLB that has joints. `result.json` counts
+     that `review_articulation` reviewed. When `parts.json` has a found requirement, it also needs a
+     GLB that the surface check does not block (see *Surface check* under **Requirements and
+     rounds**). `unchanged` delivers the controller's own copy of `parts.glb` at the session root
+     (`agent/s/original.glb` in a web-app job), without joints.
+     `controller.check_glb` checks the joint tree of every GLB that has joints. It also refuses a GLB
+     whose nodes form a cycle (`joints.parents`) and one with an image larger than 8192 x 8192 pixels
+     (`surface.large_image`, which reads only the image's header). `result.json` counts
      `joints` (the accepted `set_joint` changes; refused ones are not counted) and
      `articulation_reviews`, and `joints_delivered` is the number of joints in the delivered GLB.
+     `simulations` is the number of `simulate` runs that gave a report.
+   - `simulate` exports the scene and runs the host's check on the host's copy of the export in
+     `control/exports/`, which the agent cannot change during the check (see *The host's check* under
+     **Requirements and rounds**). It runs off the clock, like `export_glb`. The check gets
+     270 s less the export's time, and at least 30 s, so the whole helper stays under the 300 s limit
+     of the Claude shell. The check's time, at most 270 s, moves the deadline, and its export counts
+     as an export. The helper prints the outcome and scope, one line per requirement (at most 8), the
+     surface shares and the top findings (at most 6). It copies the report to
+     `work/simulate/sNNN-<sha12>/report.json`. A `simulate` never writes `control/ranges.json`, so a
+     draft does not set a reference.
 
 **Physics with links.** These are the steps of note 9 for a GLB with joints.
 - **Align** (`envs/sam3d`): `python -m harpor.physics.align --glb IN.glb --out aligned.glb ... --links-out DIR`
@@ -1221,29 +1340,304 @@ Decisions (2026-10-20, user):
   `welded`, `excluded_pairs` and `warnings`, and its inertial is the sum of the links. The check adds
   every body's mass, `njnt`, the joints, the bodies in contact at rest, and a forward-kinematics probe:
   each hinge or slide alone at its upper limit, with the largest move of a vertex of its body.
+  - Actuators: each hinge and slide has joint damping and a position actuator of the same name, with
+    `ctrl` limited to the joint's range. The gains scale with I, the inertia about the axis line of the
+    links that move with the joint (the mass for a slide): kp = w^2 I, kv = 2 w I and damping 0.2 kv,
+    with w = 2 pi 5 rad/s. So a joint of any size tracks alike, and at ctrl 0 the actuator holds the
+    joint at rest. `mjcf.json` adds `actuators`.
+  - Soft links: a soft link has no body. It is a `<flexcomp>` `<name>_<link>_flex` inside its
+    parent's body (`harpor/physics/soft.py`). The link is voxelized in its own oriented box, so a tilted
+    pad gets clean layers. The pitch starts at half the box's thinnest side and grows by 1.25 while the
+    mesh has over 800 nodes and the next pitch still gives 2 layers. Over 2000 nodes or under 2 layers
+    is no usable mesh. Each voxel splits into 5 tetrahedra. The pins are the nodes within 1 pitch of the
+    parent's surface and on the parent's side of it. A link with no pin, with over 70% of its nodes
+    pinned, or with a voxel island that has no pin has no usable support. The flex has radius 0.002,
+    edge damping 0.01 and no self-collision. The link's own mesh is one `<skin>` per visual on the
+    nodes, and the flex stays in group 3, so a viewer shows the textured surface.
+    `soft/<link>.npz` holds the binding (each visible vertex's tetrahedron and weights, PhysAg3D's Eq. 4),
+    and `check_binding` tests it.
+  - A model with a soft link sets `integrator="discrete"` and `solver="CG"`, which a scene that
+    includes the model must keep. `<exclude>` has no effect on a flex, so contact bits do the work.
+    Links collide with each other, the flex does not touch its own object, and both collide with
+    anything else in a scene. So a neighbouring part can pass through the soft part under load. That
+    is accepted, since the hex mesh is a proxy.
+  - A soft link's hulls, visual OBJs and inertial stay for URDF and USD. Its inertial is the hulls
+    filled at the material's density (`source: soft_table`), not VoMP's, which would make a cushion a
+    solid block. A part held by a soft link is welded to the soft link's parent, with a warning. A soft
+    link with no usable mesh stays a rigid link fixed to its parent, with a warning, in `mjcf.json`
+    `soft_rigid`. `mjcf.json` adds `soft` (file, nodes, tets, pinned, pitch, material, Young's
+    modulus, Poisson's ratio, density and mass per link) and `soft_excluded_pairs`, and the check adds
+    each flex's compiled mass (`soft_mass`), which is less than the declared mass because pinned nodes
+    drop their share.
 - **USD** (`envs/mujoco`): `/NAME` gets `ArticulationRootAPI`. Each link is an Xform
   `/NAME/links/<link>` with `RigidBodyAPI`, `MassAPI` (the MJCF's inertial of that link) and its own
   visuals and collisions. Each joint is `/NAME/joints/<child>`: a `PhysicsRevoluteJoint` (limits in
   degrees), a `PhysicsPrismaticJoint` (limits in m) or a `PhysicsFixedJoint`, with `localPos0` and
   `localPos1` at the joint's origin and the joint's x axis turned onto its axis. A loose link gets a
   fixed joint to the link that the MJCF welds it to. A fixed base is `/NAME/joints/world`, at the
-  MJCF's start height. Every pair in `excluded_pairs` gets `FilteredPairsAPI`.
+  MJCF's start height. Every pair in `excluded_pairs` gets `FilteredPairsAPI`. A soft link gets a
+  `PhysicsFixedJoint` and `customData` `harpor:soft_as_rigid` on its prim, and the pairs of
+  `soft_excluded_pairs` get `FilteredPairsAPI` too, because a soft link collides here.
 - **URDF** (`envs/mujoco`, `harpor/physics/urdf.py`):
   `python -m harpor.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
   writes `model.urdf`, `meshes/` (one OBJ per link with its MTL and textures, and the MJCF's collision
   OBJs) and `urdf.json` with `checked`. It reuses the MJCF's meshes and per-link inertials. Each part
   is a link. A part with a revolute or prismatic joint gets the joint `<child>_joint` with `<axis>`
   and `<limit lower upper effort="100" velocity="1"/>`. A part with a fixed joint gets a fixed
-  `<child>_joint`. A part without a joint gets a fixed `<child>_joint` to the link that the MJCF
+  `<child>_joint`. A soft part gets a fixed `<child>_joint` with an XML comment before it, and
+  `urdf.json` names it in `soft_as_rigid`. A part without a joint gets a fixed `<child>_joint` to the link that the MJCF
   welds it to. Every link's geometry is in S, so the root's frame is S, and a child's frame sits at
   its joint's origin. A fixed base adds the link `world` and the
   joint `world_joint` at the MJCF's start height. URDF has no contact filter, so `urdf.json` only
-  lists the excluded pairs. The check parses the XML, counts the links and joints, and checks that
+  lists the excluded pairs, with `soft_excluded_pairs`. The check parses the XML, counts the links and joints, and checks that
   every mesh file exists. It loads the model with `yourdfpy` only when that is installed. A rigid
   object gives one link.
 
+**Requirements and rounds** (after PhysAg3D, arXiv 2610.39924v1).
+
+*Requirements.* `stage finish` writes the top-level `requirements` of `parts.json` from the proposal's
+(`harpor/parts/stage.py`). A proposal older than them gets `propose.default_requirements`. Each
+proposal requirement makes max(count, found) records, `r1`, `r2` and so on. There is one record per
+found link of its part, in the vote's order, then one with status `not_found` and part null for each
+missing link. The first `count` records are required. A found link beyond the count is not required,
+so an agent that joins a fragment to its part does not miss a required link. A cluster that was not
+found makes no record. The fields follow PhysAg3D's Eq. 2: `part` and `parent` are U, `action` is a,
+`observe` is O, `test` is psi and `scope` is D. A revolute part's range becomes its test `min_span`,
+in radians. A prismatic part's range goes only into `text`, because a length depends on the scale,
+which is an estimate without LiDAR. A joint `unknown` takes either moving type.
+
+```json
+{"id": "r1", "part": "seat_and_backrest", "prompt": "seat and backrest", "parent": "chair_base",
+ "kind": "joint", "joint": "revolute", "text": "turns all the way round on the base",
+ "action": {"type": "sweep", "directions": ["lower", "upper"]},
+ "observe": {"type": "joint_range", "relative_to": "parent"}, "test": {"min_span": 6.283},
+ "scope": {"start": "mesh pose, every joint at 0", "base": "fixed", "gravity": false},
+ "source": "vlm", "status": "found", "required": true}
+```
+
+A soft part's record has `kind` and `joint` soft and its `material`. Its action is a press toward the
+support, its observe the node and visible residual after a rigid alignment, and its test
+`{"min_response_diag": 0.001, "recovery": true}`. `prepare_session` copies `parts.json` to
+`work/input/parts.json` and to `control/parts.json`. The host's checks read only the control copy.
+
+*The host's check* (`harpor/agent/validate.py`, in `envs/sam3d`). `validate.check(glb, control,
+original, timeout)` runs in two places: during a round through the `simulate` helper, and after each
+build or repair round. It reads the GLB once without following a link, hashes it and copies it to
+`control/validate/<sha16>/candidate.glb`. Every later step reads only that copy, because the agent is
+alive while `simulate` runs. The steps:
+1. The surface check against `root/original.glb` (see *Surface check*).
+2. Joints. `J.validate`'s problems, and joints in a frame other than W, are `invalid_joints`, and then
+   the clearance and MuJoCo steps do not run. Link names must be file names (`align.safe_links`:
+   letters, digits, spaces, `_`, `.` and `-`, with no leading dot), else `bad_link_name`, since `mjcf`
+   makes files and XML of them. MuJoCo does not run on such names.
+3. Clearance in W on the link meshes, one hinge or slide at a time with every other joint at 0. The
+   reference interval [l0, h0] is the joint's limits, each side widened to the entry `<link>|<type>`
+   of `control/ranges.json`. Only the check at a round's end writes that file. So the reference stays
+   across repairs, and a narrower range does not lower it. At rest the moving links must not lie in
+   another link (`rest_collision`), and every other link must be closed (`clearance_missing`). Either
+   one ends the search. Then the interval [l0, h0] (2/3)^n, for n = 0, 1 and 2, is swept with 4 states
+   each way from rest until one passes. A state fails when a surface sample lies deeper than the
+   tolerance inside another link (0.5% of the diagonal, at most a quarter of that link's thinnest
+   side, as in `review_articulation`). A reduced interval must keep 20% of h0 - l0, and 10 degrees for
+   a hinge. No interval passing is `axis_blocked`, and one passing after a reduction is
+   `range_blocked`. A span under that floor, or one that the joint's limits cut, is `range_short`.
+4. MuJoCo. `model.glb` is the copy with its joints marked S but with W's numbers. The command is
+   `GATOR_MUJOCO -m harpor.physics.sim_check` (below), from the repository with `PYTHONSAFEPATH=1`.
+   It builds the model with a fixed base, zero gravity and no floor, so up does not matter. It gets
+   the time that the other steps left. A GLB without a hinge, slide or soft joint is not simulated.
+5. `assess` gives each requirement a record, findings and an outcome.
+
+The report is cached at `control/validate/<sha16>/report.json`, so the check at a round's end reuses
+a `simulate` of the same bytes, unless a reference changed since. A report with a failed step is never
+cached. The check at a round's end has 600 s (`HOST_CHECK_TIMEOUT_S`).
+
+*The MuJoCo check* (`harpor/physics/sim_check.py`, in `envs/mujoco`; it imports nothing from
+`harpor.agent`). D is the asset's diagonal.
+- Each hinge and slide runs over the interval that the clearance search achieved, within its limits.
+  The ctrl of its position actuator ramps from rest to the upper end, to the lower end and back to
+  rest. Each leg takes 1 s and holds 0.25 s, and a state is recorded every 0.25 s. A leg that ends
+  further than 5 degrees (hinge) or 0.005 D (slide) from its target is `tracking`. A state that is not
+  finite, a MuJoCo warning, or q past a limit by more than that is `unstable`.
+- Each soft link is pressed on its binding. The model settles for 0.25 s, and the nodes then are P0.
+  A force pushes the press nodes toward the parent. It ramps over 1 s to at most 0.08 E h^2 per node
+  (E the Young's modulus, h the pitch), and it stops rising once the largest residual reaches
+  3 x 0.001 D. The press holds 0.25 s, releases over 0.25 s, and the part settles for 1.5 s. The
+  residual is the node displacement left after a rigid fit onto P0 (Kabsch), and dmax is its largest
+  value. The visible dmax is the residual carried to the skin by Eq. 4.
+- The soft response needs dmax, the largest change of a distance between two nodes, and the visible
+  dmax all at least 0.001 D, else `soft_no_response`. When the force reached the cap before the
+  target, the finding is `soft_untestable` instead, because the cap scales with E and no other
+  material can help. Recovery needs a residual of at most max(0.001 D, 0.35 dmax) after the settle,
+  else `soft_no_recovery`. A failed binding check is `binding_mismatch`.
+- The report carries the candidate's sha256 (`--asset-sha`), so its states name the asset they came
+  from. A requirement passes only with at least 3 states of this sha256 for its link.
+
+*Findings and outcomes.* `validate.SCOPE` gives each finding a scope (PhysAg3D, section A.3):
+
+| Scope | Findings |
+|---|---|
+| structural | `link_missing`, `joint_type_mismatch`, `parent_mismatch`, `invalid_joints`, `rest_collision`, `axis_blocked`, `surface_identity`, `soft_no_support`, `soft_no_response`, `soft_no_recovery` |
+| local | `no_candidate`, `not_finished`, `bad_link_name`, `joint_missing`, `range_blocked`, `range_short`, `clearance_missing`, `tracking`, `unstable`, `compile_error`, `sim_timeout`, `binding_mismatch`, `surface_uv`, `surface_material`, `surface_deleted`, `surface_flipped`, `surface_error`, `surface_assignment`, `validation_error` |
+| none (no agent can help) | `soft_untestable`, `sim_unavailable` |
+
+A round is structural with a structural finding, else local with a local one, else none.
+`sim_unavailable` (`GATOR_MUJOCO` unset or not starting, or `sim_check` without its modules) makes the
+scope none. A requirement fails with a finding that is not in `INCONCLUSIVE`. It is inconclusive with
+only such findings (`compile_error`, `sim_timeout`, `sim_unavailable`, `clearance_missing`,
+`soft_untestable`, `validation_error`) or without a trajectory of 3 states. Otherwise it passes. A part
+that the split did not find is unassessed, and it does not block a pass. A round passes only when the
+agent's verdict is `articulated`, every required found requirement passes, the surface does not
+block, and no finding is structural. `validate.feedback` turns the report into at most 6000
+characters for the next prompt, structural findings first. Requirement text and the agent's text
+appear in it only as JSON, which `json.dumps` keeps ASCII.
+
+*Rounds* (`controller.run_rounds`). A session runs in rounds when `control/parts.json` has a
+requirement of status found. Every other session is one round, as before. Each round is a new agent
+with no memory of the others, so its prompt carries the whole task:
+- build: the caller's budget, 900 s for an articulation, with the articulation prompt.
+- repair: 450 s. The prompt is the articulation prompt with its budget set to 450 s, then
+  `repair_prompt.md` with the last check's feedback, the path of its report and the best stored
+  candidate so far.
+- replan: 300 s. The prompt is `replan_prompt.md` alone. The agent writes `/work/plan.md` and stops.
+  `tools.main` refuses every helper in this round, so it makes no export, receipt or off-clock time.
+  The next repair's prompt says to follow the plan. The host never reads `plan.md`.
+
+`next_round` picks the next round. There is none after a passing round or a round of scope none. A
+session has at most 3 builds (the build and 2 repairs) and 1 replan, and a replan is not a build. A
+replan comes once, after a structural round, while builds are left, and a repair always follows it.
+Any other failure gets a repair. The worst case is 900 + 300 + 450 + 450 = 2100 s of agent time.
+After each build or repair, `check_round` stores the round's pick, runs the host's check on it and
+writes the report to `work/evidence/round_NN.json` for the next agent. A host step that raises becomes
+a `validation_error` finding. A failure of the loop itself keeps the rounds that ran, and Cancel still
+ends the session.
+
+*Candidates and selection.* `store_candidate` copies the pick of each build or repair round
+(`select_deliverable` on the round's events) to `control/candidates/vNN/candidate.glb`, read-only,
+with `report.json`. Every round gets its own version, also with the bytes of an earlier one, so each
+keeps its own verdict. An `unchanged` or `fallback_original` pick is not stored. At the end,
+`select_candidate` delivers the best eligible candidate. A candidate is eligible when its copy still
+has its sha256, passes `check_glb` and `check_size`, and has no `surface_identity` finding that
+counts (see *Surface check*).
+The rank, highest first, is `controller.RANK`: the round passed, the surface does not block, the number
+of required requirements that pass, the GLB did not come from an export, and then the later version. So a
+passing round always wins, even over a later reviewed failure. The verdict is `articulated` only when
+the chosen candidate's round passed, and then it keeps the agent's reason and limitations. Otherwise
+it is `needs_review`, and the host writes the reason (the unmet requirements and open finding codes)
+and the limitations, without the agent's text. With no eligible candidate the session gives
+`fallback_original`, or `unchanged` when the last pick was unchanged. `source` keeps its value, so
+physics finds the GLB as before.
+
+`result.json` adds `rounds` (round, kind, budget_s, exit, wall_s, candidate, outcome, scope, and
+findings with only code, requirement, link, measured and expected), `candidate` (the stored candidate
+delivered, and why), `requirements` (`{pass, fail, inconclusive, unassessed}` of that candidate's
+check, or of the last round's without one) and `surface`. `counts` keeps its keys. A refinement result
+adds only `surface`.
+
+*Evidence* (`harpor/agent/evidence.py`). `control/evidence.json` is written after every round and once
+more with the choice, so a session that stops keeps it. It holds `version`, `object`, `diagonal_m`,
+`requirements` (S), `candidates`, `rounds` and `selected` (the choice, its rank and the requirements
+left open). Each candidate holds the agent's verdict, reason and limitations, MuJoCo's `runtime`,
+`mechanisms` (K), `entities` (X), `gamma` (each requirement's mechanism and link), `surface` (rho),
+`records` (E), and its findings, errors, scope and outcome. It holds no trajectory. `agent_step`
+publishes it to `J/agent/evidence.json` in a `finally`, scrubbed of the key and with every number
+that is not finite as null. The web app serves it, and `results.zip` holds it as `evidence.json`,
+except when the controller found the key in `control/evidence.json`.
+
+*Surface check* (`harpor/agent/surface.py`, in `envs/sam3d`). `compare(glb, original)` measures how
+much of the original's surface a candidate keeps (PhysAg3D's source map rho). It never raises: a
+failure is `{"error": ...}`, which is `surface_error`. D is the original's diagonal. Each candidate vertex maps
+to an original vertex within 1e-5 D (a KD-tree), and a face matches on the same three vertices. A
+matched face is retained when its UVs (within 1e-4), winding and material are the same, else
+modified. An unmatched original face is modified when its centroid and edge midpoints lie within
+0.005 D of the candidate's surface, else deleted. Original faces without UV area are the split's caps
+and are not native. Added faces never block, because the prompt asks for cavities and trays. Materials
+compare their factors and their decoded images in 16 x 16 tiles, and a mean difference above 6/255
+in a tile is a change. The limits, as shares of the native area, are: deleted above 2%
+(`surface_deleted`), other UVs above 1% (`surface_uv`), another material above 1%
+(`surface_material`), flipped above 1% (`surface_flipped`), and present under 50%
+(`surface_identity`). `validate` adds `surface_assignment` when a requirement's link keeps under half
+of its own native area. The limits come from reasoning, not from paired data. So `surface.ENFORCE` is
+False, and every surface finding is report-only. It shows in the report, in `simulate`'s output and in
+the feedback, and it decides nothing. While `ENFORCE` is False, `finish articulated` never refuses on
+the surface, the rank's surface term is the same for every candidate, and `surface_identity` makes no
+candidate ineligible. A refinement session records `compare` of its deliverable as `result.json`
+`surface`, which never blocks either.
+
+*Soft-part video* (`harpor/webapp/softvideo.py`, stage `softvideo`). The stage runs after
+`turntable`, on the GPU, and it is optional (`steps.OPTIONAL`, "soft-part video"). It is skipped ("no
+soft part") unless `physics/mjcf/mjcf.json` has `soft`, which the runner reads when the stage starts.
+No job setting asks for it. It has three steps:
+1. `motion` (`envs/mujoco`) loads `physics/mjcf/<name>.xml` through `MjSpec`. It deletes the root's
+   free joint, welds every hinge and slide (deleting each joint and its actuator) and sets gravity to
+   0. Under gravity the free root drops and tilts by more than the dent, and a hinged parent would turn
+   under the press. It runs `sim_check.press` on the first soft link, to a visible dent of
+   min(12 mm, 0.2 t), with t the part's depth along the press, and a cap of 0.3 E h^2 per node. That
+   is deeper than the test press (3 x 0.001 D), so the dent shows at true scale. It writes `motion.npz` (the
+   rest vertices in S and 90 frames of their displacement by Eq. 4) and `motion.json`. The step count
+   is fixed, so it needs no timeout.
+2. `render` (`envs/sam3d`, Blender in the agent's SIF) runs `blender/turntable.py` with `soft` on the
+   360 video's GLB and matrix, for at most 1200 s (`turntable.RENDER_TIMEOUT_S`). The container sees
+   only `J/softvideo`, the GLB and the Blender scripts.
+3. `encode` (`envs/web`) writes `softvideo/softvideo.mp4` as the 360 video is encoded: 90 frames at
+   30 fps, 3 s, which loops. It deletes the frames and writes `softvideo/softvideo.json` last, the
+   stage's marker.
+
+A failure warns ("soft-part video: <why>"), and the job goes on to `results.zip`. A job folder from
+before this stage gets its record as skipped, "older than this stage" (`Runner._recover`).
+
+*ICE setup.*
+- `steps.command` exports `GATOR_MUJOCO=$G/envs/mujoco/bin/python` for the agent stage. The variable
+  is split like a shell, as `GATOR_BLENDER` is. Without it, every check is `sim_unavailable`. So
+  `agent_step` stops before the session runs when an articulation has rounds and `GATOR_MUJOCO`
+  does not name a python that exists.
+- `envs/mujoco` needs no new package. Run `setup/mujoco.sh` once in a scratch root first (note 9).
+- `envs/sam3d` needs rtree and scipy for the clearance and surface checks. The ICE check of
+  2026-10-20 listed both.
+- The SIF needs no rebuild, because `harpor/agent/bin/` binds at run time. `bin/simulate` must keep
+  mode 755 in git.
+- A worst-case job takes about 95 minutes in the agent stage: 2100 s of agent time, up to 600 s off
+  the clock in each build or repair, and up to 600 s of host check after each of them. The site's
+  setting `near_end_minutes` (`docs/public_site.md`) only stops new builds near the end of the Slurm
+  job, and its default is 60. Set it to 120 on the site, so that a build that starts can finish. This
+  needs no code.
+
+*Tested so far.* On the Mac, the tests pass in a venv with Python 3.12, numpy 2.5.4, MuJoCo 3.16.0
+and CoACD.
+- Real code on synthetic test objects: the soft mesh, the flex export, the skin and binding checks,
+  `sim_check`'s execution and press, `validate.check` with the clearance sweep and a real
+  `sim_check` run, the surface check, and the soft-part video's press.
+- Fake only: Blender and the agent. Every Blender step runs as the fake Blender of
+  `harpor.agent.fake_agent`, and the soft branch of `blender/turntable.py` runs on stand-ins for
+  `bpy` and `mathutils`. The agents are `fake_agent` scripts with a list per round. The round tests
+  use `fake_agent --sim` in place of MuJoCo, with outcomes from `GATOR_FAKE_SIM`. One web-app test
+  runs the real `agent_step.run` with requirements, `fake_agent` rounds and the fake `--sim`.
+- Fake mode (`python -m harpor.webapp --fake`): `propose` and `parts` write requirements, and the
+  fake agent stage writes the result keys and `agent/evidence.json` of a session in rounds without
+  running the round code. A typed list `body / pad > body : soft` gives a soft part, and the
+  `softvideo` stage then runs for real with the fake Blender (with a synthetic dent where MuJoCo is
+  not installed).
+
+Not run anywhere yet: a real agent in rounds (Opus or Astra, the repair and replan prompts, repeated
+`codex exec` on one `codex_home`); real Blender (whether the original's vertices, UVs and images
+survive the round trip within the surface limits, and the soft-part render under Cycles); `envs/mujoco`
+on ICE (Python 3.11, numpy 2.4.6); `bin/simulate` and `GATOR_MUJOCO` through the containers; the time
+of `sim_check` with CoACD on ICE against the 270 s and 600 s limits; SAM 3 and the vote on a soft part
+(whether "seat cushion" separates from "seat and backrest"); the VLM's soft parts and span targets;
+and the new video and evidence through the public site's relay.
+
+*Still to do.*
+- Milestone 11, on ICE. Do the setup above. Run a real Opus job on the office chair while the surface
+  check only reports. Calibrate the surface limits from that run, set `surface.ENFORCE` to True, and
+  run the job again. The milestone is done when the evidence shows the outcomes of the swivel and the
+  cushion, and a real surface block is seen or ruled out.
+- Milestone 12: before-and-after runs by hand on 3 to 5 objects, with the results in this note. The
+  "before" run of each object uses the code without rounds. It needs no new evaluation code.
+
 **Web app.** The toggle "Articulated object", the three parts modes, the key for `propose`, the pause
-after `propose` and the stages `propose`, `parts` and `urdf` are described in note 10.
+after `propose` and the stages `propose`, `parts` and `urdf` are described in note 10. The Results tab
+adds the rows Rounds, Requirements (met of total, and one row per requirement), Surface retained and
+Soft part, and the soft-part video beside the 360 video. The Downloads tab adds `softvideo.mp4` and
+`evidence.json`. `help.html` explains each of them.
 
 **Checks on ICE** (2026-10-20):
 - `envs/sam3d` has no shapely, manifold3d or embree.
@@ -1279,11 +1673,20 @@ Measured times on ICE for the real chair (5 views, 10,268 faces, 2 parts):
   has no continuous joint.
 - The up hint of `physics_auto` needs the web app's view names (view 0 is `0`). A run with other view
   names needs `--up normals` or `--up-near` by hand.
-- The physics and URDF tests did not run on ICE, because `envs/mujoco` has no pytest.
+- The physics, URDF and `sim_check` tests did not run on ICE, because `envs/mujoco` has no pytest.
 - No real articulated job has run through the web app on ICE yet. The chair went through the stages
-  from the command line.
+  from the command line, before the soft parts and the rounds.
 - No drawer, door or laptop has been tested yet, so the prompt's rules for drawers (the cavity and the
   tray), doors and lids have not met real data.
+- The surface limits come from reasoning, not from paired data, so the surface check only reports
+  until milestone 11 calibrates the limits.
+- The pin and press rules of a soft part were tested only on synthetic objects. A neighbouring part can
+  pass through a soft part under load, because the hex mesh is a proxy.
+- Defaults that a real run should confirm. A part that the split did not find is unassessed, not
+  failed. A joint type unlike the requirement's fails it (`joint_type_mismatch`, structural), though
+  the VLM's type is a guess and the agent cannot change it. A link that is not closed gives
+  `clearance_missing`: the requirement is inconclusive, and a repair is asked for. The soft-part video
+  shows the dent at true scale, at most 12 mm.
 
 ### 12. Metric scale from LiDAR (`harpor/stage_a/lidar_scale.py`, `harpor/webapp/lidar.py`)
 

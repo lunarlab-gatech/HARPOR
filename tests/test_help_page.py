@@ -10,7 +10,7 @@ from pathlib import Path
 from harpor.agent import controller, tools
 from harpor.parts import geometry, vote
 from harpor.stage_a import lidar_scale, part_masks
-from harpor.webapp import agent_step, jobs, site, steps, turntable, video, views
+from harpor.webapp import agent_step, jobs, site, softvideo, steps, turntable, video, views
 from harpor.webapp import lidar as lidar_stage
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -135,6 +135,10 @@ def test_help_page_holds_the_method_numbers():
                        "outside the object", "union", "welds them into one body"],
              "agent": [f"{num(agent_step.BUDGET_S['refinement'])} s to edit",
                        f"{num(agent_step.BUDGET_S['articulation'])} s to set", f"up to {num(tools.MAX_EXCLUDED_S)} s",
+                       f"{num(controller.ROUND_BUDGET_S['repair'])} s for a repair",
+                       f"{num(controller.ROUND_BUDGET_S['replan'])} s to plan", f"up to {controller.MAX_BUILDS - 1} repairs",
+                       "Rounds", "Requirement r1", "inconclusive", "unassessed", "not required", "Surface retained",
+                       "report only", "blocks articulated",
                        f"{controller.CLAUDE_EFFORT} effort", f"below {iou}", "skipped", *prices, "A ? means",
                        "refusal fallback", f"at most {tools.MAX_LIMITATIONS}", *tools.VERDICTS["refinement"],
                        *tools.VERDICTS["articulation"], "fallback_original", "checkpoint", "export", "API key",
@@ -154,8 +158,10 @@ def test_help_page_holds_the_method_numbers():
                         "Turn the box off to see the whole scan", "read the object's dots and the median",
                         "outside the mask"],
              "results": [f"Below {iou}", "view 0's camera frame", "aligned.glb", "larger than", "mean over the views",
-                         "360 video", "reduced motion"],
-             "joints": ["A ? means", "With 0", "nearest part above it", "fixed to the world", "one rigid body"],
+                         "360 video", "reduced motion", "Soft-part video", f"a dent of {1000 * softvideo.DENT_M:g} mm",
+                         "true scale", "springs back"],
+             "joints": ["A ? means", "With 0", "nearest part above it", "fixed to the world", "one rigid body",
+                        "URDF and USD", "Soft part", "kPa", "rigid in MuJoCo too"],
              "physics": ["64³", mass_err, "collision hulls", "left out", "median density", "Pa", "kg/m³",
                          "by its volume", "bottom of the object", "MuJoCo, USD and URDF", "VoMP v1.1"],
              "downloads": ["(package)", "API key", "the agent's result when the key was found in it",
@@ -166,11 +172,13 @@ def test_help_page_holds_the_method_numbers():
                            "null without LiDAR",
                            "excluded", f"up to {seam_lines} fitted lines", "not split off", "only in results.zip",
                            "urdf/meshes", *zipped, "H.264", f"{turntable.SIDE} x {turntable.SIDE} px",
-                           f"{turntable.FPS} fps", f"{turntable.FRAMES / turntable.FPS:g} s"],
+                           f"{turntable.FPS} fps", f"{turntable.FRAMES / turntable.FPS:g} s",
+                           f"{softvideo.FPS} fps, {softvideo.FRAMES / softvideo.FPS:g} s"],
              "demos": ["gallery", "All demos", "Back button", "Coming soon", "360 video", "muted and looping", "3D view",
                        "aligned.glb", "<demo>_<name>"],
-             "retry": ["first stage that is not done", "replaces the results"],
-             "troubleshooting": ["360 video: …", "Retry from turntable"]}
+             "retry": ["first stage that is not done", "replaces the results", "Retry from softvideo"],
+             "troubleshooting": ["360 video: …", "Retry from turntable", f"{steps.OPTIONAL['softvideo']}: …",
+                                 "Retry from softvideo"]}
     assert set(facts) <= set(text), set(facts) - set(text)
     for sid, want in facts.items():
         assert all(f in text[sid] for f in want), (sid, [f for f in want if f not in text[sid]])
@@ -183,6 +191,22 @@ def test_help_page_holds_the_method_numbers():
     example = re.search(r"<pre>(.*?)</pre>", lidar, re.S)[1]
     cal = lidar_scale.read_calibration(html.unescape(example), "calibration.yaml")
     assert cal["given_as"] == "T_cam_lidar" and len(cal["T_cam_lidar"]) == 4
+
+
+def test_help_page_gives_the_rank_and_the_time_off_the_clock():
+    """The agent section names what the job's pick of the stored GLBs compares, in controller.RANK's order, and the
+    helpers whose time does not count (tools.OFF_CLOCK), with the cap that holds in each round."""
+    text = sections(HELP.read_text())["agent"]
+    words = {"round outcome pass": "a GLB whose check passed wins",
+             "surface not blocking": "surface findings do not block",
+             "required requirements passing": "meets the most requirements",
+             "source not an export": "did not come from an export", "version": "then the later one"}
+    assert tuple(words) == controller.RANK
+    at = [text.index(w) for w in words.values()]
+    assert at == sorted(at), at
+    clock = re.search(r"Time spent [^.]*\.", text)[0]
+    assert set(tools.OFF_CLOCK) == {"export", "simulate"} and "exporting GLBs" in clock and "simulate helper" in clock
+    assert clock.endswith(f"up to {tools.MAX_EXCLUDED_S:g} s in each round.")
 
 
 def test_help_page_is_a_plain_page_with_every_section():

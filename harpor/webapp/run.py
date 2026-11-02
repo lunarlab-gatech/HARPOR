@@ -66,6 +66,7 @@ from pathlib import Path
 import anyio
 import httpx
 
+from harpor.agent.tools import printable
 from harpor.fileio import read_json
 from harpor.webapp import jobs, relay, server, session, steps, views
 
@@ -327,8 +328,8 @@ class Run:
 
     def finished(self):
         r = self.call("GET", "")["agent_result"]
-        if r:
-            say(f"agent: {r.get('verdict')}: {r.get('reason')}")
+        if r:  # the agent wrote the reason: one line without control characters, also from an older result
+            say(f"agent: {printable(r.get('verdict'))}: {printable(r.get('reason'))}")
         say(f"results: {self.J / 'results.zip'}")
         return DONE
 

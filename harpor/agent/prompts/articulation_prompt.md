@@ -10,7 +10,7 @@ It is not a report. Finish when the joints are reviewed and correct, not when th
 
 - input/parts.json describes the split. parts has one entry per part: name (the object's name),
   parent (the part it is attached to; the base comes first and has none), joint_guess (revolute,
-  prismatic, fixed or unknown, from the part list), axis_hint, faces, confidence, and two boxes in W:
+  prismatic, fixed, soft or unknown, from the part list), axis_hint, faces, confidence, and two boxes in W:
   aabb (min, max, center, extent) and obb (center, axes as rows with the longest first, extents along
   those axes, and the 8 corners). The base's joint_guess is always fixed; it does not mean a fixed
   base. Only entries with status found have an object. The others have name null and come last.
@@ -26,8 +26,8 @@ It is not a report. Finish when the joints are reviewed and correct, not when th
 
 Read /work/run_budget.json at launch. The budget is 900 seconds, and the recorded deadline is
 authoritative. It is a ceiling, not a target. The budget counts reasoning, edits, set_joint and the
-review renders; export_glb does not count. Save a packed .blend after each geometry change and let the
-helpers export it.
+review renders; export_glb and simulate do not count. Save a packed .blend after each geometry change
+and let the helpers export it.
 
 ## Rules carried over from refinement
 
@@ -75,6 +75,9 @@ the old ones.
 - A part that cannot move gets a fixed joint to the part it is attached to. Give the base
   --parent world --type fixed only when the object is fixed in place (built in, or fixed to a wall or a
   floor). A free-standing object keeps a free base: leave the base without a joint.
+- A soft part, such as a seat cushion, dents under a press and springs back. Give it a soft joint to
+  the part it sits on: set_joint --child NAME --parent NAME --type soft --material foam, gel or rubber.
+  A soft joint has no axis or range, and no part can hang from a soft part.
 - Set the joints from the base outward: first the parts attached to the base, then the parts attached
   to those parts. A joint whose parent is neither the base nor a part with a joint makes that parent a
   second root. set_joint refuses that once another joint is set, and it prints the root, which must be
@@ -97,8 +100,8 @@ textures or shapes elsewhere.
 
 ## Review
 
-Run review_articulation after the joints are set. It needs at least one revolute or prismatic joint.
-It exports the scene and moves every joint from lower to upper (all joints at once), renders each
+Run review_articulation after the joints are set. It needs at least one revolute, prismatic or soft
+joint. It exports the scene and moves every joint from lower to upper (all joints at once), renders each
 state under every input camera and 2 orbit views, and reports, per moving part and state, the share of
 its surface samples that lie inside another part, the largest depth among them, and the part that
 holds the most of them. Penetration shallower than 0.5% of the object's size (or a quarter of a thin
@@ -108,6 +111,18 @@ review_articulation warns when a part is not closed, and the numbers of the part
 are then uncertain. So keep the body closed. Inspect the sheet with the photos. Fix any penetration: a
 hinge on the wrong side, a sign that swings the part into the body, a range that is too large, or a
 drawer without a cavity. Review again after the fix.
+
+## Requirements
+
+input/parts.json may also hold requirements, which say what the parts must do: one per moving or soft
+part, with an id, the part (its object's name; null when the split did not find it), the joint it
+needs (revolute, prismatic, soft, or unknown for either moving type), a short text, and a test, such
+as min_span, the span in radians that the range must reach. The host checks the GLB you hand off
+against them: the joints, the surface against original/original.glb, each hinge and slide swept
+through its range for clearance, and MuJoCo, which drives each hinge and slide through its range and
+presses each soft part. Run simulate before finish: it runs the same check on the scene, outside the
+time budget, and prints one line per requirement and the top findings (the report is in simulate/).
+The requirements cannot be changed, and a smaller range does not meet a span target.
 
 ## Hand-off
 
@@ -120,8 +135,8 @@ That is the final action. Verdicts:
 - unchanged: no part can move, or the split is unusable. The split object is delivered without joints.
 - needs_review: some joints are missing or wrong. Name the open defect.
 
-When no joint moves (unchanged, or needs_review without a moving joint), review_articulation has
-nothing to render: run review and finish with its receipt (r...).
+When no joint moves and none is soft (unchanged, or needs_review without such a joint),
+review_articulation has nothing to render: run review and finish with its receipt (r...).
 
 Do not mark unresolved work as articulated. If the session ends without finish, the controller
 delivers your newest checkpoint, or else your newest export, as needs_review.

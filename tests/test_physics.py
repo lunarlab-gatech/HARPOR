@@ -582,6 +582,207 @@ def test_fixed_base_links_do_not_collide_with_their_parent_or_touching_neighbour
         build(tmp_path / "w.glb", summary, tmp_path / "w", "chest", decompose=inflated_hull)
 
 
+def test_each_hinge_gets_a_position_actuator_scaled_by_its_inertia(tmp_path):
+    """kp = w^2 I, kv = 2 w I and joint damping 0.2 kv, with I the inertia about the hinge's axis line of the links
+    that move with it: lid_left and the knob welded to it, but lid_right alone."""
+    mujoco = pytest.importorskip("mujoco")
+    from harpor.physics.mjcf import OMEGA, axis_inertia, build
+
+    glb, summary = two_lid_chest(tmp_path)
+    report = build(glb, summary, tmp_path / "mjcf", "chest", decompose=hull_parts)
+    # A half lid is 0.3 x 0.4 x 0.04 m at 500 kg/m^3 with its centre 0.2 m in front of the hinge line and 0.02 m above
+    # it; the knob is a 4 cm cube 0.35 m in front and 0.06 m above.
+    lid, knob = 0.3 * 0.4 * 0.04 * 500, 0.04 ** 3 * 500
+    I_lid = lid / 12 * (0.4 ** 2 + 0.04 ** 2) + lid * (0.2 ** 2 + 0.02 ** 2)
+    I_knob = knob / 12 * 2 * 0.04 ** 2 + knob * (0.35 ** 2 + 0.06 ** 2)
+    a = report["actuators"]
+    assert list(a) == ["lid_left", "lid_right"] and a["lid_left"]["name"] == "chest_lid_left_joint"
+    assert np.isclose(a["lid_left"]["inertia"], I_lid + I_knob) and np.isclose(a["lid_right"]["inertia"], I_lid)
+    I = a["lid_left"]["inertia"]
+    assert np.allclose([a["lid_left"][k] for k in ("kp", "kv", "damping")], [OMEGA ** 2 * I, 2 * OMEGA * I, 0.4 * OMEGA * I])
+    m = mujoco.MjModel.from_xml_path(str(tmp_path / "mjcf" / "scene.xml"))
+    k, j = m.actuator("chest_lid_left_joint").id, m.joint("chest_lid_left_joint").id
+    assert m.actuator_trnid[k][0] == j and m.actuator_ctrllimited[k] and np.allclose(m.actuator_ctrlrange[k], [0, 1.5])
+    assert np.isclose(m.actuator_gainprm[k][0], a["lid_left"]["kp"])
+    assert np.allclose(m.actuator_biasprm[k][:3], [0, -a["lid_left"]["kp"], -a["lid_left"]["kv"]], rtol=1e-5)
+    assert np.isclose(m.dof_damping[m.jnt_dofadr[j]], a["lid_left"]["damping"], rtol=1e-5)
+    # A slide's gains take the mass of what moves with it.
+    bodies = [{"mass": 2.0, "com": [1.0, 0, 0], "fullinertia": [1, 1, 1, 0, 0, 0]},
+              {"mass": 3.0, "com": [0, 1.0, 0], "fullinertia": [1, 1, 1, 0, 0, 0]}]
+    assert axis_inertia({"type": "prismatic", "origin": [0, 0, 0], "axis": [0, 0, 1.0]}, bodies) == 5.0
+
+
+def test_a_model_without_textures_writes_no_png(tmp_path):
+    mujoco = pytest.importorskip("mujoco")
+    from harpor.physics.mjcf import build
+
+    glb, summary, _, _ = two_box_hinge(tmp_path)
+    report = build(glb, summary, tmp_path / "mjcf", "chest", decompose=hull_parts, textures=False)
+    assert not list((tmp_path / "mjcf" / "assets").glob("*.png")) and all(v["texture"] is None for v in report["visuals"])
+    assert mujoco.MjModel.from_xml_path(str(tmp_path / "mjcf" / "chest.xml")).ntex == 0  # scene.xml has the floor's
+
+
+FLEX_SCENE = """<mujoco model="pad scene">
+  <compiler angle="radian"/>
+  <option integrator="discrete" solver="CG"/>
+  <asset>
+    <mesh name="block" vertex="-.2 -.2 0  .2 -.2 0  .2 .2 0  -.2 .2 0  0 0 .1"/>
+  </asset>
+  <worldbody>
+    <geom name="floor" type="plane" size="0 0 0.05"/>
+    <body name="pad" pos="0 0 0.5">
+      <freejoint/>
+      <inertial pos="0 0 0" mass="1" diaginertia="0.1 0.1 0.1"/>
+      <geom type="mesh" mesh="block"/>
+      <body name="pad_seat">
+        <joint name="pad_seat_joint" type="hinge" axis="0 0 1" range="-1 1" limited="true"/>
+        <inertial pos="0 0 0" mass="1" diaginertia="0.1 0.1 0.1"/>
+        <geom type="mesh" mesh="block"/>
+        <flexcomp name="cushion" type="direct" dim="3" mass="0.5" radius="0.002" dof="full"
+                  point="0 0 0.1  0.2 0 0.1  0 0.2 0.1  0 0 0.3  0.2 0.2 0.3" element="0 1 2 3  1 2 3 4">
+          <contact selfcollide="none"/>
+          <edge damping="0.01"/>
+          <elasticity young="30000" poisson="0.3"/>
+          <pin id="0 1 2"/>
+        </flexcomp>
+      </body>
+    </body>
+    <body name="ball" pos="0.1 0.1 0.72">
+      <freejoint/>
+      <geom type="sphere" size="0.03"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+def test_check_probe_and_rest_contacts_leave_a_flex_out(tmp_path):
+    """A flex adds a body and 3 slide joints per free node, and its contacts have geom -1. Pinned nodes
+    name the seat, which keeps its hinge. A ball resting on the flex touches no other body of the model."""
+    mujoco = pytest.importorskip("mujoco")
+    from harpor.physics.mjcf import check, node_bodies, probe, rest_contacts
+
+    (tmp_path / "scene.xml").write_text(FLEX_SCENE)
+    m = mujoco.MjModel.from_xml_path(str(tmp_path / "scene.xml"))
+    nodes = {m.body("cushion_3").id, m.body("cushion_4").id}
+    assert node_bodies(m) == nodes and (m.nbody, m.njnt, m.flex_nodebodyid.size) == (6, 9, 0)
+    assert m.body("pad_seat").id in m.flex_vertbodyid
+    d = mujoco.MjData(m)
+    mujoco.mj_forward(m, d)
+    assert any(c.geom2 < 0 for c in d.contact[:d.ncon])
+    assert rest_contacts(m) == []
+    (p,) = probe(m)
+    assert (p["joint"], p["body"], p["q"]) == ("pad_seat_joint", "pad_seat", 1.0) and p["max_move_m"] > 0.1
+    c = check(tmp_path, "pad")
+    assert c["joints"] == [{"name": "pad_seat_joint", "type": "hinge", "body": "pad_seat", "range": [-1.0, 1.0]}]
+    assert [q["joint"] for q in c["probe"]] == ["pad_seat_joint"] and c["rest_contacts"] == []
+    assert sorted(c["bodies"]) == ["ball", "pad", "pad_seat"] and (c["nbody"], c["njnt"]) == (4, 3)
+    assert np.isclose(c["soft_mass"]["cushion"], 0.5 * 2 / 5)  # the 3 pinned nodes drop their share
+
+
+def soft_cushion_chest(tmp_path, frame="W", cushion=([0.5, 0.3, 0.06], [0, 0, 0.37], "lid"), extra=(), holes=0):
+    """A 0.6 x 0.4 x 0.3 m body box with a lid on top, hinged on the back top edge, and a soft foam cushion on the
+    lid, as the mesh nodes of parts.glb with their joints in frame (W by default). The numbers are those of S, so z
+    is up. The cushion (size, centre, parent) is textured and subdivided, so that its skin has vertices across
+    each face, and holes of its faces are left out. extra: more boxes (name, size, centre, parent node) without a
+    joint. summary.json has no links, so every link gets a hull inertial. Returns (glb, summary)."""
+    trimesh = pytest.importorskip("trimesh")
+    from PIL import Image
+
+    from harpor.parts.joints import SOFT_MATERIALS, write_joints
+
+    scene = trimesh.Scene()
+    for name, size, center, parent in (("body", [0.6, 0.4, 0.3], [0, 0, 0.15], None),
+                                       ("lid", [0.6, 0.4, 0.04], [0, 0, 0.32], None),
+                                       ("cushion", *cushion[:2], None), *extra):
+        box = trimesh.creation.box(size)
+        box.apply_translation(center)
+        visual = None
+        if name == "cushion":
+            box = box.subdivide().subdivide()
+            box = trimesh.Trimesh(box.vertices, box.faces[holes:], process=False)
+            uv = np.random.default_rng(0).random((len(box.vertices), 2))
+            img = Image.fromarray(np.random.default_rng(1).integers(0, 255, (16, 16, 3), dtype=np.uint8))
+            visual = trimesh.visual.TextureVisuals(uv=uv, material=trimesh.visual.material.PBRMaterial(baseColorTexture=img))
+        scene.add_geometry(trimesh.Trimesh(frames.w_to_gltf(box.vertices), box.faces, visual=visual, process=False),
+                           node_name=name, geom_name=name, parent_node_name=parent)
+    scene.export(tmp_path / "parts.glb")
+    doc, binary = read_glb(tmp_path / "parts.glb")
+    joints = {"lid": {"version": 1, "frame": frame, "parent": "body", "type": "revolute", "origin": [0.0, 0.2, 0.3],
+                      "axis": [-1.0, 0.0, 0.0], "lower": 0.0, "upper": 1.5},
+              "cushion": {"version": 1, "frame": frame, "parent": cushion[2], "type": "soft", "material": "foam",
+                          **SOFT_MATERIALS["foam"], "support": "parent"}}
+    write_glb(tmp_path / "parts.glb", write_joints(doc, joints), binary)
+    (tmp_path / "summary.json").write_text(json.dumps({"median": {"density_kg_m3": 500.0}}))
+    return tmp_path / "parts.glb", tmp_path / "summary.json"
+
+
+def test_a_soft_part_passes_align_urdf_and_usd_as_a_rigid_link(tmp_path, monkeypatch):
+    """Through align, URDF and USD a soft cushion is a link fixed to its parent. It rides on the lid's hinge,
+    adds no joint and collides like a fixed link. Only the reports and the notes say that it is soft. The MJCF
+    makes it a flex in the lid's body, which needs no exclude."""
+    pytest.importorskip("trimesh")
+    pytest.importorskip("mujoco")
+    pytest.importorskip("pxr")
+    from pxr import Usd
+
+    from harpor.parts.joints import SOFT_AS_RIGID, load
+    from harpor.physics import align, urdf, usd
+    from harpor.physics.mjcf import build as build_mjcf
+    from harpor.physics.mjcf import check as check_mjcf
+    from harpor.webapp.fake_steps import usd_links
+
+    glb, summary = soft_cushion_chest(tmp_path)
+    (tmp_path / "links").mkdir()
+    monkeypatch.setattr("sys.argv", ["align", "--glb", str(glb), "--out", str(tmp_path / "aligned.glb"), "--up-near=0,0,1",
+                                     "--links-out", str(tmp_path / "links")])
+    align.main()
+    joints, links = load(tmp_path / "aligned.glb")
+    soft = joints["cushion"]
+    assert (soft["type"], soft["frame"], soft["material"], soft["young"], soft["support"]) == ("soft", "S", "foam", 3e4, "parent")
+    assert links == ["body", "lid", "cushion"] and (tmp_path / "links" / "cushion.glb").is_file()
+
+    mj = build_mjcf(tmp_path / "aligned.glb", summary, tmp_path / "mjcf", "chest", decompose=hull_parts)
+    c = check_mjcf(tmp_path / "mjcf", "chest")
+    assert [j["name"] for j in c["joints"]] == ["chest_lid_joint"] and c["njnt"] == 2 and c["nbody"] == 3
+    assert [p["joint"] for p in c["probe"]] == ["chest_lid_joint"] and c["rest_contacts"] == []
+    assert [(j["child"], j["type"]) for j in mj["joints"]] == [("lid", "revolute"), ("cushion", "soft")]
+    assert "chest_cushion_joint" not in (tmp_path / "mjcf" / "chest.xml").read_text() and list(mj["soft"]) == ["cushion"]
+    assert mj["excluded_pairs"] == [["body", "lid"]] and mj["soft_excluded_pairs"] == [["body", "cushion"]]
+
+    report = urdf.build(tmp_path / "aligned.glb", summary, tmp_path / "mjcf", tmp_path / "urdf", "chest")
+    checked = urdf.check(tmp_path / "urdf")
+    assert checked["joint_types"] == {"lid_joint": "revolute", "cushion_joint": "fixed"} and checked["missing"] == []
+    assert report["soft_as_rigid"] == {"cushion": SOFT_AS_RIGID}
+    assert f"<!-- cushion: {SOFT_AS_RIGID} -->" in (tmp_path / "urdf" / "model.urdf").read_text()
+    assert report["excluded_pairs"] == [["body", "lid"], ["body", "cushion"]]
+
+    report = usd.build(tmp_path / "aligned.glb", summary, tmp_path / "mjcf", tmp_path / "usd", "chest")
+    checked = usd.check(tmp_path / "usd", "chest")
+    kinds = {j["name"]: j["type"] for j in checked["joints"]}
+    assert kinds == {"lid": "PhysicsRevoluteJoint", "cushion": "PhysicsFixedJoint"}
+    assert set(checked["links"]) == {"body", "lid", "cushion"} and report["soft_as_rigid"] == {"cushion": SOFT_AS_RIGID}
+    # The rigid cushion still leaves out the body, as the lid does.
+    filtered = sorted(sorted([a, t.rsplit("/", 1)[1]]) for a, rec in checked["links"].items() for t in rec["filtered"])
+    assert filtered == [["body", "cushion"], ["body", "lid"]]
+    assert report["filtered_pairs"] == [["body", "lid"], ["body", "cushion"]]
+    stage = Usd.Stage.Open(str(tmp_path / "usd" / "chest.usd"))
+    assert stage.GetPrimAtPath("/chest/links/cushion").GetCustomDataByKey("harpor:soft_as_rigid") is True
+    assert not stage.GetPrimAtPath("/chest/links/lid").HasCustomDataKey("harpor")
+    # The web app's fake USD writes the same layout.
+    assert {"name": "cushion", "type": "PhysicsFixedJoint", "body0": "lid", "body1": "cushion"} in usd_links("chest", mj)[1]["joints"]
+
+
+def test_urdf_comment_of_a_soft_link_stays_valid_xml():
+    import xml.etree.ElementTree as ET
+
+    from harpor.physics.urdf import urdf_xml
+
+    for name in ("a--b", "a---b", "a----b", "-a-"):
+        joint = {"name": f"{name}_joint", "type": "fixed", "parent": "base", "child": name, "xyz": [0.0, 0.0, 0.0]}
+        assert ET.fromstring(urdf_xml("x", [], [joint], False, {name})).find("joint").get("name") == f"{name}_joint"
+
+
 def test_articulated_usd_welds_the_knob_to_its_lid_and_filters_the_excluded_pairs(tmp_path):
     pytest.importorskip("trimesh")
     pytest.importorskip("pxr")
@@ -597,3 +798,232 @@ def test_articulated_usd_welds_the_knob_to_its_lid_and_filters_the_excluded_pair
     assert joints["world"]["body0"] == [] and np.allclose(joints["world"]["pos0"], [0, 0, mj["start_z"]])
     filtered = sorted(sorted([a, t.rsplit("/", 1)[1]]) for a, rec in c["links"].items() for t in rec["filtered"])
     assert filtered == sorted(map(sorted, mj["excluded_pairs"]))
+
+
+def soft_model(tmp_path, fixed_base=False, **kw):
+    """soft_cushion_chest in frame S, built with one hull per link: (report, compiled MjModel of scene.xml)."""
+    mujoco = pytest.importorskip("mujoco")
+    from harpor.physics.mjcf import build
+
+    glb, summary = soft_cushion_chest(tmp_path, "S", **kw)
+    report = build(glb, summary, tmp_path / "mjcf", "chest", decompose=hull_parts, fixed_base=fixed_base)
+    return report, mujoco.MjModel.from_xml_path(str(tmp_path / "mjcf" / "scene.xml"))
+
+
+def test_a_soft_link_is_a_flex_in_its_parent_body(tmp_path):
+    import hashlib
+
+    mujoco = pytest.importorskip("mujoco")
+    from harpor.physics.mjcf import build, check, node_bodies
+
+    report, m = soft_model(tmp_path)
+    soft = report["soft"]["cushion"]
+    assert (soft["file"], soft["material"], soft["young"], soft["poisson"], soft["density"]) == \
+        ("soft/cushion.npz", "foam", 3e4, 0.3, 120.0)
+    assert m.opt.integrator == mujoco.mjtIntegrator.mjINT_DISCRETE and m.opt.solver == mujoco.mjtSolver.mjSOL_CG
+    assert (m.nflex, m.nskin, m.flex_vertnum[0], m.flex_group[0]) == (1, 1, soft["nodes"], 3)
+    assert mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_FLEX, 0) == "chest_cushion_flex"
+    # The free nodes hang from the lid, and so do the pinned ones, which ride on its hinge.
+    nodes = node_bodies(m)
+    assert {int(m.body_parentid[b]) for b in nodes} == {m.body("chest_lid").id}
+    assert [int(b) for b in m.flex_vertbodyid if b not in nodes] == [m.body("chest_lid").id] * soft["pinned"]
+    # The cushion's inertial is its hull filled with foam, and the flex drops the pinned nodes' share.
+    rec = report["links"]["cushion"]
+    assert rec["source"] == "soft_table" and np.isclose(rec["inertial"]["mass"], 0.5 * 0.3 * 0.06 * 120)
+    assert soft["mass"] == rec["inertial"]["mass"]
+    c = check(tmp_path / "mjcf", "chest")
+    assert np.isclose(c["soft_mass"]["cushion"], soft["mass"] * (1 - soft["pinned"] / soft["nodes"]))
+    assert (c["nbody"], c["njnt"], sorted(c["bodies"])) == (3, 2, ["chest", "chest_lid"])
+    # No mesh asset or body for it, but its hulls and visual OBJ stay for URDF and USD.
+    assert m.nmesh == 4 and (tmp_path / "mjcf" / "assets" / "collision_cushion_0.obj").is_file() and rec["visuals"]
+    with np.load(tmp_path / "mjcf" / soft["file"]) as b:
+        assert str(b["asset_sha256"]) == hashlib.sha256((tmp_path / "parts.glb").read_bytes()).hexdigest()
+        assert (str(b["link"]), str(b["flex"]), b["visuals"].tolist()) == ("cushion", "chest_cushion_flex", rec["visuals"])
+        assert b["ranges"].tolist() == [[0, len(b["vertices"])]] and len(b["press"])
+        assert np.allclose(b["direction"], [0, 0, -1])
+    # A rigid model keeps its old head.
+    glb, summary, _, _ = two_box_hinge(tmp_path / "rigid")
+    build(glb, summary, tmp_path / "rigid" / "mjcf", "chest", decompose=hull_parts)
+    xml = (tmp_path / "rigid" / "mjcf" / "chest.xml").read_text()
+    assert "<option" not in xml and 'contype="3"' not in xml
+
+
+@pytest.mark.parametrize("fixed_base", [False, True])
+def test_a_soft_model_steps_with_a_free_root_and_a_fixed_base(tmp_path, fixed_base):
+    mujoco = pytest.importorskip("mujoco")
+
+    report, m = soft_model(tmp_path, fixed_base)
+    free_nodes = m.flex_vertnum[0] - report["soft"]["cushion"]["pinned"]
+    assert report["fixed_base"] is fixed_base and m.njnt == 1 + (not fixed_base) + 3 * free_nodes
+    d = mujoco.MjData(m)
+    mujoco.mj_forward(m, d)
+    root = m.body("chest").id
+    rest = d.flexvert_xpos - d.xpos[root]
+    mujoco.mj_step(m, d, 500)
+    assert np.isfinite(d.qpos).all() and np.isfinite(d.flexvert_xpos).all()
+    assert all(w.number == 0 for w in d.warning)
+    # The foam sags a little under its own weight on the shut lid, and a free chest drops onto the floor.
+    assert np.linalg.norm(d.flexvert_xpos - d.xpos[root] - rest, axis=1).max() < 0.002
+    assert abs(d.xpos[root][2] - report["start_z"]) < (0.01 if not fixed_base else 1e-12)
+
+
+def test_contact_bits_keep_the_flex_off_its_own_object(tmp_path):
+    """<exclude> does not reach a flex, so contact bits do: links collide with links (2), not with the flex
+    (0), and both with anything else (1). A ball dropped on the cushion rests on the flex."""
+    mujoco = pytest.importorskip("mujoco")
+
+    report, m = soft_model(tmp_path, fixed_base=True)
+
+    def touch(a, b):
+        return bool(a[0] & b[1] or b[0] & a[1])
+
+    hull, floor = m.geom("chest_collision_lid_0").id, m.geom("floor").id
+    link, flex = (m.geom_contype[hull], m.geom_conaffinity[hull]), (m.flex_contype[0], m.flex_conaffinity[0])
+    other = (m.geom_contype[floor], m.geom_conaffinity[floor])
+    assert (link, flex, other) == ((3, 2), (1, 0), (1, 1))
+    assert touch(link, link) and touch(link, other) and touch(flex, other)
+    assert not touch(link, flex) and not touch(flex, flex)
+    # The hex stands proud into the lid at rest, yet nothing touches.
+    d = mujoco.MjData(m)
+    mujoco.mj_forward(m, d)
+    assert d.ncon == 0
+    (tmp_path / "mjcf" / "ball.xml").write_text(
+        '<mujoco>\n  <include file="chest.xml"/>\n  <worldbody>\n    <body name="ball" pos="0 0 0.55">\n'
+        '      <freejoint/>\n      <geom type="sphere" size="0.03" density="300"/>\n    </body>\n  </worldbody>\n</mujoco>\n')
+    m = mujoco.MjModel.from_xml_path(str(tmp_path / "mjcf" / "ball.xml"))
+    d = mujoco.MjData(m)
+    mujoco.mj_step(m, d, 1000)
+    top = d.flexvert_xpos[:, 2].max()
+    assert any(min(c.geom) < 0 for c in d.contact[:d.ncon])  # the flex side of a contact has no geom
+    assert abs(d.xpos[m.body("ball").id][2] - 0.03 - top) < 0.01 and top > 0.4 + report["start_z"]
+
+
+def test_the_skin_follows_eq4_under_load(tmp_path):
+    """Skin vertices from mjv_updateScene are V_rest + W (P_t - P_rest) at rest, under a press on the press
+    nodes and with the lid opened, because each free node is a bone and the pinned ones one bone on the lid."""
+    trimesh = pytest.importorskip("trimesh")
+    mujoco = pytest.importorskip("mujoco")
+
+    report, m = soft_model(tmp_path, fixed_base=True)
+    b = dict(np.load(tmp_path / "mjcf" / "soft" / "cushion.npz"))
+    d = mujoco.MjData(m)
+    scene = mujoco.MjvScene(m, maxgeom=100)
+
+    def skin():
+        mujoco.mj_forward(m, d)
+        mujoco.mjv_updateScene(m, d, mujoco.MjvOption(), mujoco.MjvPerturb(), mujoco.MjvCamera(),
+                               mujoco.mjtCatBit.mjCAT_ALL, scene)
+        start = scene.skinvertadr[0]
+        return np.array(scene.skinvert).reshape(-1, 3)[start:start + scene.skinvertnum[0]]
+
+    W = b["weights"]
+    rows = b["tets"][b["tet_of_vertex"]]
+    rest_nodes = b["nodes"] + [0, 0, report["start_z"]]
+    rest = b["vertices"] + [0, 0, report["start_z"]]
+    assert np.abs(skin() - rest).max() < 1e-6
+    press = [m.body(f"chest_cushion_flex_{k}").id for k in b["press"]]
+    d.xfrc_applied[press, 2] = -4.0
+    mujoco.mj_step(m, d, 300)
+    P = d.flexvert_xpos
+    dent = np.linalg.norm(P - rest_nodes, axis=1).max()
+    assert dent > 0.002 and np.abs(skin() - (rest + ((P - rest_nodes)[rows] * W[..., None]).sum(1))).max() < 1e-6
+    d.qpos[m.jnt_qposadr[m.joint("chest_lid_joint").id]] = 1.0
+    mujoco.mj_step(m, d, 20)
+    assert np.abs(skin() - (rest + ((d.flexvert_xpos - rest_nodes)[rows] * W[..., None]).sum(1))).max() < 1e-6
+    # The skin keeps the texture as the OBJ visuals do: the stored glTF v is 1 - trimesh's v.
+    uv = trimesh.load(tmp_path / "parts.glb", force="scene").geometry["cushion"].visual.uv
+    assert np.allclose(m.skin_texcoord, np.c_[uv[:, 0], 1 - uv[:, 1]], atol=1e-6)
+
+
+def test_check_binding_catches_a_bad_file(tmp_path):
+    from harpor.physics.mjcf import check_binding
+
+    _, m = soft_model(tmp_path, fixed_base=True)
+    npz, glb = tmp_path / "mjcf" / "soft" / "cushion.npz", tmp_path / "parts.glb"
+    assert check_binding(m, npz, glb) == []
+    good = dict(np.load(npz))
+    lopsided = good["weights"].copy()
+    lopsided[0] = [4.0, -3.0, 0.0, 0.0]
+    for change, why in (({"flex": "chest_lid_flex"}, "the model has no flex chest_lid_flex"),
+                        ({"nodes": good["nodes"][:-1]}, "nodes against"),
+                        ({"tets": good["tets"] + len(good["nodes"])}, "an index is out of range"),
+                        ({"weights": good["weights"][:-1]}, "weights of shape"),
+                        ({"nodes": good["nodes"] + [0, 0, 1e-5]}, "the nodes are not where the flex is at rest"),
+                        ({"start_z": good["start_z"] + 1e-3}, "the nodes are not where the flex is at rest"),
+                        ({"weights": good["weights"] * 1.01}, "a weight row does not sum to 1"),
+                        ({"weights": lopsided}, "a weight is above 3"),
+                        ({"vertices": good["vertices"] + 1e-4}, "the weights do not rebuild the vertices"),
+                        ({"link": "lid"}, "the vertices are not the GLB's")):
+        np.savez(tmp_path / "bad.npz", **{**good, **change})
+        assert any(why in p for p in check_binding(m, tmp_path / "bad.npz", glb)), why
+
+
+def test_a_soft_part_at_the_bottom_starts_above_the_floor(tmp_path):
+    # A foot pad under the body: its hex reaches below the hulls, so it sets the start height.
+    mujoco = pytest.importorskip("mujoco")
+
+    report, m = soft_model(tmp_path, cushion=([0.5, 0.3, 0.03], [0, 0, -0.015], "body"))
+    with np.load(tmp_path / "mjcf" / "soft" / "cushion.npz") as b:
+        low = b["nodes"][:, 2].min()
+    assert low < -0.03 and np.isclose(report["lowest_collision_z"], low) and np.isclose(report["start_z"], 0.005 - low)
+    d = mujoco.MjData(m)
+    mujoco.mj_forward(m, d)
+    assert np.isclose(d.flexvert_xpos[:, 2].min(), 0.005, atol=1e-4)
+
+
+def test_a_link_held_by_a_soft_link_is_welded_to_its_parent(tmp_path):
+    # A button parented to the cushion's node without a joint cannot hang from a flex: it rides on the lid.
+    report, m = soft_model(tmp_path, extra=[("button", [0.04, 0.04, 0.02], [0, 0, 0.41], "cushion")])
+    assert report["welded"] == {"button": "lid"} and report["loose"] == ["button"]
+    assert "button is held by the soft link cushion, so it is welded to its parent" in report["warnings"]
+    assert m.body_parentid[m.body("chest_button").id] == m.body("chest_lid").id
+
+
+def test_a_link_named_as_a_flex_node_or_with_a_quote_still_compiles(tmp_path):
+    # MuJoCo names the cushion's free node 7 chest_cushion_flex_7, the body of a link cushion_flex_7, so the flex
+    # takes a number. A quote in a link name goes into its collision OBJ's file attribute.
+    from harpor.physics.mjcf import check, check_binding, flex_of
+
+    report, m = soft_model(tmp_path, extra=[("cushion_flex_7", [0.04, 0.04, 0.04], [0.35, 0, 0.15], None),
+                                            ('knob"top', [0.04, 0.04, 0.04], [-0.35, 0, 0.15], None)])
+    assert report["links"]["cushion"]["flex"] == "chest_cushion_flex1"
+    with np.load(tmp_path / "mjcf" / "soft" / "cushion.npz") as b:
+        assert 7 not in b["pinned"] and str(b["flex"]) == "chest_cushion_flex1"
+    assert m.body_geomnum[m.body("chest_cushion_flex_7").id] and m.body("chest_cushion_flex1_7").id
+    assert m.body_geomnum[m.body('chest_knob"top').id]
+    assert list(check(tmp_path / "mjcf", "chest")["soft_mass"]) == ["cushion"]
+    assert check_binding(m, tmp_path / "mjcf" / "soft" / "cushion.npz", tmp_path / "parts.glb") == []
+    assert flex_of("o_a", ["o", "o_a_flex_1", "o_a_flex1_3", "o_a_flex2"]) == "o_a_flex2"
+
+
+def test_an_open_soft_link_gets_a_warning(tmp_path):
+    report, _ = soft_model(tmp_path, holes=4)
+    assert "cushion is not closed, so its soft mesh is hollow" in report["warnings"] and report["soft"]
+
+
+def test_a_soft_link_without_a_usable_mesh_stays_rigid(tmp_path):
+    # A cushion floating 20 cm above the lid has no node near it: it is a fixed link, as before.
+    report, m = soft_model(tmp_path, cushion=([0.5, 0.3, 0.06], [0, 0, 0.57], "lid"))
+    assert report["soft"] == {} and report["soft_rigid"]["cushion"]["code"] == "soft_no_support"
+    assert any(w.startswith("cushion stays rigid: no node lies within a pitch") for w in report["warnings"])
+    assert m.nflex == 0 and m.body_parentid[m.body("chest_cushion").id] == m.body("chest_lid").id
+    assert "<option" not in (tmp_path / "mjcf" / "chest.xml").read_text() and ["body", "cushion"] in report["excluded_pairs"]
+    assert report["links"]["cushion"]["source"] == "soft_table"
+
+
+def test_mjcf_command_line_checks_the_binding(tmp_path, monkeypatch):
+    pytest.importorskip("mujoco")
+    from harpor.physics import mjcf
+
+    glb, summary = soft_cushion_chest(tmp_path, "S")
+    build = mjcf.build
+    monkeypatch.setattr(mjcf, "build", lambda *a, **k: build(*a, decompose=hull_parts, **k))
+    argv = ["mjcf", "--glb", str(glb), "--summary", str(summary), "--out", str(tmp_path / "out"), "--name", "chest"]
+    monkeypatch.setattr("sys.argv", argv)
+    mjcf.main()
+    report = json.loads((tmp_path / "out" / "mjcf.json").read_text())
+    assert list(report["compiled"]["soft_mass"]) == ["cushion"] and not any("binding" in w for w in report["warnings"])
+    monkeypatch.setattr(mjcf, "check_binding", lambda m, npz, glb: ["a weight is above 3"])
+    mjcf.main()
+    report = json.loads((tmp_path / "out" / "mjcf.json").read_text())
+    assert "the binding of cushion: a weight is above 3" in report["warnings"] and "compiled" in report

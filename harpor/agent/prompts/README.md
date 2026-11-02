@@ -19,3 +19,20 @@ the paper's. The agent gets it when an articulated job's parts stage has split t
 the moving parts their joints with `set_joint`, checks them with `review_articulation` and hands
 off within 900 seconds. Since it is not copied from the paper, `CHANGES["articulation"]` is empty:
 there is no original text to record edits against, and the file is edited directly.
+
+`repair_prompt.md` and `replan_prompt.md` are our own too. When `input/parts.json` has a found
+requirement, the articulation session runs in rounds (`controller.run_rounds`, after PhysAg3D's
+repair loop): the build round gets the articulation prompt, and the host's check of each build
+(`harpor.agent.validate`) decides the next round, a repair or a planning round (replan). Each round
+is a new agent with no memory of the others, so `round_prompt(kind, budget_s, feedback, best,
+evidence)` gives it the whole task:
+
+- repair: the articulation prompt with its budget sentence (`BUDGET`) set to the round's budget,
+  then `repair_prompt.md`; only the repair right after a planning round gets `PLAN`, the sentence
+  that tells it to follow `/work/plan.md`, since that plan came from the same check
+- replan: `replan_prompt.md` alone; its agent writes `/work/plan.md`, and every helper is refused
+
+Both templates say that `candidate.blend` holds the last round's work, name the check's report under
+`evidence/`, and say that the requirements cannot change and that a smaller range does not meet a
+span target. They take the check's feedback, the best candidate so far, the round's budget and
+(repair) the plan sentence through `str.format`, so their own text has no braces. `FILES` and `load` serve only the two modes.

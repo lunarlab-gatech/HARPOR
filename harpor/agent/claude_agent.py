@@ -35,8 +35,8 @@ Log: ROOT/session/claude.jsonl, one JSON object per line (start, request, retry,
 tool_result, end), appended and flushed; stdout gets a short trace. The cost estimate prices every
 attempt that usage.iterations lists (a declined attempt and its fallback) at the prices of the model
 that ran it; attempts that failed and were sent again are billed too but not counted ("reissued" in
-the end line). Exit codes: 0 the model ended its turn or the finish helper ran, 2 refusal, 3 API
-error, 130 SIGINT or SIGTERM, 1 anything else (end reason "error", then the traceback). --shell host
+the end line). Exit codes: 0 the model ended its turn or the finish helper ran in this round
+(tools.round_events), 2 refusal, 3 API error, 130 SIGINT or SIGTERM, 1 anything else (end reason "error", then the traceback). --shell host
 runs bash on the host in ROOT/work instead of Apptainer, for tests and local runs only.
 """
 
@@ -168,14 +168,16 @@ def read_key(key_file):
 
 class Log:
     """ROOT/session/claude.jsonl: one JSON object per line, appended and flushed. Every line passes
-    through redact first."""
+    through redact first. The lines are ASCII: JSON escapes every other character, so the C1 controls,
+    bidi and zero-width characters of the model's text and of command output stay escaped for cat and
+    tail -f, and json.loads gives the same strings back."""
 
     def __init__(self, path, secret=None):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.f, self.secret = open(path, "a", encoding="utf-8"), secret
 
     def write(self, kind, **fields):
-        line = json.dumps({"t": round(time.time(), 3), "type": kind, **fields}, ensure_ascii=False, default=str)
+        line = json.dumps({"t": round(time.time(), 3), "type": kind, **fields}, default=str)
         self.f.write(redact(line, self.secret) + "\n")  # one write, so a signal cannot split a line
         self.f.flush()
 
@@ -819,7 +821,9 @@ def log_blocks(content):
 
 
 def _short(text, n=200):
-    text = " ".join(str(text).split())
+    """text for stdout (claude_stdout.log) as one printable line (tools.printable): the model and its commands
+    wrote it."""
+    text = tools.printable(text)
     return text if len(text) <= n else text[:n] + "..."
 
 
@@ -958,7 +962,7 @@ def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", model=MO
                               seconds=round(time.time() - t, 3), is_error=is_error, output=logged[:LOG_OUTPUT_CHARS])
                     say(f"  -> {b.name}{' error' if is_error else ''}: {_short(logged)}")
                 messages.append({"role": "user", "content": results})
-                if any(e.get("event") == "finish" for e in tools.read_events(root / "control")):
+                if any(e.get("event") == "finish" for e in tools.round_events(root / "control")):
                     return end("finished", EXIT["ended"])
         except anthropic.APIError as e:
             label = next(text for cls, text in API_ERRORS if isinstance(e, cls))

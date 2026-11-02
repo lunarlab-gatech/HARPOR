@@ -13,7 +13,8 @@ Runs in envs/sam3d from the repo root; J is the job folder:
   vote     harpor.parts.vote: run/parts/faces.npz and run/parts/vote.json.
   split    blender/split_parts.py in the agent's SIF: run/parts.glb and run/parts/split_report.json, log
            run/parts/split.log, at most 600 s. The container sees only J/run and the Blender scripts
-           (as controller.blender_command, which sees only the session's work folder). --blender CMD
+           (as controller.blender_command sees only the session's work folder and two folders of
+           its control/). --blender CMD
            (split like a shell) replaces the container and Blender, as GATOR_BLENDER does for the agent's
            helpers; the tests pass the fake Blender of harpor.agent.fake_agent.
   finish   run/parts.json, the stage's done marker, written last. parts.glb must pass controller.check_glb,
@@ -22,11 +23,23 @@ Runs in envs/sam3d from the repo root; J is the job folder:
            in W, visibility per view, views, cap_faces; parts that were not found or were dropped come
            last, with no name (status not_found, dropped_small or unconfirmed, and why, from vote.json).
            Per pair of adjacent parts the seam (geometry.seams): edges, length, center, up to 4 fitted
-           lines (hinge-axis candidates) and the normals of both sides.
+           lines (hinge-axis candidates) and the normals of both sides. The requirements, see below.
 
 A part's parent is the part that its proposal parent names. When that name was found more than once
 (two drawers), the one with the longest seam to the part is taken; when it was not found, its own
 parent, up to the base.
+
+The requirements of parts.json are the proposal's (harpor.parts.propose; a proposal older than them
+gets propose.default_requirements) in the fields of paper Eq. 2: part and parent are U, action a,
+observe O, test psi and scope D. A proposal requirement makes max(count, found) records, r1 on: one per
+found link of its part, in the vote's order, then status not_found with part None for each one missing.
+The first count are required; a found link beyond the count is not, so that an agent that joins a
+fragment to its part does not miss a required link. A cluster that was not found makes no record. Each
+record holds id, part, prompt, parent (a link; the proposal's parent name when not found), kind (joint
+or soft), joint (unknown takes either moving joint), material (soft), text, action, observe, test (empty
+without a span target), scope, source, status (found or not_found) and required. A revolute part's
+range becomes its test min_span, in radians. A prismatic part's goes only into text, since a length
+depends on the scale, which is an estimate without LiDAR.
 """
 
 import argparse
@@ -41,6 +54,7 @@ import numpy as np
 from harpor.fileio import write_json
 
 SPLIT_TIMEOUT_S = 600.0
+MIN_RESPONSE = 0.001  # of D: a soft part's smallest dent, harpor.physics.sim_check.RESPONSE
 
 
 def _run_dir(job):
@@ -156,6 +170,45 @@ def parents(clusters, proposal, names, seams):
     return out
 
 
+def eq2_fields(req):
+    """kind, joint, material (soft), text, action, observe, test and scope of a proposal requirement."""
+    if req["joint"] == "soft":
+        return {"kind": "soft", "joint": "soft", "material": req["material"], "text": req["text"],
+                "action": {"type": "press", "toward": "support"},
+                "observe": {"type": "node_and_visible_residual", "after": "rigid alignment"},
+                "test": {"min_response_diag": MIN_RESPONSE, "recovery": True},
+                "scope": {"start": "mesh pose", "base": "fixed", "support": "parent", "gravity": False}}
+    span, text, test = req.get("range"), req["text"], {}
+    if span and req["joint"] == "revolute":
+        test["min_span"] = round(float(np.radians(span)), 3)
+    elif span and req["joint"] == "prismatic":
+        text += f" (full travel about {span:g} cm)"
+    return {"kind": "joint", "joint": req["joint"], "text": text,
+            "action": {"type": "sweep", "directions": ["lower", "upper"]},
+            "observe": {"type": "joint_range", "relative_to": "parent"}, "test": test,
+            "scope": {"start": "mesh pose, every joint at 0", "base": "fixed", "gravity": False}}
+
+
+def requirements(proposal, clusters, names, parent):
+    """The requirements of parts.json (see the module docstring). clusters: the found clusters by name;
+    names: the found parts, the base first; parent: parents()."""
+    from harpor.parts import propose as P
+
+    by_prompt = {p["name"]: p for p in proposal["parts"]}
+    reqs = proposal.get("requirements")
+    out = []
+    for r in P.default_requirements(proposal["parts"]) if reqs is None else reqs:
+        links = [n for n in names[1:] if clusters[n]["prompt"] == r["part"]]
+        count = by_prompt.get(r["part"], {}).get("count", 1)
+        for k in range(max(count, len(links))):
+            link = links[k] if k < len(links) else None
+            out.append({"id": f"r{len(out) + 1}", "part": link, "prompt": r["part"],
+                        "parent": parent[link] if link else by_prompt.get(r["part"], {}).get("parent"),
+                        **eq2_fields(r), "source": r["source"], "status": "found" if link else "not_found",
+                        "required": k < count})
+    return out
+
+
 def finish(job):
     """Write run/parts.json (see the module docstring). Returns it."""
     from harpor.agent import controller, tools
@@ -209,9 +262,10 @@ def finish(job):
             parts.append({"name": None, "role": "part", "prompt": c["prompt"], "parent": p.get("parent"),
                           "joint_guess": p.get("joint", "unknown"), "axis_hint": p.get("axis_hint"), "faces": 0,
                           "status": c["status"], "why": c.get("why")})
+    reqs = requirements(proposal, clusters, names, parent)
     doc = {"version": 1, "frame": "W", "glb": "parts.glb", "glb_sha256": tools.sha256(glb), "noun": proposal.get("noun"),
            "base": names[0], "source": proposal.get("source"), "agent": proposal.get("agent"),
-           "model": proposal.get("model"), "parts": parts, "seams": seams,
+           "model": proposal.get("model"), "parts": parts, "requirements": reqs, "seams": seams,
            "split": {k: split_rec.get(k) for k in ("mapping", "unmatched", "welded_vertices", "custom_normals_cleared")},
            "warnings": [*proposal.get("warnings", []), *vote_rec.get("warnings", []), *split_rec.get("warnings", [])]}
     write_json(R / "parts.json", doc)
@@ -219,6 +273,10 @@ def finish(job):
     for p in parts:
         if p["status"] == "found" and p["parent"]:
             print(f"  {p['name']} > {p['parent']} : {p['joint_guess']}, confidence {p['confidence']:.2f}")
+    for r in reqs:
+        print(f"  {r['id']} {r['part'] or r['prompt']!r}: {r['kind']} {r['joint']}, {r['status']}"
+              + ("" if r["required"] else ", not required")
+              + (f", min span {r['test']['min_span']} rad" if "min_span" in r["test"] else ""))
     for s in seams:
         top = s["lines"][0] if s["lines"] else None
         print(f"  seam {s['parts'][0]}|{s['parts'][1]}: {s['edges']} edges, {s['length']:.3f} long, {len(s['lines'])} lines"

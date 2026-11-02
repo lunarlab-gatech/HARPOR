@@ -377,12 +377,16 @@ th { padding-block: 6px; font-size: var(--t-s); font-weight: 500; color: var(--m
     margin-top: 0; }
   #resultsbody.onefig > #spin { grid-column: 2; grid-row: 1; }
   #resultsbody.onefig > #facts2 { grid-column: 2; grid-row: 2; margin-top: 0; }
-  #resultsbody.onefig .spinfig { margin-top: 0; }
+  #resultsbody.onefig .spinfig { margin: 0 0 var(--s4); }
   #resultsbody.onefig .spinfig video { width: min(100%, 260px); }
 }
 .viewers figure { margin: 0; min-width: 0; }
 .viewers figcaption, .spinfig figcaption { padding: 0 0 6px; font-size: var(--t-ui); font-weight: 600; }
-/* The 360 video (app.js renderSpin): square, as tall as a viewer, with the viewers' hairline. */
+/* The 360 video (app.js renderSpin): square, as tall as a viewer, with the viewers' hairline. The soft-part video sits
+   beside it, or below it on a narrow panel. A flex item's margins do not collapse, so a figure keeps only its top
+   margin, and the gap above the viewers stays one margin. */
+#spin { display: flex; flex-wrap: wrap; column-gap: var(--s5); }
+#spin > .spinfig { flex: 0 1 clamp(260px, 45vh, 420px); min-width: 0; margin-bottom: 0; }
 .spinfig { margin: var(--s4) 0; }
 .spinfig video { display: block; width: min(100%, clamp(260px, 45vh, 420px)); height: auto; aspect-ratio: 1;
   background: var(--viewer-bg); border: 1px solid var(--line); border-radius: var(--r); }

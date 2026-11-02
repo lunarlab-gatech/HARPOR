@@ -4,6 +4,7 @@ The scripted sessions run in parallel in one fixture, because each fake Blender 
 """
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import shlex
 import shutil
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -28,6 +30,7 @@ from harpor import frames as F
 from harpor.agent import controller as C
 from harpor.agent import prompts as PR
 from harpor.agent import tools as T
+from harpor.agent import validate as V
 from harpor.agent.bin import gator_tool
 from harpor.agent.fake_agent import write_glb
 from harpor.agent.server import ToolServer
@@ -40,6 +43,10 @@ LONG = 20.0
 # The fake original's edge. Every GLB a session below delivers keeps its size (C.SIZE_RATIO: 0.725 to 2.9).
 ORIGINAL_SIZE = 1.45
 PROMPT = "Prompt 1 text, byte for byte: é\n"
+# Agent text with OSC 52 (a clipboard write), OSC 0 (a window title), CSI, a bidi override and line breaks, and the
+# one line that T.printable keeps of it. The webapp tests use them too.
+DIRTY = "Café\x1b]52;c;aGk=\x07 fixed\x1b]0;title\x07 the\x1b[2J lid‮ gap\nsecond line\r\n\tthird"
+CLEAN = "Café]52;c;aGk= fixed]0;title the[2J lid gap second line third"
 
 
 def edit(size, kind="good", seconds=0.0):
@@ -70,6 +77,13 @@ PARTS = {"version": 1, "frame": "W", "glb": "parts.glb", "base": "body", "seams"
                    {"name": "lid", "parent": "body", "joint_guess": "revolute", "status": "found"}]}
 HINGE = {"origin": [0.0, -0.25, 0.5], "axis": [-1.0, 0.0, 0.0], "lower": 0.0, "upper": 1.5}
 INSIDE = {"origin": [0.0, 0.125, 0.0], "axis": [1.0, 0.0, 0.0], "lower": 0.0, "upper": 1.5}
+SOFT = {"material": "gel", "young": 1e5, "poisson": 0.3, "density": 900.0, "support": "parent"}
+# A requirement of parts.json (harpor.parts.stage) that HINGE meets.
+LID = {"id": "r1", "part": "lid", "prompt": "lid", "parent": "body", "kind": "joint", "joint": "revolute",
+       "text": "opens upward", "action": {"type": "sweep", "directions": ["lower", "upper"]},
+       "observe": {"type": "joint_range", "relative_to": "parent"}, "test": {"min_span": 1.5},
+       "scope": {"start": "mesh pose, every joint at 0", "base": "fixed", "gravity": False}, "source": "vlm",
+       "status": "found", "required": True}
 
 
 def lid_joint(hinge, kind="revolute"):
@@ -123,6 +137,10 @@ SESSIONS = {
                                          {"do": "sleep", "seconds": 5}]),
     "stop_during_export": ("refinement", LONG, [edit(1.0, seconds=3.0), {"do": "tool_nowait", "args": ["export_glb"]},
                                                 CRASH]),
+    "dirty_text": ("refinement", LONG, [edit(1.2), REVIEW, checkpoint(DIRTY),
+                                        tool("finish", "--receipt", "{receipt}", "--verdict", "complete", "--reason", DIRTY,
+                                             "--limitation", DIRTY, "--limitation", "plain text, é and ü")]),
+    "dirty_checkpoint": ("refinement", LONG, [edit(1.3), REVIEW, checkpoint(DIRTY), CRASH]),
     "articulation_finish": ("articulation", LONG, [{"do": "read_prompt"}, edit(PARTS_SIZE, "parts"), EXPORT,
                                                    set_joint("lid", "body", "revolute", HINGE),
                                                    tool("review_articulation"), articulated("articulated")]),
@@ -391,6 +409,33 @@ def test_finish_glb_changed_after_finish_rejected(runs):
     assert r["source"] == "fallback_original"
 
 
+def test_printable_keeps_one_line_of_printable_characters():
+    for text, clean in [("plain text", "plain text"), ("Café crème, naïve, Ærø, 日本", "Café crème, naïve, Ærø, 日本"),
+                        ("é", "é"),  # a combining accent
+                        ("a\tb\nc\r\nd e\x85f\x0bg", "a b c d e f g"),
+                        ("\x1b]52;c;aGk=\x07x", "]52;c;aGk=x"), ("\x1b]0;title\x1b\\y", "]0;title\\y"),  # OSC 52, OSC 0
+                        ("\x1b[2J\x1b[31mred\x1b[0m", "[2J[31mred[0m"), ("\x9b31m", "31m"),  # CSI, and the C1 CSI
+                        ("‮evil‬ ​", "evil"),  # a bidi override and a zero-width space (Cf)
+                        ("a\x7fb\x00c", "abc"), ("x\ud800͸y", "xy"),  # a surrogate, unassigned, private use
+                        ("  spaced \x1b  out  ", "spaced out"), (DIRTY, CLEAN)]:
+        assert T.printable(text) == clean, repr(text)
+
+
+def test_agent_text_is_stored_as_one_printable_line(runs):
+    """OSC 52, OSC 0, CSI, a bidi override and line breaks in finish's reason and limitations and in checkpoint's
+    defect, sent through the tool server as any agent sends them, are stored as one line without them (T.printable):
+    in finish.json, the checkpoint's record, the events and result.json. Plain text and accented letters stay."""
+    root, r = runs["dirty_text"]
+    events = {e["event"]: e for e in T.read_events(root / "control")}
+    fin = json.loads((root / "work" / "finish.json").read_text())
+    assert fin["reason"] == events["finish"]["reason"] == r["reason"] == CLEAN
+    assert fin["limitations"] == events["finish"]["limitations"] == r["limitations"] == [CLEAN, "plain text, é and ü"]
+    meta = json.loads((root / "work" / events["checkpoint"]["glb"]).with_suffix(".json").read_text())
+    assert meta["defect"] == events["checkpoint"]["defect"] == CLEAN and f"defect: {CLEAN}\n" in agent_log(root)
+    root, r = runs["dirty_checkpoint"]
+    assert (r["source"], r["reason"]) == ("checkpoint", CLEAN)
+
+
 def test_budget_file_is_replaced_atomically(tmp_path):
     T.write_budget(tmp_path, 1000.0, 600.0)
     inode = (tmp_path / "run_budget.json").stat().st_ino
@@ -441,6 +486,8 @@ def test_manifest_and_layout(tmp_path):
     assert (root / "session" / "codex_home" / "config.toml").exists()
     assert "finish --receipt ID" in (work / "AGENTS.md").read_text()
     assert (root / "control" / "events.jsonl").exists() and not (work / ".gator").exists()
+    for d in ("exports", "staging"):  # the helpers' Blender container binds them, so they must exist
+        assert (root / "control" / d).is_dir()
     assert json.loads((root / "control" / "manifest.json").read_text()) == json.loads((work / "input" / "manifest.json").read_text())
     m = json.loads((work / "input" / "manifest.json").read_text())
     assert m["mode"] == "refinement" and m["units"] == "meters"
@@ -687,8 +734,16 @@ def test_apptainer_command_keeps_control_out(tmp_path):
     with pytest.raises(ValueError, match="cannot bind"):
         C.apptainer_command(tmp_path / "a,b", "a.sif", "k", "/tmp/x")
     blender = C.blender_command(root, "/sif/agent.sif")
-    work = (root / "work").resolve()
+    work, control = (root / "work").resolve(), (root / "control").resolve()
     assert blender[-2:] == ["/sif/agent.sif", "blender"] and f"{work}:{work}" in blender and f"{work}:/work" in blender
+    # Of control/, the helpers' Blender writes only staging/, where export_glb.py writes, and sees exports/, the
+    # host's copies, read-only, and the tool server hands the helpers this command as GATOR_BLENDER.
+    assert [b for b in (blender[i + 1] for i, a in enumerate(blender) if a == "--bind") if str(control) in b] == \
+        [f"{control}/staging:{control}/staging", f"{control}/exports:{control}/exports:ro"]
+    with tempfile.TemporaryDirectory(prefix="gator-") as d:
+        server = ToolServer(os.path.join(d, "tools.sock"), root / "work", root / "control", blender)
+        server.stop()
+    assert shlex.split(server.env["GATOR_BLENDER"]) == blender
 
 
 def test_note_5_command_is_the_controllers(tmp_path):
@@ -732,7 +787,7 @@ def test_tool_server_rejects_bad_requests(tmp_path):
         try:
             assert gator_tool.call(["rm", "-rf", "/"], path) == ("unknown command 'rm'; use one of export_glb, "
                                                                  "review, checkpoint, finish, set_joint, "
-                                                                 "review_articulation\n", 2)
+                                                                 "review_articulation, simulate\n", 2)
             assert gator_tool.call([], path)[1] == 2
             with socket.socket(socket.AF_UNIX) as s:
                 s.connect(path)
@@ -764,6 +819,195 @@ def test_failed_exports_cannot_stack_and_exclusion_is_capped():
     assert C.deadline(0.0, 600.0, done, now=0.0) == (600.0 + T.MAX_EXCLUDED_S, T.MAX_EXCLUDED_S)
 
 
+def test_simulate_time_is_off_the_clock_like_export_time(tmp_path):
+    """simulate's check counts like an export: each run up to 270 s, a running one pauses the clock, and exports and
+    simulations share the 600 s cap. The agent's view counts them alike."""
+    ev = [{"event": "export_started", "export": 1, "time": 10.0},
+          {"event": "export_done", "export": 1, "time": 12.0, "seconds": 2.0},
+          {"event": "simulate_started", "simulate": 1, "time": 12.0},
+          {"event": "simulate_done", "simulate": 1, "time": 512.0, "seconds": 500.0},
+          {"event": "simulate_started", "simulate": 2, "time": 600.0}]
+    assert T.OFF_CLOCK == {"export": T.EXPORT_TIMEOUT_S, "simulate": 270.0} and T.SIMULATE_TIMEOUT_S == 270.0
+    assert C.deadline(0.0, 900.0, ev, now=610.0) == (900.0 + 282.0, 282.0)
+    assert C.deadline(0.0, 900.0, ev, now=2000.0) == (900.0 + 542.0, 542.0)
+    ev += [{"event": "simulate_done", "simulate": 2, "seconds": 270.0},
+           {"event": "export_started", "export": 2, "time": 900.0}]
+    assert C.deadline(0.0, 900.0, ev, now=901.0) == (900.0 + 543.0, 543.0)  # the newest run is the export
+    assert C.deadline(0.0, 900.0, ev, now=1000.0) == (900.0 + T.MAX_EXCLUDED_S, T.MAX_EXCLUDED_S)
+    work = prepare(tmp_path, "articulation")
+    control = work.parent / "control"
+    T.start_budget(work, control, 0.0, 900.0)
+    T.log_event(control, "export_done", export=1, seconds=2.0, ok=True)
+    T.log_event(control, "simulate_done", simulate=1, seconds=30.5, ok=True)
+    assert T._extend_budget(work, control) == 932.5
+    view = json.loads((work / "run_budget.json").read_text())
+    assert (view["excluded_s"], view["exports"], view["simulations"], view["simulate_timeout_s"]) == (
+        32.5, [{"export": 1, "seconds": 2.0}], [{"simulate": 1, "seconds": 30.5}], 270.0)
+
+
+def test_simulate_runs_off_the_clock_in_a_session(tmp_path, monkeypatch):
+    """The agent sets the lid's hinge and runs simulate, whose MuJoCo here starts 6 s late, which its 5 s budget
+    would not survive on the clock; then it reviews and finishes. The report goes to work/simulate/, the output
+    keeps to 20 lines with the time left, and the export and the check both count off the clock. The found
+    requirement makes the session one of rounds: its round passes, so it is the only one, and the check at its
+    end reuses simulate's report of the same bytes and pins the reference that simulate left open."""
+    for module in ("mujoco", "coacd", "rtree"):
+        pytest.importorskip(module)
+    work = prepare(tmp_path, "articulation")
+    control = work.parent / "control"
+    (control / "parts.json").write_text(json.dumps({**PARTS, "requirements": [LID]}))
+    monkeypatch.setenv("GATOR_MUJOCO", shlex.join(["sh", "-c", 'sleep 6; exec "$0" "$@"', sys.executable]))
+    script = [edit(PARTS_SIZE, "parts"), set_joint("lid", "body", "revolute", HINGE), tool("simulate"),
+              tool("review_articulation"), articulated("articulated")]
+    (tmp_path / "script.json").write_text(json.dumps(script))
+    with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
+        env = {**os.environ, "PYTHONPATH": str(REPO), "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
+        cmd = [sys.executable, "-m", "harpor.agent.fake_agent", str(tmp_path / "script.json")]
+        r = C.run_session(work.parent, cmd, env, blender=FAKE_BLENDER, sock_dir=sock_dir, budget_s=5.0, **FAST)
+    assert (r["exit"], r["source"], r["verdict"]) == ("exited", "finish", "articulated")
+    assert r["glb"] == "control/candidates/v01/candidate.glb" and r["candidate"]["from"] == "work/exports/001.glb"
+    events = T.read_events(control)
+    assert [e["event"] for e in events] == ["round_start", "joint", "export_started", "export_done", "simulate_started",
+                                            "simulate_done", "review_articulation", "finish"]
+    export, done = events[3], events[5]
+    assert done["ok"] and done["seconds"] > 6.0 and (done["outcome"], done["scope"]) == ("pass", "none")
+    t = r["timings"]
+    assert t["excluded_s"] == pytest.approx(export["seconds"] + done["seconds"]) and t["wall_s"] > t["budget_s"]
+    view = json.loads((work / "run_budget.json").read_text())
+    assert view["simulations"] == [{"simulate": 1, "seconds": done["seconds"]}]
+    assert view["excluded_s"] == t["excluded_s"]
+    sha = T.sha256(work / "exports" / "001.glb")
+    assert done["sha256"] == sha and done["glb"] == "exports/001.glb"
+    copy = json.loads((work / "simulate" / f"s001-{sha[:12]}" / "report.json").read_text())
+    kept = json.loads((control / "validate" / sha[:16] / "report.json").read_text())
+    assert copy == {**kept, "cached": False} and copy["records"][0]["outcome"] == "pass"
+    assert copy["clearance"]["lid"]["reference"] == [0.0, 1.5]  # simulate took the joint's limits, pinning nothing
+    assert json.loads((control / "ranges.json").read_text()) == {"lid|revolute": [0.0, 1.5]}  # the round's end did
+    evidence = json.loads((work / "evidence" / "round_01.json").read_text())
+    assert evidence["cached"] is True and evidence["sha256"] == sha and evidence["outcome"] == "pass"
+    assert [(x["round"], x["kind"], x["outcome"]) for x in r["rounds"]] == [(1, "build", "pass")]
+    assert r["simulations"] == 1
+    block = agent_log(work.parent).split("$ ")[2]
+    lines = block.splitlines()
+    assert lines[0] == "simulate" and len(lines) <= 21 and lines[-1].startswith("time left: ")
+    assert lines[1] == f"simulate 001: exports/001.glb (new export), sha256 {sha[:12]}"
+    assert lines[2] == f"outcome pass, scope none; details simulate/s001-{sha[:12]}/report.json"
+    assert lines[3] == "  r1 lid (revolute): pass, achieved [0, 1.5] of [0, 1.5]"
+    assert lines[4].startswith("surface (report only): present 100.0%, deleted 0.0%")
+
+
+def hinged_blend(work):
+    """A fake .blend of the parts with LID's hinge, ready to export."""
+    (work / "candidate.blend").write_text(json.dumps({"kind": "parts", "size": PARTS_SIZE, "seconds": 0.0,
+                                                      "objects": ["body", "lid"], "joints": {"lid": lid_joint(HINGE)}}))
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_stopping_simulate_kills_its_mujoco(tmp_path, monkeypatch):
+    """The tool server ends a running helper with SIGTERM at a round's end and on Cancel. The helper runs as
+    harpor.agent.tools, the module whose _run harpor.agent.validate uses, so its handler kills the group of MuJoCo,
+    which has a session of its own and would outlive the helper and its timeout."""
+    pytest.importorskip("rtree")
+    work = prepare(tmp_path, "articulation")
+    control = work.parent / "control"
+    hinged_blend(work)
+    T.start_budget(work, control, time.time(), 900.0)
+    pid_file = tmp_path / "mujoco.pid"
+    monkeypatch.setenv("GATOR_MUJOCO", shlex.join(["sh", "-c", f"echo $$ > {shlex.quote(str(pid_file))}; exec sleep 60"]))
+    with tempfile.TemporaryDirectory(prefix="gator-") as d:
+        path = os.path.join(d, "tools.sock")
+        server = ToolServer(path, work, control, FAKE_BLENDER).start()
+        try:
+            threading.Thread(target=gator_tool.call, args=(["simulate"], path), daemon=True).start()
+            end = time.time() + 60.0
+            while time.time() < end and not (pid_file.exists() and pid_file.read_text().strip()):
+                time.sleep(0.05)
+        finally:
+            server.stop()
+    pid = int(pid_file.read_text())
+    try:
+        end = time.time() + 10.0
+        while alive(pid) and time.time() < end:
+            time.sleep(0.05)
+        assert not alive(pid)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    assert [e["event"] for e in T.read_events(control)][-2:] == ["simulate_started", "simulate_done"]
+
+
+def test_simulate_does_not_write_through_a_link_left_during_its_check(tmp_path, monkeypatch):
+    """The agent is alive while simulate checks its scene, for up to 270 s. simulate/ is checked after the check, so
+    a link put there meanwhile is refused, and nothing is written where it points."""
+    work = prepare(tmp_path, "articulation")
+    control = work.parent / "control"
+    hinged_blend(work)
+    T.start_budget(work, control, time.time(), 900.0)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (work / "simulate").mkdir()
+
+    def check(glb, *a):
+        (work / "simulate").rename(work / "simulate_real")
+        (work / "simulate").symlink_to(victim)
+        return {"sha256": T.sha256(glb), "outcome": "fail", "scope": "local", "cached": False}
+
+    monkeypatch.setattr(V, "check", check)
+    with pytest.raises(SystemExit, match="simulate/ must be a folder, not a link or a file"):
+        T.simulate(work, control, FAKE_BLENDER)
+    assert list(victim.iterdir()) == [] and list((work / "simulate_real").iterdir()) == []
+    assert [e["event"] for e in T.read_events(control)][-1] == "simulate_done"
+
+
+def test_simulate_prints_at_most_20_lines(tmp_path, monkeypatch, capsys):
+    work = prepare(tmp_path, "articulation")
+    control = work.parent / "control"
+    T.start_budget(work, control, time.time(), 900.0)
+    monkeypatch.setenv("GATOR_WORK", str(work))
+    monkeypatch.setenv("GATOR_CONTROL", str(control))
+    records = [{"requirement": f"r{k}", "target": [f"door_{k}"], "joint": "revolute", "outcome": "fail",
+                "measured": {"achieved": [0.0, 1.0], "reference": [0.0, 1.5]},
+                "findings": [{"code": "range_blocked"}, {"code": "range_blocked"}, {"code": "tracking"}]}
+               for k in range(12)]
+    findings = [{"code": "tracking", "requirement": f"r{k}", "link": f"door_{k}", "why": "q ends at 1.2 rad"}
+                for k in range(9)] + [{"code": "rest_collision", "requirement": None, "link": "body", "why": "at rest"}]
+    shares = {k: 0.0 for k in ("deleted", "uv_changed", "material_changed", "flipped", "added")}
+    rep = {"outcome": "fail", "scope": "structural", "records": records, "findings": findings,
+           "surface": {"shares": {**shares, "present": 1.0}}}
+    rec = {"simulate": 3, "glb": "exports/004.glb", "sha256": "0123456789ab" * 5, "cached_export": True,
+           "cached": True, "report": "simulate/s003-0123456789ab/report.json"}
+    monkeypatch.setattr(T, "simulate", lambda *a: (rec, rep))
+    T.main(["simulate"])
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 20
+    assert out[0] == "simulate 003: exports/004.glb (cached export), sha256 0123456789ab, checked before"
+    assert out[2] == "  r0 door_0 (revolute): fail, achieved [0, 1] of [0, 1.5]; range_blocked, tracking"
+    assert out[10:13] == ["  ... and 4 more requirements", "surface (report only): present 100.0%, deleted 0.0%, other "
+                          "UVs 0.0%, other material 0.0%, flipped 0.0%, added 0.0%",
+                          "  structural rest_collision body: at rest"]
+    assert out[13] == "  local tracking r0 door_0: q ends at 1.2 rad" and out[-2] == "  ... and 4 more findings"
+    assert out[-1].startswith("time left: ")
+    rep["surface"] = {"error": "ValueError: the original has no faces"}
+    T.main(["simulate"])
+    assert "surface check failed: ValueError: the original has no faces" in capsys.readouterr().out
+
+
+def test_every_helper_command_has_its_client():
+    from harpor.agent.server import COMMANDS
+
+    for name in COMMANDS:
+        path = C.AGENT_DIR / "bin" / name
+        assert path.read_text() == f'#!/bin/sh\nexec python3 "$(dirname "$0")/gator_tool.py" {name} "$@"\n'
+        assert path.stat().st_mode & 0o777 == 0o755, name
+
+
 def test_export_does_not_follow_links_and_always_logs_done(tmp_path):
     work = prepare(tmp_path, "refinement")
     control = work.parent / "control"
@@ -782,6 +1026,195 @@ def test_export_does_not_follow_links_and_always_logs_done(tmp_path):
     os.symlink(tmp_path, work / "exports")
     with pytest.raises(SystemExit, match="must be a folder"):
         T.export_glb(work, control, FAKE_BLENDER)
+
+
+def after_blender_wrote(control, ex, name, then):
+    """A thread that runs then() once the fake Blender has written the GLB name (control/staging/, or exports/ as
+    before), and before it writes the report: the scene's pause, as the real script re-imports the GLB meanwhile."""
+    def wait():
+        end = time.time() + LONG
+        while not ((control / "staging" / name).exists() or (ex / name).exists()) and time.time() < end:
+            time.sleep(0.01)
+        then()
+
+    th = threading.Thread(target=wait)
+    th.start()
+    return th
+
+
+def test_an_export_is_hashed_as_blender_wrote_it(tmp_path, monkeypatch):
+    """An agent that renames its own files over exports/001.glb and 001.json while Blender runs gets neither logged
+    nor delivered: Blender writes into control/staging/, out of the agent's reach, and the agent's copies, Blender's
+    bytes, replace its files only after the host has hashed them."""
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    work = prepare(tmp_path, "refinement")
+    root, control, ex = work.parent, work.parent / "control", work / "exports"
+    (work / "candidate.blend").write_text(json.dumps({"kind": "good", "size": 1.2, "seconds": 0.0, "pause": 1.0}))
+    T.start_budget(work, control, time.time(), 600.0)
+    write_glb(tmp_path / "agent.glb", size=1.3)
+    planted = {"001.glb": (tmp_path / "agent.glb").read_bytes(), "001.json": b'{"meshes": 9, "warnings": []}'}
+
+    def swap():
+        for name, data in planted.items():
+            (tmp_path / name).write_bytes(data)
+            os.replace(tmp_path / name, ex / name)
+
+    th = after_blender_wrote(control, ex, "001.glb", swap)
+    glb, rep, cached = T.export_glb(work, control, FAKE_BLENDER)
+    th.join()
+    done = [(e["ok"], e["glb"], e["glb_sha256"]) for e in T.read_events(control) if e["event"] == "export_done"]
+    assert len(done) == 1 and done[0][2] != hashlib.sha256(planted["001.glb"]).hexdigest()
+    blender = (control / "exports" / "001.glb").read_bytes()
+    assert done == [(True, "exports/001.glb", hashlib.sha256(blender).hexdigest())] and not cached
+    assert glb.read_bytes() == blender != planted["001.glb"] and edge(glb) == 1.2
+    assert rep["meshes"] == 1 and (ex / "001.json").read_bytes() == (control / "exports" / "001.json").read_bytes()
+    pick, rejected = C.select_deliverable(root, "refinement")
+    assert (pick["source"], rejected) == ("export", []) and pick["glb"].read_bytes() == blender
+
+
+def test_an_export_replaces_links_at_its_names(tmp_path, monkeypatch):
+    """Links that the agent put at exports/001.glb and 001.json are replaced, never written through. A folder that the
+    agent swaps for a link while Blender runs gets nothing, and that export fails."""
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    work = prepare(tmp_path, "refinement")
+    control, ex = work.parent / "control", work / "exports"
+    T.start_budget(work, control, time.time(), 600.0)
+    victim, outside = tmp_path / "victim.txt", tmp_path / "outside"
+    victim.write_text("keep me")
+    outside.mkdir()
+    os.symlink(victim, ex / "001.glb")
+    os.symlink(outside / "001.json", ex / "001.json")  # dangling: a write through it would make the file
+    (work / "candidate.blend").write_text(json.dumps({"kind": "good", "size": 1.2, "seconds": 0.0}))
+    T.export_glb(work, control, FAKE_BLENDER)
+    assert victim.read_text() == "keep me" and not any(outside.iterdir())
+    for name in ("001.glb", "001.json"):
+        assert not (ex / name).is_symlink() and (ex / name).read_bytes() == (control / "exports" / name).read_bytes()
+
+    (work / "candidate.blend").write_text(json.dumps({"kind": "good", "size": 1.3, "seconds": 0.0, "pause": 1.0}))
+
+    def swap():
+        os.rename(ex, work / "exports_real")
+        os.symlink(outside, ex)
+
+    th = after_blender_wrote(control, ex, "002.glb", swap)
+    with pytest.raises(SystemExit, match="export 002 failed"):
+        T.export_glb(work, control, FAKE_BLENDER)
+    th.join()
+    assert not any(outside.iterdir()) and not (work / "exports_real" / "002.glb").exists()
+    assert [e["ok"] for e in T.read_events(control) if e["event"] == "export_done"] == [True, False]
+
+
+def test_an_export_log_is_not_written_through_a_swapped_folder(tmp_path, monkeypatch):
+    """exports/ is checked when the export starts, and the cache check may then hash a large GLB of the agent's for a
+    second. A link that the agent swaps in for the folder meanwhile gets no log: the log is opened through a
+    descriptor of the folder (T.folder), and that export fails."""
+    work = prepare(tmp_path, "refinement")
+    control, outside = work.parent / "control", tmp_path / "outside"
+    outside.mkdir()
+    (work / "candidate.blend").write_text(json.dumps({"kind": "good", "size": 1.2, "seconds": 0.0}))
+    T.start_budget(work, control, time.time(), 600.0)
+    real = T.sha256
+
+    def swap_then_hash(path):  # the first hash, of the .blend, comes after the check of exports/
+        if not (work / "exports").is_symlink():
+            os.rename(work / "exports", work / "exports_real")
+            os.symlink(outside, work / "exports")
+        return real(path)
+
+    monkeypatch.setattr(T, "sha256", swap_then_hash)
+    with pytest.raises(SystemExit, match="export 001 failed"):
+        T.export_glb(work, control, FAKE_BLENDER)
+    assert not any(outside.iterdir()) and not any((work / "exports_real").iterdir())
+    assert [(e["event"], e.get("ok")) for e in T.read_events(control)] == [("export_started", None), ("export_done", False)]
+
+
+def test_a_blender_run_cannot_change_the_hosts_copies(tmp_path, monkeypatch):
+    """Blender writes through the links that the agent puts in work/, such as a review's sheet.png, so its container
+    writes only control/staging/ and sees the host's copies in control/exports/ read-only (blender_command). Each
+    export moves out of staging/, and what another run left there is removed before the next export: an export
+    whose Blender writes nothing then fails and does not take those bytes."""
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    work = prepare(tmp_path, "refinement")
+    control = work.parent / "control"
+    (work / "candidate.blend").write_text(json.dumps({"kind": "good", "size": 1.2, "seconds": 0.0}))
+    T.start_budget(work, control, time.time(), 600.0)
+    T.export_glb(work, control, FAKE_BLENDER)
+    assert sorted(p.name for p in (control / "exports").iterdir()) == ["001.glb", "001.json"]
+    assert not any((control / "staging").iterdir())
+    write_glb(control / "staging" / "002.glb", size=1.3)  # as a run's write through a link in work/ would leave
+    (control / "staging" / "002.json").write_text(json.dumps({"meshes": 1, "warnings": []}))
+    (work / "candidate.blend").write_text(json.dumps({"kind": "good", "size": 1.4, "seconds": 0.0}))
+    with pytest.raises(SystemExit, match="export 002 failed"):
+        T.export_glb(work, control, [sys.executable, "-c", "pass"])  # exits 0 and writes nothing
+    assert not any((control / "staging").iterdir()) and not (work / "exports" / "002.glb").exists()
+    assert [e["ok"] for e in T.read_events(control) if e["event"] == "export_done"] == [True, False]
+
+
+@pytest.mark.parametrize("command", ["review", "review_articulation"])
+def test_a_review_writes_nothing_through_a_swapped_folder(tmp_path, monkeypatch, command):
+    """The export and the render take minutes, in which the agent can swap the review folder for a link. The host
+    makes and writes the receipt's folder through descriptors (T.new_folder): a link there when the export ends
+    stops the review, and one swapped in during the render gets nothing, so the receipt stays in the folder that the
+    host made."""
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    mode, folder = ("refinement", "reviews") if command == "review" else ("articulation", "reviews_articulation")
+    work = prepare(tmp_path, mode)
+    control, outside = work.parent / "control", tmp_path / "outside"
+    outside.mkdir()
+    scene = {"kind": "good", "size": 1.2} if mode == "refinement" else \
+        {"kind": "parts", "size": PARTS_SIZE, "objects": ["body", "lid"], "joints": {"lid": lid_joint(HINGE)}}
+    (work / "candidate.blend").write_text(json.dumps({**scene, "seconds": 0.0, "pause": 1.0}))
+    T.start_budget(work, control, time.time(), 900.0)
+
+    def swap():
+        os.rename(work / folder, work / f"{folder}_real")
+        os.symlink(outside, work / folder)
+
+    th = after_blender_wrote(control, work / "exports", "001.glb", swap)
+    with pytest.raises(SystemExit, match=re.escape(f"{folder}/ must be a folder, not a link or a file")):
+        getattr(T, command)(work, control, FAKE_BLENDER)
+    th.join()
+    assert not any(outside.iterdir())
+    os.unlink(work / folder)
+    os.rename(work / f"{folder}_real", work / folder)
+    run_ok = T.run_ok
+
+    def render(cmd, log, timeout):  # the agent swaps the folder while Blender renders
+        if Path(cmd[cmd.index("--python") + 1]).name == f"{command}.py":
+            swap()
+            return True
+        return run_ok(cmd, log, timeout)
+
+    monkeypatch.setattr(T, "run_ok", render)
+    rec = getattr(T, command)(work, control, FAKE_BLENDER)
+    rec = rec[0] if command == "review_articulation" else rec
+    assert not any(outside.iterdir()) and rec["cached"]
+    got = work / f"{folder}_real" / rec["receipt"]
+    assert json.loads((got / "receipt.json").read_text()) == rec and (got / "args.json").is_file()
+    assert [e["receipt"] for e in T.read_events(control) if e["event"] == command] == [rec["receipt"]]
+
+
+def test_helpers_give_blender_resolved_paths(tmp_path, monkeypatch):
+    """blender_command binds the resolved work and control folders, and Blender's container has no other path. A
+    session root reached through a symlink (a HARPOR_ROOT under ~/scratch on ICE) still reaches Blender resolved:
+    the export's files and every path of the review's args."""
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    real = prepare(tmp_path / "real", "refinement").parent
+    (tmp_path / "link").symlink_to(real)
+    work, control = tmp_path / "link" / "work", tmp_path / "link" / "control"
+    (work / "candidate.blend").write_text(json.dumps({"kind": "good", "size": 1.2, "seconds": 0.0}))
+    T.start_budget(work, control, time.time(), 600.0)
+    blender = C.blender_command(tmp_path / "link", "/sif/agent.sif")
+    bound = [Path(blender[i + 1].split(":")[0]) for i, a in enumerate(blender) if a == "--bind"]
+    seen, run = [], T._run
+    monkeypatch.setattr(T, "_run", lambda cmd, log, timeout: seen.append(cmd) or run(cmd, log, timeout))
+    for k, v in (("GATOR_WORK", work), ("GATOR_CONTROL", control), ("GATOR_BLENDER", shlex.join(FAKE_BLENDER))):
+        monkeypatch.setenv(k, str(v))
+    T.main(["review"])
+    paths = [Path(a) for cmd in seen for a in cmd[cmd.index("--") + 1:]]
+    args = json.loads(paths[-1].read_text())
+    paths += [Path(args[k]) for k in ("root", "out", "candidate", "original")]
+    assert len(seen) == 2 and all(any(p.is_relative_to(b) for b in bound) for p in paths), paths
 
 
 def test_network_commands_are_flagged(tmp_path):
@@ -983,6 +1416,53 @@ def test_articulation_poses_move_welded_links_and_groups_them():
     assert shares[0] > shares[1] > shares[2] == 0.0 and j["states"][0]["worst_other_link"] == "body"
 
 
+def test_a_soft_part_moves_with_its_parent_and_has_no_penetration_row():
+    """A soft joint has no coordinate: a cushion on a lid has the lid's motion, and its samples count as the lid's."""
+    pytest.importorskip("rtree")  # trimesh's collision checks
+    joints = {"lid": lid_joint(HINGE), "pad": {**lid_joint({}, "soft"), "parent": "lid", **SOFT}}
+    links = ["body", "lid", "pad"]
+    carrier = T.carriers(joints, links, {})
+    assert carrier == {"body": "body", "lid": "lid", "pad": "lid"}
+    poses = T.articulation_poses(joints, links, {})
+    assert all(p["q"]["pad"] == 0 and np.allclose(p["motions"]["pad"], p["motions"]["lid"]) for p in poses)
+    meshes = {"body": trimesh.creation.box(bounds=[[-0.5, -0.25, -0.5], [0.5, 0.5, 0.5]]),
+              "lid": trimesh.creation.box(bounds=[[-0.5, -0.5, -0.5], [0.5, -0.25, 0.5]]),
+              "pad": trimesh.creation.box(bounds=[[-0.4, -0.6, -0.4], [0.4, -0.5, 0.4]])}
+    rep = T.penetration(meshes, joints, poses, carrier, samples=200)
+    assert list(rep["joints"]) == ["lid"] and rep["joints"]["lid"]["moving_links"] == ["lid", "pad"]
+    assert T._joint_row("pad", joints["pad"]) == "pad > lid: soft, gel"
+
+
+def test_review_articulation_takes_a_soft_joint_but_not_only_fixed_joints(tmp_path, monkeypatch, capsys):
+    """set_joint stores a material's numbers. A soft part is a reason to review, though nothing moves, and finish
+    takes that receipt. Nothing can hang from it: such a change is undone."""
+    pytest.importorskip("rtree")  # trimesh's collision checks
+    work = prepare(tmp_path, "articulation")
+    control = work.parent / "control"
+    (work / "candidate.blend").write_text(json.dumps({"kind": "parts", "size": PARTS_SIZE, "seconds": 0.0,
+                                                      "objects": ["body", "lid"], "joints": {}}))
+    T.start_budget(work, control, time.time(), 900.0)
+    for k, v in (("GATOR_WORK", work), ("GATOR_CONTROL", control), ("GATOR_BLENDER", shlex.join(FAKE_BLENDER)),
+                 ("PYTHONPATH", REPO)):
+        monkeypatch.setenv(k, str(v))
+    T.main(["set_joint", "--child", "lid", "--parent", "body", "--type", "fixed"])
+    with pytest.raises(SystemExit, match="every joint is fixed, so nothing moves"):
+        T.review_articulation(work, control, FAKE_BLENDER)
+    capsys.readouterr()
+    T.main(["set_joint", "--child", "lid", "--parent", "body", "--type", "soft", "--material", "gel"])
+    assert "  lid > body: soft, gel\n" in capsys.readouterr().out
+    scene = json.loads((work / "candidate.blend").read_text())
+    assert scene["joints"]["lid"] == {**lid_joint({}, "soft"), **SOFT} and J.validate(scene["joints"], ["body", "lid"]) == []
+    with pytest.raises(SystemExit) as e:
+        T.main(["set_joint", "--child", "body", "--parent", "lid", "--type", "fixed"])
+    assert e.value.code.startswith("refused: the joint of 'body': a part cannot hang from a soft part ('lid')")
+    assert json.loads((work / "candidate.blend").read_text())["joints"] == scene["joints"]
+    rec, rep = T.review_articulation(work, control, FAKE_BLENDER)
+    assert rep["joints"] == {} and rec["joints"] == 1 and len(rep["states"]) == T.STATES
+    out = T.finish(work, control, rec["receipt"], "articulated", "the lid is soft")
+    assert J.load(work / out["glb"])[0] == scene["joints"]
+
+
 def test_articulation_poses_compose_a_chain_of_joints():
     """A handle hinged on the lid turns with the lid: its motion is the lid's motion, then its own turn."""
     lid = lid_joint(HINGE)
@@ -1066,11 +1546,17 @@ def test_set_joint_checks_its_arguments(tmp_path, monkeypatch):
                       ([*lid, "--type", "revolute", *hinge[:-1], "7"], "at most 2 pi"),
                       ([*lid, "--type", "revolute", "--origin", "nan", "0", "0", *hinge[4:]], "finite"),
                       ([*lid, "--type", "fixed", *hinge[:4]], "a fixed joint takes only"),
+                      ([*lid, "--type", "fixed", "--material", "foam"], "only a soft joint takes --material"),
+                      ([*lid, "--type", "soft"], "a soft joint needs --material"),
+                      ([*lid, "--type", "soft", "--material", "cloud"], "--material is one of foam, gel, rubber, not 'cloud'"),
+                      ([*lid, "--type", "soft", "--material", "foam", *hinge[:4]], "a soft joint takes only"),
+                      (["--child", "lid", "--parent", "world", "--type", "soft", "--material", "foam"], "only a fixed joint"),
                       (["--child", "lid", "--parent", "world", "--type", "revolute", *hinge], "only a fixed joint"),
                       (["--child", "lid", "--parent", "lid", "--type", "fixed"], "lid cannot be its own parent"),
                       (["--child", "world", "--parent", "body", "--type", "fixed"], '"world" is the fixed base'),
                       (["--child", "lid"], "give --parent and --type, or --remove"),
                       ([*lid, "--remove"], "--remove takes only --child"),
+                      (["--child", "lid", "--material", "foam", "--remove"], "--remove takes only --child"),
                       (["--child", "door", "--parent", "body", "--type", "fixed"], "no mesh object is named 'door'")]:
         with pytest.raises(SystemExit) as e:
             T.main(["set_joint", *args])
@@ -1088,7 +1574,7 @@ def test_set_joint_checks_its_arguments(tmp_path, monkeypatch):
     monkeypatch.setenv("GATOR_WORK", str(refine))
     monkeypatch.setenv("GATOR_CONTROL", str(refine.parent / "control"))
     T.start_budget(refine, refine.parent / "control", time.time(), 600.0)
-    for cmd in (["set_joint", "--child", "lid", "--remove"], ["review_articulation"]):
+    for cmd in (["set_joint", "--child", "lid", "--remove"], ["review_articulation"], ["simulate"]):
         with pytest.raises(SystemExit, match="works only in the articulation mode"):
             T.main(cmd)
 
@@ -1169,6 +1655,35 @@ def test_finish_articulated_needs_reviewed_joints(tmp_path):
     assert (pick["source"], pick["glb"]) == ("fallback_original", root / "original.glb")
 
 
+def test_finish_articulated_refuses_a_surface_check_that_blocks(tmp_path, monkeypatch):
+    """With a found requirement in control/parts.json, finish articulated runs the surface check on the reviewed
+    bytes, and refuses a GLB it blocks, which it does only while surface.ENFORCE is on. A cube of 0.6 of the
+    original's edge keeps none of its faces."""
+    from harpor.agent import surface
+
+    work = prepare(tmp_path, "articulation")
+    control, ex = work.parent / "control", work / "exports"
+    write_glb(ex / "001.glb", "parts", 0.6 * PARTS_SIZE, {"lid": lid_joint(HINGE)})
+    sha = T.sha256(ex / "001.glb")
+    receipt = f"a001-{sha[:12]}"
+    T.log_event(control, "review_articulation", receipt=receipt, glb="exports/001.glb", sha256=sha, joints=1)
+    monkeypatch.setattr(surface, "ENFORCE", True)
+    assert T.finish(work, control, receipt, "articulated", "x")["verdict"] == "articulated"  # no requirements
+    (control / "parts.json").write_text(json.dumps({**PARTS, "requirements": [LID]}))
+    why = ("exports/001.glb cannot be delivered as articulated: under half of the native surface is still present: "
+           "0.0, expected at least 0.5 (surface_identity); run simulate for the details")
+    with pytest.raises(SystemExit, match=re.escape(why)):
+        T.finish(work, control, receipt, "articulated", "x")
+    assert T.finish(work, control, receipt, "needs_review", "the lid lost its faces")["verdict"] == "needs_review"
+    assert [p.name for p in control.glob("*.glb")] == []  # the host copy is gone
+    monkeypatch.setattr(surface, "ENFORCE", False)
+    assert T.finish(work, control, receipt, "articulated", "x")["verdict"] == "articulated"
+    monkeypatch.setattr(surface, "ENFORCE", True)
+    (control / "parts.json").write_text(json.dumps({**PARTS, "requirements": [{**LID, "status": "not_found",
+                                                                               "part": None}]}))
+    assert T.finish(work, control, receipt, "articulated", "x")["verdict"] == "articulated"
+
+
 def test_articulation_helpers_print_at_most_20_lines(tmp_path, monkeypatch, capsys):
     work = prepare(tmp_path, "articulation")
     control = work.parent / "control"
@@ -1221,12 +1736,13 @@ def test_articulation_prompt_and_session_layout(tmp_path):
     text = PR.load("articulation")
     assert text == PR.original("articulation") and "/work/run_budget.json" in text and "900 seconds" in text
     for fact in ("input/parts.json", "set_joint", "review_articulation", "articulated", "needs_review", "checkpoint",
-                 "--parent world --type fixed", "lower <= 0 <= upper"):
+                 "--parent world --type fixed", "lower <= 0 <= upper", "--type soft --material"):
         assert fact in text
     work = prepare(tmp_path, "articulation")
     m = json.loads((work / "input" / "manifest.json").read_text())
     assert m["mode"] == "articulation" and m["parts"] == "input/parts.json"
     assert json.loads((work / "input" / "parts.json").read_text()) == PARTS
+    assert json.loads((work.parent / "control" / "parts.json").read_text()) == PARTS  # the copy the host's checks read
     assert T.sha256(work.parent / "original.glb") == T.sha256(work / "original" / "original.glb")
     assert J.load(work / "original" / "original.glb")[1] == ["body", "lid"]
     with pytest.raises(ValueError, match="parts"):
@@ -1445,6 +1961,60 @@ def test_loop_trace_of_a_codex_session(runs, tmp_path, capsys):
     (tmp_path / "s" / "control" / "agent.json").unlink()
     with pytest.raises(FileNotFoundError, match="agent.json"):
         loop_trace.main([str(tmp_path)])
+
+
+def test_loop_trace_prints_the_agents_text_on_clean_lines(runs, tmp_path, capsys):
+    """A session from before the helpers cleaned the agent's text, with raw escapes in a finish event and in the
+    Codex log, which the Codex agent can write, still traces as lines without control characters."""
+    from harpor.agent import loop_trace
+
+    s = tmp_path / "s"
+    shutil.copytree(runs["dirty_text"][0], s)
+    with open(s / "control" / "events.jsonl", "a") as f:
+        f.write(json.dumps({"time": time.time(), "event": "finish", "verdict": "complete", "reason": DIRTY}) + "\n")
+    with open(s / "session" / "codex.jsonl", "a") as f:
+        for item in ({"type": "agent_message", "text": DIRTY}, {"type": "command_execution", "command": DIRTY,
+                                                                "exit_code": DIRTY}):
+            f.write(json.dumps({"type": "item.completed", "item": {"id": item["type"], **item}}) + "\n")
+    loop_trace.main([str(tmp_path)])
+    out = capsys.readouterr().out
+    assert f"  says: {CLEAN}\n" in out and f"  runs [exit {CLEAN}]: {CLEAN}\n" in out
+    assert out.count(f" finish complete: {CLEAN}\n") == 2  # the session's own, stored clean, and the raw one
+    assert next(x for x in out.splitlines() if " checkpoint checkpoints/001-" in x).endswith(f": {CLEAN}")
+    assert [c for c in out if not c.isprintable() and c != "\n"] == []
+
+
+def test_loop_trace_skips_what_the_agent_wrote_in_another_shape(runs, tmp_path):
+    """codex.jsonl and the review files in work/ are the agent's to write. A line that is not an object, an item that
+    is not one, an id that is a list, a review.json that is a list and a FIFO, which open() would wait on forever,
+    are skipped, and the host's records still print. The trace runs as the script of note 5, with a timeout."""
+    s = tmp_path / "s"
+    shutil.copytree(runs["articulation_finish"][0], s)
+    with open(s / "session" / "codex.jsonl", "a") as f:
+        for line in ([1, 2], {"type": "item.completed", "item": "x"},
+                     {"type": "item.completed", "item": {"id": [1], "type": "agent_message", "text": "a list id"}}):
+            f.write(json.dumps(line) + "\n")
+    report = next((s / "work" / "reviews_articulation").glob("a001-*/report.json"))
+    report.unlink()
+    os.mkfifo(report)
+
+    def trace():
+        p = subprocess.run([sys.executable, str(REPO / "harpor" / "agent" / "loop_trace.py"), str(tmp_path)],
+                           capture_output=True, text=True, timeout=30)
+        assert p.returncode == 0, p.stderr
+        return p.stdout
+
+    out = trace()
+    assert "  says: a list id\n" in out and "finish articulated: lid hinged at the back" in out
+    assert "articulation review a001-" in out and "penetration share" not in out
+    (s / "session" / "codex.jsonl").unlink()
+    os.mkfifo(s / "session" / "codex.jsonl")
+    with open(s / "control" / "events.jsonl", "a") as f:  # a review whose review.json is a list
+        f.write(json.dumps({"time": time.time(), "event": "review", "receipt": "r009-0123456789ab", "glb": "x"}) + "\n")
+    (s / "work" / "reviews" / "r009-0123456789ab").mkdir(parents=True)
+    (s / "work" / "reviews" / "r009-0123456789ab" / "review.json").write_text("[]")
+    out = trace()
+    assert "review r009-0123456789ab of x" in out and "mask IoU" not in out and "says:" not in out
 
 
 def test_claude_session_with_every_tool(tmp_path, monkeypatch):
@@ -1709,3 +2279,748 @@ def test_tool_server_does_not_import_from_the_work_folder(tmp_path):
             server.stop()
     assert code == 1 and "unknown review receipt 'r9'" in output
     assert not marker.exists()
+
+
+# ---- rounds: an articulation with a found requirement (controller.run_rounds) ----
+
+FAKE_SIM = [sys.executable, "-m", "harpor.agent.fake_agent", "--sim"]  # GATOR_MUJOCO without MuJoCo
+SLIDE = {"origin": [0.0, -0.25, 0.0], "axis": [0.0, -1.0, 0.0], "lower": 0.0, "upper": 0.3}  # lifts the lid off
+REVIEW_ART, READ_PROMPT = tool("review_articulation"), {"do": "read_prompt"}
+
+
+def hinged(verdict="articulated"):
+    """The actions that meet LID: the lid's hinge, its review and finish, articulated or with verdict."""
+    return [set_joint("lid", "body", "revolute", HINGE), REVIEW_ART, articulated(verdict)]
+
+
+def exported(k):
+    """A round that saves the parts again, exports them and crashes: its export is taken as needs_review, and the
+    lid has no joint. k changes the .blend (the fake export's delay) and not the GLB, so that each round exports."""
+    return [edit(PARTS_SIZE, "parts", 0.01 * k), EXPORT, CRASH]
+
+
+ROUND_SESSIONS = {
+    "rounds_pass": [[edit(PARTS_SIZE, "parts"), *hinged()]],
+    "rounds_repair": [exported(0), [READ_PROMPT, *hinged()]],
+    # A slide fails LID's joint type, which is structural. Every helper of the planning round is refused, and the
+    # finish of round 1 does not end it: it writes its plan after finish_wait_s.
+    "rounds_replan": [[edit(PARTS_SIZE, "parts"), set_joint("lid", "body", "prismatic", SLIDE), REVIEW_ART,
+                       articulated("articulated")],
+                      [READ_PROMPT, EXPORT, tool("simulate"), articulated("needs_review"), {"do": "sleep", "seconds": 1.0},
+                       {"do": "write", "path": "plan.md", "text": "a hinge on the lid's back edge\n"}],
+                      [READ_PROMPT, *hinged()]],
+    # As rounds_replan, but the repair after the plan keeps the slide and only exports, so a second repair follows.
+    "rounds_plan_then_two_repairs": [[edit(PARTS_SIZE, "parts"), set_joint("lid", "body", "prismatic", SLIDE), REVIEW_ART,
+                                      articulated("articulated")],
+                                     [{"do": "write", "path": "plan.md", "text": "a hinge on the lid's back edge\n"}],
+                                     exported(1), [READ_PROMPT, *hinged()]],
+    "rounds_cap": [exported(0), exported(1), exported(2), [CRASH]],
+    # Round 1 meets LID but finishes needs_review; round 2 removes the hinge and exports; round 3 hands off nothing.
+    "rounds_regress": [[edit(PARTS_SIZE, "parts"), *hinged("needs_review")],
+                       [READ_PROMPT, tool("set_joint", "--child", "lid", "--remove"), EXPORT, CRASH], [READ_PROMPT, CRASH]],
+    # Round 2 reviews round 1's scene again, unchanged, and finishes it articulated: the same bytes.
+    "rounds_review_then_pass": [[edit(PARTS_SIZE, "parts"), *hinged("needs_review")],
+                                [REVIEW_ART, articulated("articulated")]],
+    "rounds_unchanged": [[REVIEW, finish("unchanged")]] * 3,
+}
+
+
+def run_in_rounds(root, rounds, budget_s=LONG):
+    """A session of the fake parts whose control/parts.json has LID, with a fake agent script of rounds."""
+    work = prepare(root, "articulation")
+    (work.parent / "control" / "parts.json").write_text(json.dumps({**PARTS, "requirements": [LID]}))
+    (root / "script.json").write_text(json.dumps({"rounds": rounds}))
+    with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
+        env = {**os.environ, "PYTHONPATH": str(REPO), "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
+        cmd = [sys.executable, "-m", "harpor.agent.fake_agent", str(root / "script.json")]
+        return C.run_session(work.parent, cmd, env, blender=FAKE_BLENDER, sock_dir=sock_dir, budget_s=budget_s, **FAST)
+
+
+@pytest.fixture(scope="module")
+def round_runs(tmp_path_factory):
+    pytest.importorskip("rtree")  # the clearance check (tools.penetration)
+    roots = {name: tmp_path_factory.mktemp(name) for name in ROUND_SESSIONS}
+    with pytest.MonkeyPatch.context() as m, ThreadPoolExecutor(len(ROUND_SESSIONS)) as ex:
+        m.setenv("GATOR_MUJOCO", shlex.join(FAKE_SIM))
+        m.delenv("GATOR_FAKE_SIM", raising=False)  # every run passes
+        results = list(ex.map(lambda name: run_in_rounds(roots[name], ROUND_SESSIONS[name]), ROUND_SESSIONS))
+    return {name: (roots[name] / "s", r) for name, r in zip(ROUND_SESSIONS, results)}
+
+
+def codes(rec):
+    return [f["code"] for f in rec["findings"]]
+
+
+def test_a_session_with_a_found_requirement_runs_in_rounds(round_runs):
+    """A build that passes is the only round. The round is logged, run_budget.json names it, its check pins the
+    reference and goes to work/evidence/, and the result adds rounds, candidate, requirements, simulations and
+    surface. The deliverable is the round's stored candidate, a read-only copy in control/candidates, with the
+    agent's verdict and reason, since its round passed. The session folder keeps the layout of a session without
+    rounds."""
+    root, r = round_runs["rounds_pass"]
+    control, work = root / "control", root / "work"
+    glb = "control/candidates/v01/candidate.glb"
+    assert (r["source"], r["verdict"], r["glb"], r["exit"], r["reason"]) == (
+        "finish", "articulated", glb, "exited", "lid hinged at the back")
+    sha = T.sha256(root / r["glb"])
+    assert sha == r["sha256"] == T.sha256(work / "exports" / "001.glb")
+    assert (root / glb).stat().st_mode & 0o777 == 0o444
+    assert r["candidate"] == {"version": 1, "round": 1, "kind": "build", "from": "work/exports/001.glb",
+                              "agent_verdict": "articulated", "outcome": "pass", "why": "the only eligible candidate"}
+    assert r["rounds"] == [{"round": 1, "kind": "build", "budget_s": LONG, "exit": "exited",
+                            "wall_s": r["timings"]["wall_s"], "outcome": "pass", "scope": "none", "findings": [],
+                            "candidate": {"version": 1, "source": "finish", "verdict": "articulated",
+                                          "glb": "work/exports/001.glb", "sha256": sha}}]
+    stored = json.loads((control / "candidates" / "v01" / "report.json").read_text())
+    assert stored["report"] == json.loads((work / "evidence" / "round_01.json").read_text())
+    ev = json.loads((control / "evidence.json").read_text())
+    assert (ev["object"], ev["diagonal_m"], ev["requirements"], ev["rounds"]) == (
+        None, pytest.approx(3 ** 0.5), [LID], r["rounds"])
+    assert ev["selected"] == {"version": 1, "verdict": "articulated", "why": "the only eligible candidate",
+                              "rank": [{"version": 1, "rank": [True, True, 1, True, 1]}], "ineligible": [],
+                              "unresolved": []}
+    (c,) = ev["candidates"]
+    assert (c["glb"], c["from"], c["sha256"], c["source"], c["agent_verdict"], c["outcome"]) == (
+        glb, "work/exports/001.glb", sha, "finish", "articulated", "pass")
+    assert c["mechanisms"] == [{"id": "m1", "link": "lid", "parent": "body", "type": "revolute",
+                                "origin_w": HINGE["origin"], "axis_w": HINGE["axis"], "range": [0.0, 1.5],
+                                "reference_range": [0.0, 1.5], "assumptions": {}}]
+    assert c["entities"] == {"links": ["body", "lid"], "flex": []}
+    assert c["gamma"] == [{"requirement": "r1", "mechanism": "m1", "link": "lid",
+                           "faces_area_m2": pytest.approx(c["surface"]["links"]["lid"]["native"])}]
+    assert [(x["requirement"], x["target"], x["outcome"], x["measured"]["states"]) for x in c["records"]] == [
+        ("r1", ["lid"], "pass", 3)]
+    assert r["requirements"] == {"pass": 1, "fail": 0, "inconclusive": 0, "unassessed": 0}
+    assert r["simulations"] == 0 and r["surface"]["shares"]["present"] == pytest.approx(1.0)
+    assert r["timings"]["budget_s"] == LONG and r["joints_delivered"] == 1
+    assert r["counts"] == {"exports": 1, "reviews": 0, "checkpoints": 0, "joints": 1, "articulation_reviews": 1}
+    events = T.read_events(control)
+    assert {k: events[0][k] for k in ("event", "round", "kind")} == {"event": "round_start", "round": 1, "kind": "build"}
+    budget = json.loads((work / "run_budget.json").read_text())
+    assert (budget["round"], budget["kind"], budget["budget_s"]) == (1, "build", LONG)
+    evidence = json.loads((work / "evidence" / "round_01.json").read_text())
+    assert (evidence["sha256"], evidence["outcome"], evidence["records"][0]["outcome"]) == (sha, "pass", "pass")
+    assert json.loads((control / "ranges.json").read_text()) == {"lid|revolute": [0.0, 1.5]}
+    assert not (root / "session" / "rounds").exists()
+    assert (root / "session" / "prompt.txt").read_text(encoding="utf-8") == PROMPT
+    assert json.loads((root / "result.json").read_text()) == r
+
+
+def test_a_local_failure_gets_a_repair_round(round_runs):
+    """Round 1 leaves only an export without joints: joint_missing and not_finished, both local, so a repair of
+    450 s follows. Its agent is new, and its prompt is the articulation prompt with that budget, then the check's
+    feedback, the evidence file and the best candidate so far. Round 1's logs and prompt move to rounds/01/, and
+    the result's exit is the last round's, with the timings summed."""
+    root, r = round_runs["rounds_repair"]
+    session, work = root / "session", root / "work"
+    assert [(x["round"], x["kind"], x["budget_s"], x["outcome"], x["scope"]) for x in r["rounds"]] == [
+        (1, "build", LONG, "fail", "local"), (2, "repair", C.ROUND_BUDGET_S["repair"], "pass", "none")]
+    first = r["rounds"][0]
+    assert codes(first) == ["joint_missing", "not_finished"]
+    assert first["findings"][0] == {"code": "joint_missing", "requirement": "r1", "link": "lid", "measured": None,
+                                    "expected": "revolute"}
+    assert (first["candidate"]["source"], first["candidate"]["glb"]) == ("export", "work/exports/001.glb")
+    assert (r["source"], r["verdict"], r["glb"], r["exit"]) == (
+        "finish", "articulated", "control/candidates/v02/candidate.glb", "exited")
+    assert (r["candidate"]["from"], r["candidate"]["why"]) == (
+        "work/exports/002.glb", "first of 2 eligible candidates; it beats v01 on round outcome pass")
+    assert r["requirements"]["pass"] == 1 and J.load(root / r["glb"])[0] == {"lid": lid_joint(HINGE)}
+    t = r["timings"]
+    assert t["budget_s"] == LONG + 450.0 and t["wall_s"] == pytest.approx(sum(x["wall_s"] for x in r["rounds"]))
+    evidence = json.loads((work / "evidence" / "round_01.json").read_text())
+    best = {"glb": "exports/001.glb", "round": 1, "passing": 0, "required": 1}
+    prompt = PR.round_prompt("repair", 450.0, V.feedback(evidence), best, "evidence/round_01.json")
+    assert (work / "prompt_seen.txt").read_text(encoding="utf-8") == prompt
+    assert (session / "prompt.txt").read_text(encoding="utf-8") == prompt
+    assert "The budget is 450 seconds" in prompt and "900 seconds" not in prompt and "joint_missing" in prompt
+    assert sorted(p.name for p in (session / "rounds" / "01").iterdir()) == ["codex.jsonl", "prompt.txt", "stderr.log"]
+    assert (session / "rounds" / "01" / "prompt.txt").read_text(encoding="utf-8") == PROMPT
+    assert "$ export_glb" in (session / "rounds" / "01" / "codex.jsonl").read_text()
+    assert "$ set_joint" in agent_log(root) and "$ export_glb" not in agent_log(root)
+    assert (work / "AGENTS.md").read_text() == (C.AGENT_DIR / "codex" / "AGENTS.md").read_text()
+    budget = json.loads((work / "run_budget.json").read_text())
+    assert (budget["round"], budget["kind"], budget["budget_s"]) == (2, "repair", 450.0)
+    starts = [e for e in T.read_events(root / "control") if e["event"] == "round_start"]
+    assert [(e["round"], e["kind"]) for e in starts] == [(1, "build"), (2, "repair")]
+    assert json.loads((root / "result.json").read_text()) == r
+
+
+def test_a_structural_failure_gets_one_planning_round(round_runs):
+    """A slide where LID needs a hinge is structural: a planning round of 300 s follows, in which every helper is
+    refused, so it logs no event; round 1's finish does not end it, and it writes plan.md. A repair, which is
+    told of the plan, follows it."""
+    root, r = round_runs["rounds_replan"]
+    session, work, control = root / "session", root / "work", root / "control"
+    assert [(x["round"], x["kind"], x["budget_s"], x["outcome"], x["scope"]) for x in r["rounds"]] == [
+        (1, "build", LONG, "fail", "structural"), (2, "replan", 300.0, None, None), (3, "repair", 450.0, "pass", "none")]
+    assert "joint_type_mismatch" in codes(r["rounds"][0])
+    plan = r["rounds"][1]
+    assert (plan["exit"], plan["candidate"], plan["findings"]) == ("exited", None, [])
+    assert plan["wall_s"] > 1.0 and (work / "plan.md").read_text() == "a hinge on the lid's back edge\n"
+    log = (session / "rounds" / "02" / "codex.jsonl").read_text()
+    for cmd in ("export_glb", "simulate", "finish"):
+        assert f"{cmd} refused: this is a planning round" in log
+    events = T.read_events(control)
+    starts = [i for i, e in enumerate(events) if e["event"] == "round_start"]
+    assert [events[i]["kind"] for i in starts] == ["build", "replan", "repair"] and starts[2] == starts[1] + 1
+    evidence = json.loads((work / "evidence" / "round_01.json").read_text())
+    best = {"glb": "exports/001.glb", "round": 1, "passing": 0, "required": 1}
+    assert (session / "rounds" / "02" / "prompt.txt").read_text(encoding="utf-8") == PR.round_prompt(
+        "replan", 300.0, V.feedback(evidence), best, "evidence/round_01.json")
+    seen = (work / "prompt_seen.txt").read_text(encoding="utf-8")  # round 3's
+    assert seen == PR.round_prompt("repair", 450.0, V.feedback(evidence), best, "evidence/round_01.json", planned=True)
+    assert PR.PLAN in seen and not (work / "evidence" / "round_02.json").exists()
+    assert r["timings"]["budget_s"] == LONG + 300.0 + 450.0
+    assert (r["source"], r["verdict"]) == ("finish", "articulated") and J.load(root / r["glb"])[0] == {"lid": lid_joint(HINGE)}
+
+
+def test_only_the_repair_after_the_plan_is_told_to_follow_it(round_runs):
+    """plan.md stays in work/ after the repair that follows the planning round, but a later repair has the feedback
+    of a newer check, so its prompt does not send it to a plan made from round 1's."""
+    root, r = round_runs["rounds_plan_then_two_repairs"]
+    session, work = root / "session", root / "work"
+    assert [(x["kind"], x["outcome"]) for x in r["rounds"]] == [("build", "fail"), ("replan", None), ("repair", "fail"),
+                                                                ("repair", "pass")]
+    assert PR.PLAN in (session / "rounds" / "03" / "prompt.txt").read_text(encoding="utf-8")
+    seen = (work / "prompt_seen.txt").read_text(encoding="utf-8")  # round 4's
+    evidence = json.loads((work / "evidence" / "round_03.json").read_text())
+    assert (work / "plan.md").exists() and "plan.md" not in seen
+    assert "evidence/round_03.json" in seen and seen.endswith(V.feedback(evidence))
+
+
+def test_the_rounds_stop_after_three_builds(round_runs):
+    """Three local failures are the most a session builds (MAX_BUILDS); round 4's script never runs. The three
+    stored candidates rank alike but for their version, so the session delivers the newest, as needs_review with
+    the host's reason and limitations."""
+    root, r = round_runs["rounds_cap"]
+    assert [(x["kind"], x["outcome"], x["scope"]) for x in r["rounds"]] == [
+        ("build", "fail", "local"), ("repair", "fail", "local"), ("repair", "fail", "local")]
+    assert all(codes(x) == ["joint_missing", "not_finished"] for x in r["rounds"]) and C.next_round(r["rounds"]) is None
+    assert (r["source"], r["verdict"], r["glb"]) == ("export", "needs_review", "control/candidates/v03/candidate.glb")
+    assert r["reason"] == ("the host's check of candidate v03 (round 3) did not pass: requirements not met: r1 fail; "
+                           "open: joint_missing, not_finished")
+    assert r["limitations"] == ["joint_missing: requirement r1, link lid", "not_finished"]
+    assert r["candidate"]["why"] == "first of 3 eligible candidates; it beats v02 on version"
+    assert edge(root / r["glb"]) == PARTS_SIZE and r["counts"]["exports"] == 3
+    assert r["requirements"] == {"pass": 0, "fail": 1, "inconclusive": 0, "unassessed": 0}
+    assert sorted(p.name for p in (root / "session" / "rounds").iterdir()) == ["01", "02"]
+
+
+def test_loop_trace_shows_the_last_round(round_runs, capsys):
+    """budget.json is the last round's, so the trace shows that round's events on its clock, and the rounds of the
+    result."""
+    from harpor.agent import loop_trace
+
+    root, r = round_runs["rounds_repair"]
+    loop_trace.main([str(root.parent)])
+    trace = capsys.readouterr().out
+    assert "== round 2 of 2 (repair); earlier rounds' logs are in session/rounds/\n" in trace
+    host = trace.split("== host records")[1].split("== result")[0]
+    assert "export 1 started" not in host and "export 2 started" in host and "finish articulated" in host
+    assert not re.search(r"^\s+-\d+ s ", host, re.M)
+    assert "   round 1 (build): exited, outcome fail, scope local\n" in trace
+    assert "   round 2 (repair): exited, outcome pass, scope none\n" in trace
+
+
+def test_an_earlier_candidate_wins_when_a_repair_regresses(round_runs, tmp_path):
+    """Round 1 meets LID but finishes needs_review, round 2 removes the hinge, and round 3 hands off nothing, so it
+    stores no candidate. The session delivers round 1's stored candidate, not round 2's newer export, as needs_review
+    with the host's reason and limitations, since its round did not pass. The later prompts point the agent at it,
+    and harpor.webapp.steps.agent_glb finds it in a job folder as before."""
+    from harpor.webapp import steps
+
+    root, r = round_runs["rounds_regress"]
+    work, control = root / "work", root / "control"
+    assert [(x["kind"], x["outcome"], x["candidate"]["version"], codes(x)) for x in r["rounds"]] == [
+        ("build", "fail", 1, ["not_finished"]), ("repair", "fail", 2, ["joint_missing", "not_finished"]),
+        ("repair", "fail", None, ["no_candidate"])]
+    assert (r["source"], r["verdict"], r["glb"]) == ("finish", "needs_review", "control/candidates/v01/candidate.glb")
+    assert J.load(root / r["glb"])[0] == {"lid": lid_joint(HINGE)} and r["joints_delivered"] == 1
+    assert r["reason"] == ("the host's check of candidate v01 (round 1) did not pass: every required requirement "
+                           "passes; open: not_finished")
+    assert r["limitations"] == ["not_finished"]
+    assert r["candidate"] == {"version": 1, "round": 1, "kind": "build", "from": "work/exports/001.glb",
+                              "agent_verdict": "needs_review", "outcome": "fail",
+                              "why": "first of 2 eligible candidates; it beats v02 on required requirements passing"}
+    assert r["requirements"] == {"pass": 1, "fail": 0, "inconclusive": 0, "unassessed": 0}
+    assert sorted(p.name for p in (control / "candidates").iterdir()) == ["v01", "v02"]
+    best = {"glb": "exports/001.glb", "round": 1, "passing": 1, "required": 1}
+    evidence = json.loads((work / "evidence" / "round_02.json").read_text())
+    assert (work / "prompt_seen.txt").read_text(encoding="utf-8") == PR.round_prompt(
+        "repair", 450.0, V.feedback(evidence), best, "evidence/round_02.json")  # round 3's
+    ev = json.loads((control / "evidence.json").read_text())
+    assert [(c["version"], c["round"], c["records"][0]["outcome"]) for c in ev["candidates"]] == [
+        (1, 1, "pass"), (2, 2, "fail")]
+    assert (ev["selected"]["version"], [x["version"] for x in ev["selected"]["rank"]]) == (1, [1, 2])
+    job = tmp_path / "job"
+    shutil.copytree(root, job / "agent" / "s")
+    (job / "agent" / "result.json").write_text(json.dumps(r))
+    assert steps.agent_glb(job) == job / "agent" / "s" / "control" / "candidates" / "v01" / "candidate.glb"
+
+
+def test_a_pass_beats_an_earlier_reviewed_failure(round_runs):
+    """Round 2 hands off round 1's reviewed GLB again, now articulated. Each round stores its own candidate, though
+    the bytes are the same, so each keeps its own verdict, and round 2's check reuses round 1's report. The passing
+    round wins and is delivered articulated with the agent's reason."""
+    root, r = round_runs["rounds_review_then_pass"]
+    assert [(x["kind"], x["outcome"], x["candidate"]["version"]) for x in r["rounds"]] == [
+        ("build", "fail", 1), ("repair", "pass", 2)]
+    one, two = (json.loads((root / "control" / "candidates" / v / "report.json").read_text()) for v in ("v01", "v02"))
+    assert one["sha256"] == two["sha256"] and (one["agent_verdict"], two["agent_verdict"]) == ("needs_review", "articulated")
+    assert (one["report"]["cached"], two["report"]["cached"]) == (False, True)
+    assert C.rank(one)[1:4] == C.rank(two)[1:4]
+    assert (r["source"], r["verdict"], r["glb"], r["reason"]) == (
+        "finish", "articulated", "control/candidates/v02/candidate.glb", "lid hinged at the back")
+    assert r["candidate"]["why"] == "first of 2 eligible candidates; it beats v01 on round outcome pass"
+
+
+def test_an_unchanged_verdict_is_kept_when_nothing_was_stored(round_runs):
+    """unchanged stores no candidate, and its check is of the original, whose joint_missing asks for a repair. With
+    no stored candidate and the last verdict unchanged, the session keeps it rather than falling back."""
+    root, r = round_runs["rounds_unchanged"]
+    sha = T.sha256(root / "original.glb")
+    assert [(x["candidate"]["version"], x["candidate"]["sha256"], codes(x)) for x in r["rounds"]] == [
+        (None, sha, ["joint_missing", "not_finished"])] * 3
+    assert (r["source"], r["verdict"], r["glb"], r["candidate"]) == ("finish", "unchanged", "original.glb", None)
+    assert r["requirements"] == {"pass": 0, "fail": 1, "inconclusive": 0, "unassessed": 0}
+    assert not (root / "control" / "candidates").exists()
+    ev = json.loads((root / "control" / "evidence.json").read_text())
+    assert ev["candidates"] == [] and ev["selected"] == {
+        "version": None, "verdict": "unchanged", "rank": [], "ineligible": [], "why": "no build or repair handed off a GLB",
+        "unresolved": ["r1"]}
+
+
+def stored(version, outcome="fail", passing=True, states=3, sha="a", blocks=False, source="finish"):
+    """A stored candidate's record of sha256 "a" whose report, of the bytes sha, has one required requirement."""
+    rec = {"requirement": "r1", "target": ["lid"], "required": True, "outcome": "pass" if passing else "fail",
+           "measured": {"states": states}, "findings": []}
+    return {"version": version, "round": version, "sha256": "a", "source": source,
+            "report": {"sha256": sha, "outcome": outcome, "scope": "none", "surface": {"blocks": blocks},
+                       "records": [rec], "findings": []}}
+
+
+def test_a_passing_round_ranks_first():
+    """rank: a passing round beats a newer failure, which paper A.6's order would not ensure; then a surface that
+    does not block, more required requirements passing, a source other than an uninspected export, and the newer
+    version. A requirement counts only with a trajectory of 3 states and a report of the candidate's own bytes."""
+    assert C.RANK == ("round outcome pass", "surface not blocking", "required requirements passing",
+                      "source not an export", "version")
+    assert C.rank(stored(1, "pass")) > C.rank(stored(2, passing=False)) > C.rank(stored(1, passing=False))
+    assert C.rank(stored(1)) > C.rank(stored(2, blocks=True))
+    assert C.rank(stored(1)) > C.rank(stored(2, passing=False))
+    assert C.rank(stored(1, source="checkpoint")) > C.rank(stored(2, source="export"))
+    assert [C.passing(stored(1, states=n)) for n in (2, 3)] == [0, 1]
+    assert C.passing(stored(1, sha="b")) == 0 and C.rank(stored(1, "pass", sha="b"))[0] is False
+    ranked = sorted([stored(1, passing=False), stored(2, "pass"), stored(3)], key=C.rank, reverse=True)
+    assert [c["version"] for c in ranked] == [2, 3, 1]
+    assert C.why_first(ranked) == "first of 3 eligible candidates; it beats v03 on round outcome pass"
+    assert C.why_first(ranked[1:]) == "first of 2 eligible candidates; it beats v01 on required requirements passing"
+    assert C.why_first(ranked[:1]) == "the only eligible candidate"
+
+
+def store(root, n, report, kind="parts", size=PARTS_SIZE, verdict="needs_review"):
+    """Store a GLB of the fake parts with LID's hinge as round n's candidate, its record holding report (stored's)
+    as a report of the copy's bytes."""
+    glb = root / "work" / "exports" / f"{n:03d}.glb"
+    write_glb(glb, kind, size, {"lid": lid_joint(HINGE)})
+    c = C.store_candidate(root, n, "build", {"source": "finish", "verdict": verdict, "glb": glb,
+                                            "reason": "the agent's reason", "limitations": ["the agent's limitation"]})
+    c["report"] = {**report, "sha256": c["sha256"]}
+    (root / c["glb"]).with_name("report.json").write_text(json.dumps(c))
+    return c
+
+
+def test_select_candidate_delivers_the_best_eligible_candidate(tmp_path, monkeypatch):
+    """A stored candidate that is not a valid GLB, has another size, changed after it was stored or (only while
+    surface.ENFORCE is on) lost most of the original is not eligible (paper A.6). The best of the others is
+    delivered from its read-only copy: articulated with the agent's words when its round passed, else needs_review
+    with the host's. With none eligible the session falls back to the original, unless the last round's verdict
+    was unchanged."""
+    root = prepare(tmp_path, "articulation").parent
+    (root / "control" / "parts.json").write_text(json.dumps({**PARTS, "requirements": [LID]}))
+    gone = {"code": "surface_identity", "requirement": None, "link": None, "measured": 0.3, "expected": "at least 0.5",
+            "why": "most of the native area is gone"}
+    open_ = {"code": "not_finished", "requirement": None, "link": None, "measured": "needs_review",
+             "expected": "articulated", "why": "the agent's own words"}
+    first = store(root, 1, stored(1, "pass")["report"], verdict="articulated")
+    store(root, 2, stored(2)["report"], kind="garbage")
+    store(root, 3, stored(3)["report"], size=3.0)
+    store(root, 4, {**stored(4)["report"], "outcome": "fail", "findings": [gone, open_]})
+    pick, chosen, selected = C.select_candidate(root)
+    assert pick == {"source": "finish", "glb": root / "control" / "candidates" / "v01" / "candidate.glb",
+                    "verdict": "articulated", "reason": "the agent's reason", "limitations": ["the agent's limitation"]}
+    assert chosen == first and C.check_glb(pick["glb"]) is None
+    assert selected["rank"] == [{"version": 1, "rank": [True, True, 1, True, 1]},
+                                {"version": 4, "rank": [False, True, 1, True, 4]}]
+    assert [(x["from"], x["glb"], x["why"].split(":")[0]) for x in selected["ineligible"]] == [
+        ("candidate v02", "control/candidates/v02/candidate.glb", "unparsable"),
+        ("candidate v03", "control/candidates/v03/candidate.glb", "wrong size")]
+    v01 = root / first["glb"]
+    v01.chmod(0o644)
+    v01.write_bytes(v01.read_bytes() + b"\0")
+    pick, chosen, selected = C.select_candidate(root)
+    assert (pick["verdict"], pick["glb"], chosen["version"], selected["unresolved"]) == (
+        "needs_review", root / "control" / "candidates" / "v04" / "candidate.glb", 4, [])
+    assert pick["reason"] == ("the host's check of candidate v04 (round 4) did not pass: every required requirement "
+                              "passes; open: not_finished")
+    assert pick["limitations"] == ["not_finished"] and selected["ineligible"][0]["why"] == "changed after it was stored"
+    monkeypatch.setattr("harpor.agent.surface.ENFORCE", True)
+    pick, chosen, selected = C.select_candidate(root)
+    assert (pick, chosen) == (C.original_pick(root), None)
+    assert (selected["why"], selected["unresolved"], selected["ineligible"][-1]["why"]) == (
+        "no stored candidate is eligible", ["r1"], "surface_identity: most of the native area is gone")
+    last = {"source": "finish", "verdict": "unchanged", "glb": root / "original.glb", "reason": "nothing to do",
+            "limitations": []}
+    assert C.select_candidate(root, last)[0] == last
+    assert C.select_candidate(tmp_path / "none")[2]["why"] == "no build or repair handed off a GLB"
+
+
+def test_the_evidence_of_a_soft_part():
+    """K gives a soft joint its material as parameter assumptions and no range, X the flex that MuJoCo pressed, and
+    gamma ties each found requirement to the mechanism of its link. A candidate whose check never ended has every
+    record unassessed."""
+    from harpor.agent import evidence as E
+
+    report = {"joints": {"lid": lid_joint(HINGE), "pad": {"version": 1, "frame": "W", "parent": "body", "type": "soft",
+                                                          **SOFT}},
+              "links": ["body", "lid", "pad"], "clearance": {"lid": {"reference": [0.0, 1.5]}},
+              "sim": {"soft": [{"link": "pad", "flex": "pad", "press_nodes": 32, "dmax_m": 0.004}]},
+              "surface": {"links": {"pad": {"native": 0.2, "kept": 0.19}}},
+              "records": [{"requirement": "r2", "target": ["pad"]}, {"requirement": "r3", "target": []}]}
+    mechs = E.mechanisms(report)
+    assert [(m["id"], m["link"], m["type"], m["range"], m["reference_range"]) for m in mechs] == [
+        ("m1", "lid", "revolute", [0.0, 1.5], [0.0, 1.5]), ("m2", "pad", "soft", None, None)]
+    assert (mechs[0]["assumptions"], mechs[1]["assumptions"]) == ({}, SOFT)
+    assert E.entities(report) == {"links": ["body", "lid", "pad"], "flex": [{"link": "pad", "flex": "pad",
+                                                                             "press_nodes": 32}]}
+    assert E.gamma(report["records"], mechs, report["surface"]) == [
+        {"requirement": "r2", "mechanism": "m2", "link": "pad", "faces_area_m2": 0.19}]
+    entry = E.candidate({"version": 1, "report": None}, [LID])
+    assert ([x["outcome"] for x in entry["records"]], entry["mechanisms"], entry["outcome"]) == (["unassessed"], [], None)
+
+
+def test_records_start_at_unassessed_after_a_build_change(tmp_path, monkeypatch):
+    """Records belong to one candidate (paper A.3). Round 1's hinge meets LID; round 2 changes the build, and its
+    check fails, so its candidate's records stay unassessed and do not take round 1's pass. Each check reads the
+    stored copy, and round 1's candidate is delivered."""
+    pytest.importorskip("rtree")
+    monkeypatch.setenv("GATOR_MUJOCO", shlex.join(FAKE_SIM))
+    monkeypatch.delenv("GATOR_FAKE_SIM", raising=False)
+    real, calls = V.check, []
+
+    def check(*args, **kw):
+        calls.append(args[0])
+        if len(calls) == 2:
+            raise RuntimeError("a bug in a check")
+        return real(*args, **kw)
+
+    monkeypatch.setattr(V, "check", check)
+    r = run_in_rounds(tmp_path, [[edit(PARTS_SIZE, "parts"), *hinged("needs_review")],
+                                 [set_joint("lid", "body", "revolute", {**HINGE, "upper": 1.6}), EXPORT, CRASH], [CRASH]])
+    root = tmp_path / "s"
+    ev = json.loads((root / "control" / "evidence.json").read_text())
+    one, two = ev["candidates"]
+    assert [x["outcome"] for x in one["records"]] == ["pass"] and [x["outcome"] for x in two["records"]] == ["unassessed"]
+    assert one["sha256"] != two["sha256"] and (one["mechanisms"][0]["range"], two["mechanisms"]) == ([0.0, 1.5], [])
+    assert [f["code"] for f in two["findings"]] == ["validation_error", "not_finished"]
+    assert calls == [root / one["glb"], root / two["glb"]]
+    assert (r["glb"], r["requirements"]["pass"]) == (one["glb"], 1)
+
+
+def test_the_evidence_and_the_candidates_outlive_a_failed_loop(tmp_path, monkeypatch, capsys):
+    """control/evidence.json is written after every round, so it holds what the rounds found when the loop itself
+    fails, here at the start of round 2; the session still selects from the stored candidates and writes
+    result.json, and the evidence then names the choice."""
+    pytest.importorskip("rtree")
+    monkeypatch.setenv("GATOR_MUJOCO", shlex.join(FAKE_SIM))
+    real = C.run_round
+
+    def run_round(root, cmd, env, blender, sock_dir, n, *args):
+        if n == 2:
+            raise RuntimeError("the socket cannot be bound")
+        return real(root, cmd, env, blender, sock_dir, n, *args)
+
+    monkeypatch.setattr(C, "run_round", run_round)
+    r = run_in_rounds(tmp_path, [exported(0), [CRASH]])
+    assert "rounds stopped after round 1: RuntimeError: the socket cannot be bound\n" in capsys.readouterr().err
+    assert (r["source"], r["verdict"], r["glb"]) == ("export", "needs_review", "control/candidates/v01/candidate.glb")
+    assert r["reason"] == ("the host's check of candidate v01 (round 1) did not pass: requirements not met: r1 fail; "
+                           "open: joint_missing, not_finished")
+    ev = json.loads((tmp_path / "s" / "control" / "evidence.json").read_text())
+    assert ev["rounds"] == r["rounds"] and [c["version"] for c in ev["candidates"]] == [1]
+    assert (ev["selected"]["version"], ev["selected"]["unresolved"]) == (1, ["r1"])
+
+
+def test_a_sim_outage_ends_the_rounds(tmp_path, monkeypatch):
+    """When GATOR_MUJOCO cannot run sim_check (here its modules are missing), no repair can be checked: the scope is
+    none, and the session ends after its build with the requirement inconclusive."""
+    pytest.importorskip("rtree")
+    monkeypatch.setenv("GATOR_MUJOCO", shlex.join(FAKE_SIM))
+    monkeypatch.setenv("GATOR_FAKE_SIM", json.dumps({"error": "ModuleNotFoundError: No module named 'mujoco'"}))
+    r = run_in_rounds(tmp_path, [[edit(PARTS_SIZE, "parts"), *hinged()], [CRASH]])
+    assert [(x["kind"], x["outcome"], x["scope"]) for x in r["rounds"]] == [("build", "fail", "none")]
+    assert codes(r["rounds"][0]) == ["sim_unavailable"]
+    assert r["requirements"] == {"pass": 0, "fail": 0, "inconclusive": 1, "unassessed": 0}
+
+
+def test_a_failed_check_is_a_finding_but_cancel_ends_the_session(tmp_path, monkeypatch):
+    """The steps after a round read what the agent made, so an exception or a string SystemExit there is a
+    validation_error of the round, which leaves its requirements unassessed, and the rounds go on. Cancel's integer
+    SystemExit (tools._on_sigterm) ends the session, and no result.json is written."""
+    pytest.importorskip("rtree")
+    monkeypatch.setenv("GATOR_MUJOCO", shlex.join(FAKE_SIM))
+    real, calls = V.check, []
+
+    def check(*args, **kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            raise RuntimeError("a bug in a check")
+        if len(calls) == 2:
+            sys.exit("reviews_articulation/ must be a folder, not a link or a file")
+        return real(*args, **kw)
+
+    monkeypatch.setattr(V, "check", check)
+    r = run_in_rounds(tmp_path / "a", [exported(0), exported(1), exported(2)])
+    assert [codes(x) for x in r["rounds"]] == [["validation_error", "not_finished"], ["validation_error", "not_finished"],
+                                              ["joint_missing", "not_finished"]]
+    assert calls == [{"pin_ranges": True}] * 3 and r["rounds"][0]["scope"] == "local"
+    evidence = [json.loads((tmp_path / "a" / "s" / "work" / "evidence" / f"round_0{n}.json").read_text()) for n in (1, 2)]
+    assert [e["findings"][0]["why"] for e in evidence] == [
+        "RuntimeError: a bug in a check", "reviews_articulation/ must be a folder, not a link or a file"]
+    assert evidence[0]["records"][0]["outcome"] == "unassessed" and V.feedback(evidence[0]).startswith(
+        "no candidate checked: outcome fail, scope local\n")
+
+    monkeypatch.setattr(V, "check", lambda *a, **kw: sys.exit(143))
+    with pytest.raises(SystemExit) as e:
+        run_in_rounds(tmp_path / "b", [exported(0), [CRASH]])
+    assert e.value.code == 143 and not (tmp_path / "b" / "s" / "result.json").exists()
+    assert sum(x["event"] == "round_start" for x in T.read_events(tmp_path / "b" / "s" / "control")) == 1
+
+
+CANCEL = '''
+import os, signal, sys
+from harpor.agent import controller, tools
+signal.signal(signal.SIGTERM, tools._on_sigterm)  # as harpor.webapp.agent_step runs the stage
+root, script, sock_dir = sys.argv[1:]
+env = {**os.environ, "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
+controller.run_session(root, [sys.executable, "-m", "harpor.agent.fake_agent", script], env,
+                       blender=[sys.executable, "-m", "harpor.agent.fake_agent", "--blender"], sock_dir=sock_dir,
+                       budget_s=20.0, poll_s=0.02, kill_after_s=0.5, finish_wait_s=0.5)
+'''
+
+
+def test_cancel_ends_a_session_in_its_second_round(tmp_path):
+    """SIGTERM (Cancel) in round 2 ends the session as it ends one without rounds: the agent's group is killed, the
+    step exits with 143, and no result.json is written. control/evidence.json keeps round 1 and its candidate, with
+    no choice made."""
+    pytest.importorskip("rtree")
+    root = prepare(tmp_path, "articulation").parent
+    (root / "control" / "parts.json").write_text(json.dumps({**PARTS, "requirements": [LID]}))
+    script = tmp_path / "script.json"
+    script.write_text(json.dumps({"rounds": [exported(0), [{"do": "sleep", "seconds": 60}]]}))
+    (tmp_path / "cancel.py").write_text(CANCEL)
+    env = {**os.environ, "PYTHONPATH": str(REPO), "GATOR_MUJOCO": shlex.join(FAKE_SIM)}
+    with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
+        p = subprocess.Popen([sys.executable, str(tmp_path / "cancel.py"), str(root), str(script), sock_dir], env=env)
+        try:
+            end = time.time() + 60.0
+            while time.time() < end and not any(e.get("round") == 2 for e in T.read_events(root / "control")):
+                time.sleep(0.05)
+            time.sleep(1.0)  # the round's agent is asleep
+            p.send_signal(signal.SIGTERM)
+            assert p.wait(30) == 143
+        finally:
+            if p.poll() is None:
+                p.kill()
+    assert not (root / "result.json").exists()
+    assert str(script) not in subprocess.run(["ps", "-ax", "-o", "command"], capture_output=True, text=True).stdout
+    ev = json.loads((root / "control" / "evidence.json").read_text())
+    assert [x["round"] for x in ev["rounds"]] == [1] and ev["selected"] is None
+    assert [(c["version"], c["glb"], c["records"][0]["outcome"]) for c in ev["candidates"]] == [
+        (1, "control/candidates/v01/candidate.glb", "fail")]
+
+
+def test_round_events_and_round_info(tmp_path):
+    """Without a round_start every event is the round's. With rounds, the round's readers see only the events after
+    its round_start, while file numbers stay global."""
+    T.log_event(tmp_path, "export_started", export=1)
+    assert [e["event"] for e in T.round_events(tmp_path)] == ["export_started"] and T.round_info(tmp_path) == {}
+    T.log_event(tmp_path, "round_start", round=1, kind="build")
+    T.log_event(tmp_path, "finish", verdict="articulated")
+    T.log_event(tmp_path, "round_start", round=2, kind="repair")
+    assert T.round_events(tmp_path) == [] and T.round_info(tmp_path) == {"round": 2, "kind": "repair"}
+    T.log_event(tmp_path, "export_started", export=2)
+    assert [e["export"] for e in T.round_events(tmp_path)] == [2] and T._count(tmp_path, "export_started") == 2
+
+
+def test_the_budget_view_keeps_the_round_and_counts_only_its_time(tmp_path):
+    """start_budget and _extend_budget keep round and kind in run_budget.json, and both they and the controller's
+    deadline count only this round's off-clock time. A session without rounds has neither key."""
+    work = prepare(tmp_path, "articulation")
+    control = work.parent / "control"
+    T.write_budget(work, 0.0, 900.0)
+    assert not {"round", "kind"} & set(json.loads((work / "run_budget.json").read_text()))
+    T.log_event(control, "round_start", round=1, kind="build")
+    T.log_event(control, "export_done", export=1, seconds=100.0, ok=True)
+    T.log_event(control, "round_start", round=2, kind="repair")
+    T.start_budget(work, control, 1000.0, 450.0)
+    view = json.loads((work / "run_budget.json").read_text())
+    assert (view["round"], view["kind"], view["excluded_s"], view["exports"]) == (2, "repair", 0.0, [])
+    T.log_event(control, "simulate_done", simulate=1, seconds=30.0, ok=True)
+    assert T._extend_budget(work, control) == 1000.0 + 450.0 + 30.0
+    view = json.loads((work / "run_budget.json").read_text())
+    assert (view["round"], view["kind"], view["simulations"]) == (2, "repair", [{"simulate": 1, "seconds": 30.0}])
+    assert C.deadline(1000.0, 450.0, T.round_events(control), now=1001.0) == (1480.0, 30.0)
+
+
+def test_next_round_follows_the_papers_budget():
+    """At most 3 builds (the build and 2 repairs) and 1 replan, which a build always follows; a pass or scope none
+    ends the rounds. The worst case is 4 rounds."""
+    def r(kind, outcome=None, scope=None):
+        return {"kind": kind, "outcome": outcome, "scope": scope}
+
+    local, structural = r("build", "fail", "local"), r("build", "fail", "structural")
+    assert (C.MAX_BUILDS, C.ROUND_BUDGET_S) == (3, {"repair": 450.0, "replan": 300.0})
+    assert C.next_round([r("build", "pass", "none")]) is None and C.next_round([r("build", "fail", "none")]) is None
+    assert C.next_round([local]) == "repair" and C.next_round([structural]) == "replan"
+    assert C.next_round([structural, r("replan")]) == "repair"
+    assert C.next_round([structural, r("replan"), r("repair", "fail", "structural")]) == "repair"  # one replan only
+    assert C.next_round([local, r("repair", "fail", "structural")]) == "replan"
+    assert C.next_round([local, r("repair", "fail", "structural"), r("replan")]) == "repair"
+    assert C.next_round([local, r("repair", "fail", "structural"), r("replan"), r("repair", "fail", "local")]) is None
+    assert C.next_round([local, r("repair", "fail", "local"), r("repair", "fail", "structural")]) is None
+
+
+def test_round_prompts_carry_the_whole_task():
+    """A new agent knows only its prompt: a repair is the articulation prompt with the round's budget, then the
+    repair template; a replan is its template alone. Both name the evidence, the best candidate and the rules."""
+    feedback = 'candidate sha256 0123456789ab: outcome fail, scope local\n- local tracking: {"x": 1}\n'
+    best = {"glb": "exports/002.glb", "round": 1, "passing": 0, "required": 2}
+    repair = PR.round_prompt("repair", 450.0, feedback, best, "evidence/round_01.json")
+    base = PR.load("articulation")
+    assert base.count(PR.BUDGET) == 1 and repair.startswith(base.replace(PR.BUDGET, "The budget is 450 seconds"))
+    replan = PR.round_prompt("replan", 300.0, feedback, None, "evidence/round_02.json")
+    assert replan.startswith("# Planning round") and base.splitlines()[0] not in replan
+    rules = ("candidate.blend is your work from the last round", "holds the details", "The requirements cannot be "
+             "changed", "A smaller range does not meet a span target")
+    for text, facts in ((repair, ("evidence/round_01.json", "/work/exports/002.glb, from round 1: 0 of 2", "simulate")),
+                        (replan, ("evidence/round_02.json", "No round has handed off a valid candidate yet",
+                                  "every helper command is refused", "The budget is 300 seconds", "/work/plan.md"))):
+        flat = " ".join(text.split())
+        assert all(fact in flat for fact in (*rules, *facts)), text
+        assert text.endswith('\n- local tracking: {"x": 1}\n')
+    # Only the repair right after a planning round follows its plan, which came from the same check.
+    planned = PR.round_prompt("repair", 450.0, feedback, best, "evidence/round_01.json", planned=True)
+    assert "plan.md" not in repair and PR.PLAN in planned and planned.replace(PR.PLAN, "") == repair
+    with pytest.raises(KeyError):
+        PR.round_prompt("build", 900.0, feedback, None, "evidence/round_01.json")
+
+
+def test_a_planning_round_refuses_every_helper(tmp_path, monkeypatch):
+    """One check in tools.main: a replan makes no export, receipt or off-clock time, so its budget holds and no
+    fourth build can be handed off through a later finish. All but finish end with the time left."""
+    from harpor.agent.server import COMMANDS
+
+    work = prepare(tmp_path, "articulation")
+    control = work.parent / "control"
+    T.log_event(control, "round_start", round=2, kind="replan")
+    T.start_budget(work, control, time.time(), 300.0)
+    monkeypatch.setenv("GATOR_WORK", str(work))
+    monkeypatch.setenv("GATOR_CONTROL", str(control))
+    receipt = "a001-0123456789ab"
+    args = {"checkpoint": ["--receipt", receipt, "--defect", "x"], "set_joint": ["--child", "lid", "--remove"],
+            "finish": ["--receipt", receipt, "--verdict", "articulated", "--reason", "x"]}
+    before = T.read_events(control)
+    for cmd in COMMANDS:
+        with pytest.raises(SystemExit) as e:
+            T.main([cmd, *args.get(cmd, [])])
+        first, *rest = e.value.code.split("\n")
+        assert first == (f"{cmd} refused: this is a planning round, in which no helper runs; write your plan to "
+                         "/work/plan.md and stop")
+        assert rest == [] if cmd == "finish" else (len(rest) == 1 and rest[0].startswith("time left: "))
+    assert T.read_events(control) == before and not any((work / "exports").iterdir())
+
+
+def test_start_round_moves_links_and_does_not_follow_them(tmp_path):
+    """The agent of a round may leave links at the names that start_round moves or writes. They are moved or
+    replaced, never followed, so the next round's prompt, AGENTS.md and Codex settings are the host's own and the
+    file they point to stays as it was. session/rounds and codex_home must be real folders."""
+    work = prepare(tmp_path, "articulation")
+    root, session = work.parent, work.parent / "session"
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me")
+    links = [session / "prompt.txt", session / "codex.jsonl", session / "stderr.log", work / "AGENTS.md",
+             session / "codex_home" / "config.toml"]
+    for link in links:
+        link.unlink(missing_ok=True)
+        link.symlink_to(victim)
+    C.start_round(root, 2, "round 2: é\n")
+    assert victim.read_text() == "keep me"
+    done = session / "rounds" / "01"
+    assert sorted(p.name for p in done.iterdir()) == ["codex.jsonl", "prompt.txt", "stderr.log"]
+    assert all((done / p.name).is_symlink() for p in links[:3])
+    for path, text in ((session / "prompt.txt", "round 2: é\n"), (work / "AGENTS.md", (C.AGENT_DIR / "codex" / "AGENTS.md")
+                       .read_text(encoding="utf-8")), (session / "codex_home" / "config.toml", C.codex_config())):
+        assert not path.is_symlink() and path.read_text(encoding="utf-8") == text
+    assert not [p for d in (session, work, session / "codex_home") for p in d.iterdir() if p.name.startswith(".")]
+    (session / "codex_home").rename(session / "codex_home_real")
+    (session / "codex_home").symlink_to(tmp_path)
+    with pytest.raises(SystemExit, match="codex_home/ must be a folder"):
+        C.start_round(root, 3, "round 3\n")
+    assert not (tmp_path / "config.toml").exists()
+    shutil.rmtree(session / "rounds")
+    (session / "rounds").symlink_to(tmp_path)
+    with pytest.raises(SystemExit, match="rounds/ must be a folder"):
+        C.start_round(root, 3, "round 3\n")
+
+
+def test_usage_and_network_commands_are_summed_per_round(tmp_path):
+    """Each round's agent writes its own log. Its usage is read alone and summed, and so are its commands, since a
+    new Codex process may use the same item ids again; the limit applies to all of them."""
+    session = tmp_path / "session"
+    (session / "rounds" / "01").mkdir(parents=True)
+    end = {"type": "end", "reason": "finished", "turns": 3, "totals": usage(10, 20, 30, 40), "cost_usd": 0.25}
+    (session / "rounds" / "01" / "claude.jsonl").write_text(json.dumps(end) + "\n")
+    (session / "claude.jsonl").write_text(json.dumps({"type": "response", "usage": usage(1, 2), "cost_usd": 0.01}) + "\n")
+    logs = C.round_logs(tmp_path, "claude")
+    assert logs == [session / "rounds" / "01" / "claude.jsonl", session / "claude.jsonl"]
+    assert C.claude_usage(*logs) == {"turns": 4, "tokens": usage(11, 22, 30, 40), "cost_usd": 0.26, "end_reason": None}
+    for k, folder in enumerate((session / "rounds" / "01", session)):
+        items = [{"type": "item.completed", "item": {"id": f"item_{i}", "type": "command_execution",
+                                                     "command": f"pip install r{k}_{i}"}} for i in range(3)]
+        (folder / "codex.jsonl").write_text("".join(json.dumps(x) + "\n" for x in items))
+    logs = C.round_logs(tmp_path, "codex")
+    assert C.network_commands(*logs) == [f"pip install r{k}_{i}" for k, i in ((0, 0), (0, 1), (0, 2), (1, 0), (1, 1))]
+    assert C.round_logs(tmp_path / "one", "codex") == [tmp_path / "one" / "session" / "codex.jsonl"]
+
+
+def test_round_logs_keep_the_log_of_a_round_whose_next_failed_to_start(tmp_path):
+    """start_round moves round 1's log before anything of round 2 can fail, so the session then has 1 run and no
+    log in session/. The logs are listed from the folders, so round 1's commands and cost still count."""
+    session = tmp_path / "session"
+    (session / "rounds" / "01").mkdir(parents=True)
+    end = {"type": "end", "reason": "finished", "turns": 3, "totals": usage(10, 20, 30, 40), "cost_usd": 0.25}
+    (session / "rounds" / "01" / "claude.jsonl").write_text(json.dumps(end) + "\n")
+    logs = C.round_logs(tmp_path, "claude")
+    assert logs == [session / "rounds" / "01" / "claude.jsonl", session / "claude.jsonl"]
+    assert (C.claude_usage(*logs)["turns"], C.claude_usage(*logs)["cost_usd"]) == (3, 0.25)
+
+
+def test_a_planted_log_does_not_hang_or_lead_the_controller(tmp_path):
+    """The Codex agent can write /session, and start_round moves what is there into session/rounds/NN/. A FIFO there
+    would block a plain read until something writes to it, and a link would lead the host out of the session: both
+    give nothing, as tools.read_file reads."""
+    session = tmp_path / "session"
+    (session / "rounds" / "01").mkdir(parents=True)
+    os.mkfifo(session / "rounds" / "01" / "codex.jsonl")
+    elsewhere = tmp_path / "elsewhere.jsonl"
+    elsewhere.write_text(json.dumps({"type": "item.completed", "item": {"id": "x", "type": "command_execution",
+                                                                        "command": "pip install x"}}) + "\n")
+    (session / "codex.jsonl").symlink_to(elsewhere)
+    got = []
+    reader = threading.Thread(target=lambda: got.append(C.network_commands(*C.round_logs(tmp_path, "codex"))),
+                              daemon=True)
+    reader.start()
+    reader.join(10.0)
+    assert not reader.is_alive() and got == [[]]
+    assert C.network_commands(elsewhere) == ["pip install x"]

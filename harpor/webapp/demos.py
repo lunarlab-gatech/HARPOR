@@ -436,7 +436,8 @@ def facts_of(J, job=None):
             r = j.get("range") or [0, 0]
             out.append([f"Joint of {j['child']}", f"turns on {j['parent']}, {deg(r[0])}° to {deg(r[1])}°"
                         if j.get("type") == "revolute" else f"slides on {j['parent']}, {cm(r[0])} to {cm(r[1])} cm"
-                        if j.get("type") == "prismatic" else f"fixed to {j['parent']}"])
+                        if j.get("type") == "prismatic" else f"soft on {j['parent']}"
+                        if j.get("type") == "soft" else f"fixed to {j['parent']}"])
         out += [[f"Joint of {k}", f"none (welded to {to})"] for k, to in (mj.get("welded") or {}).items()]
     elif mj and art:
         out.append(["Links", "1 (no joints, one rigid body)"])

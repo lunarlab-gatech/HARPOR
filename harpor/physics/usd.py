@@ -30,9 +30,11 @@ inertial) that holds that link's visuals/ and collisions/. All links share frame
 PhysicsFixedJoint from the parent link to the child, with localPos0 = localPos1 = the joint's origin and
 localRot0 = localRot1 turning the joint's x axis onto its axis (harpor.parts.joints.axis_rotation); a link
 without a joint gets a fixed joint to the link the MJCF welds it to (mjcf.json welded, else the root). A
-fixed base is /NAME/joints/world, a PhysicsFixedJoint from the world to the root link at the MJCF's start
-height, where scene.usda places the asset. A joint's two links never collide (collisionEnabled is false
-by default); every pair in mjcf.json excluded_pairs also gets FilteredPairsAPI, as the MJCF's <exclude>.
+soft part gets a PhysicsFixedJoint too; its link prim holds customData harpor:soft_as_rigid, and usd.json
+soft_as_rigid names it. A fixed base is /NAME/joints/world, a PhysicsFixedJoint from the world to the root
+link at the MJCF's start height, where scene.usda places the asset. A joint's two links never collide
+(collisionEnabled is false by default); every pair in mjcf.json excluded_pairs also gets FilteredPairsAPI,
+as the MJCF's <exclude>, and so does every pair in soft_excluded_pairs, because a soft link collides here.
 """
 
 import argparse
@@ -43,7 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
-from harpor.parts.joints import axis_rotation
+from harpor.parts.joints import SOFT_AS_RIGID, STATIC, axis_rotation
 from harpor.physics.mjcf import load_s
 
 
@@ -253,11 +255,13 @@ def build_links(glb, summary, mjcf_dir, out, name, mj, friction):
             v, f = read_obj(Path(mjcf_dir) / "assets" / f"collision_{link}_{j}.obj")
             _collider(stage, f"{path[link]}/collisions/collision_{j}", v, f, phys)
 
-    for a, b in mj.get("excluded_pairs", []):
+    filtered = mj.get("excluded_pairs", []) + mj.get("soft_excluded_pairs", [])  # a soft link is rigid here
+    for a, b in filtered:
         UsdPhysics.FilteredPairsAPI.Apply(stage.GetPrimAtPath(path[a])).CreateFilteredPairsRel().AddTarget(path[b])
 
     UsdGeom.Scope.Define(stage, f"/{name}/joints")
-    kinds = {"revolute": UsdPhysics.RevoluteJoint, "prismatic": UsdPhysics.PrismaticJoint, "fixed": UsdPhysics.FixedJoint}
+    kinds = {"revolute": UsdPhysics.RevoluteJoint, "prismatic": UsdPhysics.PrismaticJoint, "fixed": UsdPhysics.FixedJoint,
+             "soft": UsdPhysics.FixedJoint}
     holder = mj.get("welded", {})
     welded = [{"child": k, "parent": holder.get(k, mj["root"]), "type": "fixed", "pos": [0.0, 0.0, 0.0],
                "axis": [1.0, 0.0, 0.0], "range": [0.0, 0.0]} for k in mj["loose"]]
@@ -273,7 +277,9 @@ def build_links(glb, summary, mjcf_dir, out, name, mj, friction):
         J.CreateLocalPos1Attr(Gf.Vec3f(*map(float, j["pos"])))
         J.CreateLocalRot1Attr(rot)
         lower, upper = j["range"]
-        if j["type"] != "fixed":
+        if j["type"] == "soft":
+            stage.GetPrimAtPath(path[j["child"]]).SetCustomDataByKey("harpor:soft_as_rigid", True)
+        if j["type"] not in STATIC:
             J.CreateAxisAttr(UsdPhysics.Tokens.x)
             scale = 180 / np.pi if j["type"] == "revolute" else 1.0  # USD revolute limits are in degrees
             J.CreateLowerLimitAttr(float(lower * scale))
@@ -291,7 +297,8 @@ def build_links(glb, summary, mjcf_dir, out, name, mj, friction):
               "mjcf": str(Path(mjcf_dir).resolve()), "name": name, "friction": friction, "start_z": mj["start_z"],
               "visuals": visuals, "collision_hulls": mj["collision_hulls"], "root": mj["root"],
               "fixed_base": mj["fixed_base"], "links": links, "joints": joints,
-              "filtered_pairs": mj.get("excluded_pairs", [])}
+              "filtered_pairs": filtered,
+              "soft_as_rigid": {j["child"]: SOFT_AS_RIGID for j in joints if j["type"] == "soft"}}
     (out / "usd.json").write_text(json.dumps(report, indent=1))
     return report
 

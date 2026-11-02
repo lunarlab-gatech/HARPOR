@@ -13,7 +13,8 @@ Real code runs wherever it needs no GPU and no ICE env: topics, frames and extra
 for a rosbag, since rosbags is pure Python, and for a Stray Scanner zip), prep (mvsam3d.prep), lidar
 (lidar.py, with the LiDAR points of the views), select (views.py), align (physics_auto.py), cameras.json
 (mvsam3d.cameras), turntable (harpor.webapp.turntable with the fake Blender of harpor.agent.fake_agent,
-whose frames are the GLB's outline; the MP4 is a real H.264 file) and package (jobs.package).
+whose frames are the GLB's outline; the MP4 is a real H.264 file), softvideo (harpor.webapp.softvideo, the same
+way, after MuJoCo's press, or a synthetic dent where MuJoCo is not installed) and package (jobs.package).
 For a job with LiDAR (steps.lidar: a bag's LiDAR topic or a Stray Scanner capture's
 depth), the fake DA3 is off by FAKE_DA3_SCALE: its depth, pointmaps and camera translations are 0.8 x
 the scene's, so the real lidar stage must find 1.25 from the bag's true points or the capture's true
@@ -24,14 +25,19 @@ checks the key file (mode 0600, an OPENAI_API_KEY line for astra, an ANTHROPIC_A
 opus), never prints the key, and writes the result record of the agent it stands in for.
 
 An articulated job (build_plan.md note 11) has a lid. propose lists "body" and "lid" for the VLM
-modes (with the same key file check) and runs the real stage for the user's list. parts cuts the box
-at 75% of its height: the list's base is below the cut and its next part above it (the other parts
-are not found), with the part masks, check images, faces.npz, vote.json, parts.glb and parts.json
-(the seam's lines from harpor.parts.geometry) of the real stage. The agent hinges that part on the
-base's back top edge, in frame W. vomp then runs per link of physics/links, and mjcf builds the
-nested model with the real harpor.physics.mjcf (one convex hull per link instead of CoACD) when the
-aligned GLB has joints. usd writes the articulation's layout as text, and urdf runs the real
-harpor.physics.urdf on such an MJCF (for the box MJCF of a rigid job it writes one box link).
+modes (with the same key file check), with their requirements (harpor.parts.propose.requirements_from),
+and runs the real stage for the user's list. parts cuts the box at 75% of its height: the list's base
+is below the cut and its next part above it (the other parts are not found), with the part masks,
+check images, faces.npz, vote.json, parts.glb and parts.json (the seam's lines from
+harpor.parts.geometry, the requirements from harpor.parts.stage) of the real stage. The agent hinges
+that part on the base's back top edge, in frame W, or makes it soft on the base when its joint_guess
+is soft, so a typed list "body / pad > body : soft" runs the whole path with a soft part. Its result
+has the keys of the real session, and a part list with a found requirement those of a session in
+rounds and agent/evidence.json, without running the round code (in_rounds). vomp then runs per link
+of physics/links, and mjcf builds the nested model with the real harpor.physics.mjcf (one convex
+hull per link instead of CoACD) when the aligned GLB has joints. usd writes the articulation's
+layout as text, and urdf runs the real harpor.physics.urdf on such an MJCF (for the box MJCF of a
+rigid job it writes one box link).
 """
 
 import argparse
@@ -63,6 +69,7 @@ COLOR = [170, 120, 70, 255]
 FAKE_PARTS = [{"name": "body", "parent": None, "joint": "fixed"},
               {"name": "lid", "parent": "body", "joint": "revolute", "count": 1,
                "axis_hint": "a hinge along the back top edge; the lid opens upward"}]
+FAKE_BLENDER = [sys.executable, "-m", "harpor.agent.fake_agent", "--blender"]  # the videos' Blender
 
 
 def pace(n=4):
@@ -315,7 +322,8 @@ def propose(J, key_file=None, which="astra"):
     except ValueError as e:
         raise SystemExit(f"fake VLM: {e}") from None
     proposal = {"source": "vlm", "agent": which, "model": CLAUDE_MODEL if which == "opus" else CODEX_MODEL,
-                "noun": job["prompt"], "base": parts[0]["name"], "parts": parts, "warnings": [], "seconds": 2 * DELAY,
+                "noun": job["prompt"], "base": parts[0]["name"], "parts": parts,
+                "requirements": P.requirements_from(FAKE_PARTS, parts), "warnings": [], "seconds": 2 * DELAY,
                 "attempts": 1, "answer": "fake VLM: a body and a lid", "mode": mode, "fake": True}
     write_json(J / "run" / "proposal.json", proposal)
     print(f"proposal (fake {proposal['model']}): base {parts[0]['name']!r}, {len(parts) - 1} moving parts")
@@ -328,7 +336,7 @@ def parts(J):
 
     from harpor import frames
     from harpor.agent import controller, tools
-    from harpor.parts import geometry, render
+    from harpor.parts import geometry, render, stage
     from harpor.parts.vote import load_mesh
     from harpor.stage_a.part_masks import COLORS, overlay_parts
     from harpor.stage_a.sam3_masks import slug
@@ -461,14 +469,18 @@ def parts(J):
     out_parts += [{"name": None, "role": "part", "prompt": p["name"], "parent": p.get("parent"),
                    "joint_guess": p.get("joint", "unknown"), "axis_hint": p.get("axis_hint"), "faces": 0,
                    "status": "not_found", "why": why} for p in lost]
+    reqs = stage.requirements(proposal, {c["name"]: c for c in clusters[:len(found)]}, names,
+                              {n: p["parent"] for n, p in zip(names, out_parts)})
     doc = {"version": 1, "frame": "W", "glb": "parts.glb", "glb_sha256": tools.sha256(R / "parts.glb"),
            "noun": proposal.get("noun"), "base": names[0], "source": proposal.get("source"),
-           "agent": proposal.get("agent"), "model": proposal.get("model"), "parts": out_parts, "seams": seams,
+           "agent": proposal.get("agent"), "model": proposal.get("model"), "parts": out_parts, "requirements": reqs,
+           "seams": seams,
            "split": {k: split[k] for k in ("mapping", "unmatched", "welded_vertices", "custom_normals_cleared")},
            "warnings": [*proposal.get("warnings", []), *([f"{why}; not found: {', '.join(p['name'] for p in lost)}"]
                                                          if lost else [])], "fake": True}
     write_json(R / "parts.json", doc)
-    print(f"parts.json (fake): {len(names)} parts ({', '.join(names)}), {len(seams)} seams")
+    print(f"parts.json (fake): {len(names)} parts ({', '.join(names)}), {len(seams)} seams, "
+          f"{sum(r['status'] == 'found' for r in reqs)} of {len(reqs)} requirements found")
     for s in seams:
         print(f"  seam {s['parts'][0]}|{s['parts'][1]}: {s['edges']} edges, {s['length']:.3f} long, {len(s['lines'])} lines")
 
@@ -483,9 +495,17 @@ def hinge(J, child, parent):
                     "lower": 0.0, "upper": 1.5}}
 
 
+def soft(rec, part):
+    """part's soft joint on its parent, of the material of its requirement in rec (run/parts.json), else foam."""
+    from harpor.agent import tools
+
+    material = next((r.get("material") for r in rec.get("requirements") or [] if r["part"] == part["name"]), None)
+    return {part["name"]: tools.soft_joint(part["parent"], material or "foam", (None,) * 4)}
+
+
 def articulate(J, out):
-    """parts.glb with the hinge of its first moving part (run/parts.json) as out. Returns the number of
-    joints (0 when the split found no moving part)."""
+    """parts.glb with the joint of its first moving part (run/parts.json) as out: a soft joint when its
+    joint_guess is soft (soft), else the hinge. Returns the joints ({} when the split found no moving part)."""
     from harpor.agent import controller
     from harpor.parts import joints
     from harpor.physics.align import read_glb, write_glb
@@ -493,7 +513,10 @@ def articulate(J, out):
     rec = json.loads((J / "run" / "parts.json").read_text())
     moving = [p for p in rec["parts"] if p["status"] == "found" and p["parent"]]
     doc, binary = read_glb(J / "run" / "parts.glb")
-    spec = hinge(J, moving[0]["name"], moving[0]["parent"]) if moving else {}
+    spec = {}
+    if moving:
+        p = moving[0]
+        spec = soft(rec, p) if p["joint_guess"] == "soft" else hinge(J, p["name"], p["parent"])
     problems = joints.validate(spec, joints.mesh_nodes(doc)) if spec else []
     if problems:
         raise SystemExit("fake agent: bad joint: " + "; ".join(problems))
@@ -501,25 +524,81 @@ def articulate(J, out):
     bad = controller.check_glb(out)
     if bad:
         raise SystemExit(f"fake agent: {bad}")
-    return len(spec)
+    return spec
+
+
+def fake_check(root, glb, joints):
+    """The report of harpor.agent.validate.check on the fake agent's GLB without running it: every found
+    requirement of control/parts.json passes, a hinge over its whole range and a soft part with a 4 mm dent that
+    springs back, each with validate.MIN_STATES states. glb: the GLB's path in root; joints: its joints."""
+    from harpor.agent import surface, tools, validate
+    from harpor.parts.joints import load
+
+    def measured(j):
+        if j["type"] == "soft":
+            return {"type": "soft", "dmax_m": 0.004, "visible_dmax_m": 0.004, "residual_m": 0.0, "cap_limited": False,
+                    "states": validate.MIN_STATES}
+        ends = [j["lower"], j["upper"]]
+        return {"type": j["type"], "reference": ends, "achieved": ends, "reductions": 0, "states": validate.MIN_STATES}
+
+    records = []
+    for r in validate.requirements(root / "control"):
+        ok = r["status"] == "found" and r["part"] in joints
+        records.append({**validate.record(r, measured(joints[r["part"]]) if ok else None),
+                        "outcome": "pass" if ok else "unassessed"})
+    return {"version": 1, "sha256": tools.sha256(root / glb), "links": load(root / glb)[1], "joints": joints,
+            "clearance": {}, "sim": {"skipped": "the fake agent runs no MuJoCo"},
+            "surface": surface.compare(root / glb, root / "original.glb"), "records": records, "findings": [],
+            "errors": [], "scope": "none", "outcome": "pass"}
+
+
+def in_rounds(J, root, result, joints, keys):
+    """The keys of a session in rounds (controller.run_session) for the fake agent's articulation, without its round
+    code: one build that passes (fake_check), whose GLB stays where the agent left it, and its evidence
+    (harpor.agent.evidence) in control/evidence.json, published to agent/evidence.json as agent_step does."""
+    from harpor.agent import controller, evidence
+    from harpor.webapp.agent_step import BUDGET_S, publish_evidence
+
+    report = fake_check(root, result["glb"], joints)
+    cand = {"version": 1, "round": 1, "kind": "build", "glb": result["glb"], "from": result["glb"],
+            "sha256": report["sha256"], "source": result["source"], "agent_verdict": result["verdict"],
+            "reason": result["reason"], "limitations": result["limitations"], "report": report}
+    run = {"budget_s": BUDGET_S["articulation"], "exit": result["exit"], "wall_s": result["timings"]["wall_s"]}
+    end = {"pick": {"source": cand["source"], "verdict": cand["agent_verdict"], "glb": root / cand["glb"]},
+           "version": 1, "sha256": cand["sha256"], "report": report}
+    rounds = [controller.round_record(root, 1, "build", run, end)]
+    selected = {"version": 1, "verdict": result["verdict"], "why": controller.why_first([cand]),
+                "rank": [{"version": 1, "rank": list(controller.rank(cand))}], "ineligible": [],
+                "unresolved": [r["requirement"] for r in report["records"] if r["outcome"] != "pass"]}
+    evidence.write(root, rounds, [cand], selected)
+    publish_evidence(root, J / "agent" / "evidence.json", keys)
+    result.update(rounds=rounds, candidate=controller.candidate_summary(cand, selected),
+                  requirements=controller.requirement_counts(root, report), surface=report["surface"])
 
 
 def agent(J, key_file, which="astra"):
-    """A refinement that returns posed.glb, or for an articulated job (agent_step.mode) the parts with a hinge."""
-    from harpor.agent import controller, tools
-    from harpor.webapp.agent_step import AGENTS, mode
+    """A refinement that returns posed.glb, or for an articulated job (agent_step.mode) the parts with the joint of
+    articulate. The result has the surface report of the real session (harpor.agent.surface), and an articulation
+    whose parts.json has a found requirement the keys of a session in rounds (in_rounds)."""
+    from harpor.agent import controller, surface, tools
+    from harpor.webapp.agent_step import AGENTS, mode, print_rounds
 
     check_key_file(key_file, which)
     root = J / "agent" / "s"
     shutil.rmtree(root, ignore_errors=True)
     (root / "work" / "exports").mkdir(parents=True)
-    (J / "agent" / "result.json").unlink(missing_ok=True)
+    (root / "control").mkdir()
+    for f in ("result.json", "evidence.json"):
+        (J / "agent" / f).unlink(missing_ok=True)
     glb = root / "work" / "exports" / "001.glb"
     articulation = mode(J, json.loads((J / "job.json").read_text())) == "articulation"
-    if articulation:
-        shutil.copyfile(J / "run" / "parts.glb", root / "original.glb")  # as prepare_session does
-        n = articulate(J, glb)
+    if articulation:  # as prepare_session does
+        shutil.copyfile(J / "run" / "parts.glb", root / "original.glb")
+        shutil.copyfile(J / "run" / "parts.json", root / "control" / "parts.json")
+        joints = articulate(J, glb)
+        n = len(joints)
     else:
+        shutil.copyfile(J / "run" / "posed.glb", root / "original.glb")
         shutil.copyfile(J / "run" / "posed.glb", glb)
     pace(4)
     kind = AGENTS[which]  # the controller's name of the agent
@@ -532,11 +611,18 @@ def agent(J, key_file, which="astra"):
               "key_found_in": []}
     if articulation:
         rel = "work/exports/001.glb" if n else "original.glb"
+        child, j = next(iter(joints.items()), (None, {}))
+        said = (f"fake agent: {child} is soft ({j.get('material')}) on {j.get('parent')}" if j.get("type") == "soft"
+                else "fake agent: the lid hinges on the back top edge of the body")
         result.update(mode="articulation", verdict="articulated" if n else "unchanged",
-                      reason="fake agent: the lid hinges on the back top edge of the body" if n
-                      else "fake agent: the split has no part that moves", glb=rel, sha256=tools.sha256(root / rel),
+                      reason=said if n else "fake agent: the split has no part that moves", glb=rel,
+                      sha256=tools.sha256(root / rel),
                       counts={"exports": 1, "reviews": 0, "checkpoints": 0, "joints": n, "articulation_reviews": int(n > 0)},
-                      joints_delivered=n)
+                      joints_delivered=n, simulations=0)
+        if controller.has_rounds(root, "articulation"):
+            in_rounds(J, root, result, joints, controller.read_keys(key_file))
+    else:
+        result["surface"] = surface.compare(glb, root / "original.glb")
     if kind == "claude":
         tokens = {"input_tokens": 41000, "output_tokens": 9000, "cache_read_input_tokens": 380000,
                   "cache_creation_input_tokens": 52000}
@@ -546,6 +632,8 @@ def agent(J, key_file, which="astra"):
     shutil.copyfile(root / "result.json", J / "agent" / "result.json")
     print(f"agent (fake {info['model']}): finish {result['verdict']}, GLB {result['glb']}"
           + (f", {n} joints" if articulation else ""))
+    if result.get("rounds"):
+        print_rounds(result)
 
 
 def grid(glb, n=12):
@@ -665,11 +753,14 @@ def mjcf(J):
     print(f"MJCF (fake): {P / 'mjcf' / 'scene.xml'}")
 
 
-USD_JOINT = {"revolute": "PhysicsRevoluteJoint", "prismatic": "PhysicsPrismaticJoint", "fixed": "PhysicsFixedJoint"}
+USD_JOINT = {"revolute": "PhysicsRevoluteJoint", "prismatic": "PhysicsPrismaticJoint", "fixed": "PhysicsFixedJoint",
+             "soft": "PhysicsFixedJoint"}
 
 
 def usd_links(name, mj):
     """(the asset's text, its check) for an MJCF with links: the layout of harpor.physics.usd, masses only."""
+    from harpor.parts.joints import STATIC
+
     def vec(x):
         return "(" + ", ".join(f"{v:.6g}" for v in x) + ")"
 
@@ -687,7 +778,7 @@ def usd_links(name, mj):
                   f'            rel physics:body1 = </{name}/links/{j["child"]}>',
                   f"            point3f physics:localPos0 = {vec(j['pos'])}",
                   f"            point3f physics:localPos1 = {vec(j['pos'])}"]
-        if j["type"] != "fixed":
+        if j["type"] not in STATIC:
             k = 180 / np.pi if j["type"] == "revolute" else 1.0  # USD limits are degrees for a hinge
             lines += ['            uniform token physics:axis = "X"',
                       f"            float physics:lowerLimit = {j['range'][0] * k:.6g}",
@@ -784,8 +875,49 @@ def turntable(J):
     from harpor.webapp import turntable as T
 
     signal.signal(signal.SIGTERM, tools._on_sigterm)
-    T.render(J, blender=[sys.executable, "-m", "harpor.agent.fake_agent", "--blender"])
+    T.render(J, blender=FAKE_BLENDER)
     T.encode(J)
+
+
+def soft_motion(J):
+    """harpor.webapp.softvideo.motion without MuJoCo: the first soft part of mjcf.json dents along its press direction
+    by the motion's target, most at the middle of its press nodes and fading over 2 cm, in a press that ramps, holds and
+    springs back over the frames."""
+    from harpor.fileio import read_json
+    from harpor.webapp import softvideo as S
+
+    mj = read_json(J / "physics" / "mjcf" / "mjcf.json")
+    link, rec = next(iter(mj["soft"].items()))
+    with np.load(J / "physics" / "mjcf" / rec["file"]) as z:
+        rest, direction, press = z["vertices"], z["direction"], z["nodes"][z["press"]]
+    depth = float(np.ptp(rest @ direction))
+    target = min(S.DENT_M, S.DENT_SHARE * depth)
+    bump = np.exp(-(np.linalg.norm(rest - press.mean(0), axis=1) / 0.02) ** 2)
+    k = np.arange(S.FRAMES) / S.FRAMES
+    press_in = np.clip(np.minimum(k / 0.3, (0.6 - k) / 0.2), 0, 1)  # in over 0.3, held, out by 0.6 of the loop
+    disp = press_in[:, None, None] * target * bump[None, :, None] * direction
+    shutil.rmtree(J / "softvideo", ignore_errors=True)
+    (J / "softvideo").mkdir()
+    np.savez(J / "softvideo" / "motion.npz", rest=rest, disp=disp.astype(np.float32))
+    write_json(J / "softvideo" / "motion.json", {"link": link, "frames": S.FRAMES, "fps": S.FPS, "depth_m": depth,
+                                                 "target_m": target, "dent_m": target, "fake": True}, indent=1)
+    print(f"soft part {link} (fake motion, no MuJoCo): a dent of {1000 * target:.1f} mm")
+
+
+def softvideo(J):
+    """The real stage with the fake Blender: the motion (harpor.webapp.softvideo, or soft_motion without MuJoCo), the
+    frames and the MP4."""
+    from harpor.agent import tools
+    from harpor.webapp import softvideo as S
+    from harpor.webapp import turntable as T
+
+    signal.signal(signal.SIGTERM, tools._on_sigterm)
+    if importlib.util.find_spec("mujoco"):
+        S.motion(J)
+    else:
+        soft_motion(J)
+    S.render(J, blender=FAKE_BLENDER)
+    T.encode(J, "softvideo")
 
 
 def main(argv=None):

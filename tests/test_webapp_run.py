@@ -443,6 +443,17 @@ def test_a_stray_capture_keeps_its_depth_unless_it_is_turned_off(term):
     assert code == run.WAITS and job["lidar"] is None and job["stages"]["lidar"]["status"] == "skipped", out
 
 
+def test_the_agent_line_is_one_clean_line(tmp_path, capsys):
+    """The agent's reason in the job's agent result, an older one too, prints as one line without control
+    characters, accents kept."""
+    from test_agent_controller import CLEAN, DIRTY
+
+    r = {"verdict": "complete", "reason": DIRTY}
+    job = SimpleNamespace(J=tmp_path, call=lambda method, route: {"agent_result": r})
+    assert run.Run.finished(job) == run.DONE
+    assert capsys.readouterr().out == f"agent: complete: {CLEAN}\nresults: {tmp_path / 'results.zip'}\n"
+
+
 def test_the_key_stays_out_of_every_output(term):
     key = term.key_file()
     code, out = term(term.video(), "--prompt", "box", "--n-views", 3, "--agent", "opus", "--key-file", key)

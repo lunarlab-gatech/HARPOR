@@ -38,7 +38,11 @@ confirms the list, and false again whenever propose runs. A rigid job skips prop
 
 job.json "turntable" (false at first) asks for the 360 video: the turntable stage
 (steps.py) renders it after urdf. It is optional (steps.OPTIONAL): when it fails, the job gets a warning
-and the build goes on to package.
+and the build goes on to package. So is the softvideo stage after it, which needs no setting: it runs when the
+MuJoCo model has a soft part.
+
+A job folder of an earlier version may lack the record of a newer stage: Runner._recover adds it, skipped, at
+every start of the server.
 
 The API key stays in the runner's memory, with the agent it was checked for. For the stages that take
 it (steps.needs_key: the agent stage, and the propose stage when the VLM lists the parts) it is
@@ -57,9 +61,11 @@ holder_alive); a file it cannot check counts as stale.
 
 writes J/results.zip: posed.glb, refined.glb (the agent's GLB; physics/up.json glb_rule says whether
 physics used it), parts.glb and parts.json (an articulated job's split parts), aligned.glb,
-turntable.mp4 (the 360 video, when the job asked for it), summary.json, mjcf/, usd/, urdf/, placement.json, selection.json, lidar.json (the metric
-scale from LiDAR) and agent_result.json, without any file that the agent result lists in key_found_in
-(agent_result.json too, when the session's result.json is listed).
+turntable.mp4 (the 360 video, when the job asked for it), softvideo.mp4 (the soft-part video, when the MuJoCo model
+has a soft part), summary.json, mjcf/, usd/, urdf/, placement.json, selection.json, lidar.json (the metric
+scale from LiDAR), agent_result.json and evidence.json (the agent's evidence of an articulation in rounds),
+without any file that the agent result lists in key_found_in (agent_result.json too, when the session's
+result.json is listed, and evidence.json when its control/evidence.json is).
 """
 
 import argparse
@@ -100,7 +106,8 @@ DERIVED = {"frames": ("frames/meta.json", "frames/thumbs", "frames/stamps.json",
            "extract": ("frames/pool.json", "scene", "pool"), "lidar": ("pool/lidar.json", "lidar/check", "lidar/cloud"),
            "select": ("selection.json", "run"), "propose": ("run/proposal.json",),
            "parts": ("run/parts", "run/parts.glb", "run/parts.json"), "agent": ("agent",), "align": ("physics",),
-           "turntable": ("turntable",), "package": ("results.zip",)}
+           "turntable": ("turntable",), "softvideo": ("softvideo",), "package": ("results.zip",)}
+OLDER = "older than this stage"  # the note of a stage that a job folder of an earlier version has no record of
 NO_KEY = {a: f"The server no longer holds the {p} API key (it restarted); paste the key again and press Build."
           for a, p in steps.PROVIDER.items()}
 NO_KEY_LATER = {a: f"The job needs the {p} API key now; paste it and press Build." for a, p in steps.PROVIDER.items()}
@@ -817,11 +824,18 @@ class Runner:
         return path
 
     def _recover(self):
-        """Jobs that were running when an earlier server stopped are failed; no job holds a key."""
+        """Jobs that were running when an earlier server stopped are failed; no job holds a key. A job folder of an
+        earlier version gets a record of each stage it has none of, skipped (OLDER), so that a done job does not look
+        unfinished and progress and _build find every stage; load stays strict."""
         for f in sorted(self.runs.glob("*/job.json")):
             with contextlib.suppress(OSError, ValueError, KeyError):
                 job = load(f.parent)
                 fields = {"key_ok": False}
+                older = {s: {**STAGE, "status": "skipped", "note": OLDER} for s in steps.NAMES
+                         if s not in job["stages"]}
+                if older:
+                    job["stages"].update(older)
+                    fields["stages"] = job["stages"]
                 if job["status"] in ACTIVE:
                     for name, st in job["stages"].items():
                         if st["status"] == "running":  # it ended about when its log last changed
@@ -1013,27 +1027,29 @@ def _last_line(log):
 def package(job_dir):
     """Write J/results.zip; see the module docstring."""
     J = Path(job_dir)
-    result = J / "agent" / "result.json"
+    result, evidence = J / "agent" / "result.json", J / "agent" / "evidence.json"
     keyed = set()
     if result.is_file():
         found = json.loads(result.read_text()).get("key_found_in") or []
         keyed = {(J / "agent" / "s" / p).resolve() for p in found}
-        if "result.json" in found:  # agent/result.json is that file (with the key scrubbed out), so it stays too
-            keyed.add(result.resolve())
+        # agent/result.json and agent/evidence.json are copies of these files with the key scrubbed out, so they stay
+        # out too.
+        copies = {"result.json": result, "control/evidence.json": evidence}
+        keyed |= {copy.resolve() for src, copy in copies.items() if src in found}
     files = [("posed.glb", J / "run" / "posed.glb"), ("refined.glb", steps.agent_glb(J)),
              ("parts.glb", J / "run" / "parts.glb"), ("parts.json", J / "run" / "parts.json"),
              ("aligned.glb", J / "physics" / "aligned.glb"), ("turntable.mp4", J / "turntable" / "turntable.mp4"),
-             ("summary.json", J / "physics" / "summary.json"),
+             ("softvideo.mp4", J / "softvideo" / "softvideo.mp4"), ("summary.json", J / "physics" / "summary.json"),
              ("placement.json", J / "run" / "placement.json"), ("selection.json", J / "selection.json"),
-             ("lidar.json", J / "pool" / "lidar.json"), ("agent_result.json", result)]
+             ("lidar.json", J / "pool" / "lidar.json"), ("agent_result.json", result), ("evidence.json", evidence)]
     for d in ("mjcf", "usd", "urdf"):
         files += [(f"{d}/{p.relative_to(J / 'physics' / d)}", p) for p in sorted((J / "physics" / d).rglob("*"))]
-    # align copies the GLB byte for byte, MJCF, USD and URDF copy its meshes and textures, and the 360 video
-    # shows it.
+    # align copies the GLB byte for byte, MJCF, USD and URDF copy its meshes and textures, and the 360 video and the
+    # soft-part video show it.
     used = (json.loads((J / "physics" / "up.json").read_text()).get("glb") if (J / "physics" / "up.json").is_file() else None)
     if used and Path(used).resolve() in keyed:
         keyed |= {p.resolve() for a, p in files
-                  if a in ("aligned.glb", "turntable.mp4") or a.startswith(("mjcf/", "usd/", "urdf/"))}
+                  if a in ("aligned.glb", "turntable.mp4", "softvideo.mp4") or a.startswith(("mjcf/", "usd/", "urdf/"))}
     tmp = J / ".results.zip.tmp"
     names = []
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:

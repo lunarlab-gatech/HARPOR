@@ -154,6 +154,15 @@ def test_demo_facts_are_rows_of_the_results_tab(job):
     assert rows["Agent"].startswith(facts["Agent"] + " (")
 
 
+def test_demo_facts_name_a_soft_joint(tmp_path):
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run" / "parts.glb").write_bytes(b"glTF")
+    (tmp_path / "physics" / "mjcf").mkdir(parents=True)
+    joint = {"child": "pad", "parent": "seat", "type": "soft", "pos": [0, 0, 0], "axis": [1, 0, 0], "range": [0, 0]}
+    (tmp_path / "physics" / "mjcf" / "mjcf.json").write_text(json.dumps({"links": {"seat": {}, "pad": {}}, "joints": [joint]}))
+    assert ["Joint of pad", "soft on seat"] in demos.facts_of(tmp_path)
+
+
 def test_add_refuses_private_data(job, tmp_path):
     """A job whose input is table.MOV, a prompt that names a private scene, a job under a private folder, and a rosbag
     job without --public-bag are refused with the rule's reason, and nothing is written. A demo.json edited by hand to

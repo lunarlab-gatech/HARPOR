@@ -5,7 +5,9 @@ GATOR_SOCKET set to the tool server's socket. The script is a list of actions:
 
   {"do": "edit", "kind": "good", "size": 1.0, "seconds": 0}   save candidate.blend, a JSON scene that
                                                              the fake Blender exports in `seconds`; the
-                                                             scene's other keys (objects, joints) stay
+                                                             scene's other keys (objects, joints, and
+                                                             pause, the seconds between the GLB and its
+                                                             report) stay
   {"do": "glb", "path": "exports/009.glb", "kind": "nan"}     write a GLB directly
   {"do": "tool", "args": ["finish", "--receipt", "{receipt}", ...]}   call a helper through the socket,
                                                              as bin/ does; {receipt} is the newest review
@@ -16,13 +18,20 @@ GATOR_SOCKET set to the tool server's socket. The script is a list of actions:
   {"do": "sleep", "seconds": 30}, {"do": "ignore_sigint"}, {"do": "crash"}
   {"do": "read_prompt"}                                      copy stdin to prompt_seen.txt
 
+A session with rounds (controller.run_rounds) runs one agent per round: the script may then be
+{"rounds": [[...], [...]]}, and each agent runs the list of its round, run_budget.json's round (none
+past the last).
+
 GLB kinds: good (a box of edge `size` with a PBR material), nan, no_material, garbage and parts (the
 same cube as two named nodes in W: body, the lower three quarters, and lid on top; with joints in the
 lid's extras when the scene has them). The fake .blend of parts also lists its objects and joints.
 `python -m harpor.agent.fake_agent --blender ...` stands in for Blender, following the file contracts
 of blender/export_glb.py, review.py, set_joint.py and review_articulation.py without bpy, those of
 blender/split_parts.py for harpor.parts.stage split, and the frames_dir contract of blender/turntable.py
-for harpor.webapp.turntable render.
+for harpor.webapp.turntable render and, with "soft", harpor.webapp.softvideo render.
+`python -m harpor.agent.fake_agent --sim` stands in for the python of envs/mujoco: harpor.agent.validate
+runs GATOR_MUJOCO, split like a shell as GATOR_BLENDER is, with `-m harpor.physics.sim_check ...` after
+it, and fake_sim writes the report of that contract without MuJoCo, with the outcomes of GATOR_FAKE_SIM.
 """
 
 import contextlib
@@ -127,7 +136,8 @@ def turntable_frames(args, side=96):
     """blender/turntable.py without bpy: args["frames"] PNGs of side px (0001.png, ...) on the
     0.82-gray background, each the convex hull of the GLB's vertices in dark gray, seen orthographically as the
     real camera sees it (along +z of W after the asset's matrix, args["elevation"] degrees from above), as the
-    asset turns once about W's y."""
+    asset turns once about W's y. With args["soft"] the asset stays, framed on the soft part, whose vertices of each
+    frame (matrix @ (rest + disp) of the motion) are drawn on it in white."""
     import numpy as np
     from PIL import Image, ImageDraw
     from scipy.spatial import ConvexHull
@@ -135,20 +145,33 @@ def turntable_frames(args, side=96):
     from harpor.physics.align import load_w
 
     assert len(args["assets"]) == 1 and args.get("frames_dir"), "turntable.py takes exactly one asset and frames_dir"
-    a, out, n = args["assets"][0], Path(args["frames_dir"]), args["frames"]
+    a, out, n, soft = args["assets"][0], Path(args["frames_dir"]), args["frames"], args.get("soft")
     M = np.eye(4) if a.get("matrix") is None else np.asarray(a["matrix"], float)
     v = load_w(a["path"])[0] @ M[:3, :3].T + M[:3, 3]  # glTF -> W is Blender's import
-    c, r = (v.min(0) + v.max(0)) / 2, np.linalg.norm(v.max(0) - v.min(0)) / 2
+    part = None
+    if soft:
+        S = np.asarray(soft["matrix"], float)
+        with np.load(soft["motion"]) as z:
+            part = (z["rest"][None] + z["disp"]) @ S[:3, :3].T + S[:3, 3]
+        assert len(part) == n, f"the motion has {len(part)} frames, not {n}"
+    box = v if part is None else part[0]
+    c, r = (box.min(0) + box.max(0)) / 2, np.linalg.norm(box.max(0) - box.min(0)) / 2
     e = math.radians(args.get("elevation", 0))
     right, down = np.array([1.0, 0.0, 0.0]), np.array([0.0, math.cos(e), -math.sin(e)])  # the camera's x and y in W
     out.mkdir(parents=True, exist_ok=True)
+
+    def panel(p):  # the panel is 2.6 r wide
+        return side / 2 + np.stack([(p - c) @ right, (p - c) @ down], 1) * side / (2.6 * r)
+
     for k in range(n):
-        t = -2 * math.pi * k / n  # as turntable.py keys the pivot's turn
+        t = 0.0 if soft else -2 * math.pi * k / n  # as turntable.py keys the pivot's turn
         R = np.array([[math.cos(t), 0.0, math.sin(t)], [0.0, 1.0, 0.0], [-math.sin(t), 0.0, math.cos(t)]])
-        p = (v - c) @ R.T
-        uv = side / 2 + np.stack([p @ right, p @ down], 1) * side / (2.6 * r)  # the panel is 2.6 r wide
+        uv = panel((v - c) @ R.T + c)
         img = Image.new("RGB", (side, side), (209, 209, 209))
-        ImageDraw.Draw(img).polygon([tuple(q) for q in uv[ConvexHull(uv).vertices]], fill=(64, 64, 64))
+        draw = ImageDraw.Draw(img)
+        draw.polygon([tuple(q) for q in uv[ConvexHull(uv).vertices]], fill=(64, 64, 64))
+        if part is not None:
+            draw.point([tuple(q) for q in panel(part[k])], fill=(255, 255, 255))
         img.save(out / f"{k + 1:04d}.png")
 
 
@@ -174,6 +197,7 @@ def fake_blender(argv):
         scene = json.loads(Path(blend).read_text())
         time.sleep(scene["seconds"])
         write_glb(rest[0], scene["kind"], scene["size"], scene.get("joints"))
+        time.sleep(scene.get("pause", 0.0))  # the real script re-imports the GLB before it writes the report
         rep = {"meshes": 1, "materials": int(scene["kind"] != "no_material"), "images": 0, "triangles": 12,
                "warnings": []}
         if scene["kind"] == "parts":
@@ -202,6 +226,49 @@ def fake_blender(argv):
         if args["original"]:
             review.update(center_shift=0.0, extent_ratio=[1.0, 1.0, 1.0])
         (out / "review.json").write_text(json.dumps(review))
+
+
+def fake_sim(argv):
+    """harpor.physics.sim_check without MuJoCo. argv is what follows GATOR_MUJOCO: `-m harpor.physics.sim_check
+    --glb GLB --out DIR --asset-sha SHA [--intervals FILE]`. Each hinge and slide of the intervals (each one
+    without them) and each soft part gets a run of 3 states. GATOR_FAKE_SIM is JSON: {link: code} gives the
+    link's run a finding of that code ("pass": none), and {"error": text} gives a report of only that error."""
+    import argparse
+
+    from harpor.parts import joints as J
+
+    assert argv[:2] == ["-m", "harpor.physics.sim_check"], argv
+    ap = argparse.ArgumentParser()
+    for flag in ("--glb", "--out", "--asset-sha"):
+        ap.add_argument(flag, required=True)
+    ap.add_argument("--intervals")
+    a = ap.parse_args(argv[2:])
+    outcomes, out = json.loads(os.environ.get("GATOR_FAKE_SIM") or "{}"), Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    report = {"asset_sha256": a.asset_sha}
+    if "error" in outcomes:
+        report["error"] = outcomes["error"]
+    else:
+        joints, _ = J.load(a.glb)
+        intervals = json.loads(Path(a.intervals).read_text()) if a.intervals else None
+        states = [{"t": 1.25 * k, "ctrl": 0.0, "q": 0.0} for k in range(3)]
+        report.update(
+            joints=[{"link": c, "type": j["type"], "interval": intervals[c] if intervals else [j["lower"], j["upper"]],
+                     "states": states} for c, j in joints.items()
+                    if j["type"] in ("revolute", "prismatic") and (intervals is None or c in intervals)],
+            soft=[{"link": c, "dmax_m": 0.004, "visible_dmax_m": 0.004, "residual_m": 0.0, "cap_limited": False,
+                   "states": states} for c, j in joints.items() if j["type"] == "soft"],
+            findings=[{"code": code, "link": link, "measured": None, "expected": None, "why": "fake MuJoCo"}
+                      for link, code in outcomes.items() if code != "pass" and link in joints])
+    (out / "report.json").write_text(json.dumps(report))
+
+
+def round_actions(script):
+    """The actions of this agent: script itself, or of {"rounds": [...]} the list of run_budget.json's round."""
+    if isinstance(script, list):
+        return script
+    n = json.loads(Path("run_budget.json").read_text())["round"]
+    return script["rounds"][n - 1] if n <= len(script["rounds"]) else []
 
 
 def run(script):
@@ -251,5 +318,7 @@ def run(script):
 if __name__ == "__main__":
     if sys.argv[1] == "--blender":
         fake_blender(sys.argv[2:])
+    elif sys.argv[1] == "--sim":
+        fake_sim(sys.argv[2:])
     else:
-        run(json.loads(Path(sys.argv[1]).read_text()))
+        run(round_actions(json.loads(Path(sys.argv[1]).read_text())))

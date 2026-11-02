@@ -2,16 +2,19 @@
 
 A part's joint lives on the part's glTF node as extras.gator_joint, a JSON string (Blender exports string
 custom properties as extras reliably; readers accept a dict too):
-    {"version": 1, "frame": "W"|"S", "parent": name|"world", "type": "revolute"|"prismatic"|"fixed",
+    {"version": 1, "frame": "W"|"S", "parent": name|"world", "type": "revolute"|"prismatic"|"fixed"|"soft",
      "origin": [x, y, z], "axis": [unit], "lower": l, "upper": u}
 The node's name is the child. origin and axis are coordinates of the frame (W: view 0's camera, which is
 Blender's world; S: the gravity frame of harpor.physics.align), not of the node. The mesh as it is is the
 pose q = 0, and lower <= 0 <= upper, in radians (revolute) or meters (prismatic). A fixed joint may leave
 out origin, axis, lower and upper (read as 0, +x, 0, 0). parent "world" with type fixed on the root
-marks a fixed base. The links are the GLB's mesh nodes; one link has no parent (or the world): the root.
-A link other than the root without a joint is loose. The physics export welds it to the link of its
-nearest glTF ancestor that holds a mesh (holders), so a tray parented to a drawer in Blender moves with
-the drawer, or to the root when it has no such ancestor (welds).
+marks a fixed base. A soft joint holds a part that dents under a press and springs back. It has no joint
+coordinate either, so it may leave out the same keys, and it adds "material" (a key of SOFT_MATERIALS),
+"young" (Pa), "poisson", "density" (kg/m^3) and "support": "parent". No part hangs from a soft part. The
+links are the GLB's mesh nodes; one link has no parent (or the world): the root. A link other than the
+root without a joint is loose. The physics export welds it to the link of its nearest glTF ancestor that
+holds a mesh (holders), so a tray parented to a drawer in Blender moves with the drawer, or to the root
+when it has no such ancestor (welds).
 
 numpy, json and math only, so a Blender script can import it too.
 """
@@ -22,10 +25,16 @@ import math
 import numpy as np
 
 KEY = "gator_joint"
-TYPES = ("revolute", "prismatic", "fixed")
+TYPES = ("revolute", "prismatic", "fixed", "soft")
+STATIC = ("fixed", "soft")  # no joint coordinate
 FRAMES = ("W", "S")
 WORLD = "world"
 FIXED_DEFAULTS = {"origin": [0.0, 0.0, 0.0], "axis": [1.0, 0.0, 0.0], "lower": 0.0, "upper": 0.0}
+SOFT_MATERIALS = {"foam": {"young": 3e4, "poisson": 0.3, "density": 120.0},
+                  "gel": {"young": 1e5, "poisson": 0.3, "density": 900.0},
+                  "rubber": {"young": 1e6, "poisson": 0.3, "density": 1100.0}}
+YOUNG_RANGE, POISSON_RANGE = (1e3, 1e6), (0.0, 0.45)
+SOFT_AS_RIGID = "rigid here, soft in MuJoCo"  # the note of a soft link in the URDF and USD reports
 
 
 def mesh_nodes(doc):
@@ -87,9 +96,9 @@ def load(path):
 
 
 def full(joint):
-    """Copy of a joint with the defaults of a fixed joint filled in."""
+    """Copy of a joint with the defaults of a joint without a coordinate (STATIC) filled in."""
     j = dict(joint)
-    if j.get("type") == "fixed":
+    if j.get("type") in STATIC:
         for k, v in FIXED_DEFAULTS.items():
             j.setdefault(k, list(v) if isinstance(v, list) else v)
     return j
@@ -101,6 +110,26 @@ def _number(x):
 
 def _vec3(x):
     return isinstance(x, (list, tuple)) and len(x) == 3 and all(_number(c) for c in x)
+
+
+def _within(x, lo, hi):
+    return _number(x) and lo <= x <= hi
+
+
+def _soft_problems(j):
+    """What is wrong with the fields of a soft joint, as phrases."""
+    out = []
+    if j.get("material") not in tuple(SOFT_MATERIALS):
+        out.append(f"material must be one of {', '.join(SOFT_MATERIALS)}")
+    if not _within(j.get("young"), *YOUNG_RANGE):
+        out.append("young must be within {:g} to {:g} Pa".format(*YOUNG_RANGE))
+    if not _within(j.get("poisson"), *POISSON_RANGE):
+        out.append("poisson must be within {:g} to {:g}".format(*POISSON_RANGE))
+    if not _number(j.get("density")) or j["density"] <= 0:
+        out.append("density must be a positive number")
+    if j.get("support") != "parent":
+        out.append('support must be "parent"')
+    return out
 
 
 def _top(joints, child):
@@ -147,7 +176,7 @@ def validate(joints, node_names):
             errors.append(f"the {p}: frame must be W or S")
         kind, parent = j.get("type"), j.get("parent")
         if kind not in TYPES:
-            errors.append(f"the {p}: type must be revolute, prismatic or fixed")
+            errors.append(f"the {p}: type must be revolute, prismatic, fixed or soft")
         if parent == child:
             errors.append(f"the {p}: the part is its own parent")
         elif parent == WORLD:
@@ -155,7 +184,11 @@ def validate(joints, node_names):
                 errors.append(f"the {p}: only a fixed joint attaches a part to the world")
         elif parent not in known:
             errors.append(f"the {p}: the parent {parent!r} is not a mesh node")
-        moving = kind != "fixed"
+        elif isinstance(joints.get(parent), dict) and joints[parent].get("type") == "soft":
+            errors.append(f"the {p}: a part cannot hang from a soft part ({parent!r})")
+        if kind == "soft":
+            errors += [f"the {p}: {why}" for why in _soft_problems(j)]
+        moving = kind not in STATIC
         if "origin" in j or moving:
             if not _vec3(j.get("origin")):
                 errors.append(f"the {p}: origin must be 3 finite numbers")
@@ -228,10 +261,29 @@ def loose(joints, links, root):
     return [k for k in links if k != root and k not in joints]
 
 
-def holders(doc):
-    """{mesh node name: name of its nearest ancestor node that holds a mesh} of every mesh node that has one."""
+def parents(doc):
+    """{node index: its parent's index} of a glTF dict. Raises ValueError when nodes form a cycle, which glTF forbids
+    and which would loop every walk up the tree (holders, and harpor.agent.tools.carriers through it)."""
     nodes = doc.get("nodes", [])
     parent = {c: i for i, n in enumerate(nodes) for c in n.get("children", [])}
+    done = set()  # nodes whose walk up ends at a root
+    for i in range(len(nodes)):
+        path, k = {}, i  # the walk up from node i, in order
+        while k is not None and k not in done:
+            if k in path:
+                loop = list(path)[list(path).index(k):] + [k]
+                raise ValueError(f"the glTF nodes form a cycle: {' -> '.join(map(str, loop))}")
+            path[k] = None
+            k = parent.get(k)
+        done.update(path)
+    return parent
+
+
+def holders(doc):
+    """{mesh node name: name of its nearest ancestor node that holds a mesh} of every mesh node that has one.
+    Raises ValueError when nodes form a cycle (parents)."""
+    nodes = doc.get("nodes", [])
+    parent = parents(doc)
     out = {}
     for i, n in enumerate(nodes):
         if "mesh" not in n:
@@ -259,7 +311,7 @@ def _rotation(axis, angle):
 
 def joint_transform(joint, q):
     """4x4 motion of the child at joint value q, in the joint's frame: a turn by q rad about the axis line
-    through origin (revolute), a shift of q m along the axis (prismatic), the identity (fixed)."""
+    through origin (revolute), a shift of q m along the axis (prismatic), the identity (fixed, soft)."""
     j = full(joint)
     o, a = np.asarray(j["origin"], float), np.asarray(j["axis"], float)
     a = a / np.linalg.norm(a)

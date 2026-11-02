@@ -1,5 +1,5 @@
 // HARPOR web app UI: jobs list and upload; a job page with the panels that wait for the user (camera topic, review of
-// the views and of the part list, a LiDAR failure) above five tabs: Results (the 360 video, the viewers and the facts),
+// the views and of the part list, a LiDAR failure) above five tabs: Results (the videos, the viewers and the facts),
 // Downloads (the files, by group), Inputs (the input's facts, its preview video, the views the build used and their LiDAR points),
 // Settings (the build settings, with LiDAR for the metric scale) and Log. The header's Help link opens help.html at the screen's section.
 // Plain DOM code, no build step. The API key is only read from the password fields and sent once.
@@ -8,8 +8,8 @@
 const $ = (sel) => document.querySelector(sel);
 const ACTIVE = ["analyzing", "queued", "running"];
 const BUILD = ["extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "place", "propose", "parts", "agent", "align", "vomp",
-  "mjcf", "usd", "urdf", "turntable", "package"];
-const OPTIONAL = ["turntable"];  // steps.OPTIONAL: when it fails, the job still ends done
+  "mjcf", "usd", "urdf", "turntable", "softvideo", "package"];
+const OPTIONAL = ["turntable", "softvideo"];  // steps.OPTIONAL: when it fails, the job still ends done
 // job.json "agent" (steps.AGENTS): the key it takes and the placeholder of the key field.
 const AGENTS = { astra: { key: "OpenAI API key", placeholder: "sk-..." },
   opus: { key: "Anthropic API key", placeholder: "sk-ant-..." }, none: { key: null, placeholder: "" } };
@@ -19,11 +19,12 @@ const VLM = { astra: RAN.codex, opus: RAN.claude };  // proposal.json "agent": t
 const STAGE_LABEL = { topics: "camera topics", frames: "frame analysis", extract: "extract frames", masks: "SAM 3 masks",
   prep: "prepare views", da3: "depth (Depth Anything 3)", lidar: "metric scale (LiDAR)", select: "view selection",
   sam3d: "mesh (MV-SAM3D)", place: "pose and scale", propose: "part list", parts: "split into parts", agent: "agent refinement", align: "align upright", vomp: "materials (VoMP)",
-  mjcf: "MuJoCo model", usd: "USD", urdf: "URDF", turntable: "360 video", package: "results.zip" };
+  mjcf: "MuJoCo model", usd: "USD", urdf: "URDF", turntable: "360 video", softvideo: "soft-part video",
+  package: "results.zip" };
 // A stage's label; the agent's names its task.
 const stageLabel = (name, articulated) => name !== "agent" ? STAGE_LABEL[name] || ""
   : articulated ? "agent sets the joints" : STAGE_LABEL.agent;
-const JOINTS = ["revolute", "prismatic", "fixed", "unknown"];  // harpor.parts.propose.JOINTS
+const JOINTS = ["revolute", "prismatic", "fixed", "soft", "unknown"];  // harpor.parts.propose.JOINTS
 // agent_result.verdict of an articulation (the agent sets joints); a refinement's verdicts show as they are.
 const VERDICT = { unchanged: "unchanged (no joints)", needs_review: "needs review" };
 const LIST_STATUS = { review: "needs review" };  // badge text in the jobs list; the others are the status
@@ -125,8 +126,8 @@ const NO_VIEWS = "No views selected yet.";
 // cards (the review cards: renderCards), es, state, scaleStale (the LiDAR scale is stale: scaleStale()); tab (the
 // tab shown), pick (the tab the user picked), tabPhase (the phase of the status that the tab follows) and hashTab (the
 // hash's tab when the page opened); logAtEnd and logTop (where the log was left); and input, inputKey, videoKey, video,
-// selected, inputPlaced, inputAsked, placeAsked and overlay (the Inputs tab: renderInput); spin, spinKey and spinOn (the
-// 360 video: renderSpin).
+// selected, inputPlaced, inputAsked, placeAsked and overlay (the Inputs tab: renderInput); spin, spinKey, spinFig and
+// spinOn (the 360 video), and soft, softKey, softFig and softOn (the soft-part video: renderSpin).
 let V = {};
 let listKey = null, upXhr = null;  // the jobs list as last drawn; the running upload
 
@@ -460,8 +461,8 @@ async function settings(job) {  // the build settings (Settings tab) and the inp
 
 // Show the tab `name` and hide the other panels. pick: the user chose it, so the hash keeps it (a reload shows it
 // again) until the job's status changes. When the focus was in the panel that hides, or on a tab that is no longer
-// selected (the status changed), the new tab takes it. The preview video stops when its tab hides, and the 360 video
-// plays only while its tab shows (spinTab).
+// selected (the status changed), the new tab takes it. The preview video stops when its tab hides, and the videos
+// of the Results tab play only while it shows (spinTab).
 function selectTab(name, pick) {
   const old = V.tab && V.tab !== name ? $("#" + TABS[V.tab]) : null, had = document.activeElement, tab = $("#tab-" + name);
   const lost = !!had && had !== tab && ((!!old && old.contains(had) === true) || $("#tabs").contains(had) === true);
@@ -561,7 +562,7 @@ async function useTopic(topic, btn) {
     $("#log").textContent = "";
   });
 }
-// True when the system asks for reduced motion: scrolls jump, and the 360 video does not start by itself.
+// True when the system asks for reduced motion: scrolls jump, and the videos of the Results tab do not start by themselves.
 const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 const smooth = () => reducedMotion() ? "auto" : "smooth";
 $("#chtopic").onclick = async () => {  // the topic table, above the tabs, takes the focus
@@ -1488,9 +1489,11 @@ async function renderResults(job) {
   $("#resultsbody").classList.toggle("onefig", !refined && !split);  // a wide screen puts the facts beside it
   // With the agent off there is no agent viewer; the Agent row of the facts says so.
   fill($("#viewers"), viewer("run/posed.glb", "Posed mesh"), split, refined);
-  const [place, phys, mj, parts, pr, lid] = await Promise.all([json("run/placement.json"), json("physics/summary.json"),
+  // The evidence alone may fail to read: its rows are left out then, not every row.
+  const [place, phys, mj, parts, pr, lid, ev] = await Promise.all([json("run/placement.json"), json("physics/summary.json"),
     art ? json("physics/mjcf/mjcf.json") : null, art ? json("run/parts.json") : null,
-    art && has("run/parts.json") ? api(`/api/jobs/${V.id}/parts`).catch(() => null) : null, json("pool/lidar.json")]);
+    art && has("run/parts.json") ? api(`/api/jobs/${V.id}/parts`).catch(() => null) : null, json("pool/lidar.json"),
+    art ? json("agent/evidence.json").catch(() => null) : null]);
   // [label, value]: what each one means is in help.html.
   const rows = [], num = (x, d = 3) => x == null ? "?" : Number(x).toPrecision(d);
   // A position in m, to the mm. Rounding first turns float noise such as -1.51e-18 into 0.000, not -0.000.
@@ -1506,6 +1509,7 @@ async function renderResults(job) {
     for (const l of a.limitations || []) rows.push(["Limitation", l]);
     if (rigged) rows.push(["Joints", a.joints_delivered != null ? String(a.joints_delivered) : "?"]);
     if (rigged) rows.push(["Joint changes", String(a.counts.joints)]);
+    rows.push(...roundRows(a, ev));
     if (a.tokens) {
       const t = a.tokens;
       rows.push(["Agent tokens", `${count(t.input_tokens)} input, ${count(t.output_tokens)} output, ` +
@@ -1520,8 +1524,10 @@ async function renderResults(job) {
       ["Base", `${mj.root}, ${mj.fixed_base ? "fixed to the world" : "free to move"}`]);
     for (const j of mj.joints || []) rows.push([`Joint of ${j.child}`, j.type === "revolute"
       ? `turns on ${j.parent}, ${deg(j.range[0])}° to ${deg(j.range[1])}°` : j.type === "prismatic"
-        ? `slides on ${j.parent}, ${cmr(j.range[0])} to ${cmr(j.range[1])} cm` : `fixed to ${j.parent}`]);
+        ? `slides on ${j.parent}, ${cmr(j.range[0])} to ${cmr(j.range[1])} cm` : j.type === "soft"
+          ? `soft on ${j.parent}` : `fixed to ${j.parent}`]);
     for (const [k, to] of Object.entries(mj.welded || {})) rows.push([`Joint of ${k}`, `none (welded to ${to})`]);
+    rows.push(...softRows(mj));
   } else if (mj && art) rows.push(["Links", "1 (no joints, one rigid body)"]);
   if (phys) {
     const whole = mj && mj.links ? mj.inertial : null;  // every link, also one that VoMP could not voxelize
@@ -1551,6 +1557,73 @@ function metricScale(place, rec, job) {
   const shown = facts.filter(Boolean);
   return `×${m.toFixed(3)} from LiDAR` + (shown.length ? ` (${shown.join(", ")})` : "");
 }
+// The outcomes of a requirement (harpor.agent.controller.OUTCOMES), whose counts agent_result.requirements gives.
+const OUTCOMES = ["pass", "fail", "inconclusive", "unassessed"];
+const degrees = (x) => (x * 180 / Math.PI).toFixed(0);
+// The rows of a session in rounds (controller.run_session) and of the surface check: the rounds, how many requirements
+// the delivered candidate meets, each requirement of agent/evidence.json (ev) with its outcome and what the host's
+// check measured, and how much of the original's surface the result keeps. A key that the result lacks gives no row:
+// old jobs have none of them, and a view stored on the public site never passed through this server.
+function roundRows(a, ev) {
+  const rows = [], rounds = Array.isArray(a.rounds) ? a.rounds.filter((r) => r && typeof r === "object") : [];
+  if (rounds.length) rows.push(["Rounds", roundsText(rounds, a.candidate)]);
+  const n = a.requirements && typeof a.requirements === "object" ? a.requirements : null;
+  if (n) {
+    const total = OUTCOMES.reduce((sum, k) => sum + (Number(n[k]) || 0), 0);
+    rows.push(["Requirements", `${Number(n.pass) || 0} of ${total} met`]);
+    for (const r of chosenRecords(ev)) rows.push([`Requirement ${r.requirement}`, requirementText(r, ev)]);
+  }
+  if (a.surface && typeof a.surface === "object") rows.push(["Surface retained", surfaceText(a.surface)]);
+  return rows;
+}
+// "2 (build fail, repair pass); delivered round 2's candidate". cand: agent_result.candidate, null when the session
+// delivered no stored candidate.
+function roundsText(rounds, cand) {
+  const each = rounds.map((r) => r.outcome ? `${r.kind} ${r.outcome}` : r.kind).join(", ");
+  const sent = cand && typeof cand === "object" ? `; delivered round ${cand.round}'s candidate`
+    : cand === null ? "; no candidate delivered" : "";
+  return `${rounds.length} (${each})${sent}`;
+}
+// The records of the candidate that the session delivered (evidence.json selected), else none.
+function chosenRecords(ev) {
+  const sel = ev && ev.selected, cands = ev && Array.isArray(ev.candidates) ? ev.candidates : [];
+  const c = sel && sel.version != null ? cands.find((x) => x && x.version === sel.version) : null;
+  return c && Array.isArray(c.records) ? c.records.filter((r) => r && typeof r === "object") : [];
+}
+// "lid, revolute: pass, clear from 0° to 86°", "pad, soft: pass, dents 4.0 mm", or for a part that was not split off
+// "drawer (not split off), prismatic: unassessed".
+function requirementText(r, ev) {
+  const m = r.measured && typeof r.measured === "object" ? r.measured : {};
+  const target = Array.isArray(r.target) ? r.target[0] : null;
+  const req = (Array.isArray(ev.requirements) ? ev.requirements : []).find((q) => q && q.id === r.requirement) || {};
+  let text = `${target || `${req.prompt || "?"} (not split off)`}, ${r.joint}: ${r.outcome}`;
+  const [lo, hi] = Array.isArray(m.achieved) ? m.achieved : [];
+  if (typeof lo === "number" && typeof hi === "number") {
+    text += m.type === "prismatic" ? `, clear from ${(100 * lo).toFixed(1)} to ${(100 * hi).toFixed(1)} cm`
+      : `, clear from ${degrees(lo)}° to ${degrees(hi)}°`;
+  }
+  if (typeof m.dmax_m === "number") text += `, dents ${(1000 * m.dmax_m).toFixed(1)} mm`;
+  return text + (r.required === false ? ", not required" : "");
+}
+// "99.5% kept: 98.0% as it was, 1.5% changed", with the share whose UVs cannot be checked and the surface findings.
+function surfaceText(sf) {
+  if (sf.error != null) return "not compared (the check failed)";
+  const sh = sf.shares || {}, found = Array.isArray(sf.findings) ? sf.findings : [];
+  const codes = [...new Set(found.map((f) => f && f.code).filter(Boolean))];
+  return `${pct(sh.present)} kept: ${pct(sh.retained)} as it was, ${pct(sh.modified)} changed`
+    + (sh.unresolved > 0 ? `, ${pct(sh.unresolved)} without UVs to check` : "")
+    + (codes.length ? `; ${codes.join(", ")} (${sf.blocks ? "blocks articulated" : "report only"})` : "");
+}
+// The Soft part rows of mjcf.json: each soft link with its material and Young's modulus, and each one that stayed rigid
+// in MuJoCo too (soft_rigid), with the reason.
+function softRows(mj) {
+  const kpa = (y) => typeof y === "number" ? Math.round(y / 1e3).toLocaleString("en-US") : "?";
+  const soft = Object.entries(mj.soft || {}).map(([k, sp]) => ["Soft part",
+    `${k}: ${(sp && sp.material) || "?"}, about ${kpa(sp && sp.young)} kPa; rigid in URDF and USD`]);
+  const rigid = Object.entries(mj.soft_rigid || {}).map(([k, r]) => ["Soft part",
+    `${k}: rigid in MuJoCo too (${(r && r.reason) || "?"})`]);
+  return [...soft, ...rigid];
+}
 
 // ---- 5a. the Downloads tab: the job's files by group ----
 
@@ -1561,10 +1634,11 @@ const DOWNLOADS = [
   ["Everything", [["results.zip", "results.zip"]]],
   ["Meshes", [["run/posed.glb", "posed.glb"], ["run/parts.glb", "parts.glb"], ["refined.glb", "refined.glb"],
     ["physics/aligned.glb", "aligned.glb"]]],
-  ["Video", [["turntable/turntable.mp4", "turntable.mp4"]]],
+  ["Video", [["turntable/turntable.mp4", "turntable.mp4"], ["softvideo/softvideo.mp4", "softvideo.mp4"]]],
   ["Simulation", [["physics/urdf/model.urdf", "model.urdf"]]],
   ["Records", [["run/placement.json", "placement.json"], ["physics/summary.json", "summary.json"], ["pool/lidar.json", "lidar.json"],
-    ["selection.json", "selection.json"], ["run/parts.json", "parts.json"], ["physics/mjcf/mjcf.json", "mjcf.json"]]]];
+    ["selection.json", "selection.json"], ["run/parts.json", "parts.json"], ["physics/mjcf/mjcf.json", "mjcf.json"],
+    ["agent/evidence.json", "evidence.json"]]]];
 // What the Simulation group says above its one file: model.urdf does not load alone.
 const SIM_TEXT = "Needs the meshes in results.zip.";
 // A file's size: "512 B", "3.4 KB", "35 KB", "1.2 MB", "100 MB", "2.50 GB" (1 KB is 1000 bytes, as in size()).
@@ -2124,46 +2198,64 @@ function cloudLegend(C, data) {
     C.compare ? [" ", h("span", { class: "key long" }, NO_COMPARE)] : null);
 }
 
-// ---- 5d. the 360 video of the object (Results tab) ----
+// ---- 5d. the videos of the object (Results tab) ----
 
-// turntable/turntable.mp4: the turntable stage's video, when the job asked for one and its render worked.
-const SPIN = "turntable/turntable.mp4";
-function clearSpin() {  // another job opens, or a new build hides the results: the old video goes
-  V.spin = V.spinKey = null;
+// The videos above the viewers, side by side, each as [its slot in V, its file, its stage, its caption, its name for
+// a screen reader]: the turntable stage's 360 video, when the job asked for one and its render worked, and the
+// softvideo stage's video of the soft part pressed and let go, when the MuJoCo model has one. A slot holds the video,
+// the key of its draw, its figure and whether it plays when the tab shows (V.spin, V.spinKey, V.spinFig, V.spinOn).
+// A job stored on the site before the softvideo stage has no record of it.
+const SPIN = "turntable/turntable.mp4", SOFT = "softvideo/softvideo.mp4";
+const VIDEOS = [["spin", SPIN, "turntable", "360 video", (what) => `360 video of the ${what}`],
+  ["soft", SOFT, "softvideo", "Soft-part video", (what) => `The soft part of the ${what}, pressed and let go`]];
+function clearSpin() {  // another job opens, or a new build hides the results: the old videos go
+  for (const [slot] of VIDEOS) V[slot] = V[slot + "Key"] = V[slot + "Fig"] = null;
   fill($("#spin"));
 }
-// The video above the viewers: muted, looping, with controls that pause it; it does not start by itself when the system
-// asks for reduced motion. It is drawn once per file, so a refresh or a new signed URL does not start it again. When
-// it cannot play, the caption stays and a line offers the file, as for a viewer.
-function renderSpin(job) {
-  if (!job.files.includes(SPIN)) return clearSpin();
-  const key = JSON.stringify([job.id, job.stages.turntable.ended, (job.sizes || {})[SPIN]]);
-  if (key === V.spinKey) return;
-  V.spinKey = key;
-  V.spinOn = !reducedMotion();
-  const name = `${job.id}_turntable.mp4`, cap = h("figcaption", {}, "360 video"), fig = h("figure", { class: "spinfig" }, cap);
-  const video = V.spin = h("video", { src: file(SPIN), autoplay: V.spinOn, muted: true, loop: true, playsinline: true,
-    controls: true, preload: "auto", "aria-label": `360 video of the ${job.prompt || "object"}`,
+// One video: muted, looping, with controls that pause it; it does not start by itself when the system asks for reduced
+// motion. It is drawn once per file, so a refresh or a new signed URL does not start it again. When it cannot play,
+// the caption stays and a line offers the file, as for a viewer. Returns true when its figure changed.
+function drawVideo(job, [slot, p, stage, title, label]) {
+  if (!job.files.includes(p)) {
+    const had = !!V[slot + "Fig"];
+    V[slot] = V[slot + "Key"] = V[slot + "Fig"] = null;
+    return had;
+  }
+  const key = JSON.stringify([job.id, (job.stages[stage] || {}).ended, (job.sizes || {})[p]]);
+  if (key === V[slot + "Key"]) return false;
+  V[slot + "Key"] = key;
+  V[slot + "On"] = !reducedMotion();
+  const name = `${job.id}_${p.split("/").pop()}`, cap = h("figcaption", {}, title);
+  const fig = V[slot + "Fig"] = h("figure", { class: "spinfig" }, cap);
+  const video = V[slot] = h("video", { src: file(p), autoplay: V[slot + "On"], muted: true, loop: true, playsinline: true,
+    controls: true, preload: "auto", "aria-label": label(job.prompt || "object"),
     onerror: () => {
-      if (V.spin === video) V.spin = null;
+      if (V[slot] === video) V[slot] = null;
       fig.replaceChildren(cap, h("p", { class: "msg" }, "Could not play the video: ",
-        h("a", { href: file(SPIN, name), download: name }, "download it"), "."));
+        h("a", { href: file(p, name), download: name }, "download it"), "."));
     } });
   video.muted = true;  // the attribute only sets the default
   if (V.tab && V.tab !== "results") video.pause();  // drawn while another tab shows: no start there
   fig.append(video);
-  fill($("#spin"), fig);
+  return true;
 }
-// The 360 video plays only while the Results tab shows. It stops when the tab hides, and plays again when the tab shows
-// if it played when the tab hid (V.spinOn), or at first unless the system asks for reduced motion.
+function renderSpin(job) {
+  const changed = VIDEOS.map((v) => drawVideo(job, v));  // each one, so that neither misses its draw
+  if (changed.some(Boolean)) fill($("#spin"), VIDEOS.map(([slot]) => V[slot + "Fig"]));
+}
+// The videos play only while the Results tab shows. Each stops when the tab hides, and plays again when the tab shows
+// if it played when the tab hid (V.spinOn, V.softOn), or at first unless the system asks for reduced motion.
 function spinTab(name) {
-  const v = V.spin;
-  if (!v || name === V.tab) return;
-  if (name === "results") {
-    if (V.spinOn) Promise.resolve(v.play()).catch(() => {});  // a browser may refuse it: the controls still start it
-  } else {
-    if (V.tab === "results") V.spinOn = !v.paused;
-    v.pause();
+  if (name === V.tab) return;
+  for (const [slot] of VIDEOS) {
+    const v = V[slot];
+    if (!v) continue;
+    if (name === "results") {
+      if (V[slot + "On"]) Promise.resolve(v.play()).catch(() => {});  // a browser may refuse it: the controls still start it
+    } else {
+      if (V.tab === "results") V[slot + "On"] = !v.paused;
+      v.pause();
+    }
   }
 }
 

@@ -17,6 +17,15 @@ OPENAI_KEY = "sk-proj-" + "z" * 40
 GOOD = json.dumps({"base": "cabinet body", "parts": [
     {"name": "drawer", "parent": "cabinet body", "joint": "prismatic", "count": 2, "axis_hint": "slides out toward the camera"},
     {"name": "door", "parent": "", "joint": "Revolute", "count": 1, "axis_hint": "hinge on the left edge"}]})
+CHAIR = json.dumps({"base": "chair base", "parts": [
+    {"name": "seat and backrest", "parent": "chair base", "joint": "revolute", "axis_hint": "the gas lift",
+     "motion": "turns  all the way\n round on the base", "range": 360, "material": "rubber"},
+    {"name": "seat  cushion", "parent": "seat and backrest", "joint": "soft", "motion": "x" * 200, "range": 5,
+     "material": " Gel "},
+    {"name": "armrest pad", "parent": "seat and backrest", "joint": "soft", "material": "memory foam"},
+    {"name": "footrest", "parent": "chair base", "joint": "prismatic", "motion": "slides out", "range": 30},
+    {"name": "lever", "parent": "chair base", "joint": "fixed", "motion": "stays put", "range": float("nan")},
+    {"name": "knob", "parent": "chair base", "joint": "unknown", "range": "a quarter turn"}]})
 
 
 class FakeClient:
@@ -87,10 +96,21 @@ def test_validate_normalizes_a_good_list():
     ([{"name": "body"}, {"parent": "body"}], "needs a name"),
     ([{"name": "globe stand"}, {"name": "World", "parent": "globe stand"}], "reserved"),
     ([{"name": "world"}, {"name": "globe", "parent": "world"}], "reserved"),
+    ([{"name": "body"}, {"name": "pad", "parent": "body", "joint": "soft"}, {"name": "cover", "parent": "pad"}],
+     "'cover' cannot hang from the soft part 'pad'"),
 ])
 def test_validate_catches_each_fault(parts, why):
     with pytest.raises(ValueError, match=why):
         P.validate(parts, noun="cabinet")
+
+
+def test_validate_takes_a_soft_part():
+    parts = P.validate([{"name": "chair base"}, {"name": "seat", "parent": "chair base", "joint": "revolute"},
+                        {"name": "Seat cushion", "parent": "seat", "joint": "Soft"}], noun="office chair")
+    assert [p["joint"] for p in parts] == ["fixed", "revolute", "soft"]
+    # The base is always fixed, whatever the list says, so a part may hang from it.
+    parts = P.validate([{"name": "body", "joint": "soft"}, {"name": "door", "parent": "body"}], noun="cabinet")
+    assert parts[0]["joint"] == "fixed"
 
 
 def test_parse_takes_the_first_json_object():
@@ -123,12 +143,65 @@ def test_opus_proposes_from_view_0(tmp_path, monkeypatch):
     im = Image.open(io.BytesIO(base64.b64decode(image["source"]["data"])))
     assert image["source"]["media_type"] == "image/jpeg" and im.format == "JPEG" and im.size == (1024, 768)
     assert "The photo shows a cabinet." in text["text"] and "At most 11 parts" in text["text"]
+    assert "the seat cushion of an office chair is a soft part" in text["text"] and '"material"' in text["text"]
     assert proposal["source"] == "vlm" and proposal["agent"] == "opus" and proposal["model"] == "claude-opus-5-5"
     assert proposal["base"] == "cabinet body" and proposal["mode"] == "vlm"
     assert [(p["name"], p["parent"], p["joint"], p["count"]) for p in proposal["parts"]] == [
         ("cabinet body", None, "fixed", 1), ("drawer", "cabinet body", "prismatic", 2), ("door", "cabinet body", "revolute", 1)]
+    # An answer without motion, range and material: the default text, still the VLM's requirement.
+    assert proposal["requirements"] == [
+        {"part": "drawer", "joint": "prismatic", "text": "slides along its track", "range": None, "source": "vlm"},
+        {"part": "door", "joint": "revolute", "text": "turns about its hinge or axle", "range": None, "source": "vlm"}]
     assert json.loads((J / "run" / "proposal.json").read_text()) == proposal
     assert no_key_in(J, OPUS_KEY) == []
+
+
+def test_the_answer_fields_become_requirements(tmp_path, capsys):
+    """motion is cut as axis_hint is, range kept only as a number within the limits, material only from the
+    table (else foam); a fixed part and the base get no requirement."""
+    J = job(tmp_path)
+    proposal = P.run(J, key_file(tmp_path, f"ANTHROPIC_API_KEY={OPUS_KEY}"), client=FakeClient([CHAIR]))
+    assert proposal["requirements"] == [
+        {"part": "seat and backrest", "joint": "revolute", "text": "turns all the way round on the base", "range": 360.0,
+         "source": "vlm"},
+        {"part": "seat cushion", "joint": "soft", "text": "x" * 120, "material": "gel", "source": "vlm"},
+        {"part": "armrest pad", "joint": "soft", "text": "dents under a press and springs back", "material": "foam",
+         "source": "vlm"},
+        {"part": "footrest", "joint": "prismatic", "text": "slides out", "range": 30.0, "source": "vlm"},
+        {"part": "knob", "joint": "unknown", "text": "moves relative to its parent", "range": None, "source": "vlm"}]
+    assert json.loads((J / "run" / "proposal.json").read_text()) == proposal  # the NaN range was not kept
+    assert "requirement of seat and backrest: turns all the way round on the base, range 360 (vlm)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("given,kept", [(90, 90.0), (0.5, 0.5), (720, 720.0), (0, None), (-90, None), (721, None),
+                                        ("90", None), (True, None), (None, None), (float("nan"), None),
+                                        (float("inf"), None), ([90], None)])
+def test_a_range_is_a_number_above_0_and_at_most_720(given, kept):
+    parts = P.validate([{"name": "body"}, {"name": "lid", "parent": "body", "joint": "revolute"}])
+    (req,) = P.requirements_from([{"name": "lid", "range": given}], parts)
+    assert req["range"] == kept
+
+
+@pytest.mark.parametrize("given,kept", [("foam", "foam"), (" Gel ", "gel"), ("RUBBER", "rubber"), ("memory foam", "foam"),
+                                        ("steel", "foam"), (3, "foam"), (None, "foam")])
+def test_a_material_comes_from_the_table_else_foam(given, kept):
+    parts = P.validate([{"name": "chair"}, {"name": "cushion", "parent": "chair", "joint": "soft"}])
+    (req,) = P.requirements_from([{"name": "cushion", "material": given, "range": 10}], parts)
+    assert req == {"part": "cushion", "joint": "soft", "text": "dents under a press and springs back", "material": kept,
+                   "source": "vlm"}
+
+
+def test_a_user_list_gets_the_default_requirements():
+    parts = P.validate([{"name": "body"}, {"name": "lid", "parent": "body", "joint": "revolute"},
+                        {"name": "drawer", "parent": "body", "joint": "prismatic", "count": 2},
+                        {"name": "pad", "parent": "lid", "joint": "soft"}, {"name": "foot", "parent": "body", "joint": "fixed"},
+                        {"name": "knob", "parent": "body"}])
+    assert P.default_requirements(parts) == [
+        {"part": "lid", "joint": "revolute", "text": "turns about its hinge or axle", "range": None, "source": "default"},
+        {"part": "drawer", "joint": "prismatic", "text": "slides along its track", "range": None, "source": "default"},
+        {"part": "pad", "joint": "soft", "text": "dents under a press and springs back", "material": "foam",
+         "source": "default"},
+        {"part": "knob", "joint": "unknown", "text": "moves relative to its parent", "range": None, "source": "default"}]
 
 
 def test_a_bad_answer_is_asked_once_more(tmp_path):
@@ -173,16 +246,65 @@ def test_astra_proposes_through_the_responses_api(tmp_path, monkeypatch):
 
 
 def test_a_key_is_scrubbed_before_the_answer_is_cut(tmp_path):
-    # The key crosses both cuts: an axis_hint's 120 characters and the stored answer's 4000.
+    # The key crosses all three cuts: an axis_hint's and a requirement text's 120 characters and the stored
+    # answer's 4000.
     answer = json.dumps({"base": "cabinet body", "parts": [{"name": "door", "parent": "cabinet body",
-                                                            "axis_hint": "a" * 100 + " " + OPUS_KEY}]})
+                                                            "axis_hint": "a" * 100 + " " + OPUS_KEY,
+                                                            "motion": "m" * 100 + " " + OPUS_KEY}]})
     answer += " " + "y" * (3990 - len(answer) - 1) + OPUS_KEY
     assert answer.index(OPUS_KEY, 3000) == 3990
     J = job(tmp_path)
     proposal = P.run(J, key_file(tmp_path, f"ANTHROPIC_API_KEY={OPUS_KEY}"), client=FakeClient([answer]))
     assert proposal["parts"][1]["axis_hint"] == "a" * 100 + " [redacted API key]"
-    assert proposal["answer"].count("[redacted API key]") == 2 and OPUS_KEY[:10] not in proposal["answer"]
+    assert proposal["requirements"][0]["text"] == "m" * 100 + " [redacted API key]"
+    assert proposal["answer"].count("[redacted API key]") == 3 and OPUS_KEY[:10] not in proposal["answer"]
     assert no_key_in(J, OPUS_KEY[:10]) == []
+
+
+def test_a_key_spelt_with_json_escapes_is_scrubbed(tmp_path):
+    """The answer writes the key's first letter as an escape, which json.loads turns back into the key; the motion
+    cut at 120 characters would keep a part of it."""
+    escaped = "\\u0073" + OPUS_KEY[1:]
+    answer = json.dumps({"base": "cabinet body", "parts": [{"name": "door", "parent": "cabinet body",
+                                                            "motion": "m" * 100 + " KEY", "axis_hint": "KEY"}]})
+    J = job(tmp_path)
+    proposal = P.run(J, key_file(tmp_path, f"ANTHROPIC_API_KEY={OPUS_KEY}"),
+                     client=FakeClient([answer.replace("KEY", escaped)]))
+    assert proposal["requirements"][0]["text"] == "m" * 100 + " [redacted API key]"
+    assert proposal["parts"][1]["axis_hint"] == "[redacted API key]" and OPUS_KEY[1:10] not in proposal["answer"]
+    assert no_key_in(J, OPUS_KEY[1:10]) == []
+    # An escaped backslash, a quote and a control character stay escaped, so the object decodes to the same.
+    text = json.dumps({"a": "\\u0073 \" \x1b \\ s"})
+    assert P.unescape(text) == text and P.unescape('{"a": "\\u0041\\u0022"}') == '{"a": "A\\u0022"}'
+
+
+def test_control_characters_leave_the_answer_text(tmp_path, capsys):
+    """A terminal escape or a right-to-left mark in a name, a hint or a motion would reach the stage log."""
+    answer = json.dumps({"base": "cabinet body", "parts": [{"name": "door‮", "parent": "cabinet body",
+                                                            "joint": "revolute", "axis_hint": "left\x1b[2J edge",
+                                                            "motion": "swings‮\x07 open"}]})
+    proposal = P.run(job(tmp_path), key_file(tmp_path, f"ANTHROPIC_API_KEY={OPUS_KEY}"), client=FakeClient([answer]))
+    assert proposal["parts"][1]["name"] == "door" and proposal["parts"][1]["axis_hint"] == "left[2J edge"
+    assert proposal["requirements"][0]["text"] == "swings open"
+    out = capsys.readouterr().out
+    assert "door > cabinet body : revolute (left[2J edge)" in out and not any(c in out for c in "\x1b\x07‮")
+
+
+def test_an_answer_that_is_not_json_says_so(tmp_path):
+    """A range with units breaks the outer object: the reason is the decode error, not the base that parse() missed
+    when it went on to the object of the second part (or found no object at all with one part)."""
+    two = json.loads(GOOD)
+    two["parts"][1]["range"] = "RANGE"
+    for answer in (json.dumps(two), json.dumps({**two, "parts": two["parts"][1:]})):
+        answer = answer.replace('"RANGE"', "90 degrees")
+        with pytest.raises(ValueError, match=r"not valid JSON \(Expecting ',' delimiter: .*\); .* no units"):
+            P.from_answer(answer, "cabinet")
+    with pytest.raises(ValueError, match='no "base"'):
+        P.from_answer('{"parts": [{"name": "door"}]}', "cabinet")
+    J = job(tmp_path)
+    fake = FakeClient([json.dumps(two).replace('"RANGE"', "90 degrees"), GOOD])
+    P.propose_vlm("cabinet", J / "run" / "input" / "images" / "0.png", "opus", OPUS_KEY, client=fake)
+    assert "could not be used: the answer is not valid JSON" in fake.calls[1]["messages"][0]["content"][1]["text"]
 
 
 def test_api_errors_report_only_their_kind(tmp_path, monkeypatch, capsys):
@@ -220,6 +342,8 @@ def test_the_user_list_needs_no_key(tmp_path):
     assert proposal["source"] == "user" and proposal["agent"] == "none" and proposal["model"] is None
     assert proposal["mode"] == "user"  # the mode the job runs in, not the one it asked for
     assert [p["name"] for p in proposal["parts"]] == ["body", "lid"] and proposal["base"] == "body"
+    assert proposal["requirements"] == [{"part": "lid", "joint": "revolute", "text": "turns about its hinge or axle",
+                                         "range": None, "source": "default"}]
     J2 = job(tmp_path / "b", agent="opus", mode="user")
     with pytest.raises(SystemExit, match="no part list"):
         P.run(J2)
@@ -238,3 +362,28 @@ def test_confirm_writes_the_edited_list(tmp_path):
     assert [p["count"] for p in saved["parts"]] == [1, 3]
     with pytest.raises(ValueError, match="exactly one part"):
         P.confirm(J, [{"name": "a"}, {"name": "b"}])
+
+
+def test_confirm_keeps_a_requirement_only_for_the_same_name_and_joint(tmp_path):
+    J = job(tmp_path)
+    vlm = P.run(J, key_file(tmp_path, f"ANTHROPIC_API_KEY={OPUS_KEY}"), client=FakeClient([CHAIR]))["requirements"]
+    edited = [{"name": "chair base"}, {"name": "seat and backrest", "parent": "chair base", "joint": "revolute", "count": 2},
+              {"name": "seat cushion", "parent": "seat and backrest", "joint": "soft"},
+              {"name": "footrest", "parent": "chair base", "joint": "revolute"},
+              {"name": "headrest", "parent": "seat and backrest", "joint": "prismatic"}]
+    saved = P.confirm(J, edited)
+    assert saved["requirements"] == [
+        vlm[0], vlm[1],  # the count does not matter, nor does the armrest pad that was left out
+        {"part": "footrest", "joint": "revolute", "text": "turns about its hinge or axle", "range": None, "source": "default"},
+        {"part": "headrest", "joint": "prismatic", "text": "slides along its track", "range": None, "source": "default"}]
+    assert json.loads((J / "run" / "proposal.json").read_text())["requirements"] == saved["requirements"]
+    # The VLM's list confirmed as it is keeps every requirement.
+    assert P.confirm(J, saved["parts"])["requirements"] == saved["requirements"]
+    # A change of case keeps the requirement, as the page keeps the axis hint, under the confirmed name.
+    renamed = [{**p, "name": "Seat And Backrest"} if p["name"] == "seat and backrest" else
+               {**p, "parent": "Seat And Backrest"} if p["parent"] == "seat and backrest" else p for p in saved["parts"]]
+    assert P.confirm(J, renamed)["requirements"] == [{**vlm[0], "part": "Seat And Backrest"}, *saved["requirements"][1:]]
+    # A proposal written before requirements (a job that waited at its part list across the update) gets the defaults.
+    old = {k: v for k, v in saved.items() if k != "requirements"}
+    (J / "run" / "proposal.json").write_text(json.dumps(old))
+    assert P.confirm(J, saved["parts"])["requirements"] == P.default_requirements(saved["parts"])

@@ -15,6 +15,7 @@ from harpor.agent import tools
 from harpor.parts import render
 from harpor.parts import stage as S
 from harpor.parts import vote as V
+from harpor.physics import sim_check
 from harpor.physics.align import read_glb, write_glb
 from harpor.stage_a import part_masks
 from test_parts_vote import CENTER, look_at
@@ -107,6 +108,30 @@ def test_vote_split_finish(job, capsys):
     assert all(np.isclose(line["p0"][1], -0.075) for line in seam["lines"])
     nodes, _ = read_glb(run / "parts.glb")
     assert sorted(n["name"] for n in nodes["nodes"] if "mesh" in n) == ["box_body", "lid"]
+    assert doc["requirements"] == [  # the user's list: the default requirement, with no span target
+        {"id": "r1", "part": "lid", "prompt": "lid", "parent": "box_body", "kind": "joint", "joint": "revolute",
+         "text": "turns about its hinge or axle", "action": {"type": "sweep", "directions": ["lower", "upper"]},
+         "observe": {"type": "joint_range", "relative_to": "parent"}, "test": {},
+         "scope": {"start": "mesh pose, every joint at 0", "base": "fixed", "gravity": False},
+         "source": "default", "status": "found", "required": True}]
+    assert "r1 'lid': joint revolute, found\n" in out
+
+
+def test_finish_takes_the_proposal_requirements_or_the_defaults(job):
+    J, _ = job
+    run = J / "run"
+    S.main(["vote", "--job", str(J)])
+    S.split(J, blender=FAKE_BLENDER)
+    proposal = json.loads((run / "proposal.json").read_text())
+    proposal["requirements"] = [{"part": "lid", "joint": "revolute", "text": "opens a quarter turn", "range": 90.0,
+                                 "source": "vlm"}]
+    (run / "proposal.json").write_text(json.dumps(proposal))
+    (req,) = S.finish(J)["requirements"]
+    assert (req["text"], req["test"], req["source"]) == ("opens a quarter turn", {"min_span": 1.571}, "vlm")
+    del proposal["requirements"]  # a proposal older than requirements
+    (run / "proposal.json").write_text(json.dumps(proposal))
+    (req,) = S.finish(J)["requirements"]
+    assert (req["part"], req["text"], req["test"], req["source"]) == ("lid", "turns about its hinge or axle", {}, "default")
 
 
 def test_finish_refuses_a_glb_without_the_part_nodes(job):
@@ -157,3 +182,46 @@ def test_parents_follow_the_longest_seam_and_skip_parts_not_found():
     seams = [{"parts": ["door_1", "knob"], "length": 0.1}, {"parts": ["door_2", "knob"], "length": 0.3}]
     assert S.parents(clusters, proposal, names, seams) == {"body": None, "door_1": "body", "door_2": "body",
                                                            "knob": "door_2", "handle": "body"}
+
+
+def test_requirements_make_max_count_found_records():
+    """3 drawers with 2 found: 2 found and 1 not_found, all required. 1 door with 2 found: the second is not
+    required. A knob that was only dropped_small (not in clusters): not_found. Revolute range is a span target in
+    radians, prismatic range only text; a soft part gets the press."""
+    proposal = {"base": "cabinet body", "parts": [
+        {"name": "cabinet body", "parent": None, "joint": "fixed", "count": 1},
+        {"name": "drawer", "parent": "cabinet body", "joint": "prismatic", "count": 3},
+        {"name": "door", "parent": "cabinet body", "joint": "revolute", "count": 1},
+        {"name": "knob", "parent": "door", "joint": "unknown", "count": 1},
+        {"name": "pad", "parent": "door", "joint": "soft", "count": 1}],
+        "requirements": [
+            {"part": "drawer", "joint": "prismatic", "text": "pulls out", "range": 40.0, "source": "vlm"},
+            {"part": "door", "joint": "revolute", "text": "swings open", "range": 360.0, "source": "vlm"},
+            {"part": "knob", "joint": "unknown", "text": "turns", "range": 90.0, "source": "vlm"},
+            {"part": "pad", "joint": "soft", "text": "dents", "material": "gel", "source": "vlm"}]}
+    clusters = {"cabinet_body": {"prompt": "cabinet body"}, "drawer_1": {"prompt": "drawer"},
+                "drawer_2": {"prompt": "drawer"}, "door_1": {"prompt": "door"}, "door_2": {"prompt": "door"},
+                "pad": {"prompt": "pad"}}
+    names = list(clusters)
+    parent = {"cabinet_body": None, "drawer_1": "cabinet_body", "drawer_2": "cabinet_body", "door_1": "cabinet_body",
+              "door_2": "cabinet_body", "pad": "door_1"}
+    reqs = S.requirements(proposal, clusters, names, parent)
+    assert [(r["id"], r["part"], r["prompt"], r["parent"], r["status"], r["required"]) for r in reqs] == [
+        ("r1", "drawer_1", "drawer", "cabinet_body", "found", True),
+        ("r2", "drawer_2", "drawer", "cabinet_body", "found", True),
+        ("r3", None, "drawer", "cabinet body", "not_found", True),
+        ("r4", "door_1", "door", "cabinet_body", "found", True),
+        ("r5", "door_2", "door", "cabinet_body", "found", False),
+        ("r6", None, "knob", "door", "not_found", True),
+        ("r7", "pad", "pad", "door_1", "found", True)]
+    drawer, door, knob, pad = reqs[0], reqs[3], reqs[5], reqs[6]
+    assert (drawer["kind"], drawer["text"], drawer["test"]) == ("joint", "pulls out (full travel about 40 cm)", {})
+    assert (door["text"], door["test"]) == ("swings open", {"min_span": 6.283})
+    assert (knob["kind"], knob["joint"], knob["text"], knob["test"]) == ("joint", "unknown", "turns", {})
+    assert pad == {"id": "r7", "part": "pad", "prompt": "pad", "parent": "door_1", "kind": "soft", "joint": "soft",
+                   "material": "gel", "text": "dents", "action": {"type": "press", "toward": "support"},
+                   "observe": {"type": "node_and_visible_residual", "after": "rigid alignment"},
+                   "test": {"min_response_diag": sim_check.RESPONSE, "recovery": True},
+                   "scope": {"start": "mesh pose", "base": "fixed", "support": "parent", "gravity": False},
+                   "source": "vlm", "status": "found", "required": True}
+    assert S.MIN_RESPONSE == sim_check.RESPONSE

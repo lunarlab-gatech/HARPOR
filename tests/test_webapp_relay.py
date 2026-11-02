@@ -329,6 +329,11 @@ def test_globs_cover_every_allow_path():
         assert fnmatch.fnmatchcase(sample, glob), (alt, glob)
         assert relay.owner(sample) in steps.NAMES, sample
     assert relay.owner("logs/masks.log") == "masks" and relay.owner("agent/s/x") is None
+    # The agent stage publishes its evidence (agent_step), which the site holds with the results.
+    assert relay.owner("agent/evidence.json") == "agent" and relay.role_of("agent/evidence.json") == "result"
+    # The soft-part video is the softvideo stage's result; the stage's other files are not mirrored.
+    assert relay.owner("softvideo/softvideo.mp4") == "softvideo" and relay.role_of("softvideo/softvideo.mp4") == "result"
+    assert relay.owner("softvideo/motion.npz") is None and relay.owner("logs/softvideo.log") == "softvideo"
     assert {relay.role_of(p) for p in server.OUTPUTS} == {"result"}
     assert relay.role_of("logs/frames.log") == "log" and relay.role_of("frames/thumbs/0.jpg") == "review"
     # The LiDAR points of the run's views: select copies them, and they leave the site with the review images.

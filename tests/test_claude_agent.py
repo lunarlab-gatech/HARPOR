@@ -280,6 +280,28 @@ def test_system_prompt_is_the_work_folder_manual():
     assert "## Measured times" in s and "median 29 s" in s and "Measured times" not in agents
 
 
+def test_stdout_shows_the_models_text_and_output_as_printable_lines(root):
+    """The model's text and its commands' output reach stdout (claude_stdout.log) as one line each, without control
+    characters (tools.printable)."""
+    script = [msg(text("look\x1b]0;title\x07\n‮done"), bash(r"printf 'a\033]52;c;aGk=\007\nb'", "toolu_1")),
+              msg(text("ok"), stop="end_turn")]
+    code, client, lines, out = run(root, script)
+    assert code == 0 and "  text: look]0;title done\n" in out and "  -> bash: a]52;c;aGk= b" in out
+    assert [c for c in out if not c.isprintable() and c != "\n"] == []
+
+
+def test_the_log_is_ascii(root):
+    """An OSC made of C1 controls alone (U+009D ... U+009C) needs no ESC, and a terminal that takes C1 controls in
+    UTF-8 runs it on cat or tail -f of the log. JSON escapes it, and DEL, bidi and zero-width characters, in the
+    model's text and in command output; json.loads gives the same strings back."""
+    dirty = "csi\x9b2J osc\x9d52;c;aGk=\x9c del\x7f rlo‮abc zwj‍ é"
+    code, client, lines, _ = run(root, [msg(text(dirty), bash(f"printf '%s' '{dirty}'", "toolu_1")),
+                                        msg(text("ok"), stop="end_turn")])
+    data = (root / "session" / "claude.jsonl").read_bytes()
+    assert code == 0 and data.isascii()
+    assert of(lines, "response")[0]["blocks"][0]["text"] == dirty and dirty in of(lines, "tool_result")[0]["output"]
+
+
 def test_end_turn_and_max_tokens_without_tool_use_end_the_session(root):
     code, client, lines, _ = run(root, [msg(text("cut off mid-sent"), stop="max_tokens")])
     assert code == 0 and len(client.calls) == 1 and of(lines, "end")[0]["reason"] == "max_tokens"
@@ -506,6 +528,19 @@ def test_finish_helper_ends_the_session(root):
     cmd = f"""echo '{{"time": 1, "event": "finish", "verdict": "complete"}}' >> {events}"""
     code, client, lines, _ = run(root, [msg(bash(cmd, "toolu_1"))])
     assert code == 0 and len(client.calls) == 1 and of(lines, "end")[0]["reason"] == "finished"
+
+
+def test_a_finish_of_an_earlier_round_does_not_end_this_one(root):
+    """In a session with rounds (controller.run_rounds), each round is a new agent, and only a finish after the last
+    round_start ends it (tools.round_events)."""
+    events = root / "control" / "events.jsonl"
+    events.write_text("".join(json.dumps(e) + "\n" for e in [
+        {"time": 1, "event": "round_start", "round": 1, "kind": "build"},
+        {"time": 2, "event": "finish", "verdict": "needs_review"},
+        {"time": 3, "event": "round_start", "round": 2, "kind": "repair"}]))
+    cmd = f"""echo '{{"time": 4, "event": "finish", "verdict": "articulated"}}' >> {events}"""
+    code, client, lines, _ = run(root, [msg(bash("true", "toolu_1")), msg(bash(cmd, "toolu_2"))])
+    assert code == 0 and len(client.calls) == 2 and of(lines, "end")[0]["reason"] == "finished"
 
 
 def test_unknown_tool_and_bad_inputs_get_error_results(root):

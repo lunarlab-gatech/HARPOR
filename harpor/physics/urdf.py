@@ -7,9 +7,11 @@ It reuses the MJCF's visual OBJs and textures, convex collision hulls and per-li
   model.urdf   robot NAME. A rigid object is one link NAME with the inertial of summary.json. An
                articulated one has a link per part (the GLB's node names) and a joint per jointed part,
                <child>_joint: revolute, prismatic or fixed, with <axis> and
-               <limit lower upper effort="100" velocity="1"/>; a part without a joint gets a fixed joint
-               to the link the MJCF welds it to (mjcf.json welded, else the root). A fixed base adds a
-               link world and the fixed joint world_joint at the MJCF's start height, as MJCF and USD.
+               <limit lower upper effort="100" velocity="1"/>; a soft part gets a fixed joint with an XML
+               comment before it, because URDF has no soft body, and urdf.json soft_as_rigid names it; a
+               part without a joint gets a fixed joint to the link the MJCF welds it to (mjcf.json
+               welded, else the root). A fixed base adds a link world and the fixed joint world_joint at
+               the MJCF's start height, as MJCF and USD.
   meshes/      link_<k>.obj per link k (one object and material per visual, the MJCF's visual_<j>.obj
                merged) with link_<k>.mtl and texture_<j>.png, and the collision OBJs copied
   urdf.json    inputs, links, joints and the check below (checked)
@@ -18,7 +20,8 @@ joint's origin with S's axes. A joint's <origin xyz> is its child's frame minus 
 visual, collision and inertial <origin xyz> is minus its link's frame (the COM minus it for the inertial).
 The axis, the inertia and the limits stay as they are (radians, meters). URDF names the links by part,
 MJCF by body (<name> for the root, <name>_<part> for the rest). URDF has no contact filter, so the MJCF's
-excluded_pairs are only listed in urdf.json; importers usually turn self-collision off (Isaac Sim does).
+excluded_pairs and soft_excluded_pairs are only listed in urdf.json; importers usually turn self-collision
+off (Isaac Sim does).
 """
 
 import argparse
@@ -30,6 +33,8 @@ from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
 import numpy as np
+
+from harpor.parts.joints import SOFT_AS_RIGID
 
 
 def _shift(token, ov, ot, on):
@@ -66,8 +71,9 @@ def _xyz(x):
     return " ".join(f"{c:.6g}" for c in x)
 
 
-def urdf_xml(name, links, joints, fixed_base):
-    """links: [{name, frame, inertial, mesh, collisions}]; joints: [{name, type, parent, child, xyz, axis, range}]."""
+def urdf_xml(name, links, joints, fixed_base, soft=()):
+    """links: [{name, frame, inertial, mesh, collisions}]; joints: [{name, type, parent, child, xyz, axis, range}];
+    soft: the links that get a comment."""
     a = quoteattr
     lines = [f"<robot name={a(name)}>"]
     if fixed_base:
@@ -90,6 +96,8 @@ def urdf_xml(name, links, joints, fixed_base):
                       f'      <geometry><mesh filename={a(c)}/></geometry>', '    </collision>']
         lines.append("  </link>")
     for j in joints:
+        if j["child"] in soft:  # an XML comment cannot hold --
+            lines.append(f'  <!-- {re.sub(r"-(?=-)", "- ", j["child"])}: {SOFT_AS_RIGID} -->')
         lines += [f'  <joint name={a(j["name"])} type="{j["type"]}">',
                   f'    <parent link={a(j["parent"])}/>',
                   f'    <child link={a(j["child"])}/>',
@@ -132,16 +140,18 @@ def build(glb, summary, mjcf_dir, out, name):
             shutil.copyfile(assets / h, meshes / h)
         links.append({"name": k, "frame": frame[k], "inertial": r["inertial"], "mesh": mesh,
                       "collisions": [f"meshes/{h}" for h in r["hulls"]]})
-    joints = [{"name": f"{j['child']}_joint", "type": j["type"], "parent": j["parent"], "child": j["child"],
+    soft = {j["child"]: SOFT_AS_RIGID for j in spec if j["type"] == "soft"}
+    joints = [{"name": f"{j['child']}_joint", "type": "fixed" if j["type"] == "soft" else j["type"],
+               "parent": j["parent"], "child": j["child"],
                "xyz": (np.asarray(frame[j["child"]]) - frame[j["parent"]]).tolist(), "axis": j["axis"],
                "range": j["range"]} for j in spec]
     if fixed_base:
         joints.insert(0, {"name": "world_joint", "type": "fixed", "parent": "world", "child": root,
                           "xyz": [0.0, 0.0, float(mj["start_z"])], "axis": [1.0, 0.0, 0.0], "range": [0.0, 0.0]})
-    (out / "model.urdf").write_text(urdf_xml(name, links, joints, fixed_base))
+    (out / "model.urdf").write_text(urdf_xml(name, links, joints, fixed_base, soft))
     report = {"glb": str(Path(glb).resolve()), "summary": str(Path(summary).resolve()), "mjcf": str(mjcf_dir.resolve()),
               "name": name, "root": root, "fixed_base": fixed_base, "links": links, "joints": joints,
-              "excluded_pairs": mj.get("excluded_pairs", [])}
+              "excluded_pairs": mj.get("excluded_pairs", []) + mj.get("soft_excluded_pairs", []), "soft_as_rigid": soft}
     (out / "urdf.json").write_text(json.dumps(report, indent=1))
     return report
 

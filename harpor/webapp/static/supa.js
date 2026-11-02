@@ -35,7 +35,8 @@
   // steps.STAGES: each stage's name and whether it runs on the GPU, for the view of a job that no worker has seen yet.
   const STAGES = [["topics", false], ["frames", false], ["extract", false], ["masks", true], ["prep", false], ["da3", true],
     ["lidar", false], ["select", false], ["sam3d", true], ["place", false], ["propose", false], ["parts", true], ["agent", true],
-    ["align", false], ["vomp", true], ["mjcf", false], ["usd", false], ["urdf", false], ["turntable", true], ["package", false]];
+    ["align", false], ["vomp", true], ["mjcf", false], ["usd", false], ["urdf", false],
+    ["turntable", true], ["softvideo", true], ["package", false]];
   const SNAP_NONE = { frames: "the frames are not analyzed yet", selection: "the views are not selected yet",
     parts: "the part list is not on the site yet" };
   const ROUTE_NAME = { topic: "Camera topic", calibration_put: "Calibration", calibration_delete: "Remove calibration",

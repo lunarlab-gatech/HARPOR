@@ -58,17 +58,19 @@ GLOBS = {r"frames/thumbs/\d+\.jpg": "frames/thumbs/*.jpg",
          r"run/posed\.glb": "run/posed.glb", r"run/parts\.glb": "run/parts.glb", r"run/parts\.json": "run/parts.json",
          r"run/parts/sam3/check/\d+\.jpg": "run/parts/sam3/check/*.jpg", r"refined\.glb": "refined.glb",
          r"physics/aligned\.glb": "physics/aligned.glb", r"turntable/turntable\.mp4": "turntable/turntable.mp4",
-         r"physics/summary\.json": "physics/summary.json",
+         r"softvideo/softvideo\.mp4": "softvideo/softvideo.mp4", r"physics/summary\.json": "physics/summary.json",
          r"physics/mjcf/mjcf\.json": "physics/mjcf/mjcf.json", r"physics/urdf/model\.urdf": "physics/urdf/model.urdf",
          r"run/placement\.json": "run/placement.json", r"selection\.json": "selection.json",
-         r"results\.zip": "results.zip", r"logs/\w+\.log": "logs/*.log"}
+         r"results\.zip": "results.zip", r"agent/evidence\.json": "agent/evidence.json",
+         r"logs/\w+\.log": "logs/*.log"}
 # The stage that writes each mirrored path (the first prefix that matches); logs/<stage>.log is its stage's.
 OWNERS = (("frames/topics.json", "topics"), ("frames/topic_previews/", "topics"), ("frames/", "frames"),
           ("pool/lidar.json", "lidar"), ("lidar/", "lidar"), ("scene/", "masks"), ("selection.json", "select"),
           ("run/input/", "select"), ("run/lidar/", "select"), ("run/overlay_", "place"), ("run/posed.glb", "place"),
           ("run/placement.json", "place"), ("run/parts", "parts"), ("refined.glb", "agent"),
-          ("physics/aligned.glb", "align"), ("physics/summary.json", "vomp"), ("physics/mjcf/", "mjcf"),
-          ("physics/urdf/", "urdf"), ("turntable/", "turntable"), ("results.zip", "package"))
+          ("agent/evidence.json", "agent"), ("physics/aligned.glb", "align"), ("physics/summary.json", "vomp"),
+          ("physics/mjcf/", "mjcf"), ("physics/urdf/", "urdf"), ("turntable/", "turntable"),
+          ("softvideo/softvideo.mp4", "softvideo"), ("results.zip", "package"))
 LEAN_THUMBS = 150
 LEAN_PREVIEW = 30 << 20  # bytes
 LEAN_SIDE = 1280  # px, the long side of a lean review image
