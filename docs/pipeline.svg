@@ -1,0 +1,422 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1600 1000" width="1600" height="1000" role="img" aria-labelledby="title desc">
+  <title id="title">HARPOR pipeline</title>
+  <desc id="desc">A capture becomes a posed mesh through SAM 3 masks, Depth Anything 3, view selection, MV-SAM3D and a pose fit (A). An object with parts is split into links (B). An optional agent in Blender refines the mesh or sets its joints; for an object with requirements a host check tests the joints in MuJoCo, and a failed check starts a repair round (C). Physics stages turn the result upright, estimate materials with VoMP, and write MJCF, USD, URDF, optional videos and results.zip (D). The job can stop for review after view selection and after the part list.</desc>
+  <defs>
+    <style>
+      text { font-family: Helvetica, Arial, "Liberation Sans", sans-serif; fill: #1f2d5a; }
+      .t1 { font-size: 26px; font-weight: 700; }
+      .t2 { font-size: 20px; font-weight: 700; }
+      .bt { font-size: 17px; font-weight: 700; }
+      .bt16 { font-size: 16px; font-weight: 700; }
+      .bt15 { font-size: 15px; font-weight: 700; }
+      .bs { font-size: 14px; fill: #4a5568; }
+      .sm { font-size: 14px; fill: #4a5568; }
+      .xs { font-size: 13px; fill: #4a5568; }
+      .tag { font-size: 14px; fill: #6b5a8a; font-style: italic; }
+      .ch { font-size: 14px; }
+      .mono { font-family: Menlo, Consolas, "DejaVu Sans Mono", monospace; font-size: 14px; }
+      .lt { font-size: 14px; fill: #4a5568; }
+      .badge { font-size: 19px; font-weight: 700; fill: #ffffff; }
+      .num { font-size: 13px; font-weight: 700; fill: #ffffff; }
+      .halo { paint-order: stroke; stroke-width: 6px; stroke-linejoin: round; }
+      .c { text-anchor: middle; }
+      .box { fill: #ffffff; stroke-width: 1.6; }
+      .flow { fill: none; stroke: #4a5568; stroke-width: 2; }
+      .dash { stroke-dasharray: 7 5; }
+    </style>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/>
+    </marker>
+    <g id="pause">
+      <rect x="0" y="0" width="22" height="22" rx="11" fill="#fff3d4" stroke="#e0a526" stroke-width="1.4"/>
+      <rect x="7.5" y="6" width="2.6" height="10" fill="#b7791f"/>
+      <rect x="12" y="6" width="2.6" height="10" fill="#b7791f"/>
+    </g>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="1000" fill="#ffffff"/>
+
+  <!-- ===================== A: Pose-Aware Reconstruction ===================== -->
+  <rect x="16" y="16" width="1060" height="414" rx="14" fill="#f4f8fc" stroke="#b9d3ea" stroke-width="1.6"/>
+  <circle cx="44" cy="44" r="17" fill="#2b7bbf"/>
+  <text class="badge c" x="44" y="51">A</text>
+  <text class="t1" x="70" y="53">Pose-Aware Reconstruction</text>
+
+  <!-- A1: Capture & Views -->
+  <rect x="30" y="72" width="526" height="346" rx="10" fill="#eaf3fb" stroke="#a7c9e6" stroke-width="1.4"/>
+  <circle cx="204" cy="94" r="11" fill="#2b7bbf"/>
+  <text class="num c" x="204" y="99">1</text>
+  <text class="t2" x="222" y="101">Capture &amp; Views</text>
+
+  <rect x="44" y="116" width="150" height="24" rx="12" class="box" stroke="#7fb0da"/>
+  <text class="ch c" x="119" y="133">Phone video</text>
+  <rect x="44" y="145" width="150" height="24" rx="12" class="box" stroke="#7fb0da"/>
+  <text class="ch c" x="119" y="162">ROS 1 or 2 bag</text>
+  <rect x="44" y="174" width="150" height="24" rx="12" class="box" stroke="#7fb0da"/>
+  <text class="ch c" x="119" y="191">Stray Scanner zip</text>
+  <path class="flow" d="M194,128 H203 M194,157 H203 M194,186 H203 M203,128 V186"/>
+  <path class="flow" d="M203,157 H219" marker-end="url(#ah)"/>
+
+  <rect x="220" y="116" width="150" height="82" rx="8" class="box" stroke="#5b9bd1"/>
+  <text class="bt c" x="295" y="142">Frames</text>
+  <text class="bs c" x="295" y="162">sharpest frame</text>
+  <text class="bs c" x="295" y="179">per time bin</text>
+  <path class="flow" d="M370,157 H395" marker-end="url(#ah)"/>
+
+  <rect x="396" y="116" width="146" height="82" rx="8" class="box" stroke="#5b9bd1"/>
+  <text class="bt c" x="469" y="142">SAM 3 masks</text>
+  <text class="bs c" x="469" y="162">text prompt:</text>
+  <text class="bs c" x="469" y="179">the object's name</text>
+
+  <path class="flow" d="M469,198 V226 H139 V253" marker-end="url(#ah)"/>
+
+  <rect x="44" y="254" width="190" height="82" rx="8" class="box" stroke="#5b9bd1"/>
+  <text class="bt c" x="139" y="280">Depth Anything 3</text>
+  <text class="bs c" x="139" y="300">cameras, depth</text>
+  <text class="bs c" x="139" y="317">and pointmaps</text>
+  <path class="flow" d="M234,295 H261" marker-end="url(#ah)"/>
+
+  <rect x="262" y="254" width="170" height="82" rx="8" class="box" stroke="#5b9bd1"/>
+  <text class="bt c" x="347" y="280">View selection</text>
+  <text class="bs c" x="347" y="300">k-center on</text>
+  <text class="bs c" x="347" y="317">view direction</text>
+  <use href="#pause" xlink:href="#pause" x="421" y="243"/>
+
+  <g aria-hidden="true">
+  <circle cx="500" cy="372" r="24" fill="none" stroke="#9cc6e6" stroke-width="1.4" stroke-dasharray="3 3"/>
+  <rect x="495" y="367" width="10" height="10" rx="2" fill="#5b9bd1"/>
+  <circle cx="523.5" cy="376.8" r="4.2" fill="#2b7bbf" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="518.0" cy="387.9" r="3" fill="#c5d3e0"/>
+  <circle cx="507.6" cy="394.8" r="4.2" fill="#2b7bbf" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="495.2" cy="395.5" r="3" fill="#c5d3e0"/>
+  <circle cx="484.1" cy="390.0" r="3" fill="#c5d3e0"/>
+  <circle cx="477.2" cy="379.6" r="4.2" fill="#2b7bbf" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="476.5" cy="367.2" r="3" fill="#c5d3e0"/>
+  <circle cx="482.0" cy="356.1" r="4.2" fill="#2b7bbf" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="492.4" cy="349.2" r="3" fill="#c5d3e0"/>
+  <circle cx="504.8" cy="348.5" r="4.2" fill="#2b7bbf" stroke="#ffffff" stroke-width="1"/>
+  <circle cx="515.9" cy="354.0" r="3" fill="#c5d3e0"/>
+  <circle cx="522.8" cy="364.4" r="3" fill="#c5d3e0"/>
+  </g>
+  <text class="xs c" x="500" y="411">picked views</text>
+
+  <rect x="44" y="358" width="210" height="50" rx="8" class="box dash" stroke="#5b9bd1"/>
+  <text class="bt15 c" x="149" y="379">LiDAR or iPhone depth</text>
+  <text class="xs c" x="149" y="397">sets the metric scale</text>
+  <path class="flow dash" d="M254,383 H347 V337" marker-end="url(#ah)"/>
+
+  <!-- A2: Generate & Place -->
+  <rect x="572" y="72" width="490" height="346" rx="10" fill="#edf7ea" stroke="#a6d196" stroke-width="1.4"/>
+  <circle cx="724" cy="94" r="11" fill="#4f9236"/>
+  <text class="num c" x="724" y="99">2</text>
+  <text class="t2" x="742" y="101">Generate &amp; Place</text>
+
+  <path class="flow" d="M432,295 H587" marker-end="url(#ah)"/>
+
+  <g aria-hidden="true">
+  <rect x="598" y="130" width="60" height="56" rx="5" fill="#dfe9f2" stroke="#9cb8d0"/>
+  <line x1="600" y1="173" x2="656" y2="173" stroke="#9cb8d0" stroke-width="1.5"/>
+  <rect x="616" y="146" width="20" height="26" rx="3" fill="#4f7fae"/>
+  <path d="M636,152 a6,6 0 0 1 0,12" fill="none" stroke="#4f7fae" stroke-width="3"/>
+  <rect x="664" y="130" width="60" height="56" rx="5" fill="#1b1f24"/>
+  <rect x="682" y="146" width="20" height="26" rx="3" fill="#ffffff"/>
+  <path d="M702,152 a6,6 0 0 1 0,12" fill="none" stroke="#ffffff" stroke-width="3"/>
+  </g>
+  <text class="xs c" x="628" y="204">view</text>
+  <text class="xs c" x="694" y="204">mask</text>
+
+  <rect x="588" y="249" width="120" height="26" rx="13" class="box" stroke="#7dbb6c"/>
+  <text class="ch c" x="648" y="267">views</text>
+  <rect x="588" y="282" width="120" height="26" rx="13" class="box" stroke="#7dbb6c"/>
+  <text class="ch c" x="648" y="300">masks</text>
+  <rect x="588" y="315" width="120" height="26" rx="13" class="box" stroke="#7dbb6c"/>
+  <text class="ch c" x="648" y="333">DA3 pointmaps</text>
+  <path class="flow" d="M708,262 H717 M708,295 H717 M708,328 H717 M717,262 V328"/>
+  <path class="flow" d="M717,282 H735" marker-end="url(#ah)"/>
+
+  <rect x="736" y="116" width="310" height="190" rx="8" class="box" stroke="#5fa94d"/>
+  <g aria-hidden="true" transform="translate(-12,8)">
+  <polygon points="778.0,132.0 784.9,136.0 778.0,140.0 771.1,136.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="771.1,136.0 778.0,140.0 778.0,148.0 771.1,144.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,140.0 784.9,136.0 784.9,144.0 778.0,148.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="771.1,136.0 778.0,140.0 771.1,144.0 764.1,140.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="764.1,140.0 771.1,144.0 771.1,152.0 764.1,148.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="771.1,144.0 778.0,140.0 778.0,148.0 771.1,152.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="784.9,136.0 791.9,140.0 784.9,144.0 778.0,140.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,140.0 784.9,144.0 784.9,152.0 778.0,148.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="784.9,144.0 791.9,140.0 791.9,148.0 784.9,152.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,140.0 784.9,144.0 778.0,148.0 771.1,144.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="771.1,144.0 778.0,148.0 778.0,156.0 771.1,152.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,148.0 784.9,144.0 784.9,152.0 778.0,156.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="791.9,140.0 798.8,144.0 791.9,148.0 784.9,144.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="784.9,144.0 791.9,148.0 791.9,156.0 784.9,152.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="791.9,148.0 798.8,144.0 798.8,152.0 791.9,156.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="784.9,144.0 791.9,148.0 784.9,152.0 778.0,148.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,148.0 784.9,152.0 784.9,160.0 778.0,156.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="784.9,152.0 791.9,148.0 791.9,156.0 784.9,160.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,124.0 784.9,128.0 778.0,132.0 771.1,128.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="771.1,128.0 778.0,132.0 778.0,140.0 771.1,136.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,132.0 784.9,128.0 784.9,136.0 778.0,140.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="784.9,128.0 791.9,132.0 784.9,136.0 778.0,132.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,132.0 784.9,136.0 784.9,144.0 778.0,140.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="784.9,136.0 791.9,132.0 791.9,140.0 784.9,144.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="771.1,128.0 778.0,132.0 771.1,136.0 764.1,132.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="764.1,132.0 771.1,136.0 771.1,144.0 764.1,140.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="771.1,136.0 778.0,132.0 778.0,140.0 771.1,144.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,132.0 784.9,136.0 778.0,140.0 771.1,136.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="771.1,136.0 778.0,140.0 778.0,148.0 771.1,144.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,140.0 784.9,136.0 784.9,144.0 778.0,148.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,116.0 784.9,120.0 778.0,124.0 771.1,120.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="771.1,120.0 778.0,124.0 778.0,132.0 771.1,128.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,124.0 784.9,120.0 784.9,128.0 778.0,132.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="784.9,120.0 791.9,124.0 784.9,128.0 778.0,124.0" fill="#a9dc8f" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="778.0,124.0 784.9,128.0 784.9,136.0 778.0,132.0" fill="#6fb352" stroke="#3f7a2b" stroke-width="0.6"/>
+  <polygon points="784.9,128.0 791.9,124.0 791.9,132.0 784.9,136.0" fill="#4f9236" stroke="#3f7a2b" stroke-width="0.6"/>
+  </g>
+  <text class="t2 c" x="891" y="144">MV-SAM3D</text>
+  <text class="bs c" x="891" y="165">multi-view SAM 3D Objects</text>
+  <rect x="750" y="182" width="90" height="54" rx="6" fill="#f3faf0" stroke="#9fcf8f"/>
+  <text class="ch c" x="795" y="204" font-weight="700">Stage 1</text>
+  <text class="xs c" x="795" y="222">50 steps</text>
+  <rect x="851" y="182" width="90" height="54" rx="6" fill="#f3faf0" stroke="#9fcf8f"/>
+  <text class="ch c" x="896" y="204" font-weight="700">Stage 2</text>
+  <text class="xs c" x="896" y="222">25 steps</text>
+  <rect x="952" y="182" width="80" height="54" rx="6" fill="#f3faf0" stroke="#9fcf8f"/>
+  <text class="ch c" x="992" y="204" font-weight="700">Decode</text>
+  <text class="xs c" x="992" y="222">and bake</text>
+  <path class="flow" d="M840,209 H850 M941,209 H951" stroke-width="1.6"/>
+  <text class="bs c" x="891" y="262">entropy-weighted fusion of the views</text>
+  <text class="bs c" x="891" y="283">gives a textured mesh and a pose</text>
+
+  <path class="flow" d="M836,306 V325" marker-end="url(#ah)"/>
+  <rect x="736" y="326" width="200" height="80" rx="8" class="box" stroke="#5fa94d"/>
+  <text class="bt c" x="836" y="352">Place</text>
+  <text class="bs c" x="836" y="372">fit pose and scale</text>
+  <text class="bs c" x="836" y="389">to all masks (IoU)</text>
+  <path class="flow" d="M936,366 H955" marker-end="url(#ah)"/>
+  <rect x="956" y="344" width="90" height="44" rx="8" fill="#ffffff" stroke="#5fa94d" stroke-width="2"/>
+  <text class="mono c" x="1001" y="371">posed.glb</text>
+
+  <!-- ===================== B: Part Split ===================== -->
+  <rect x="1096" y="16" width="488" height="414" rx="14" fill="#fdf4e8" stroke="#efc591" stroke-width="1.6"/>
+  <circle cx="1124" cy="44" r="17" fill="#d9822b"/>
+  <text class="badge c" x="1124" y="51">B</text>
+  <text class="t1" x="1150" y="53">Part Split</text>
+  <text class="tag" x="1570" y="52" text-anchor="end" style="fill:#8a6d4a">objects with parts</text>
+
+  <rect x="1110" y="72" width="460" height="120" rx="8" class="box" stroke="#e39b4f"/>
+  <text class="bt c" x="1340" y="98">Part proposal</text>
+  <text class="bs c" x="1340" y="119">Opus 5.5 or GPT-6-Astra reads view 0</text>
+  <text class="bs c" x="1340" y="137">and the object's name, or you type the list</text>
+  <rect x="1130" y="152" width="80" height="26" rx="13" fill="#ffecd6" stroke="#e9a95c"/>
+  <text class="ch c" x="1170" y="170">revolute</text>
+  <rect x="1218" y="152" width="88" height="26" rx="13" fill="#ffecd6" stroke="#e9a95c"/>
+  <text class="ch c" x="1262" y="170">prismatic</text>
+  <rect x="1314" y="152" width="58" height="26" rx="13" fill="#ffecd6" stroke="#e9a95c"/>
+  <text class="ch c" x="1343" y="170">fixed</text>
+  <rect x="1380" y="152" width="52" height="26" rx="13" fill="#ffecd6" stroke="#e9a95c"/>
+  <text class="ch c" x="1406" y="170">soft</text>
+  <rect x="1440" y="152" width="110" height="26" rx="13" fill="#eaf6e4" stroke="#8cc47a"/>
+  <text class="ch c" x="1495" y="170">requirements</text>
+  <use href="#pause" xlink:href="#pause" x="1544" y="61"/>
+
+  <path class="flow" d="M1180,192 V213" marker-end="url(#ah)"/>
+  <rect x="1110" y="214" width="140" height="82" rx="8" class="box" stroke="#e39b4f"/>
+  <text class="bt c" x="1180" y="240">Part masks</text>
+  <text class="bs c" x="1180" y="260">SAM 3 on the</text>
+  <text class="bs c" x="1180" y="277">chosen views</text>
+  <path class="flow" d="M1250,255 H1269" marker-end="url(#ah)"/>
+  <rect x="1270" y="214" width="150" height="82" rx="8" class="box" stroke="#e39b4f"/>
+  <text class="bt c" x="1345" y="240">Face vote</text>
+  <text class="bs c" x="1345" y="260">across views,</text>
+  <text class="bs c" x="1345" y="277">then a graph cut</text>
+  <path class="flow" d="M1420,255 H1439" marker-end="url(#ah)"/>
+  <rect x="1440" y="214" width="130" height="82" rx="8" class="box" stroke="#e39b4f"/>
+  <text class="bt c" x="1505" y="240">Mesh split</text>
+  <text class="bs c" x="1505" y="260">Blender cuts</text>
+  <text class="bs c" x="1505" y="277">and caps holes</text>
+
+  <path class="flow" d="M1505,296 V335" marker-end="url(#ah)"/>
+  <rect x="1380" y="336" width="190" height="44" rx="8" fill="#ffffff" stroke="#e39b4f" stroke-width="2"/>
+  <text class="ch c" x="1475" y="363">parts.glb + parts.json</text>
+
+  <path class="flow" d="M1046,366 H1345 V297" marker-end="url(#ah)"/>
+  <text class="sm" x="1112" y="356">posed.glb and cameras</text>
+
+  <g aria-hidden="true">
+  <rect x="1160" y="384" width="24" height="30" rx="3" fill="#f0a95e"/>
+  <path d="M1189,390 a7,7 0 0 1 0,16" fill="none" stroke="#5b9bd1" stroke-width="4"/>
+  </g>
+  <text class="sm" x="1210" y="404">body and handle</text>
+
+  <!-- ===================== C: Agentic Refinement ===================== -->
+  <rect x="16" y="470" width="1060" height="470" rx="14" fill="#f6f1fc" stroke="#cbb5e8" stroke-width="1.6"/>
+  <circle cx="44" cy="498" r="17" fill="#7b4fc2"/>
+  <text class="badge c" x="44" y="505">C</text>
+  <text class="t1" x="70" y="507">Agentic Refinement</text>
+  <text class="tag" x="1062" y="506" text-anchor="end">optional</text>
+
+  <path class="flow" d="M1001,388 V442 H430 V519" marker-end="url(#ah)"/>
+  <path class="flow" d="M1430,380 V456 H650 V519" marker-end="url(#ah)"/>
+
+  <rect x="330" y="520" width="200" height="48" rx="10" fill="#ffffff" stroke="#9b7bd4" stroke-width="1.6"/>
+  <text class="ch c" x="430" y="540" font-weight="700">Refinement</text>
+  <text class="xs c" x="430" y="558">rigid object · 600 s</text>
+  <rect x="550" y="520" width="200" height="48" rx="10" fill="#ffffff" stroke="#9b7bd4" stroke-width="1.6"/>
+  <text class="ch c" x="650" y="540" font-weight="700">Articulation</text>
+  <text class="xs c" x="650" y="558">object with parts · 900 s</text>
+  <path class="flow" d="M430,568 V597" marker-end="url(#ah)"/>
+  <path class="flow" d="M650,568 V597" marker-end="url(#ah)"/>
+
+  <!-- helper tools -->
+  <rect x="32" y="520" width="258" height="406" rx="8" class="box" stroke="#9b7bd4"/>
+  <text class="bt c" x="161" y="546">Host helper tools</text>
+  <text class="sm c" x="161" y="566">run outside the sandbox,</text>
+  <text class="sm c" x="161" y="583">called over a socket</text>
+  <rect x="46" y="598" width="230" height="26" rx="6" fill="#f4effb" stroke="#c4b0e6"/>
+  <text class="mono c" x="161" y="616">export_glb</text>
+  <rect x="46" y="630" width="230" height="26" rx="6" fill="#f4effb" stroke="#c4b0e6"/>
+  <text class="mono c" x="161" y="648">review</text>
+  <rect x="46" y="662" width="230" height="26" rx="6" fill="#f4effb" stroke="#c4b0e6"/>
+  <text class="mono c" x="161" y="680">checkpoint</text>
+  <rect x="46" y="694" width="230" height="26" rx="6" fill="#f4effb" stroke="#c4b0e6"/>
+  <text class="mono c" x="161" y="712">finish</text>
+  <text class="sm c" x="161" y="744">with parts only:</text>
+  <rect x="46" y="752" width="230" height="26" rx="6" fill="#f4effb" stroke="#c4b0e6"/>
+  <text class="mono c" x="161" y="770">set_joint</text>
+  <rect x="46" y="784" width="230" height="26" rx="6" fill="#f4effb" stroke="#c4b0e6"/>
+  <text class="mono c" x="161" y="802">review_articulation</text>
+  <rect x="46" y="816" width="230" height="26" rx="6" fill="#f4effb" stroke="#c4b0e6"/>
+  <text class="mono c" x="161" y="834">simulate</text>
+  <text class="sm c" x="161" y="870">export_glb and simulate</text>
+  <text class="sm c" x="161" y="887">run off the clock</text>
+
+  <path class="flow" d="M292,684 H324" marker-start="url(#ah)" marker-end="url(#ah)"/>
+
+  <!-- agent sandbox -->
+  <rect x="326" y="598" width="434" height="174" rx="10" fill="#fbf8ff" stroke="#8a63c9" stroke-width="2.2"/>
+  <circle cx="392" cy="618" r="10" fill="#7b4fc2"/>
+  <text class="num c" x="392" y="623">1</text>
+  <text class="bt" x="410" y="624">Agent and its Apptainer sandbox</text>
+  <rect x="342" y="640" width="193" height="60" rx="8" class="box" stroke="#8a63c9"/>
+  <text class="bt16 c" x="438" y="664">GPT-6-Astra</text>
+  <text class="xs c" x="438" y="684">Codex CLI runs inside</text>
+  <rect x="551" y="640" width="193" height="60" rx="8" class="box" stroke="#8a63c9"/>
+  <text class="bt16 c" x="647" y="664">Claude Opus 5.5</text>
+  <text class="xs c" x="647" y="684">host loop, offline shell</text>
+  <text class="bs c" x="543" y="728">works in Blender on candidate.blend,</text>
+  <text class="bs c" x="543" y="748">then exports, renders and reviews it</text>
+
+  <path class="flow" d="M760,670 H789" marker-end="url(#ah)"/>
+
+  <!-- host check -->
+  <rect x="790" y="520" width="272" height="222" rx="8" class="box dash" stroke="#9b7bd4"/>
+  <circle cx="874" cy="540" r="10" fill="#7b4fc2"/>
+  <text class="num c" x="874" y="545">2</text>
+  <text class="bt" x="892" y="546">Host check</text>
+  <text class="sm c" x="926" y="566">after each build with requirements</text>
+  <rect x="808" y="584" width="12" height="12" rx="2" fill="#7b4fc2"/>
+  <text class="lt" x="828" y="595">joint tree is valid</text>
+  <rect x="808" y="610" width="12" height="12" rx="2" fill="#7b4fc2"/>
+  <text class="lt" x="828" y="621">clearance sweep</text>
+  <rect x="808" y="636" width="12" height="12" rx="2" fill="#2f9e88"/>
+  <text class="lt" x="828" y="647">MuJoCo drives the joints</text>
+  <rect x="808" y="662" width="12" height="12" rx="2" fill="#2f9e88"/>
+  <text class="lt" x="828" y="673">MuJoCo presses soft parts</text>
+  <rect x="808" y="688" width="12" height="12" rx="2" fill="#b8b2c4"/>
+  <text class="lt" x="828" y="699">surface kept (report only)</text>
+  <text class="sm c" x="926" y="729">writes evidence.json</text>
+
+  <!-- repair rounds -->
+  <rect x="326" y="802" width="434" height="124" rx="8" class="box dash" stroke="#9b7bd4"/>
+  <circle cx="476" cy="822" r="10" fill="#7b4fc2"/>
+  <text class="num c" x="476" y="827">3</text>
+  <text class="bt" x="494" y="828">Repair rounds</text>
+  <text class="bs c" x="543" y="852">a failed check gives a new agent its findings</text>
+  <text class="bs c" x="543" y="872">a structural flaw gets one replan first (300 s)</text>
+  <text class="bs c" x="543" y="892">first build + up to 2 repairs of 450 s each</text>
+  <path class="flow" d="M790,720 H772 V864 H761" marker-end="url(#ah)"/>
+  <text class="sm c halo" x="772" y="800" stroke="#f6f1fc">fail</text>
+  <path class="flow" d="M543,802 V773" marker-end="url(#ah)"/>
+  <text class="sm halo" x="553" y="793" stroke="#f6f1fc">next round</text>
+
+  <!-- select -->
+  <rect x="790" y="772" width="272" height="154" rx="8" class="box" stroke="#9b7bd4"/>
+  <circle cx="842" cy="792" r="10" fill="#7b4fc2"/>
+  <text class="num c" x="842" y="797">4</text>
+  <text class="bt" x="860" y="798">Select &amp; validate</text>
+  <text class="sm c" x="926" y="818">best verified candidate</text>
+  <rect x="811" y="830" width="230" height="24" rx="12" fill="#e7f5ec" stroke="#6dbb8a"/>
+  <text class="xs c" x="926" y="847" style="fill:#1f2d5a">articulated or complete</text>
+  <rect x="811" y="860" width="230" height="24" rx="12" fill="#fff3d4" stroke="#e0a526"/>
+  <text class="xs c" x="926" y="877" style="fill:#1f2d5a">needs_review</text>
+  <rect x="811" y="890" width="230" height="24" rx="12" fill="#f1f1f4" stroke="#b8b2c4"/>
+  <text class="xs c" x="926" y="907" style="fill:#1f2d5a">unchanged or fallback</text>
+  <path class="flow" d="M926,742 V771" marker-end="url(#ah)"/>
+  <text class="xs halo" x="916" y="762" stroke="#f6f1fc" text-anchor="end">pass or last round</text>
+
+  <!-- ===================== D: Physics & Export ===================== -->
+  <rect x="1096" y="470" width="488" height="470" rx="14" fill="#eef7f5" stroke="#9ccfc2" stroke-width="1.6"/>
+  <circle cx="1124" cy="498" r="17" fill="#2f9e88"/>
+  <text class="badge c" x="1124" y="505">D</text>
+  <text class="t1" x="1150" y="507">Physics &amp; Export</text>
+
+  <path class="flow" d="M1062,850 H1086 V550 H1109" marker-end="url(#ah)"/>
+
+  <rect x="1110" y="516" width="460" height="68" rx="8" class="box" stroke="#4fae98"/>
+  <text class="bt c" x="1340" y="539">Gravity align</text>
+  <text class="sm c" x="1340" y="559">uses the agent's GLB, else posed.glb or parts.glb,</text>
+  <text class="sm c" x="1340" y="576">and turns it upright on the support plane</text>
+  <path class="flow" d="M1340,584 V599" marker-end="url(#ah)"/>
+  <rect x="1110" y="600" width="460" height="60" rx="8" class="box" stroke="#4fae98"/>
+  <text class="bt c" x="1340" y="624">VoMP v1.1</text>
+  <text class="sm c" x="1340" y="644">E, ν, ρ per voxel, then mass and inertia per link</text>
+
+  <path class="flow" d="M1340,660 V670 M1182,670 H1497"/>
+  <path class="flow" d="M1182,670 V685" marker-end="url(#ah)"/>
+  <path class="flow" d="M1340,670 V685" marker-end="url(#ah)"/>
+  <path class="flow" d="M1497,670 V685" marker-end="url(#ah)"/>
+
+  <rect x="1110" y="686" width="145" height="90" rx="8" class="box" stroke="#4fae98"/>
+  <text class="bt c" x="1182" y="710">MJCF</text>
+  <text class="xs c" x="1182" y="730">CoACD hulls</text>
+  <text class="xs c" x="1182" y="747">joint actuators</text>
+  <text class="xs c" x="1182" y="764">soft: flexcomp</text>
+  <rect x="1267" y="686" width="145" height="90" rx="8" class="box" stroke="#4fae98"/>
+  <text class="bt c" x="1340" y="710">USD</text>
+  <text class="xs c" x="1340" y="730">for Isaac Sim</text>
+  <text class="xs c" x="1340" y="747">MJCF hulls, joints</text>
+  <text class="xs c" x="1340" y="764">soft: kept rigid</text>
+  <rect x="1424" y="686" width="146" height="90" rx="8" class="box" stroke="#4fae98"/>
+  <text class="bt c" x="1497" y="710">URDF</text>
+  <text class="xs c" x="1497" y="730">links and joints</text>
+  <text class="xs c" x="1497" y="747">MJCF meshes</text>
+  <text class="xs c" x="1497" y="764">soft: fixed joint</text>
+
+  <path class="flow" d="M1182,776 V788 M1340,776 V788 M1497,776 V788 M1182,788 H1497"/>
+  <path class="flow" d="M1222,788 V799" marker-end="url(#ah)"/>
+  <path class="flow" d="M1457,788 V799" marker-end="url(#ah)"/>
+  <rect x="1110" y="800" width="225" height="54" rx="8" class="box dash" stroke="#4fae98"/>
+  <text class="bt16 c" x="1222" y="822">360° video</text>
+  <text class="xs c" x="1222" y="841">upright GLB, Blender Cycles</text>
+  <rect x="1345" y="800" width="225" height="54" rx="8" class="box dash" stroke="#4fae98"/>
+  <text class="bt16 c" x="1457" y="822">Soft-part video</text>
+  <text class="xs c" x="1457" y="841">MuJoCo press, Blender render</text>
+
+  <path class="flow" d="M1222,854 V866 M1457,854 V866 M1222,866 H1457"/>
+  <path class="flow" d="M1340,866 V877" marker-end="url(#ah)"/>
+  <rect x="1110" y="878" width="460" height="54" rx="8" fill="#ffffff" stroke="#2f9e88" stroke-width="2"/>
+  <text class="mono c" x="1340" y="901" font-weight="700">results.zip</text>
+  <text class="sm c" x="1340" y="920">GLBs, MJCF, USD, URDF, videos and JSON records</text>
+
+  <!-- ===================== legend ===================== -->
+  <path class="flow" d="M360,970 H400" marker-end="url(#ah)"/>
+  <text class="lt" x="410" y="975">data flow</text>
+  <rect x="520" y="960" width="34" height="20" rx="4" fill="#ffffff" stroke="#4a5568" stroke-width="1.6" class="dash"/>
+  <text class="lt" x="564" y="975">optional or conditional</text>
+  <use href="#pause" xlink:href="#pause" x="760" y="959"/>
+  <text class="lt" x="790" y="975">can stop for your review</text>
+  <rect x="990" y="959" width="74" height="22" rx="6" fill="#ffffff" stroke="#4a5568" stroke-width="1.6"/>
+  <text class="mono c" x="1027" y="975" style="font-size:13px">file</text>
+  <text class="lt" x="1074" y="975">file passed to the next step</text>
+</svg>
