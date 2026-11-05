@@ -538,24 +538,6 @@ def test_a_symlink_keeps_its_own_name(term):
     assert code == run.WAITS and os.path.samefile(blob, term.folder(out) / "video" / "cup.mp4"), out
 
 
-def test_a_job_of_this_command_stays_off_the_public_site(term):
-    pytest.importorskip("cryptography")
-    from harpor.webapp import worker
-
-    async def create_job(*args):
-        raise AssertionError("the worker copied the job")
-
-    code, out = term(term.video())
-    J = term.folder(out)
-    assert code == run.WAITS and jobs.load(J)["public"] == {"local": True}
-    w = SimpleNamespace(session=SimpleNamespace(mirror_since="2000-01-01T00:00:00"), refused={},
-                        runner=SimpleNamespace(runs=term.runs, uploading=lambda job_id: False),
-                        store=SimpleNamespace(create_job=create_job))
-    anyio.run(worker.Worker.local_jobs, w)
-    jobs.update(J, public=None)  # the same job as a page's upload
-    with pytest.raises(AssertionError, match="the worker copied the job"):
-        anyio.run(worker.Worker.local_jobs, w)
-
 
 def test_the_key_folder_is_not_the_servers(term):
     """A Runner deletes every *.env in its key folder. The server's key stays, and a key that a killed run left in

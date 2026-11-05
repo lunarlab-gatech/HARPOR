@@ -19,7 +19,7 @@ every stage on PACE ICE or on a user's own GPU machine (note 10, Flow).
 - **Agent:** GPT-6-Astra through the Codex CLI (the paper's setup) by default, or Claude Opus 5.5
   through our own Messages API loop (note 5). The user picks one per job and brings its key.
 - **Web app:** one object per job, in the user's ICE job through the SSH tunnel, or on the user's own
-  GPU machine through a personal worker (note 10, `docs/public_site.md`).
+  GPU machine through an SSH tunnel (note 10).
 - **Environments:** micromamba envs and venvs, and Apptainer for the agent and Blender (note 7).
 - **Licenses:** SAM 3D Objects, MV-SAM3D and SAM 3 use the SAM License, and the Depth Anything 3 model we
   use is CC BY-NC 4.0. So this version is research-only.
@@ -32,8 +32,7 @@ every stage on PACE ICE or on a user's own GPU machine (note 10, Flow).
 ### Status
 
 What works (the notes hold the main results; git history holds the run logs):
-- The web app runs the whole pipeline from a video on ICE (note 10). The public site and the personal
-  workers are built and pass their tests (`docs/public_site.md`).
+- The web app runs the whole pipeline from a video on ICE (note 10). A separate static demo gallery is available (`docs/public_site.md`).
 - Stage A: SAM 3 masks, Depth Anything 3 and MV-SAM3D with the pose fitted to the masks (notes 3
   and 4b).
 - Stage B: GPT-6-Astra and Claude Opus 5.5 refine meshes under the controller's deadline (note 5).
@@ -50,7 +49,6 @@ Not verified yet:
   ICE, in real Blender or with a real agent. Milestones 11 and 12 in note 11 list what is left.
 - No real rosbag with a LiDAR and no real Stray capture has run (note 12).
 - The 360 video has not run on ICE (note 10).
-- No real job has run through the public site (`docs/public_site.md`, step 9 and Live checks).
 
 ### Files
 
@@ -58,14 +56,14 @@ Not verified yet:
 |---|---|
 | `LICENSE` | MIT, for HARPOR's own code. Third-party models and the vendored web libraries keep their own licenses (the Licenses bullet above, and `harpor/webapp/static/vendor/licenses/`) |
 | `docs/build_plan.md` | This file: overview, design and build notes |
-| `docs/public_site.md` | The public HARPOR site on Supabase: personal workers on users' own GPU machines, the owner's setup and the live checks |
+| `docs/public_site.md` | The standalone static demo gallery |
 | `docs/research.md` | Research findings with sources: the paper and every results table, MV-SAM3D and SAM 3D, Blender, SAM 3, VoMP and the simulators |
 
 ## Component diagram
 
 ```mermaid
 flowchart TB
-  subgraph WEB["Web app (note 10): the local UI through the ICE tunnel, or the public site through a personal worker"]
+  subgraph WEB["Web app (note 10): the local UI through an SSH tunnel"]
     input["Upload: phone video, rosbag or Stray Scanner capture"]
     analyze["topics (a bag), frames, extract, masks (SAM 3), prep, da3 (Depth Anything 3)"]
     lidar["lidar: metric scale (optional, note 12)"]
@@ -763,8 +761,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    `Runner.resume` refuses a calibration that changed since then in the same way ("the calibration
    changed while the run was starting; try again").
    The page sends the chosen LiDAR topic with the upload (`?lidar_topic=`, empty when none is chosen).
-   On the public site, supa.js puts it in relay()'s query (migration part 7), and the worker adds it to
-   the request (`relay.build`). The server checks that it is one of the bag's LiDAR topics and stores
+   The server checks that it is one of the bag's LiDAR topics and stores
    it in job.json `calibration.lidar_topic` (null when none was given). Start then refuses another
    LiDAR topic, and the reason names both topics. The lidar stage refuses it too, so a retry or a run
    from lidar cannot use it either. A calibration with a null `lidar_topic` is not checked.
@@ -999,7 +996,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   files says "No LiDAR points to show."; without WebGL, or for a file that does not parse, a line
   offers the file. `GET /api/jobs/{id}` lists `run/lidar/<i>.glb` in "files" after the outputs, with
   their sizes, and the file route serves them as `model/gltf-binary`. The worker mirrors them as
-  review files (`relay.GLOBS`, owner `select`). Help explains the colors and the controls.
+  review files. Help explains the colors and the controls.
 - Help: the UI keeps its words short, and what the items mean and how they are found is in one
   static page, `static/help.html` (served at `/help.html`, also without the login cookie, so its
   troubleshooting reads when the cookie is stale). The app, the help page, the demos page and the
@@ -1017,7 +1014,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   They need `node`, which ICE does not have, so run them on the Mac. Other tests there check the tabs
   and panels of `index.html` and the styles in `style.css`.
 
-**Public site and personal workers:** `docs/public_site.md`.
+**Static demo gallery:** `docs/public_site.md`.
 
 **Security.** The server port on the compute node is open to other ICE users, so every request
 needs the login cookie (a random token), except the help page and its stylesheet, which hold no
@@ -1596,10 +1593,7 @@ before this stage gets its record as skipped, "older than this stage" (`Runner._
 - The SIF needs no rebuild, because `harpor/agent/bin/` binds at run time. `bin/simulate` must keep
   mode 755 in git.
 - A worst-case job takes about 95 minutes in the agent stage: 2100 s of agent time, up to 600 s off
-  the clock in each build or repair, and up to 600 s of host check after each of them. The site's
-  setting `near_end_minutes` (`docs/public_site.md`) only stops new builds near the end of the Slurm
-  job, and its default is 60. Set it to 120 on the site, so that a build that starts can finish. This
-  needs no code.
+  the clock in each build or repair, and up to 600 s of host check after each of them. Reserve at least two hours in the Slurm allocation before starting such a build.
 
 *Tested so far.* On the Mac, the tests pass in a venv with Python 3.12, numpy 2.5.4, MuJoCo 3.16.0
 and CoACD.
@@ -1622,8 +1616,7 @@ Not run anywhere yet: a real agent in rounds (Opus or Astra, the repair and repl
 survive the round trip within the surface limits, and the soft-part render under Cycles); `envs/mujoco`
 on ICE (Python 3.11, numpy 2.4.6); `bin/simulate` and `GATOR_MUJOCO` through the containers; the time
 of `sim_check` with CoACD on ICE against the 270 s and 600 s limits; SAM 3 and the vote on a soft part
-(whether "seat cushion" separates from "seat and backrest"); the VLM's soft parts and span targets;
-and the new video and evidence through the public site's relay.
+(whether "seat cushion" separates from "seat and backrest"); the VLM's soft parts and span targets.
 
 *Still to do.*
 - Milestone 11, on ICE. Do the setup above. Run a real Opus job on the office chair while the surface

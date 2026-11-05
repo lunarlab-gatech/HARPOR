@@ -1,5 +1,5 @@
 """The demos: finished jobs that the site's owner picked, shown at demos.html as a gallery of cards, each a link to
-the demo's 360 video, 3D view and files, signed in or out (docs/public_site.md "Demos").
+the demo's 360 video, 3D view and files, in a standalone gallery (docs/public_site.md).
 
     python -m harpor.webapp.demos add SOURCE [--name N] [--title T] [--video MP4] [--glb GLB] [--zip ZIP]
                                              [--fact LABEL=VALUE ...] [--order K] [--out DIR] [--force] [--public-bag]
@@ -42,6 +42,7 @@ check runs load and placeholders on a demos folder.
 """
 
 import argparse
+import io
 import html
 import json
 import math
@@ -56,7 +57,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 from harpor.fileio import read_json
-from harpor.webapp import relay, steps
+from harpor.webapp import steps
 
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -74,7 +75,28 @@ PRIVATE = re.compile(r"(?<![a-z])(?:cage|pallet)|table\.mov|gator_private|privat
 MACHINE_PATH = re.compile(r"(?<![\w.-])/(?:storage/[\w.-]+|home|Users|scratch|private|tmp|var)/[^\s\"'<>|;,]+")
 MACHINE_BYTES = re.compile(MACHINE_PATH.pattern.encode())
 NO_DECODER = ("KHR_draco_mesh_compression", "KHR_texture_basisu")
-CLEAN_TEXT = (*relay.TEXT, ".mtl", ".obj")  # the members of results.zip that add cleans as text
+KEY_SHAPE = re.compile(r"sk-[A-Za-z0-9_-]{16,}")
+KEY_BYTES = re.compile(rb"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}")
+SCAN_CHUNK = 1 << 20
+
+def holds_key(data, keys, chunk=SCAN_CHUNK, shape=False):
+    """True when data (bytes, or a path) holds any of keys, or with shape anything shaped like a key (KEY_BYTES),
+    including keys from older jobs. It reads chunk bytes at a time and keeps the end of each
+    for the next, so a key across two chunks is found; no size limit."""
+    keys = [k.encode() for k in keys if k]
+    if not keys and not shape:
+        return False
+    keep, tail = max([len(k) - 1 for k in keys] + [32 if shape else 0]), b""
+    f = open(data, "rb") if isinstance(data, (str, Path)) else io.BytesIO(data)
+    with f:
+        while block := f.read(chunk):
+            buf = tail + block
+            if any(k in buf for k in keys) or shape and KEY_BYTES.search(buf):
+                return True
+            tail = buf[-keep:] if keep else b""
+    return False
+
+CLEAN_TEXT = (".json", ".log", ".urdf", ".xml", ".usda", ".txt", ".csv", ".md", ".yaml", ".yml", ".mtl", ".obj")  # the members of results.zip that add cleans as text
 VIDEO, MODEL = "turntable/turntable.mp4", "physics/aligned.glb"  # in a job folder (server.OUTPUTS)
 MARKER = "<!-- demos -->"  # where page() puts the demos in static/demos.html
 PLACEHOLDERS, MAX_PLACEHOLDERS = "placeholders.json", 12  # in the demos folder, not a demo
@@ -159,7 +181,7 @@ def private(text, what):
 def _guard(text, what):
     """DemoError when text looks private, or holds a key shape or a machine path."""
     private(text, what)
-    if relay.KEY_SHAPE.search(text) or MACHINE_PATH.search(text):
+    if KEY_SHAPE.search(text) or MACHINE_PATH.search(text):
         raise DemoError(f"{what} holds a key shape or a machine path")
 
 
@@ -198,9 +220,9 @@ def _zip(path, what):
             if Path(info.filename).suffix.lower() in CLEAN_TEXT:
                 text = data.decode("utf-8", errors="replace")
                 private(text, m)
-                if relay.KEY_SHAPE.search(text) or MACHINE_PATH.search(text):
+                if KEY_SHAPE.search(text) or MACHINE_PATH.search(text):
                     raise DemoError(f"{m} holds a key shape or a machine path; make the demo again with add")
-            elif relay.holds_key(data, [], shape=True) or MACHINE_BYTES.search(data):
+            elif holds_key(data, [], shape=True) or MACHINE_BYTES.search(data):
                 raise DemoError(f"{m} holds a key shape or a machine path")
 
 
@@ -276,7 +298,7 @@ def demo(d, name=None):
             _glb(data, what)
         elif f.endswith(".zip"):
             _zip(p, what)
-        if relay.holds_key(data, [], shape=True) or MACHINE_BYTES.search(data):
+        if holds_key(data, [], shape=True) or MACHINE_BYTES.search(data):
             raise DemoError(f"{what} holds a key shape or a machine path")
     for p in sorted(d.iterdir()):
         if not p.name.startswith(".") and p.name != "demo.json" and p.name not in listed:
@@ -464,8 +486,8 @@ def clean_zip(src, dst):
         for info in zin.infolist():
             data = zin.read(info)
             if Path(info.filename).suffix.lower() in CLEAN_TEXT:
-                data = MACHINE_PATH.sub(name, relay.KEY_SHAPE.sub("[key]", data.decode("utf-8", errors="replace")))
-            elif relay.holds_key(data, [], shape=True) or MACHINE_BYTES.search(data):
+                data = MACHINE_PATH.sub(name, KEY_SHAPE.sub("[key]", data.decode("utf-8", errors="replace")))
+            elif holds_key(data, [], shape=True) or MACHINE_BYTES.search(data):
                 raise DemoError(f"results.zip's {info.filename} holds a key shape or a machine path; give --zip without "
                                 "it")
             zout.writestr(info, data)

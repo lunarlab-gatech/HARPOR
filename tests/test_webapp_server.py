@@ -956,19 +956,17 @@ def test_lidar_points_are_listed_by_view(tmp_path):
 
 def test_pool_points_only_while_the_scale_has_failed(tmp_path):
     """server.pool_clouds lists lidar/cloud/<view>.glb by name while pool/lidar.json says ok false; resolve and the
-    site's mirror (relay.mirror_plan) follow it, so a scale found later takes them away."""
-    from harpor.webapp import relay
+    file access follow it, so a scale found later takes them away."""
 
     J = tmp_path / "job"
     (J / "lidar" / "cloud").mkdir(parents=True)
     (J / "pool").mkdir()
     for name in ("f00040.glb", "f00012.glb", ".tmp_f00050.glb", "x.glb"):
         (J / "lidar" / "cloud" / name).write_bytes(b"glTF")
-    mirrored = lambda: [f.rel for f in relay.mirror_plan(J, {"stages": {}}) if f.rel.startswith("lidar/")]  # noqa: E731
     for rec, listed in ((None, []), ({"ok": True}, []), ({"ok": False}, ["lidar/cloud/f00012.glb", "lidar/cloud/f00040.glb"])):
         if rec is not None:
             (J / "pool" / "lidar.json").write_text(json.dumps(rec))
-        assert list(server.pool_clouds(J)) == listed and mirrored() == listed, rec
+        assert list(server.pool_clouds(J)) == listed, rec
         assert (server.resolve(J, "lidar/cloud/f00012.glb") is not None) == bool(listed)
 
 
@@ -1829,33 +1827,9 @@ def test_help_page_is_served_with_or_without_the_login(client):
         r = c.get("/help.html")
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
         assert r.headers["cache-control"] == "no-cache" and r.text == (server.STATIC / "help.html").read_text()
-        assert "<!-- local:troubleshooting -->" in r.text and 'href="/static/style.css"' in r.text
+        assert 'href="/static/style.css"' in r.text
         assert "Not logged in. Open the ?token= link the server printed." in r.text
 
-
-def test_stop_hooks_run_before_the_runner_stops(tmp_path, capsys):
-    """on_stop hooks (a worker's stop) run in order when the server stops, before runner.shutdown cancels
-    the stages; one that fails does not stop the others. There are none by default."""
-    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=True)
-    app = server.make_app(cfg, TOKEN, key_dir=tmp_path / "keys")
-    runner, order = app.app.state.runner, []
-    assert app.app.state.stop_hooks == []
-    shutdown = runner.shutdown
-    runner.shutdown = lambda timeout=None: (order.append("shutdown"), shutdown(timeout))
-
-    def broken():
-        order.append("broken")
-        raise RuntimeError("no network")
-
-    server.on_stop(app, lambda: order.append(("first", (cfg.runs / jobs.RUNNER_FILE).is_file())))
-    server.on_stop(app.app, broken)  # the FastAPI app inside the token gate works too
-    server.on_stop(app, lambda: order.append("last"))
-    with TestClient(app) as c:
-        login(c)
-        assert c.get("/api/jobs").json() == [] and order == []
-    assert order == [("first", True), "broken", "last", "shutdown"]
-    assert "a stop hook failed: RuntimeError('no network')" in capsys.readouterr().out
-    assert not (cfg.runs / jobs.RUNNER_FILE).exists()
 
 
 def test_key_later_builds_without_the_key(client, tmp_path):
@@ -2860,8 +2834,6 @@ def test_app_js_calibration_upload():
                                                               "camera_axes": "body", "time_offset_s": 0.02},
                put + "zero.yaml&lidar_topic=%2Flidar%2Fpoints": {**summary, "name": "zero.yaml", "time_offset_s": 0},
                put + "any.yaml&lidar_topic=": {**summary, "name": "any.yaml", "lidar_topic": None},
-               # The public site, while the job's machine has not taken the request yet (supa.js relay).
-               put + "wait.yaml&lidar_topic=%2Flidar%2Fpoints": {"__status": 202, "status": "pending", "request": 7},
                "/api/jobs/b/selection": {"lidar": {**lid, "calibration_changed": True}}}
     out = run_form_js("""
         (async () => {
@@ -2916,12 +2888,6 @@ def test_app_js_calibration_upload():
           out.review = [...texts];
           out.requests = requests.filter((r) => r.url.includes("/calibration") || r.url.endsWith("/selection"))
             .map((r) => r.method + " " + r.url);
-          // A pending answer saved nothing yet: the box keeps the saved calibration.
-          V.sel = null;
-          $("#review").hidden = true;
-          const saved = box();
-          await pick("wait.yaml");
-          out.pending = [saved, box(), V.job.calibration.name];
           console.log(JSON.stringify(out));
         })()
         """, replies)
@@ -2951,8 +2917,6 @@ def test_app_js_calibration_upload():
                                "PUT " + put + "k.yaml" + topic, "PUT " + put + "zero.yaml" + topic,
                                "PUT " + put + "any.yaml&lidar_topic=", "PUT " + put + "my%20calib.json" + topic,
                                "GET /api/jobs/b/selection"]
-    saved, pending, name = out["pending"]
-    assert pending == {**saved, "msg": "Sent. The job's machine has not saved it yet."} and name == "my_calib.json"
 
 
 LIDAR_VIEWS = [{"name": "f00003", "s": 1.0498, "points_used": 280, "status": "used"},
@@ -3646,7 +3610,6 @@ def test_app_js_input_panel_follows_the_selection():
         """, {"/api/jobs/j/frames": frames_meta()})
     assert out["failed"] == [False, True, ["view 0, frame 152, 15.2 s", "view 1, frame 40, 4.0 s", "view 2, frame 301, 30.1 s"],
                              1, 0]
-    assert out["pending"] == [False, None, "none", 1, 1]  # the same video; the views' sentence
     assert out["live"] == [False, None, 1, 1, 1] and out["before"] == 1
     assert out["after"] == [2, True, 1, 1] and out["again"] == 2
     assert out["placed"] == [3, 1, 1, 1] and out["placedAgain"] == [3, 1]
@@ -4724,10 +4687,7 @@ def test_app_js_help_link_follows_the_screen():
     rule = lambda sel: re.search(r"(?:^|\n)" + re.escape(sel) + r" \{([^}]*)\}", css).group(1)  # noqa: E731
     assert all(x in rule("#demolink, #helplink") for x in ("margin-left: auto", "var(--muted)", "var(--t-s)"))
     assert "margin-left: 0" in rule("#demolink + #helplink")  # Help sits right after Demos
-    assert "margin-left" not in rule(".conn") and "margin-left" not in rule("header .account")
-    # The account menu's button is a person icon drawn in the text color, with no text to cut.
-    assert all(x in rule(".account .person") for x in ("fill: none", "stroke: currentColor"))
-    assert "text-overflow" not in rule(".account > summary") and "white-space" not in rule(".account > summary")
+    assert "margin-left" not in rule(".conn")
 
 
 def test_app_js_error_box_links_to_troubleshooting():

@@ -4,17 +4,13 @@ views, build a simulation-ready object.
 Runs in envs/web (fastapi, uvicorn, av, numpy, pillow, scipy, rosbags) on the GPU machine, from the repo
 root (start_ice.sh starts it there, inside a Slurm job):
 
-    python -m harpor.webapp [--runs DIR] [--host 127.0.0.1] [--port 0] [--fake] [--worker [--local-keys A]]
+    python -m harpor.webapp [--runs DIR] [--host 127.0.0.1] [--port 0] [--fake]
                            [--demos DIR]
 
 It makes a login token, writes ~/.config/harpor/webapp.json (0600: node, port, token, url_path, and
 slurm_job and slurm_node from SLURM_JOB_ID and SLURMD_NODENAME, so start_ice.sh reuses the server
-only in the same job, and worker), prints the URL and the port forward from another computer, and serves the app
-with one uvicorn worker. When the server stops (Ctrl-C or SIGTERM), it runs the hooks that on_stop
-added, then cancels the running stages, and deletes webapp.json if it still holds this server's token.
---worker also serves the public site: a personal worker (worker.py) in this process, on the same Runner,
-signed in as the machine's user (python -m harpor.webapp.worker login). --local-keys names the agents whose
-key the machine keeps in its own key file. webapp.json's "worker" is true while the worker runs, else false.
+only in the same job), prints the URL and the port forward from another computer, and serves the app
+with one uvicorn worker. When the server stops, it shuts down the runner and its stage processes.
 --host defaults to 127.0.0.1; start_ice.sh passes 0.0.0.0, so that the login node can reach the server.
 --port 0 takes a free port. --fake runs every stage with harpor.webapp.fake_steps, so the app works
 on a Mac without GPUs (OpenAI keys that start with sk- and Anthropic keys that start with sk-ant-
@@ -224,12 +220,6 @@ def key_later(b):
         raise Bad(400, "key_later is true or false")
     return later and not b.get("api_key")
 
-
-def on_stop(app, hook):
-    """Run hook() (no arguments, in a thread) when the server stops, before the runner cancels the
-    stages. app is make_app's app or the FastAPI app inside it. Hooks run in the order they were added;
-    one that fails does not keep the others or the shutdown from running."""
-    (app.app if isinstance(app, TokenGate) else app).state.stop_hooks.append(hook)
 
 
 def part_reason(e):
@@ -476,16 +466,10 @@ def make_app(cfg, token, key_dir=None):
     @asynccontextmanager
     async def lifespan(app):
         yield
-        for hook in list(app.state.stop_hooks):  # on_stop: a worker stops before the stages are cancelled
-            try:
-                await run_in_threadpool(hook)
-            except Exception as e:
-                print(f"a stop hook failed: {e!r}", flush=True)
         await run_in_threadpool(runner.shutdown)  # no stage keeps the GPU after the server stops
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan, telemetry=NO_TELEMETRY)
     app.state.runner = runner
-    app.state.stop_hooks = []  # on_stop adds to it
     app.state.demos = shown
 
     @app.exception_handler(Bad)
@@ -1072,19 +1056,6 @@ def _exit_on_sigterm(sig, frame):
     raise SystemExit(128 + sig)
 
 
-def worker_of(local_keys):
-    """The personal worker's session (session.Session, which takes the session file's lock). A worker that
-    cannot start leaves the server in tunnel mode: it prints why and returns None."""
-    from harpor.webapp import session, supa, worker
-
-    if local_keys:
-        worker.check_local_keys(local_keys)  # the server refuses to start with --local-keys and a bad key file
-    try:
-        return session.Session()
-    except (SystemExit, supa.Error) as e:
-        print(f"the personal worker does not start: {e}\n{worker.SIGNED_OUT}", flush=True)
-        return None
-
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m harpor.webapp", description=__doc__,
@@ -1093,21 +1064,8 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1", help="the address to listen on (default 127.0.0.1)")
     ap.add_argument("--port", type=int, default=0, help="0 takes a free port")
     ap.add_argument("--fake", action="store_true", help="run every stage with harpor.webapp.fake_steps (no GPU)")
-    ap.add_argument("--worker", action="store_true",
-                    help="also serve the public site: a personal worker on this GPU machine (sign in first: "
-                         "python -m harpor.webapp.worker login)")
-    ap.add_argument("--local-keys", metavar="AGENTS",
-                    help="with --worker: astra, opus or astra,opus, whose API key this machine keeps in "
-                         "~/.config/harpor/openai.env or anthropic.env")
     ap.add_argument("--demos", metavar="DIR", help="a demos folder to show at /demos.html (default: WEBAPP_DEMOS)")
     a = ap.parse_args(argv)
-    local_keys = ()
-    if a.local_keys is not None:
-        if not a.worker:
-            ap.error("--local-keys needs --worker")
-        local_keys = tuple(dict.fromkeys(k.strip() for k in a.local_keys.split(",") if k.strip()))
-        if not local_keys or set(local_keys) - {"astra", "opus"}:
-            ap.error("--local-keys takes astra, opus or astra,opus")
     import uvicorn
 
     cfg = steps.config_from_env()
@@ -1121,33 +1079,22 @@ def main(argv=None):
     except OSError as e:
         raise SystemExit(f"cannot listen on {a.host}:{a.port}: {e}")
     port, node, token = sock.getsockname()[1], socket.getfqdn(), secrets.token_urlsafe(32)
-    session = worker_of(local_keys) if a.worker else None  # before the Runner claims the runs folder
     from harpor.webapp import demos
 
     try:
         app = make_app(cfg, token)
     except demos.DemoError as e:
         raise SystemExit(f"the demos folder: {e}")
-    w = None
-    if session is not None:
-        from harpor.webapp import worker
-
-        w = worker.Worker(app, cfg, local_keys, session=session)
-        on_stop(app, w.stop_thread)  # the worker stops before the runner cancels the stages
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
     info = write_info({"node": node, "port": port, "token": token, "url_path": f"/?token={token}",
-                       "slurm_job": os.environ.get("SLURM_JOB_ID"), "slurm_node": os.environ.get("SLURMD_NODENAME"),
-                       "worker": w is not None})
+                       "slurm_job": os.environ.get("SLURM_JOB_ID"), "slurm_node": os.environ.get("SLURMD_NODENAME")})
     print(f"HARPOR web app on {node}:{port}, runs in {cfg.runs}" + (" (fake stages)" if cfg.fake else ""))
     print(f"login details in {info}")
     if cfg.demos:
         print(f"demos: {len(app.app.state.demos)} from {cfg.demos}")
     print(f"on this machine: http://localhost:{port}/?token={token}")
-    target, via = ("127.0.0.1", "<this machine>") if a.worker or a.host == "127.0.0.1" else (node, "<login node>")
+    target, via = ("127.0.0.1", "<this machine>") if a.host == "127.0.0.1" else (node, "<login node>")
     print(f"from another computer: ssh -L {port}:{target}:{port} {via}, then open the same URL there", flush=True)
-    if w is not None:
-        print(f"the personal worker of {w.place} runs in this server", flush=True)
-        w.start_thread()
     try:
         with suppress(KeyboardInterrupt):  # uvicorn shuts down on Ctrl-C, then raises it again
             uvicorn.Server(uvicorn.Config(app, log_level="info", access_log=False, timeout_graceful_shutdown=3)).run(

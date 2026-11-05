@@ -1,6 +1,5 @@
 """harpor/webapp/static/help.html: the help page that the app's Help link opens. One section per part of the app, the
-method notes with the numbers of the code they explain, no script, and the local-only blocks that site.py swaps for
-the public site's text (HELP_PUBLIC)."""
+method notes with the numbers of the code they explain and no scripts."""
 import html
 import inspect
 import re
@@ -19,11 +18,6 @@ HELP = STATIC / "help.html"
 # The sections in order. The ids are stable: the app's Help links point to them, and the public page keeps them.
 SECTIONS = ("about", "capture", "add-job", "status", "topics", "settings", "review", "parts", "agent", "lidar",
             "inputs", "results", "joints", "physics", "downloads", "demos", "retry", "troubleshooting")
-# The local-only blocks, <!-- local:NAME --> ... <!-- /local:NAME -->; toc and account are empty here, and the public
-# page fills them (the account, machine and machine-status sections).
-LOCAL = ("toc", "account", "add-job", "keys", "agent-none", "troubleshooting")
-# Any marker, also one with other spacing, so that a marker which site.py cannot read fails here (blocks()).
-MARK = re.compile(r"<!--\s*(/?)\s*local\b:?\s*([\w-]*)\s*-->")
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
 
@@ -83,16 +77,6 @@ def sections(page):
         out[sid] = text.strip()
     return out
 
-
-def blocks(page):
-    """[(name, its text)] of the local blocks in page order; an AssertionError when a marker has no partner."""
-    marks, out = list(MARK.finditer(page)), []
-    assert all(m[0] == f"<!-- {m[1]}local:{m[2]} -->" for m in marks), [m[0] for m in marks]
-    assert len(marks) % 2 == 0, [m[0] for m in marks]
-    for start, end in zip(marks[::2], marks[1::2]):
-        assert (start[1], end[1], end[2]) == ("", "/", start[2]), (start[0], end[0])
-        out.append((start[2], page[start.end():end.start()]))
-    return out
 
 
 def test_help_page_holds_the_method_numbers():
@@ -212,7 +196,7 @@ def test_help_page_gives_the_rank_and_the_time_off_the_clock():
 def test_help_page_is_a_plain_page_with_every_section():
     """A page like privacy.html: the head that site.py rewrites (one charset meta, the stylesheet and the brand link
     once each), the header that the app and the demos page have too, with Help as the current page (tests/test_site.py
-    compares them), no script (the public copy adds the account menu's), no inline style and no event attribute (the
+    compares them), no script, no inline style and no event attribute (the
     public site's CSP blocks them). Every section of the plan, in order, as <section id> with its <h2> first, and a
     contents list that links to each. Every link goes to a section of the page, or home, the stylesheet, or the
     header's Demos and Help pages."""
@@ -244,40 +228,16 @@ def test_help_page_is_a_plain_page_with_every_section():
                     or (href.startswith("#") and href[1:] in ids)), href
 
 
-def test_help_page_local_blocks_are_well_formed():
-    """Each local block opens and closes once, in that order, with no block inside another, and holds whole elements,
-    so that site.py can swap it for its public text. The page without the blocks is whole too, and holds none of the
-    local page's own text: the upload, the SSH tunnel, the ?token= link and the agent "None"."""
-    page = HELP.read_text()
-    found = blocks(page)
-    assert sorted(name for name, _ in found) == sorted(LOCAL)
-    for name, body in found:
-        p = parse(body)
-        assert not p.stray and not p.open, (name, p.stray, p.open)
-        assert not MARK.search(body), name
-    assert dict(found)["toc"].strip() == "" and dict(found)["account"].strip() == ""
-    rest = MARK.sub("", re.sub(r"<!-- local:([\w-]+) -->.*?<!-- /local:\1 -->", "", page, flags=re.S))
-    p = parse(rest)
-    assert not p.stray and not p.open, (p.stray, p.open)
-    assert [a["id"] for t, a in p.tags if t == "section"] == list(SECTIONS)
-    text = sections(rest)
-    for local in ("SSH tunnel", "?token=", "Choose a file", "Cancel upload", "None", "20 GB"):
-        assert not any(local in t for t in text.values()), local
-
 
 def test_every_help_link_has_its_section():
     """The header's Help link (app.js HELP_AT), the error box's link and the demos page's Help link go to a section of
-    the help page, on the tunnel and on the public site. The links that site.py adds to the public pages (the machines
-    panel, the privacy page) go to a section of the public help page."""
+    the help page in both the local app and the static gallery."""
     app = (STATIC / "app.js").read_text()
     at = re.search(r"const HELP_AT = \{(.*?)\};", app, re.S)[1]
     anchors = set(re.findall(r':\s*"([\w-]+)"', at)) | set(re.findall(r'"help\.html#([\w-]+)"', app))
     anchors |= set(re.findall(r'"help\.html#([\w-]+)"', (STATIC / "demos.html").read_text()))
     assert "demos" in anchors
     assert {"add-job", "status", "troubleshooting"} <= anchors and len(anchors) >= 11, anchors
-    public = set(re.findall(r"help\.html#([\w-]+)", Path(site.__file__).read_text()))
-    assert {"machine", "agent"} <= public, public
-    cfg = {"url": "https://abcdefghijklmnop.supabase.co", "publishableKey": "sb_publishable_AbCdEf_0123456789"}
-    for page, want in ((HELP.read_text(), anchors), (site.public_help(HELP.read_text(), cfg), anchors | public)):
+    for page in (HELP.read_text(), site.files()["help.html"].decode()):
         ids = {a["id"] for _, a in parse(page).tags if "id" in a}
-        assert want <= ids, want - ids
+        assert anchors <= ids, anchors - ids

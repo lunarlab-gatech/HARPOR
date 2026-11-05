@@ -469,55 +469,6 @@ canvas.cloud:active { cursor: grabbing; }
 .sq.da3 { background: var(--line-strong); }
 .sq.diff { width: 28px; background: linear-gradient(90deg, var(--near), var(--fg), var(--far)); }
 
-/* the public site (static/supa.js and static/account.js draw into the markup that site.py adds): the account menu in
-   the header of the app, help and demos pages, the banner of the user's machines under it, the sign-in and waiting
-   panels, the panel about the machines, the line of requests that wait on the job page, and the privacy page */
-header .account { position: relative; }  /* after the Help link, at the right */
-/* the menu's button: a person icon (site.py ACCOUNT, drawn in the text color) and the arrow; the email is its name for a
-   screen reader and the menu's first line */
-.account > summary { display: flex; align-items: center; gap: var(--s1); min-height: 32px; padding: 0 8px;
-  border: 1px solid var(--line-strong); border-radius: var(--r); color: var(--muted); cursor: pointer; list-style: none; }
-.account > summary::-webkit-details-marker { display: none; }
-.account > summary::after { content: "\25BE"; content: "\25BE" / ""; font-size: var(--t-s); }
-.account > summary:hover, .account[open] > summary { border-color: var(--fg); color: var(--fg); }
-.account .person { flex: none; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5;
-  stroke-linecap: round; }
-.accountmenu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 200px; padding: 4px 14px;
-  border: 1px solid var(--line-strong); border-radius: var(--r); background: var(--surface); box-shadow: var(--shadow); }
-.accountmenu p { margin: var(--s2) 0; white-space: nowrap; }
-.accountmenu .who { max-width: 260px; white-space: normal; overflow-wrap: anywhere; font: var(--t-s) var(--mono); }  /* a long email wraps */
-.accountmenu #harpor-storage:empty { display: none; }
-.banner { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s5); padding: 6px var(--s5); border-bottom: 1px solid var(--line);
-  background: var(--bg); font-size: var(--t-s); }
-.banner p { display: inline-flex; gap: var(--s2); align-items: baseline; margin: 0; color: var(--muted); }
-.banner p::before { content: ""; flex: none; width: 7px; height: 7px; background: transparent;
-  box-shadow: inset 0 0 0 1px var(--line-strong); transform: translateY(-1px); }
-.banner p.stopping { color: var(--fg); }  /* an offline machine keeps the hollow mark */
-.banner p.stopping::before { background: var(--warn); box-shadow: none; }
-.gate { max-width: 600px; margin: calc(2 * var(--s6)) auto; padding: var(--s5) 0 0; border-top: 2px solid var(--fg); }
-.gate h2 { margin-bottom: var(--s3); }
-.gatebtns { display: flex; flex-wrap: wrap; gap: var(--s2); margin: var(--s5) 0 var(--s4); }
-.gatebtns button { min-height: 38px; padding-inline: 16px; background: transparent; color: var(--fg); border-color: var(--line-strong); }
-.gatebtns button:hover:not(:disabled) { background: var(--surface-2); border-color: var(--fg); }  /* two equal choices, so no primary */
-.request label { font-weight: 600; }
-.request textarea { font: inherit; }
-.own h3 { margin-bottom: var(--s1); }
-.machines { list-style: none; margin: var(--s2) 0; padding: 0; border-top: 1px solid var(--line); }
-.machines li { margin: 0; padding: 7px 0; border-bottom: 1px solid var(--line); }
-/* div: the site's list of open requests (site.py), not the "pending" stage badge */
-div.pending { display: flex; flex-direction: column; gap: var(--s1); margin: var(--s2) 0; }
-div.pending p { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 0; padding: 2px 0 2px var(--s3);
-  border-left: 2px solid var(--fg); }
-div.pending p.refused { border-left-color: var(--bad); }
-div.pending p.hint { padding: 0; border: 0; }
-.privacy .panel { max-width: 760px; margin-inline: auto; border-top: 0; }
-.privacy h3 { margin: var(--s6) 0 var(--s1); }
-.privacy p { max-width: 70ch; }
-@media (max-width: 600px) {
-  .banner { padding: 6px var(--s4); }
-  .gate { margin: var(--s5) 0; }
-}
-
 /* the help page (static/help.html, and site.py's copy on the public site): a contents list, then one section per part
    of the app under a hairline. Its tables and term lists wrap their text, and a term column is only as wide as its
    terms, up to 16em, since some terms are whole messages. */
@@ -636,5 +587,4 @@ a.democard:hover, a.democard:focus-visible { border-color: var(--fg); }
   .back a { display: inline-block; padding: 10px 0; }
   /* 44 px targets for a finger, in the header's height */
   #demolink, #helplink { margin-block: -6px; padding: 12px 0; }
-  .account > summary { min-width: 44px; min-height: 44px; margin-block: -6px; justify-content: center; }
 }

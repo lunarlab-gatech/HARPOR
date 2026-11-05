@@ -29,9 +29,6 @@ const JOINTS = ["revolute", "prismatic", "fixed", "soft", "unknown"];  // harpor
 const VERDICT = { unchanged: "unchanged (no joints)", needs_review: "needs review" };
 const LIST_STATUS = { review: "needs review" };  // badge text in the jobs list; the others are the status
 const NEEDS_YOU = ["review", "ready", "choose_topic", "failed"];  // the list marks these rows
-// "1st", "2nd", "11th": a queued job's place, from the public site's queue_pos (1 is next).
-const ordinal = (n) => n + ([11, 12, 13].includes(n % 100) ? "th" : ["th", "st", "nd", "rd"][n % 10] || "th");
-const queueText = (status, pos) => status === "queued" && Number.isInteger(pos) && pos > 0 ? `queued (${ordinal(pos)})` : null;
 // The next step under the status; a status without one has none.
 const NEXT = { ready: "Name the object, then Start.", queued: "You can close this page.", running: "You can close this page.",
   review: "Check the picked views, then Build.", failed: "Check the log, then Retry.",
@@ -72,23 +69,14 @@ const staleBy = () => !V.job ? "unknown" : V.job.kind === "stray" ? "estimator"
 // The Retry button's label of a done job whose scale is stale.
 const RERUN_LIDAR = "Run lidar and later stages again";
 const KIND_LABEL = { video: "video", rosbag: "rosbag", stray: "Stray capture" };  // job.json source kind, in the jobs list
-// How the page reaches its data: the server itself (tunnel mode), or Supabase (static/supa.js, on the public site).
-// Factories, not the globals themselves, so the node test harnesses (no XMLHttpRequest) still load. typeof on the bare
-// global, not window.HARPOR_TRANSPORT: two of the test harnesses make window a Proxy that answers every property.
-// url(path, name) gives a URL for src and href (with a download name for a link); keyless(job, agent) is false, or the
-// sentence that says which machine holds that agent's key, so the page asks for none; noJobs is what an empty jobs list
-// says. xhr is the tunnel's only: the public page has no upload area, since its jobs get their input on the user's
-// own machine.
-const PUBLIC = typeof HARPOR_TRANSPORT !== "undefined";
-const T = PUBLIC ? HARPOR_TRANSPORT : {
+// Local server transport; factories keep the UI usable in the DOM test harness.
+const T = {
   fetch: (url, opts) => fetch(url, opts),
   url: (path) => path,
   xhr: () => new XMLHttpRequest(),
   events: (url) => new EventSource(url),
-  live: ACTIVE,  // the statuses that keep the live view open
-  keyless: () => false,
+  live: ACTIVE,
   noJobs: "No jobs yet.",
-  ready: Promise.resolve(),
   liveLog: "live log",
   offline: "Cannot reach the server. Is the SSH tunnel up?",
   unauthorized: "Not logged in. Open the ?token= link the server printed.",
@@ -136,7 +124,7 @@ function h(tag, attrs, ...kids) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (k.startsWith("on")) e[k] = v;
     else if (k === "class") e.className = v;
-    // Through the CSSOM, which a strict CSP allows; it blocks style attributes (the public site has no unsafe-inline).
+    // Through the CSSOM, which a strict CSP allows; it blocks style attributes.
     else if (k === "style" && v != null && v !== false && e.style) e.style.cssText = v;
     else if (v === true) e.setAttribute(k, "");
     else if (v !== false && v != null) e.setAttribute(k, v);
@@ -230,7 +218,7 @@ function show(id) {
   helpAt();
 }
 // The section of help.html that the header's Help link opens: the jobs list's, a waiting panel's (the first one shown,
-// in page order), else the shown tab's. Before app.js routes (the public site's sign-in), the link stays help.html.
+// in page order), else the shown tab's. Before app.js routes, the link stays help.html.
 const HELP_AT = { list: "add-job", lidarfail: "lidar", topics: "topics", review: "review", partsreview: "parts",
   results: "results", downloads: "downloads", inputs: "inputs", settings: "settings", log: "status" };
 function helpAt() {
@@ -254,9 +242,7 @@ function route() {
     .catch((e) => { $("#jstatus").textContent = e.message; });
   else showList();
 }
-// The public site routes once supa.js has signed the user in (T.ready, at the end); tunnel mode at once.
-let routing = !PUBLIC;
-window.addEventListener("hashchange", () => { if (routing) route(); });
+window.addEventListener("hashchange", route);
 
 // ---- 1. jobs list and upload ----
 
@@ -276,14 +262,13 @@ function renderJobs(rows) {
       h("td", { colspan: 6 }, T.noJobs)));
     return;
   }
-  // The hint under the input: its kind, and on the public site where the job runs ("on lab-box").
-  const hint = (j) => [j.kind ? KIND_LABEL[j.kind] || j.kind : null, j.where].filter(Boolean).join(", ");
+  const hint = (j) => KIND_LABEL[j.kind] || j.kind || "";
   $("#jobs tbody").replaceChildren(...(rows || []).map((j) => h("tr", { class: NEEDS_YOU.includes(j.status) ? "act" : null },
     h("td", { class: "thumb" }, h("img", { src: T.url(`/api/jobs/${j.id}/thumb/0`), alt: "", loading: "lazy",
       onerror: (e) => e.target.replaceWith(h("span", { class: "noimg" })) })),
     h("td", { class: "input" }, h("a", { href: "#/job/" + j.id }, j.video), hint(j) ? h("div", { class: "hint" }, hint(j)) : null),
     h("td", { class: "obj" }, j.prompt || ""),
-    h("td", { class: "stat" }, badge(j.status, queueText(j.status, j.queue_pos) || LIST_STATUS[j.status])),
+    h("td", { class: "stat" }, badge(j.status, LIST_STATUS[j.status])),
     h("td", { class: "when", title: j.created.replace("T", " ") }, shortTime(j.created)),
     h("td", { class: "acts" }, !deletable(j) ? ""
       : h("button", { class: "icon danger", type: "button", title: "Delete", "aria-label": "Delete " + j.video,
@@ -295,9 +280,8 @@ function trashIcon() {  // the row's Delete button: a trash can drawn in the tex
     "stroke-width": 1.6, "stroke-linecap": "round", "stroke-linejoin": "round" }));
   return svg;
 }
-// A row's Delete button: not while the job runs or uploads, unless the row says it may go (the public site: a job whose
-// machine is offline).
-const deletable = (j) => j.deletable === true || !(ACTIVE.includes(j.status) || j.status === "uploading");
+// A row's Delete button is disabled while the job runs or uploads.
+const deletable = (j) => !(ACTIVE.includes(j.status) || j.status === "uploading");
 async function pollList() {  // the 5 s refresh: draws the list again only when it changed
   if ($("#list").hidden || document.hidden === true) return;
   let rows;
@@ -384,7 +368,7 @@ async function openJob(id, tab) {
 async function refresh() {
   const job = V.job = await api(`/api/jobs/${V.id}`);
   fill($("#jtitle"), job.video.name, job.prompt ? [" ", h("span", { class: "jobobj" }, job.prompt)] : null);
-  $("#jid").textContent = "job " + job.id + (job.where ? ", " + job.where : "");
+  $("#jid").textContent = "job " + job.id;
   if (T.live.includes(job.status)) openStream();
   // A stale scale (another calibration, or an older estimator): Retry then starts from lidar (retryFrom), also on a
   // done job.
@@ -596,10 +580,9 @@ function renderState(st, follow) {
   const overall = ["queued", "running"].includes(st.status) ? h("div", { class: "overall" },
     h("progress", { max: build.length, value: nDone, "aria-label": "build progress" }),
     h("span", { class: "hint" }, `${nDone}/${build.length} stages`)) : null;
-  const stText = queueText(st.status, V.job && V.job.queue_pos);
   // The badge says the state once: the summary ("Done"), or a queued job's place in the queue. A failed job's error ends
   // with the help page's troubleshooting section.
-  fill($("#jstatus"), badge(st.status, stText || sum), overall, st.error ? h("div", { class: "msg errbox" }, st.error, " ",
+  fill($("#jstatus"), badge(st.status, sum), overall, st.error ? h("div", { class: "msg errbox" }, st.error, " ",
     h("a", { href: "help.html#troubleshooting", target: "_blank", rel: "noopener" }, "Help")) : null);
   const from = retryFrom(st);
   // A done job whose scale is stale (V.scaleStale) runs again from lidar.
@@ -667,7 +650,7 @@ function renderState(st, follow) {
   // A rerun from lidar runs the agent stage again, and a done job's key is gone (jobs.Runner._status).
   const agent = st.agent;
   $("#keyrow").hidden = st.key_ok || agent === "none" || !(["review", "failed", "cancelled"].includes(st.status) || rerun) ||
-    from === "frames" || !!T.keyless(V.id, agent);  // the machine that runs the job holds the key
+    from === "frames";
   $("#key2name").textContent = AGENTS[agent].key || "API key";
   // The key goes next to the button that sends it.
   const home = st.status === "review" ? partList ? $("#partsbar") : $("#revbar") : $("#actions");
@@ -814,8 +797,7 @@ async function loadFrames() {
     $("#nviews").value = $("#nval").textContent = job.n_views || 6;
     $("#pause").checked = !job.auto_continue;
     $("#turntable").checked = job.turntable === true;
-    // The public site offers only astra and opus, and only the agents the account may use (supa.js disables the others):
-    // a job of another agent starts from the first agent offered.
+    // Fall back to the first available agent for an unrecognized saved agent.
     const radios = [...document.querySelectorAll("input[name=agent]")];
     for (const r of radios) r.checked = r.value === job.agent && r.disabled !== true;
     if (!radios.some((r) => r.checked)) {
@@ -879,14 +861,13 @@ function chosenAgent() {
   for (const r of document.querySelectorAll("input[name=agent]")) if (r.checked) return r.value;
   return "astra";
 }
-// The key field names the chosen agent's provider; without an agent no key is asked for or sent. On the public site,
-// a job on a machine that holds the agent's key (T.keyless) shows that sentence in place of the field.
+// The key field names the chosen agent's provider.
 function agentToggle() {
-  const a = AGENTS[chosenAgent()], keyless = a.key ? T.keyless(V.id, chosenAgent()) : false;
+  const a = AGENTS[chosenAgent()];
   $("#keylabel").hidden = !a.key;
-  $("#key").hidden = !!keyless;
-  $("#key").required = !!a.key && !keyless;
-  $("#keyname").textContent = keyless || a.key || "";
+  $("#key").hidden = false;
+  $("#key").required = !!a.key;
+  $("#keyname").textContent = a.key || "";
   $("#key").placeholder = a.placeholder;
   partsToggle();
 }
@@ -1024,12 +1005,8 @@ async function calibrate(f) {
   try {
     const r = await (f ? api(url + "?name=" + encodeURIComponent(f.name) + "&lidar_topic=" +
       encodeURIComponent(typeof topic === "string" ? topic : ""), { method: "PUT", body: f }) : api(url, { method: "DELETE" }));
-    // The public site answers 202 "pending" while the job's machine has not taken the request: nothing is saved yet.
-    if (r && r.status === "pending") done = "Sent. The job's machine has not saved it yet.";
-    else {
-      if (V.job) V.job.calibration = f ? r : null;
-      done = f ? `Saved ${r.name}.` : "Removed.";
-    }
+    if (V.job) V.job.calibration = f ? r : null;
+    done = f ? `Saved ${r.name}.` : "Removed.";
   } catch (e) { say($("#calmsg"), e.message); }
   if (done !== null && V.sel && $("#review").hidden === false) {
     try { V.sel.lidar = (await api(`/api/jobs/${V.id}/selection`)).lidar; renderSelLidar(); } catch (e) { /* the old summary stays */ }
@@ -1122,7 +1099,7 @@ $("#startform").onsubmit = async (e) => {
   }
   if (V.job && V.job.files && (V.job.files.includes("run/posed.glb") || V.job.files.includes("results.zip")) &&
       !confirm("Build again? This replaces the current results.")) return;
-  const agent = chosenAgent(), keyed = agent !== "none", typed = keyed && !T.keyless(V.id, agent);
+  const agent = chosenAgent(), keyed = agent !== "none", typed = keyed;
   $("#start").disabled = true;
   say($("#startmsg"), keyed ? "checking the key" : "", true);
   try {
@@ -1563,7 +1540,7 @@ const degrees = (x) => (x * 180 / Math.PI).toFixed(0);
 // The rows of a session in rounds (controller.run_session) and of the surface check: the rounds, how many requirements
 // the delivered candidate meets, each requirement of agent/evidence.json (ev) with its outcome and what the host's
 // check measured, and how much of the original's surface the result keeps. A key that the result lacks gives no row:
-// old jobs have none of them, and a view stored on the public site never passed through this server.
+// old jobs may have none of them.
 function roundRows(a, ev) {
   const rows = [], rounds = Array.isArray(a.rounds) ? a.rounds.filter((r) => r && typeof r === "object") : [];
   if (rounds.length) rows.push(["Rounds", roundsText(rounds, a.candidate)]);
@@ -1732,8 +1709,7 @@ async function renderInput(job) {
     }
     return;
   }
-  // The views are drawn once per selection, and again when the files of their LiDAR points change (the public site
-  // gets them after the selection). A place run that ends or goes changes only the heading (its mesh fit toggle).
+  // Redraw views when the selection or LiDAR files change; placement changes only the heading.
   const key = JSON.stringify([job.id, job.stages.select.ended, vkey, usedClouds(job).map((x) => x.path).join()]);
   if (key === V.inputKey) {
     if (V.input && V.input.placed !== V.inputPlaced) {
@@ -2259,5 +2235,4 @@ function spinTab(name) {
   }
 }
 
-if (PUBLIC) T.ready.then(() => { routing = true; route(); });
-else route();
+route();

@@ -7,13 +7,11 @@ Runs in envs/web on the GPU machine, from the repo root (on ICE inside a Slurm j
 
 INPUT is a video, a rosbag or a zipped Stray Scanner export. The command makes a job folder the way an upload does,
 then runs the web app's own code in this process and calls its routes directly (server.make_app, with
-httpx.ASGITransport, as worker.py does). It opens no port. So every setting passes the page's checks, and every stage
+httpx.ASGITransport). It opens no port. So every setting passes the page's checks, and every stage
 is the Runner's stage, from the same stage scripts (steps.py); only the watching and the printing are new here.
 
 The input is a hard link in the job folder, or a copy when it is on another file system. No size limit and no
-free-space check apply: the person chose this machine's disk. A job of this command holds job.json "public":
-{"local": true}, so that a worker that starts later on the same runs folder leaves it off the public site
-(worker.local_jobs). The page can still open it.
+free-space check apply: the person chose this machine's disk.
 
 The command never asks a question. When a job needs a person, it prints what to look at and the exact next command,
 and it exits with code 3:
@@ -36,7 +34,7 @@ Ctrl-C, SIGTERM and a closed terminal cancel the running stage and leave a job t
 caller ignores (nohup) stays ignored, and the job goes on.
 
 The key of --agent astra or opus comes from --key-file or from ~/.config/harpor/openai.env or anthropic.env, in the
-format of the worker's key files (session.local_key), and it is read again on each resume. The command never prints it.
+KEY=VALUE format, and it is read again on each resume. The command never prints it.
 
 Exit codes: 0 for a finished job, 1 for a failed or cancelled job, 2 for bad arguments or a refused setting, 3 for a job
 that waits for a person, and 128 + the signal after Ctrl-C, SIGTERM or SIGHUP.
@@ -67,8 +65,8 @@ import anyio
 import httpx
 
 from harpor.agent.tools import printable
-from harpor.fileio import read_json
-from harpor.webapp import jobs, relay, server, session, steps, views
+from harpor.fileio import config_dir, read_json, read_private
+from harpor.webapp import jobs, server, steps, views
 
 POLL_S = 0.5
 DONE, FAILED, BAD, WAITS = 0, 1, 2, 3  # exit codes
@@ -79,6 +77,43 @@ SETTINGS = ("prompt", "camera_topic", "lidar_topic", "calibration", "no_lidar", 
 LATE_SETTINGS = ("calibration", "parts", "view0")  # those that a job whose build has started still takes
 LEFT_OUT = {"available": "usable, not picked", "excluded": "excluded", "no_mask": "no mask of the object",
             "small": "the mask is under 1% of the image", "inconsistent": "the mask disagrees with the other views"}
+
+
+KEY_FILES = {"astra": "openai.env", "opus": "anthropic.env"}
+
+def local_key(agent, path=None):
+    """The machine's own API key for agent (the terminal command's agent), read now: the
+    OPENAI_API_KEY= line of ~/.config/harpor/openai.env (astra) or the ANTHROPIC_API_KEY= line of anthropic.env
+    (opus), or that line of the file path. The file must be this user's with mode 0600 in a folder of mode 0700. An
+    error names the file and the line, never the text."""
+    if agent not in KEY_FILES:
+        raise ValueError(f"no key file for the agent {agent!r}")
+    var = steps.KEY_VAR[agent]
+    path = Path(path) if path else config_dir() / KEY_FILES[agent]
+    for line in read_private(path).decode("utf-8", errors="replace").splitlines():
+        k, sep, v = line.strip().removeprefix("export ").partition("=")
+        if sep and k.strip() == var:
+            key = v.strip().strip("\"'")
+            if not jobs.KEY.fullmatch(key):
+                raise ValueError(f"the {var} line of {path} is not one word of letters, digits, - and _")
+            return key
+    raise ValueError(f"{path} has no {var}= line")
+
+def first_not_done(state, parts_confirmed=False):
+    """app.js retryFrom without its stale-scale rule: "frames" while the input is not analyzed, else the first
+    build stage not done or skipped (None before any build, and when all are). A job stopped at an unconfirmed
+    part list goes back to propose."""
+    stage = {s["name"]: s for s in state["stages"]}
+    if stage["frames"]["status"] != "done":
+        return "frames"
+    x = next((s for s in state["stages"] if s["name"] in jobs.BUILD and s["status"] not in ("done", "skipped")), None)
+    if x is None:  # a done job
+        return None
+    if stage["extract"]["status"] == "pending":
+        return None
+    unconfirmed = state.get("articulated") is True and state.get("parts_mode") == "vlm_edit" \
+        and stage.get("propose", {}).get("status") == "done" and not parts_confirmed
+    return "propose" if x["name"] == "parts" and unconfirmed else x["name"]
 
 
 class Stop(Exception):
@@ -396,7 +431,7 @@ class Run:
         if agent == "none":
             return
         try:
-            self.key = session.local_key(agent, self.a.key_file)
+            self.key = local_key(agent, self.a.key_file)
         except (OSError, ValueError, SystemExit) as e:
             raise Stop(BAD, f"cannot read the {steps.PROVIDER[agent]} API key: {e}") from None
         ok, why = self.runner.check_key(self.key, agent)
@@ -408,7 +443,6 @@ class Run:
         src = Path(self.a.input)
         self.job_id, path = self.runner.new_upload(src.name)
         self.J = self.runner.runs / self.job_id
-        jobs.update(self.J, public={"local": True})
         say(f"job {self.job_id} in {self.J}")
         try:
             place(src.resolve(), path)
@@ -506,7 +540,7 @@ class Run:
                 return self.ended(job)  # the automatic selection failed, so the build cannot go on yet
             self.call("POST", "/continue", json={"api_key": self.key})  # also accepts a waiting part list
             return self.follow()
-        first = relay.first_not_done({"stages": jobs.progress(J), "articulated": steps.articulated(job),
+        first = first_not_done({"stages": jobs.progress(J), "articulated": steps.articulated(job),
                                       "parts_mode": steps.parts_mode(job)}, job["parts"]["confirmed"] is True)
         if first is None:
             return self.ended({**job, "status": "done"})

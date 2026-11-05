@@ -19,7 +19,7 @@
 <nav class="toc" aria-label="Contents">
   <ol>
     <li><a href="#about">About HARPOR</a></li>
-    <!-- local:toc --><!-- /local:toc -->
+
     <li><a href="#capture">Record a capture</a></li>
     <li><a href="#add-job">Add a job</a></li>
     <li><a href="#status">Job status and the log</a></li>
@@ -55,7 +55,7 @@
   then refines the mesh or sets the joints, and VoMP predicts the materials. <a href="#status">Job status and the
   log</a> lists every stage.</p>
 </section>
-<!-- local:account --><!-- /local:account -->
+
 
 <section id="capture">
 <h2>Record a capture</h2>
@@ -78,12 +78,12 @@
 
 <section id="add-job">
 <h2>Add a job</h2>
-<!-- local:add-job -->
+
 <p>On the jobs list, drop the file on the Add a capture box, or press Choose a file. A file can be up to 20 GB.</p>
 <p>The upload shows how much is sent and the time left. Keep the page open until it ends, because leaving the page
   stops it. Cancel upload stops it too.</p>
 <p>When the upload ends, the job page opens and the app reads the input.</p>
-<!-- /local:add-job -->
+
 </section>
 
 <section id="status">
@@ -350,9 +350,9 @@ drawer x3 &gt; cabinet body : prismatic</pre>
 <ul>
   <li>GPT-6-Astra runs through the Codex CLI. It needs an OpenAI key, which starts with sk-.</li>
   <li>Claude Opus 5.5 runs through the Anthropic API. It needs an Anthropic key, which starts with sk-ant-.</li>
-  <!-- local:agent-none -->
+
   <li>None runs no agent and needs no key.</li>
-  <!-- /local:agent-none -->
+
 </ul>
 <p>Both models run at xhigh effort. The agent has 600 s to edit the mesh, or 900 s to set the joints. Time spent
   exporting GLBs or checking them with the simulate helper does not count, up to 600 s in each round. The agent is
@@ -379,11 +379,11 @@ drawer x3 &gt; cabinet body : prismatic</pre>
 <h3>API keys</h3>
 <p>Each job uses your own key, and your provider bills you for it. A key is one word of letters, digits, - and _.
   Use a key with a spending limit, and delete it at your provider when you no longer need it.</p>
-<!-- local:keys -->
+
 <p>The page sends the key to the server when you press Start, Build, Select again or Retry, and it does not keep it.
   The server checks the key with your provider and keeps it in memory while the job needs it. It forgets the key when
   the job is done or cancelled, and when the server restarts.</p>
-<!-- /local:keys -->
+
 <p>When a stage needs the key again, a key field shows next to its button.</p>
 
 <h3>What the Results tab says about the agent</h3>
@@ -877,7 +877,7 @@ time_offset_s: 0.0</pre>
   <dd>Not an error: the agent did not run, and the row says why, such as a low mask IoU. See
     <a href="#results">Results</a>.</dd>
 </dl>
-<!-- local:troubleshooting -->
+
 <h3>The page and the server</h3>
 <dl>
   <dt>Cannot reach the server. Is the SSH tunnel up?</dt>
@@ -894,7 +894,7 @@ time_offset_s: 0.0</pre>
   <dt>upload failed</dt>
   <dd>The upload stopped, or the server refused the file, and the message says why. Upload the file again.</dd>
 </dl>
-<!-- /local:troubleshooting -->
+
 </section>
 </main>
 </body>

@@ -157,7 +157,7 @@ def create_job(runs_dir, filename):
 
 
 def stamp():
-    """Now, in job.json's "created" format (local time). A session's mirror_since takes it too, so the two compare."""
+    """Now, in job.json's "created" format (local time)."""
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 

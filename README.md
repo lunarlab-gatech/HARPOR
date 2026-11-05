@@ -18,15 +18,14 @@ The soft parts and the repair rounds have only run in tests so far, not on a rea
 
 ## Try it
 
-The public site at https://harpor.andyli3964.workers.dev/ shows finished examples on its Demos page. To run your own
-jobs there, sign in, wait for approval, and connect your own GPU machine. [docs/public_site.md](docs/public_site.md)
-explains how.
+Run jobs through the local web app or CLI on your GPU machine, using an SSH tunnel for remote access.
+A standalone static demo gallery can be built separately; see [docs/public_site.md](docs/public_site.md).
 
 You can also try the interface on a laptop without a GPU. In fake mode, each stage runs a quick stand-in:
 
 ```bash
 git clone https://github.com/lunarlab-gatech/HARPOR.git && cd HARPOR
-python3.12 -m venv .venv && .venv/bin/pip install fastapi uvicorn httpx numpy scipy pillow av rosbags pyyaml trimesh cryptography
+python3.12 -m venv .venv && .venv/bin/pip install fastapi uvicorn httpx numpy scipy pillow av rosbags pyyaml trimesh
 .venv/bin/python -m harpor.webapp --fake --runs ./runs --host 127.0.0.1 --port 8765
 ```
 
