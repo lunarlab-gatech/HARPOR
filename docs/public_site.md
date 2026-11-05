@@ -1,7 +1,6 @@
 # Static demo gallery
 
-HARPOR's public site is now a static gallery. Accounts, approvals, Supabase storage,
-remote job controls, and personal workers have been removed. Run jobs with
+HARPOR provides a standalone static demo gallery. Run jobs with
 `python -m harpor.webapp` or `python -m harpor.webapp.run` on the GPU machine.
 Use the SSH tunnel printed by the local server to access it from another computer.
 
@@ -25,10 +24,3 @@ The local app also serves the gallery with `--demos DIR`.
 The generated `index.html` and `demos.html` show the same gallery. The build includes
 help, styles, the viewer and security headers; it needs no cloud configuration.
 Deploy the generated folder with your static host's usual process.
-
-## Existing deployments
-
-Removing this code does not disable an already deployed site or delete a Supabase
-project. Replace the deployed site with a gallery build to remove its old account UI.
-Retire the former backend separately after preserving any data you need. Local job
-folders and curated demo source files are unaffected.

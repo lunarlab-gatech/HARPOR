@@ -995,13 +995,12 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
   it), and only when the canvas first has a size, so a hidden tab loads nothing. A LiDAR job without
   files says "No LiDAR points to show."; without WebGL, or for a file that does not parse, a line
   offers the file. `GET /api/jobs/{id}` lists `run/lidar/<i>.glb` in "files" after the outputs, with
-  their sizes, and the file route serves them as `model/gltf-binary`. The worker mirrors them as
-  review files. Help explains the colors and the controls.
+  their sizes, and the file route serves them as `model/gltf-binary`. Help explains the colors and the controls.
 - Help: the UI keeps its words short, and what the items mean and how they are found is in one
   static page, `static/help.html` (served at `/help.html`, also without the login cookie, so its
-  troubleshooting reads when the cookie is stale). The app, the help page, the demos page and the
-  public privacy page have one header: the brand (back to the app), Demos, Help and, on the public
-  site, the account menu. The link to the page itself is marked as current. From the app, Demos and
+  troubleshooting reads when the cookie is stale). The app, the help page and the demos page have
+  one header: the brand (back to the app), Demos and Help. The link to the page itself is marked as
+  current. From the app, Demos and
   Help open in a new tab, so an upload or an edited list keeps going; on the other pages they open in
   the same tab. The local help page's troubleshooting says that the app and Demos need the login. The
   app's Help section follows the screen (`HELP_AT` in `app.js`): the jobs list, a waiting panel, else
@@ -2252,13 +2251,11 @@ the job's current calibration (see the last bullet), it is the stage's done mark
   also when the record is not ok, before `pool/lidar.json`; a failed source writes none. `used` is
   `view_ratio`'s used rows of the view's camera points. `select` copies the picks' files to
   `run/lidar/<i>.glb` (`build_run(..., clouds=)`, before `da3_output.npz`) when the scale is applied,
-  so a build with LiDAR off has none. `run/lidar/` is served and mirrored: about 10 MB per job
-  with 6 views (20 MB with 12) on the site, as review files, gone 14 days after the job stops.
-  `lidar/cloud/` is served and mirrored only while `pool/lidar.json` says ok false
+  so a build with LiDAR off has none. `run/lidar/` is served by the local server: about 10 MB per job
+  with 6 views (20 MB with 12). `lidar/cloud/` is served only while `pool/lidar.json` says ok false
   (`server.pool_clouds`, which `server.resolve` follows): there are no views used then, so the Inputs
   tab shows each pool view's points by frame name, to check the calibration (up to about 55 MB with 32
-  views). A found scale takes them off the site, since the worker drops what `resolve` no longer
-  serves.
+  views).
 
 **Steps** (`envs/web`, from `$G/gator_clone` on ICE, or from the repo root on the Mac).
 1. **Stage:** `python -m harpor.webapp.lidar scale --job "$J"` gathers the samples (from the cache
