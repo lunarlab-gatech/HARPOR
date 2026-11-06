@@ -565,7 +565,7 @@ def test_scope_holds_every_code_the_checks_give():
     codes |= {code for _, code, _ in S.LIMITS.values()} | {"surface_identity"}
     assert {"tracking", "unstable", "binding_mismatch", "soft_no_recovery", "soft_no_support", "sim_timeout"} <= codes
     assert codes <= set(V.SCOPE) and set(V.INCONCLUSIVE) <= set(V.SCOPE)
-    assert {c for c, s in V.SCOPE.items() if s == "none"} == {"soft_untestable", "sim_unavailable"}
+    assert {c for c, s in V.SCOPE.items() if s == "none"} == {"soft_untestable", "sim_unavailable", "physics_unassessed"}
 
 
 def test_feedback_quotes_agent_text_and_keeps_to_6000_characters():

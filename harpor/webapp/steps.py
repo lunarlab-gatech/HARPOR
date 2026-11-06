@@ -18,6 +18,7 @@ job folder J under G/webapp_runs:
   select   envs/web     views select            selection.json "ok" and run/da3_output.npz
            (the job pauses here for review unless auto_continue)
   sam3d    envs/sam3d   mvsam3d sam3d           run/pose.json
+  vomp     envs/vomp11  physics/vomp_run.py     run/vomp/summary.json (whole canonical object)
   place    envs/sam3d   mvsam3d place           run/placement.json
   propose  envs/sam3d   parts.stage propose     run/proposal.json (skipped for a rigid object); it takes
                                                 the job's key unless the parts mode is "user"
@@ -26,13 +27,15 @@ job folder J under G/webapp_runs:
   parts    envs/sam3seg part_masks, then        run/parts.json, written last (skipped for a rigid object)
            envs/sam3d   parts.stage vote, split
                         (Blender in the SIF) and finish
+  vomp_parts envs/sam3d physics_auto prepare-parts, then envs/vomp11 physics/vomp_run.py:
+                                                run/vomp_parts/summary.json (skipped for a rigid object)
   agent    envs/sam3d   agent_step --agent A    agent/result.json (skipped below 0.5 mask IoU, or when
                                                 the job's agent is "none"); it refines posed.glb (600 s),
                                                 or gives the parts of an articulated job their joints
-                                                (900 s, and the rounds of its requirements, whose host
+                                                (900 s, plus physics and requirements repair rounds, whose host
                                                 check runs MuJoCo in envs/mujoco: GATOR_MUJOCO)
-  align    envs/sam3d   physics_auto align      physics/aligned.json (and physics/links/ when articulated)
-  vomp     envs/vomp11  physics/vomp_run.py     physics/summary.json (per link when articulated)
+  align    envs/sam3d   physics_auto align      physics/aligned.json and physics/summary.json:
+                                                transfer pre-refinement materials to the final mesh/links
   mjcf     envs/mujoco  physics.mjcf            physics/mjcf/mjcf.json with "compiled"
   usd      envs/mujoco  physics.usd             physics/usd/usd.json with "checked"
   urdf     envs/mujoco  physics.urdf            physics/urdf/urdf.json with "checked"
@@ -60,9 +63,9 @@ from pathlib import Path
 
 from harpor.fileio import read_json
 
-NAMES = ["topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "place", "propose", "parts",
-         "agent", "align", "vomp", "mjcf", "usd", "urdf", "turntable", "softvideo", "package"]
-GPU = ("masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable", "softvideo")
+NAMES = ["topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "vomp", "place", "propose", "parts", "vomp_parts",
+         "agent", "align", "mjcf", "usd", "urdf", "turntable", "softvideo", "package"]
+GPU = ("masks", "da3", "sam3d", "vomp", "parts", "vomp_parts", "agent", "turntable", "softvideo")
 # The stages whose failure leaves the job usable, each with the words that start its warning: the build goes on.
 OPTIONAL = {"turntable": "360 video", "softvideo": "soft-part video"}
 REVIEW_AFTER = "select"
@@ -86,7 +89,7 @@ VOMP_ENV = ('CUDA_HOME=$CONDA_PREFIX HF_HOME=$G/.cache/huggingface TORCH_HOME=$G
 MARKERS = {"topics": "frames/topics.json", "frames": "frames/meta.json", "prep": "pool/prep.json",
            "sam3d": "run/pose.json", "place": "run/placement.json", "propose": "run/proposal.json",
            "parts": "run/parts.json", "agent": "agent/result.json", "align": "physics/aligned.json",
-           "vomp": "physics/summary.json", "turntable": "turntable/turntable.json",
+           "vomp": "run/vomp/summary.json", "vomp_parts": "run/vomp_parts/summary.json", "turntable": "turntable/turntable.json",
            "softvideo": "softvideo/softvideo.json", "package": "results.zip"}
 MIN_IOU = 0.5
 # job.json "agent": GPT-6-Astra (Codex CLI), Claude Opus 5.5 (claude_agent) or no agent stage
@@ -191,14 +194,17 @@ def command(stage, job, cfg, key_file=None):
         lines += [f"export {SAM3_ENV}", f'rm -f "$J/scene/sam3_{job["slug"]}/sam3.json"',
                   run + '$G/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks --scene "$J/scene" '
                         f"--prompt={q(job['prompt'])} --overwrite{picks}"]
-    elif stage == "vomp":
-        # An articulated job's aligned GLB has a GLB per link in physics/links: VoMP runs on each, into physics/vomp.
-        links = articulated(job)
-        lines += ['rm -rf "$J/physics/work" "$J/physics/materials.npz" "$J/physics/voxels.npz" "$J/physics/summary.json"'
-                  + (' "$J/physics/vomp"' if links else ""),
-                  VOMP_ACTIVATE, f"export {VOMP_ENV}",
-                  'cd $G/VoMP && python $C/harpor/physics/vomp_run.py --glb "$J/physics/aligned.glb" --out "$J/physics"'
-                  + (' --links "$J/physics/links"' if links else "")]
+    elif stage in ("vomp", "vomp_parts"):
+        # The first generated mesh exists before placement, splitting and agent edits.
+        parts = stage == "vomp_parts"
+        lines += [f'rm -rf "$J/run/{stage}"']
+        if parts:
+            lines += [f"export {STAGE_A_ENV}", run + '$G/envs/sam3d/bin/python -m harpor.webapp.physics_auto '
+                      'prepare-parts --job "$J"']
+        lines += [VOMP_ACTIVATE, f"export {VOMP_ENV}",
+                  'cd $G/VoMP && python $C/harpor/physics/vomp_run.py '
+                  + ('--glb "$J/run/vomp_parts/aligned.glb" --out "$J/run/vomp_parts" --links "$J/run/vomp_parts/links"'
+                     if parts else '--glb "$J/run/canonical.glb" --out "$J/run/vomp" --opaque-input')]
     elif stage in ("mjcf", "usd", "urdf"):
         from harpor.webapp.physics_auto import sim_name
 
@@ -249,6 +255,8 @@ def command(stage, job, cfg, key_file=None):
 def done(stage, job_dir):
     """True when the stage's outputs are all there (see the module docstring)."""
     J = Path(job_dir)
+    if stage == "align":
+        return (J / MARKERS[stage]).is_file() and (J / "physics/summary.json").is_file()
     if stage in MARKERS:
         return (J / MARKERS[stage]).is_file()
     if stage == "extract":
@@ -339,7 +347,9 @@ def skip(stage, job_dir):
         return {"rosbag": None, "stray": "Stray Scanner capture"}.get(source(job)["kind"], "video input")
     if stage == "lidar":
         return None if lidar(job) else "turned off: no LiDAR"
-    if stage in ("propose", "parts"):
+    if stage == "vomp":
+        return "materials run after the part split" if articulated(job) else None
+    if stage in ("propose", "parts", "vomp_parts"):
         return None if articulated(job) else "turned off: rigid object"
     if stage == "turntable":
         return None if turntable(job) else "turned off"

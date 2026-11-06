@@ -150,7 +150,7 @@ def test_align_job_picks_the_glb_and_aligns_it(tmp_path, capsys):
     write_run(j / "run", *plane_view())
     box_glb(j / "run" / "posed.glb")
     (j / "run" / "placement.json").write_text(json.dumps({"check": {"mean_mask_iou": 0.8}}))
-    A.main(["align", "--job", str(j)])
+    A.align_job(j)
     up = json.loads((j / "physics" / "up.json").read_text())
     assert up["glb"] == str(j / "run" / "posed.glb") and up["glb_rule"] == "no agent result"
     assert up["info"]["source"] == "plane" and not up["opaque"]
@@ -163,7 +163,7 @@ def test_align_job_picks_the_glb_and_aligns_it(tmp_path, capsys):
     box_glb(j / "agent" / "s" / "work" / "exports" / "001.glb", alpha=128)
     result = {"source": "finish", "verdict": "complete", "glb": "work/exports/001.glb"}
     (j / "agent" / "result.json").write_text(json.dumps(result))
-    A.main(["align", "--job", str(j)])
+    A.align_job(j)
     up = json.loads((j / "physics" / "up.json").read_text())
     assert up["glb"] == str(j / "agent" / "s" / "work" / "exports" / "001.glb") and up["opaque"]
     assert "finish GLB, verdict complete" in up["glb_rule"]
@@ -233,7 +233,7 @@ def test_align_job_writes_the_links_of_an_articulated_job(tmp_path):
     box_glb(j / "run" / "posed.glb")
     (j / "job.json").write_text(json.dumps({"articulated": True, "agent": "astra"}))
     write_glb(j / "run" / "parts.glb", "parts", 0.2)
-    A.main(["align", "--job", str(j)])
+    A.align_job(j)
     up = json.loads((j / "physics" / "up.json").read_text())
     assert up["glb"] == str(j / "run" / "parts.glb") and up["glb_rule"] == "no agent result"
     rep = json.loads((j / "physics" / "aligned.json").read_text())
@@ -248,7 +248,7 @@ def test_align_job_writes_the_links_of_an_articulated_job(tmp_path):
     write_glb(j / "agent" / "s" / "work" / "exports" / "001.glb", "parts", 0.2, joints={"lid": hinge})
     (j / "agent" / "result.json").write_text(json.dumps({"source": "finish", "verdict": "articulated",
                                                          "glb": "work/exports/001.glb"}))
-    A.main(["align", "--job", str(j)])
+    A.align_job(j)
     up = json.loads((j / "physics" / "up.json").read_text())
     assert up["glb"].endswith("work/exports/001.glb") and "verdict articulated" in up["glb_rule"]
     rep = json.loads((j / "physics" / "aligned.json").read_text())
@@ -262,6 +262,6 @@ def test_align_job_writes_the_links_of_an_articulated_job(tmp_path):
     assert A.pick_glb(j) == (j / "run" / "parts.glb", "no agent result")
     (j / "job.json").write_text(json.dumps({"articulated": False, "agent": "astra"}))
     (j / "physics" / "links").rename(tmp_path / "old_links")
-    A.main(["align", "--job", str(j)])
+    A.align_job(j)
     assert json.loads((j / "physics" / "up.json").read_text())["glb"] == str(j / "run" / "posed.glb")
     assert not (j / "physics" / "links").exists()

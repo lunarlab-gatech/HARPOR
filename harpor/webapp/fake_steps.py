@@ -33,8 +33,9 @@ harpor.parts.geometry, the requirements from harpor.parts.stage) of the real sta
 that part on the base's back top edge, in frame W, or makes it soft on the base when its joint_guess
 is soft, so a typed list "body / pad > body : soft" runs the whole path with a soft part. Its result
 has the keys of the real session, and a part list with a found requirement those of a session in
-rounds and agent/evidence.json, without running the round code (in_rounds). vomp then runs per link
-of physics/links, and mjcf builds the nested model with the real harpor.physics.mjcf (one convex
+rounds and agent/evidence.json, without running the round code (in_rounds). Before the agent, vomp_parts
+predicts per split link; rigid objects run vomp immediately after sam3d. The real material transfer
+recomputes the final properties, and mjcf builds the nested model with the real harpor.physics.mjcf (one convex
 hull per link instead of CoACD) when the aligned GLB has joints. usd writes the articulation's
 layout as text, and urdf runs the real harpor.physics.urdf on such an MJCF (for the box MJCF of a
 rigid job it writes one box link).
@@ -291,10 +292,14 @@ def place(J):
     with np.load(run / "da3_output.npz") as da:  # select applied a LiDAR scale
         metric = float(da["metric_scale"]) if "metric_scale" in da.files else None
     units = "meters (LiDAR scale applied in select)" if metric is not None else "DA3 units (meters)"
+    from scipy.spatial.transform import Rotation
+    q = Rotation.from_matrix(R0.T @ np.diag([-1., -1., 1.])).as_quat()
+    fitted_pose = {"rotation_wxyz": q[[3, 0, 1, 2]].tolist(), "translation": (t0 * [-1, -1, 1]).tolist(),
+                   "scale": [da3_units] * 3}
     placement = {"frame_W": f"OpenCV camera of view 0: x right, y down, z forward, in {units}",
                  "glb_axes": "posed.glb vertices are glTF: (x, y, z)_W = (x, -z, y)_glTF (Prompt 2)",
                  "view0": cams[0]["name"], "metric_scale": metric, "units": units, "fake": True,
-                 "pose": json.loads((run / "pose.json").read_text()), "scale_fit": {"applied": False},
+                 "pose": fitted_pose, "scale_fit": {"applied": False},
                  "pose_fit": {"applied": False}, "posed_extent_W": (da3_units * (BOX_HI - BOX_LO)).tolist(),
                  "posed_center_W": center.tolist(),
                  "check": {"views": [{"name": c["name"], "mask_iou": 0.8} for c in cams], "mean_mask_iou": 0.8,
@@ -647,15 +652,15 @@ def grid(glb, n=12):
     return lo + (hi - lo) * np.stack(np.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3), h, lo, hi
 
 
-def vomp(J):
-    """Softwood in every voxel: of aligned.glb, or of each physics/links GLB of an articulated job, with the
+def vomp(J, per_part=False):
+    """Softwood in every voxel: of canonical.glb, or of each early aligned part of an articulated job, with the
     combined summary.json of vomp_run.combine_links."""
     from harpor.physics.mass import mass_properties
     from harpor.physics.vomp_run import combine_links
-    from harpor.webapp import steps
 
-    P = J / "physics"
-    articulated = steps.articulated(json.loads((J / "job.json").read_text()))
+    P = J / "run" / ("vomp_parts" if per_part else "vomp")
+    P.mkdir(parents=True, exist_ok=True)
+    articulated = per_part
     shutil.rmtree(P / "work", ignore_errors=True)  # as the real stage: VoMP needs a fresh folder
     for old in ("materials.npz", "voxels.npz", "summary.json"):
         (P / old).unlink(missing_ok=True)
@@ -674,7 +679,10 @@ def vomp(J):
 
     pace(3)
     if not links:
-        summary = {**record(P / "aligned.glb")[0], "seconds": {"load": 0.0, "predict": 3 * DELAY}, "gpu_peak_gb": None}
+        rec, centers, h, center = record(J / "run/canonical.glb")
+        np.savez(P / "voxels.npz", centers=centers, h=h, density=np.full(len(centers), rho),
+                 youngs_modulus=np.full(len(centers), E), poisson_ratio=np.full(len(centers), nu))
+        summary = {**rec, "seconds": {"load": 0.0, "predict": 3 * DELAY}, "gpu_peak_gb": None}
         (P / "summary.json").write_text(json.dumps(summary, indent=1))
         print(f"VoMP (fake): mass {summary['rigid_body']['mass']:.2f} kg")
         return
@@ -690,6 +698,13 @@ def vomp(J):
     summary = {**combine_links(P, [g.stem for g in links], P / "aligned.glb", "fake", 0.0), "fake": True}
     (P / "summary.json").write_text(json.dumps(summary, indent=1))
     print(f"VoMP (fake): {len(links)} links, mass {summary['rigid_body']['mass']:.2f} kg")
+
+
+def vomp_parts(J):
+    from harpor.webapp.physics_auto import align_job
+
+    align_job(J, prepare_parts=True)
+    vomp(J, per_part=True)
 
 
 def hull(vertices, faces, threshold):

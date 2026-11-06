@@ -1,9 +1,9 @@
 TO DO LIST
-- pass the known K to DA3 when a job has one (`inference(intrinsics=...)`, from the calibration file, camera_info or Stray's K), so the mesh fit stops using DA3's estimated K
-- add an optional input for external camera poses (a bag's `/tf` or a pose file like the Pocket2's `img_pos.txt`) and pass them to DA3 as `extrinsics`
-- add a check on s that doesn't depend on the calibration: fit DA3's camera centers times s to the external poses, and warn when they disagree. A calibration error shifts every view the same way, so the spread and outlier checks can't catch it
+- instead of relying on DA3 for camera intrinsics and extrinsics, the user should pass that data in if they have it. Eventually, in the multi user version, they should be able to have customizable preset scanners they can choose
+- support for reconstructing multiple objects at once (or many in a queue from a single command)
 
 - run psi0 on reconstructed objects for a quick baseline
+- LiDAR supervision scales the entire reconstructed object, can’t fix scale of specific sides of an object, need to improve this
 
 IN PROGRESS
 - refine lidar supervision

@@ -41,7 +41,7 @@ def _best(best):
             "start an empty scene, import that GLB, pack the images and save the scene as /work/candidate.blend.")
 
 
-def round_prompt(kind, budget_s, feedback, best, evidence, planned=False):
+def round_prompt(kind, budget_s, feedback, best, evidence, planned=False, mode="articulation"):
     """The prompt of a round after the first, kind 'repair' or 'replan' (controller.run_rounds). Each round is a new
     agent with no memory of the others, so the prompt carries the whole task: a repair is the articulation prompt
     with its budget sentence (BUDGET) set to budget_s, then repair_prompt.md; a replan is replan_prompt.md alone.
@@ -50,6 +50,15 @@ def round_prompt(kind, budget_s, feedback, best, evidence, planned=False):
     (_best); evidence: the work/ path of the last check's report; planned: the round before this repair was a
     planning round, whose plan (PLAN) was made from the same check.
     """
+    if mode == "refinement":
+        if kind == "replan":
+            return (f"This is a planning round with {budget_s:.0f} seconds. Do not edit the mesh or call helpers. "
+                    f"Inspect {evidence} and write a concrete physics repair plan to /work/plan.md. "
+                    "Preserve the object's photographed shape and scale.\n" + feedback)
+        return (load(mode) + f"\nThis is a physics repair round with a {budget_s:.0f} second budget. The deadline in "
+                "run_budget.json takes precedence. Continue from candidate.blend. Inspect the simulation evidence "
+                f"in {evidence}, fix the reported physical defects, then review and finish complete (or unchanged "
+                "if no repair is supported).\n" + _best(best) + "\nHost feedback:\n" + feedback)
     text = (HERE / ROUNDS[kind]).read_text(encoding="utf-8").format(
         budget_s=budget_s, feedback=feedback.rstrip("\n"), best=_best(best), evidence=evidence,
         plan=PLAN if planned else "")

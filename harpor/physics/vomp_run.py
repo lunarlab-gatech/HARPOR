@@ -135,6 +135,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--config", default="weights/vomp_1_1/inference.json")
     ap.add_argument("--links", help="folder of per-link GLBs: run on each instead of --glb")
+    ap.add_argument("--opaque-input", action="store_true", help="predict on an opaque copy; keep the source GLB intact")
     a = ap.parse_args()
     glbs = sorted(Path(a.links).glob("*.glb")) if a.links else []
     if a.links and not glbs:
@@ -148,7 +149,15 @@ def main():
     model = Vomp.from_checkpoint(config_path=a.config)
     t1 = time.time()
     if not a.links:
-        summary = run_glb(model, a.glb, out, a.config, load_s=t1 - t0)
+        glb = a.glb
+        if a.opaque_input:
+            from harpor.physics.align import make_opaque, read_glb, write_glb
+
+            out.mkdir(parents=True, exist_ok=True)
+            doc, binary = read_glb(glb)
+            glb = out / "input.glb"
+            write_glb(glb, make_opaque(doc), binary)
+        summary = run_glb(model, glb, out, a.config, load_s=t1 - t0)
         print(json.dumps(summary, indent=1))
         return
     done, skipped = [], {}

@@ -92,7 +92,7 @@ def warnings(m, d):
     return [n for n in names if not (n == "INERTIA" and m.nflex)]
 
 
-def execute(m, d, name, interval):
+def execute(m, d, name, interval, observe=None):
     """Run the joint name (and its actuator, of the same name) over interval [lower, upper] from rest, with the
     other actuators at 0 (see the module docstring). Returns (states, the ends [{target, q}], q's range seen)."""
     import mujoco
@@ -106,6 +106,8 @@ def execute(m, d, name, interval):
 
     def record():
         states.append({"t": float(d.time), "ctrl": float(ctrl), "q": float(d.qpos[adr])})
+        if observe:
+            observe(m, d, name)
 
     record()
     for target in (interval[1], interval[0], 0.0):
@@ -122,12 +124,12 @@ def execute(m, d, name, interval):
     return states, ends, seen
 
 
-def joint_record(m, d, joint, name, interval, D):
+def joint_record(m, d, joint, name, interval, D, observe=None):
     """(report entry, findings) of executing one hinge or slide. joint: its entry of mjcf.json joints; name: its
     joint and actuator."""
     link, hinge = joint["child"], joint["type"] == "revolute"
     tol, unit = (ANGLE_TOL, "rad") if hinge else (DIAG_TOL * D, "m")
-    states, ends, seen = execute(m, d, name, interval)
+    states, ends, seen = execute(m, d, name, interval, observe)
     errors = [abs(e["q"] - e["target"]) for e in ends]
     out = [finding("tracking", link, err, tol, f"q ends at {e['q']:.4g} {unit}, {err:.3g} {unit} from its target "
                                                f"{e['target']:.4g} {unit}")
@@ -156,7 +158,7 @@ def largest(field):
     return float(np.linalg.norm(field, axis=1).max())
 
 
-def press(m, d, flex, nodes, direction, target, cap, measure=largest):
+def press(m, d, flex, nodes, direction, target, cap, measure=largest, observe=None):
     """Press the nodes (indices into the flex's vertices) along direction from the current state: settle, a force per
     node that ramps to cap and stops rising once the largest residual reaches target, hold, release and settle (see
     the module docstring). measure: what of the residual field (N, 3) the target is for, by default its largest node
@@ -172,6 +174,8 @@ def press(m, d, flex, nodes, direction, target, cap, measure=largest):
     t0, rest = d.time, d.flexvert_xpos[adr:adr + num].copy()
     mujoco.mj_step(m, d, steps(m, SETTLE_S))
     P0 = d.flexvert_xpos[adr:adr + num].copy()
+    if observe:
+        observe(m, d, "soft")
     t, P, res, force, ends = [], [], [], [], {}
 
     def sample(f):
@@ -181,6 +185,8 @@ def press(m, d, flex, nodes, direction, target, cap, measure=largest):
         P.append(d.flexvert_xpos[adr:adr + num].copy())
         res.append(measure(residual(P[-1], P0)))
         force.append(f)
+        if observe and len(P) % 25 == 0:
+            observe(m, d, "soft")
 
     n, f = round(RAMP_S / SAMPLE_S), 0.0
     for k in range(1, n + 1):
@@ -232,7 +238,7 @@ def soft_findings(link, trace, rows, weights, D):
     return measures, out
 
 
-def soft_record(m, d, rec, npz, D):
+def soft_record(m, d, rec, npz, D, observe=None):
     """(report entry, findings) of pressing one soft link. rec: its entry of mjcf.json soft."""
     import mujoco
 
@@ -246,7 +252,8 @@ def soft_record(m, d, rec, npz, D):
         return entry, [finding("soft_untestable", link, why="no press node lies under its far face")]
     mujoco.mj_resetData(m, d)
     target, cap = TARGET * RESPONSE * D, CAP * rec["young"] * rec["pitch"] ** 2
-    trace = press(m, d, mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_FLEX, flex), b["press"], b["direction"], target, cap)
+    trace = press(m, d, mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_FLEX, flex), b["press"], b["direction"], target, cap,
+                  observe=(lambda m, d, _: observe(m, d, f"soft_{link}")) if observe else None)
     measures, out = soft_findings(link, trace, b["tets"][b["tet_of_vertex"]], b["weights"], D)
     if not np.isfinite(trace["P"]).all() or warnings(m, d):
         out.append(finding("unstable", link, warnings(m, d), [], "a node is not finite or MuJoCo warned"))
@@ -267,7 +274,7 @@ def runtime(m):
             "tolerance_angle_deg": float(np.degrees(ANGLE_TOL)), "tolerance_diag": DIAG_TOL}
 
 
-def run(glb, out, asset_sha, intervals=None):
+def run(glb, out, asset_sha, intervals=None, summary=None, observe=None):
     """The report of one GLB (see the module docstring). intervals: {link: [lower, upper]}, or None for the limits."""
     import mujoco
 
@@ -278,7 +285,10 @@ def run(glb, out, asset_sha, intervals=None):
         return {**report, "skipped": "the GLB has no hinge, slide or soft joint", "joints": [], "soft": [],
                 "findings": []}
     out.mkdir(parents=True, exist_ok=True)
-    (out / "summary.json").write_text(json.dumps({"median": {"density_kg_m3": DENSITY}}))
+    if summary is None:
+        (out / "summary.json").write_text(json.dumps({"median": {"density_kg_m3": DENSITY}}))
+    else:
+        shutil.copyfile(summary, out / "summary.json")
     shutil.rmtree(out / "mjcf", ignore_errors=True)
     mj = mjcf.build(glb, out / "summary.json", out / "mjcf", NAME, fixed_base=True, textures=False)
     built = time.time()
@@ -293,7 +303,7 @@ def run(glb, out, asset_sha, intervals=None):
         if link not in mj["actuators"] or (intervals is not None and link not in intervals):
             continue
         entry, found = joint_record(m, d, j, mj["actuators"][link]["name"],
-                                    j["range"] if intervals is None else intervals[link], D)
+                                    j["range"] if intervals is None else intervals[link], D, observe)
         executed.append(entry)
         findings += found
     pressed = []
@@ -302,7 +312,7 @@ def run(glb, out, asset_sha, intervals=None):
         problems = mjcf.check_binding(m, npz, glb)
         if problems:
             findings.append(finding("binding_mismatch", link, why="; ".join(problems)))
-        entry, found = soft_record(m, d, rec, npz, D)
+        entry, found = soft_record(m, d, rec, npz, D, observe)
         pressed.append(entry)
         findings += found
     return {**report, "runtime": runtime(m), "diagonal_m": D, "joints": executed, "soft": pressed,
@@ -315,12 +325,13 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--asset-sha", required=True, help="the candidate's sha256, which the report carries")
     ap.add_argument("--intervals", help="JSON {link: [lower, upper]} of the intervals to execute")
+    ap.add_argument("--summary", help="predicted material and inertial properties in the model's frame")
     a = ap.parse_args(argv)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     try:
         intervals = json.loads(Path(a.intervals).read_text()) if a.intervals else None
-        report = run(a.glb, out, a.asset_sha, intervals)
+        report = run(a.glb, out, a.asset_sha, intervals, summary=a.summary)
     except Exception as e:  # noqa: BLE001 - the caller reads the report, so every failure goes there
         report = {"asset_sha256": a.asset_sha, "error": f"{type(e).__name__}: {e}"}
     (out / "report.json").write_text(json.dumps(report, indent=1))

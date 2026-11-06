@@ -7,7 +7,7 @@
 
 const $ = (sel) => document.querySelector(sel);
 const ACTIVE = ["analyzing", "queued", "running"];
-const BUILD = ["extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "place", "propose", "parts", "agent", "align", "vomp",
+const BUILD = ["extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "vomp", "place", "propose", "parts", "vomp_parts", "agent", "align",
   "mjcf", "usd", "urdf", "turntable", "softvideo", "package"];
 const OPTIONAL = ["turntable", "softvideo"];  // steps.OPTIONAL: when it fails, the job still ends done
 // job.json "agent" (steps.AGENTS): the key it takes and the placeholder of the key field.
@@ -18,7 +18,7 @@ const VLM = { astra: RAN.codex, opus: RAN.claude };  // proposal.json "agent": t
 // What each stage does, shown muted next to its name.
 const STAGE_LABEL = { topics: "camera topics", frames: "frame analysis", extract: "extract frames", masks: "SAM 3 masks",
   prep: "prepare views", da3: "depth (Depth Anything 3)", lidar: "metric scale (LiDAR)", select: "view selection",
-  sam3d: "mesh (MV-SAM3D)", place: "pose and scale", propose: "part list", parts: "split into parts", agent: "agent refinement", align: "align upright", vomp: "materials (VoMP)",
+  sam3d: "mesh (MV-SAM3D)", place: "pose and scale", propose: "part list", parts: "split into parts", vomp_parts: "part materials (VoMP)", agent: "agent refinement", align: "align upright", vomp: "materials (VoMP)",
   mjcf: "MuJoCo model", usd: "USD", urdf: "URDF", turntable: "360 video", softvideo: "soft-part video",
   package: "results.zip" };
 // A stage's label; the agent's names its task.

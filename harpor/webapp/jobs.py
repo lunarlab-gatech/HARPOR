@@ -104,7 +104,8 @@ INPUTS = {"video": "a video", "rosbag": "a rosbag", "stray": "a Stray Scanner ca
 DERIVED = {"frames": ("frames/meta.json", "frames/thumbs", "frames/stamps.json", "frames/preview.mp4",
                       "frames/.tmp_preview.mp4"),
            "extract": ("frames/pool.json", "scene", "pool"), "lidar": ("pool/lidar.json", "lidar/check", "lidar/cloud"),
-           "select": ("selection.json", "run"), "propose": ("run/proposal.json",),
+           "select": ("selection.json", "run"), "vomp": ("run/vomp",), "vomp_parts": ("run/vomp_parts",),
+           "propose": ("run/proposal.json",),
            "parts": ("run/parts", "run/parts.glb", "run/parts.json"), "agent": ("agent",), "align": ("physics",),
            "turntable": ("turntable",), "softvideo": ("softvideo",), "package": ("results.zip",)}
 OLDER = "older than this stage"  # the note of a stage that a job folder of an earlier version has no record of

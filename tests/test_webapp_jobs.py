@@ -87,7 +87,7 @@ def test_commands_have_the_ice_environment():
                                   "J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n"
                                   "C=/storage/ice1/5/0/ali497/gator/gator_clone\n")
         assert ("export " + STAGE_A in argv[2]) == (s in ("prep", "da3", "sam3d", "place", "propose", "parts", "agent",
-                                                          "align", "turntable", "softvideo")), s
+                                                          "align", "vomp_parts", "turntable", "softvideo")), s
         assert env == {"PYTHONUNBUFFERED": "1"} and KEY not in argv[2]
     sc = {s: v[0][2] for s, v in scripts.items()}
     assert sc["masks"].endswith("\nexport HF_HOME=$G/.cache/huggingface\nrm -f \"$J/scene/sam3_coffee_cup/sam3.json\"\n"
@@ -105,7 +105,7 @@ def test_commands_have_the_ice_environment():
     opus = steps.command("agent", {**JOB, "agent": "opus"}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
     assert opus == sc["agent"][:-len("astra")] + "opus"
     assert "\n".join(VOMP) in sc["vomp"] and sc["vomp"].endswith(
-        'cd $G/VoMP && python $C/harpor/physics/vomp_run.py --glb "$J/physics/aligned.glb" --out "$J/physics"')
+        'cd $G/VoMP && python $C/harpor/physics/vomp_run.py --glb "$J/run/canonical.glb" --out "$J/run/vomp" --opaque-input')
     assert sc["topics"].endswith('$G/envs/web/bin/python -m harpor.webapp.video topics --job "$J"')
     assert sc["frames"].endswith('$G/envs/web/bin/python -m harpor.webapp.video analyze --job "$J"')
     assert sc["package"].endswith('$G/envs/web/bin/python -m harpor.webapp.jobs package --job "$J"')
@@ -152,10 +152,11 @@ def test_commands_have_the_ice_environment():
         '--proposal "$J/run/proposal.json" --out "$J/run/parts/sam3"\n'
         f'export {STAGE_A}\n{stage}vote --job "$J"\n{stage}split --job "$J" --sif $G/sif/harpor-agent.sif\n'
         f'{stage}finish --job "$J"')
-    # An articulated job's VoMP runs per link, into physics/vomp; a rigid job's command is as before.
-    assert steps.command("vomp", ART, ICE)[0][2] == sc["vomp"].replace(
-        '"$J/physics/summary.json"\n', '"$J/physics/summary.json" "$J/physics/vomp"\n') + ' --links "$J/physics/links"'
-    assert '"$J/physics/links"' not in sc["vomp"] and '"$J/physics/vomp"' not in sc["vomp"]
+    # Whole-object and per-part prediction are separate, mutually exclusive stages.
+    assert steps.command("vomp", ART, ICE)[0][2] == sc["vomp"]
+    assert 'prepare-parts --job "$J"' in sc["vomp_parts"]
+    assert sc["vomp_parts"].endswith('--links "$J/run/vomp_parts/links"')
+
 
 
 def test_masks_command_takes_a_noun_that_starts_with_a_dash(monkeypatch):
@@ -236,7 +237,7 @@ def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
     assert env["LIBRARY_PATH"] == f"{G}/envs/sam3d/targets/x86_64-linux/lib:{G}/envs/sam3d/lib"
     env, (ran, pwd) = run("vomp")
     assert ran == f"ran {G}/envs/vomp11/bin/python {G}/gator_clone/harpor/physics/vomp_run.py " \
-                  f"--glb {J}/physics/aligned.glb --out {J}/physics" and pwd == f"pwd {G}/VoMP"
+                  f"--glb {J}/run/canonical.glb --out {J}/run/vomp --opaque-input" and pwd == f"pwd {G}/VoMP"
     assert env["CUDA_HOME"] == env["CONDA_PREFIX"] == f"{G}/envs/vomp11"
     assert env["TORCH_EXTENSIONS_DIR"] == f"{G}/.cache/torch_extensions_vomp11" and env["TORCH_CUDA_ARCH_LIST"] == ""
     assert env["CPATH"] == f"{G}/envs/vomp11/targets/x86_64-linux/include" and env["HF_HOME"] == f"{G}/.cache/huggingface"
@@ -275,7 +276,7 @@ def test_config_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("WEBAPP_RUNS", str(tmp_path / "r"))
     monkeypatch.delenv("WEBAPP_FAKE")
     assert steps.config_from_env().runs == tmp_path / "r" and not steps.config_from_env().fake
-    assert [s["name"] for s in steps.STAGES if s["gpu"]] == ["masks", "da3", "sam3d", "parts", "agent", "vomp", "turntable",
+    assert [s["name"] for s in steps.STAGES if s["gpu"]] == ["masks", "da3", "sam3d", "vomp", "parts", "vomp_parts", "agent", "turntable",
                                                             "softvideo"]
 
 
@@ -956,7 +957,7 @@ def test_runner_key_file_lives_only_during_the_agent_stage(make_runner, tmp_path
     job_id, J = ready_job(cfg, auto_continue=True)
     runner.submit_build(job_id, KEY)
     job = wait(J, "done")
-    skipped = ("lidar", "propose", "parts", "turntable", "softvideo")  # no LiDAR, parts, 360 video or soft part
+    skipped = ("lidar", "propose", "parts", "vomp_parts", "turntable", "softvideo")  # no LiDAR, parts, 360 video or soft part
     assert all(job["stages"][s]["status"] == ("skipped" if s in skipped else "done") for s in ["frames", *jobs.BUILD])
     assert job["key_ok"] is False
     assert job["slug"] == "box" and job_id not in runner._keys
@@ -1769,6 +1770,7 @@ def test_agent_step_runs_a_fresh_refinement_session(tmp_path, monkeypatch):
         write_json(Path(root) / "result.json", r)
         return r
 
+    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
     monkeypatch.setattr(C, "run_container_session", container)
     r = agent_step.run(J, "/sif/agent.sif", J / "key.env")
     assert calls == [(J / "agent" / "s", "/sif/agent.sif", J / "key.env", 600.0)]
@@ -1809,6 +1811,7 @@ def test_agent_step_runs_an_articulation_session(tmp_path, monkeypatch, capsys):
         write_json(Path(root) / "result.json", r)
         return r
 
+    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
     monkeypatch.setattr(C, "run_container_session", container)
     r = agent_step.run(J, "/sif/agent.sif", J / "key.env")
     root = J / "agent" / "s"
@@ -1844,6 +1847,7 @@ def test_agent_step_prints_the_agents_text_on_clean_lines(tmp_path, monkeypatch,
         write_json(Path(root) / "result.json", r)
         return r
 
+    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
     monkeypatch.setattr(C, "run_container_session", container)
     agent_step.run(J, "/sif/agent.sif", J / "key.env")
     out = capsys.readouterr().out
@@ -1871,6 +1875,7 @@ def test_agent_step_redacts_a_key_that_cleaning_joins(tmp_path, monkeypatch, cap
         write_json(Path(root) / "result.json", r)
         return r
 
+    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
     monkeypatch.setattr(C, "run_container_session", container)
     agent_step.run(J, "/sif/agent.sif", J / "key.env")
     out = capsys.readouterr().out
@@ -1914,6 +1919,7 @@ def test_agent_step_runs_a_claude_session_for_opus(tmp_path, monkeypatch, capsys
         write_json(Path(root) / "result.json", r)
         return r
 
+    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
     monkeypatch.setattr(C, "run_container_session", container)
     r = agent_step.run(J, "/sif/agent.sif", J / "key.env", "opus")
     root = J / "agent" / "s"
@@ -2054,6 +2060,7 @@ def test_agent_step_publishes_the_evidence_of_its_rounds(tmp_path, monkeypatch, 
         write_json(Path(root) / "result.json", r)
         return r
 
+    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
     monkeypatch.setattr(C, "run_container_session", container)
     for value in (None, "/no/such/python -I", "'unclosed"):
         if value is None:
@@ -2127,6 +2134,7 @@ def test_agent_step_scrubs_the_key_from_the_result(tmp_path, monkeypatch, capsys
         write_json(Path(root) / "result.json", r)
         return r
 
+    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
     monkeypatch.setattr(C, "run_container_session", container)
     r = agent_step.run(J, "/sif/agent.sif", J / "key.env")
     out = capsys.readouterr().out
@@ -2162,6 +2170,7 @@ def test_agent_step_scrubs_every_key_of_a_shared_env_file(tmp_path, monkeypatch,
         write_json(Path(root) / "result.json", r)
         return r
 
+    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
     monkeypatch.setattr(C, "run_container_session", container)
     r = agent_step.run(J, "/sif/agent.sif", J / "key.env")
     out, saved = capsys.readouterr().out, (J / "agent" / "result.json").read_text()
@@ -2179,6 +2188,8 @@ def test_agent_step_sigterm_stops_the_agent(tmp_path):
         import sys, tempfile
         from harpor.agent import controller as C
         from harpor.webapp import agent_step
+        from harpor.agent import physics_review
+        physics_review.prepare = lambda *a, **k: None
         AGENT = [sys.executable, "-c", "import os, time; f = open('agent.pid', 'w'); f.write(str(os.getpid())); "
                  "f.close(); time.sleep(120)"]
         C.run_container_session = lambda root, sif, key_file, budget_s: C.run_session(
@@ -2243,8 +2254,8 @@ def test_fake_build_end_to_end(make_runner, tmp_path):
 
     runner.resume(job_id, "sam3d")
     job = wait(J, "done")
-    rigid = ("propose", "parts")  # a rigid object skips the parts stages, and a video the LiDAR
-    assert [s for s in steps.NAMES if job["stages"][s]["status"] != "done"] == ["topics", "lidar", "propose", "parts",
+    rigid = ("propose", "parts", "vomp_parts")  # a rigid object skips the parts stages, and a video the LiDAR
+    assert [s for s in steps.NAMES if job["stages"][s]["status"] != "done"] == ["topics", "lidar", "propose", "parts", "vomp_parts",
                                                                                 "turntable", "softvideo"]
     assert job["stages"]["turntable"]["note"] == "turned off" and not (J / "turntable").exists()
     assert job["stages"]["softvideo"]["note"] == "no soft part" and not (J / "softvideo").exists()
@@ -2304,7 +2315,7 @@ def test_fake_articulated_build_end_to_end(make_runner, tmp_path, mode, agent):
     job = wait(J, "done", "failed")
     assert job["status"] == "done", (job["error"], (J / "logs" / f"{job['error'].split(':')[0]}.log").read_text()[-3000:]
                                      if job["error"] else "")
-    skipped = {"topics", "lidar", "softvideo"} | ({"agent"} if agent == "none" else set()) | (
+    skipped = {"topics", "lidar", "vomp", "softvideo"} | ({"agent"} if agent == "none" else set()) | (
         {"turntable"} if mode != "vlm" else set())
     assert all(job["stages"][s]["status"] == ("skipped" if s in skipped else "done") for s in steps.NAMES), job["stages"]
     assert job["parts"]["mode"] == mode and job["parts"]["confirmed"] is (mode == "vlm_edit")

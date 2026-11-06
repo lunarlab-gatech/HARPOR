@@ -8,7 +8,7 @@ HARPOR (High-fidelity Articulated sim-Ready Object Reconstruction) turns one pho
 Stray Scanner capture of one object into a textured GLB and MJCF, USD and URDF models. It follows the
 two stages of GATOR (arXiv 2610.11215v1): Stage A generates a posed mesh from several views (here
 MV-SAM3D; we do not build GATOR's own generator), and Stage B is an LLM agent
-that repairs the mesh in Blender. VoMP then predicts the materials for physics. The web app runs
+that repairs the mesh in Blender. VoMP predicts materials before agent refinement: after MV-SAM3D for rigid objects, or per part after splitting. The web app runs
 every stage on PACE ICE or on a user's own GPU machine (note 10, Flow).
 
 ### Decisions
@@ -68,10 +68,10 @@ flowchart TB
     analyze["topics (a bag), frames, extract, masks (SAM 3), prep, da3 (Depth Anything 3)"]
     lidar["lidar: metric scale (optional, note 12)"]
     select["select: the views, then the review"]
-    stageA["sam3d (MV-SAM3D) and place (notes 2 and 4b)"]
+    stageA["sam3d, vomp (rigid), place (notes 2 and 4b)"]
     parts["propose and parts (articulated only, note 11)"]
     agent["agent: GPT-6-Astra or Claude Opus 5.5 in Blender (note 5)"]
-    physics["align, vomp, mjcf, usd, urdf (note 9)"]
+    physics["align, transfer materials, mjcf, usd, urdf (note 9)"]
     package["turntable (optional 360 video), softvideo (a soft part only), then package: results.zip"]
   end
   input --> analyze --> lidar --> select --> stageA --> parts --> agent --> physics --> package
@@ -596,6 +596,36 @@ leave the user's file as it is.
 
 ### 9. Physical properties: VoMP v1.1 (`harpor/physics/`)
 
+Current job order (2026-11-06): a rigid object runs `sam3d → vomp → place → agent`.
+An object with parts runs `sam3d → place → propose → parts → vomp_parts → agent`.
+The two VoMP stages are mutually exclusive. Rigid predictions use `run/canonical.glb`, with
+an opaque input copy, and live in `run/vomp/`. Per-part predictions use an upright copy of
+`run/parts.glb`, load the model once, and live in `run/vomp_parts/vomp/<link>/`.
+Their preparation transform is recorded in `run/vomp_parts/aligned.json`.
+
+`material_transfer.py` moves predictions into the placed world frame and then into the
+candidate or export frame. Final geometry is voxelized on the CPU, and each voxel inherits
+its nearest predicted material (restricted to its own link when possible). Mass, COM and
+inertia are recomputed. This spatial transfer is approximate for newly created geometry.
+Stage D does not run VoMP: `align` writes `physics/summary.json` through this transfer.
+Rerunning the agent or final exports preserves early material predictions; rerunning a
+split invalidates its per-part predictions.
+
+All web-app agent sessions now have physics supervision and can enter repair rounds,
+including rigid objects and multipart objects without moving-part requirements.
+`agent/physics_review.py` snapshots the predictions into host-owned session files and
+provides their summary to the agent. Existing joint checks use these inertials instead of
+placeholder density. `physics/supervise.py` makes a gravity-and-floor settling test plus
+joint/soft tests, records GIF clips and contact sheets, and supplies material estimates,
+measurements and reference photos to the job's VLM. A failed judgment feeds repair;
+unavailable simulation or VLM evidence is inconclusive, never a pass. Mechanical failures
+cannot be overridden by the visual judgment. Candidate hashes bind the judgment to the
+mesh that was tested. Soft parts retain the selected material-table parameters, shown to
+the judge alongside VoMP's estimates. These checks establish plausibility, not measured
+real-world mass or stiffness. Linux headless rendering uses `MUJOCO_GL=egl` by default.
+
+The commands below also remain available for standalone prediction and export workflows.
+
 The agent's GLB is not ready for a simulator. MuJoCo 3.16.0 loads only STL, OBJ and MSH meshes and
 PNG textures, and it needs one mass and inertia per body. VoMP v1.1 takes the GLB directly and
 predicts Young's modulus E (Pa), Poisson's ratio nu and density rho (kg/m^3) per voxel of a 64^3
@@ -699,7 +729,7 @@ The app, HARPOR (High-fidelity Articulated sim-Ready Object Reconstruction), tak
 one rosbag or one Stray Scanner capture of one object and runs the whole pipeline: frames, SAM 3
 masks, Depth Anything 3, the metric scale from LiDAR (optional, note 12), MV-SAM3D, the placement
 fit, the part list and the part split (for an articulated object only, note 11), the agent
-(GPT-6-Astra or Claude Opus 5.5), alignment, VoMP v1.1, MJCF, USD and URDF.
+(GPT-6-Astra or Claude Opus 5.5), alignment and transfer of the earlier VoMP predictions, MJCF, USD and URDF.
 
 **Start it.** Run `export HARPOR_SSH_HOST=<user>@<login node>` once in the Mac's shell profile.
 `HARPOR_SSH_SOCKET` (default `~/.ssh/cm-ice`) and `HARPOR_REMOTE_CODE` (default `~/scratch/gator/gator_clone`) are
@@ -784,9 +814,9 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
 5. The review page shows the picks with their SAM 3 overlays, every candidate's status and a
    top-down ring of the cameras. The user can lock or exclude frames, choose another SAM 3
    instance or "not in frame", and set view 0. Then Build.
-6. MV-SAM3D and `place`. For an articulated object, `propose` then writes the part list
+6. MV-SAM3D, then `vomp` for a rigid object, then `place`. For an articulated object, `propose` then writes the part list
    (`run/proposal.json`), and `parts` runs the part masks, the face vote, the split in Blender and
-   `parts.json` (note 11). A rigid object skips both stages. In the mode "VLM, then I check", the job
+   `parts.json` (note 11), followed by `vomp_parts` on each part. A rigid object skips these part stages. In the mode "VLM, then I check", the job
    stops after `propose` with the status `review`, whatever the pause setting says, and shows the list.
    Its "Build" confirms the list as it is or as edited, and the build goes on from `parts`. A retry
    after a cancel stops at the list again.
@@ -800,7 +830,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    "glb_rule" gives the reason. `results.zip` still holds the agent's GLB as `refined.glb`. `align` takes up from a plane fitted under the object in view 0's DA3 points, or
    from the mean camera up when no plane fits, uses `--x footprint`, and adds `--opaque` when the GLB
    has transmission or alpha. For an articulated object, `align` also writes one GLB per link. Then
-   VoMP (once per link for an articulated object), MJCF, USD, URDF, then the 360 video when the job
+   material transfer recomputes final mass and inertia without rerunning VoMP, then MJCF, USD, URDF, then the 360 video when the job
    asked for one (the `turntable` stage; a failure warns), then the soft-part video when the MuJoCo
    model has a soft part (the `softvideo` stage, note 11; a failure warns), then `results.zip`.
 8. The 360 video (`harpor/webapp/turntable.py`): the GLB that physics used
@@ -1030,7 +1060,7 @@ and SAM 3 masks), `pool/` (prep and DA3 on
 the candidates), `selection.json`, `run/` (the MV-SAM3D run of the picks), `agent/`, `physics/`,
 `logs/` and `results.zip`. An articulated job adds `run/proposal.json`, `run/parts/` (the part masks
 in `sam3/`, `faces.npz`, `vote.json`, `split_report.json` and `split.log`), `run/parts.glb`,
-`run/parts.json`, `physics/links/` (one GLB per link) and `physics/vomp/<link>/` (VoMP per link).
+`run/parts.json`, `physics/links/` (one GLB per link) and `run/vomp_parts/vomp/<link>/` (VoMP per link), with transferred final records in `physics/vomp/<link>/`.
 Every job gets `physics/urdf/`. A rosbag job's `frames/` adds `stamps.json` (every frame's header
 stamp and log time in ns). A Stray job unpacks its zip into `video/stray/` (`export/` and
 `.unpacked.json`). A job with LiDAR adds `pool/lidar.json` (the scale, note 12) and `lidar/`:
@@ -1060,7 +1090,7 @@ Decisions (2026-10-20, user):
   through the Anthropic API. The web app offers "VLM" or "VLM, then I check". With agent none there
   is no VLM, so the user types the parts.
 - The export is MJCF and USD with links and joints, plus a URDF.
-- VoMP runs once per part, with the model loaded once. A rigid job keeps the single whole-object run.
+- VoMP runs once per part after the split and before the agent, with the model loaded once. A rigid job runs once immediately after MV-SAM3D.
 - The agent's budget for an articulated session is 900 s. Refinement keeps 600 s.
 - Articulation is an optional toggle per job. With it off, every stage and output stays as it was,
   except that every job now also gets a URDF.

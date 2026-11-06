@@ -638,10 +638,11 @@ def build_candidate(root, blender, timeout=300):
 
 
 def has_rounds(root, mode):
-    """Whether a session runs in rounds: an articulation whose control/parts.json has a requirement of status
-    found. Any other session is one round, as before, so a job with nothing to check spends no repairs."""
-    return mode == "articulation" and any(r.get("status") == "found"
-                                          for r in validate.requirements(Path(root) / "control"))
+    """Rounds for sessions with physics supervision, or an articulation with a found requirement."""
+    from harpor.agent.physics_review import enabled
+
+    return enabled(Path(root) / "control") or (mode == "articulation" and any(
+        r.get("status") == "found" for r in validate.requirements(Path(root) / "control")))
 
 
 def next_round(rounds):
@@ -720,7 +721,8 @@ def store_candidate(root, n, kind, pick):
     an earlier one, so that each keeps its own verdict. Returns the record, or None for fallback_original and
     unchanged, which are no agent's GLB."""
     root = Path(root)
-    if pick["source"] == "fallback_original" or pick["verdict"] == "unchanged":
+    mode = (read_json(root / "control/manifest.json") or {}).get("mode", "articulation")
+    if pick["source"] == "fallback_original" or (pick["verdict"] == "unchanged" and mode != "refinement"):
         return None
     data = tools.read_file(pick["glb"])
     folder = root / "control" / "candidates"
@@ -756,13 +758,20 @@ def check_round(root, n, kind):
     when select_deliverable failed, and version when nothing was stored."""
     root = Path(root)
     control, errors, report = root / "control", [], None
-    pick, rejected = _host_step(errors, select_deliverable, root, "articulation") or (None, [])
+    mode = (read_json(control / "manifest.json") or {}).get("mode", "articulation")
+    pick, rejected = _host_step(errors, select_deliverable, root, mode) or (None, [])
     cand = pick and _host_step(errors, store_candidate, root, n, kind, pick)
     glb = root / cand["glb"] if cand else None
     if pick and pick["verdict"] == "unchanged":  # root/original.glb, the host's own copy
         glb = pick["glb"]
     if glb:
         report = _host_step(errors, validate.check, glb, control, root / "original.glb", pin_ranges=True)
+        from harpor.agent import physics_review
+
+        if report is not None and physics_review.enabled(control):
+            judgment = _host_step(errors, physics_review.check, root, glb, report)
+            if judgment is not None:
+                report = physics_review.apply(report, judgment)
     folder = _host_step(errors, tools.real_dir, root / "work", "evidence")
     final = validate.round_report(control, report, pick, errors)
     if folder is not None and not _written(errors, folder / f"round_{n:02d}.json", final):
@@ -918,7 +927,9 @@ def select_candidate(root, last=None):
     best = ranked[0]
     pick = dict(source=best["source"], glb=root / best["glb"])
     if rank(best)[0]:
-        pick.update(verdict="articulated", reason=best["reason"], limitations=best["limitations"])
+        mode = (read_json(root / "control/manifest.json") or {}).get("mode", "articulation")
+        verdict = "articulated" if mode == "articulation" else best["agent_verdict"]
+        pick.update(verdict=verdict, reason=best["reason"], limitations=best["limitations"])
     else:
         pick.update(verdict="needs_review", **review_note(root, best))
     selected = {"version": best["version"], "verdict": pick["verdict"], "why": why_first(ranked), "rank": order,
@@ -950,6 +961,7 @@ def run_rounds(root, cmd, env, blender, sock_dir, watchdog):
     rounds and check_round's {n: end}."""
     root = Path(root)
     runs, rounds, ends, kind, prompt, last = [], [], {}, "build", None, None
+    mode = (read_json(root / "control/manifest.json") or {}).get("mode", "articulation")
     try:
         while kind:
             n = len(runs) + 1
@@ -962,7 +974,11 @@ def run_rounds(root, cmd, env, blender, sock_dir, watchdog):
             if kind:
                 prompt = prompts.round_prompt(kind, ROUND_BUDGET_S[kind], validate.feedback(ends[last]["report"]),
                                               best_candidate(root), f"evidence/round_{last:02d}.json",
-                                              planned=rounds[-1]["kind"] == "replan")
+                                              planned=rounds[-1]["kind"] == "replan", mode=mode)
+                from harpor.agent.physics_review import GUIDANCE, enabled
+
+                if enabled(root / "control"):
+                    prompt += GUIDANCE
     except SystemExit as e:
         if not isinstance(e.code, str) or not runs:
             raise

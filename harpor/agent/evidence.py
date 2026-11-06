@@ -80,7 +80,8 @@ def candidate(cand, requirements):
     mechs, surface = mechanisms(report), report.get("surface") or {}
     return {**{k: cand.get(k) for k in CANDIDATE_KEYS}, "runtime": (report.get("sim") or {}).get("runtime") or {},
             "mechanisms": mechs, "entities": entities(report), "gamma": gamma(records, mechs, surface),
-            "surface": surface, "records": records, "findings": report.get("findings") or [],
+            "surface": surface, "records": records, "physics_review": report.get("physics_review"),
+            "findings": report.get("findings") or [],
             "errors": report.get("errors") or [], "scope": report.get("scope"), "outcome": report.get("outcome")}
 
 

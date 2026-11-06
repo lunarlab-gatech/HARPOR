@@ -8,11 +8,14 @@ files with mass and materials filled in. If the object has moving parts, like a 
 out and an AI agent adds the joints. It then tests the joints in MuJoCo and gives the agent another try when a test
 fails. A part can also be soft, like a seat cushion, so it dents in MuJoCo.
 
-![HARPOR pipeline: a video becomes a posed mesh (A), an object with parts is split into pieces (B), an optional agent refines the mesh or adds joints and is checked in MuJoCo (C), then materials and the MJCF, USD and URDF files are written (D)](docs/pipeline.svg)
+![HARPOR pipeline: a video becomes a posed mesh (A), an object with parts is split into pieces (B), an optional agent refines the mesh or adds joints and is checked in MuJoCo (C), materials are estimated after generation (A) or splitting (B), and simulation files are written (D)](docs/pipeline.svg)
 
-HARPOR finds the object in the video and builds a mesh in the right pose (A). It splits an object with parts into
-pieces (B). An optional agent working in Blender cleans up the mesh or adds the joints, and a check sends it back
-when something fails (C). Last, HARPOR estimates the materials and writes the simulation files (D).
+HARPOR finds the object in the video and builds a mesh in the right pose (A). VoMP estimates a rigid object's
+materials immediately after MV-SAM3D generates it. For an object with parts, HARPOR first splits the mesh (B),
+then runs VoMP on each part. An optional agent in Blender refines the mesh or adds joints (C). MuJoCo tests the
+predicted physics, and a VLM judges simulation frames against the photos; failures feed repair rounds.
+Finally, HARPOR transfers the estimates to the final geometry, recomputes mass and inertia, and exports the
+simulation files (D).
 
 The soft parts and the repair rounds have only run in tests so far, not on a real object.
 

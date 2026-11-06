@@ -168,19 +168,19 @@ def pick_glb(job_dir):
                                                  if r else "no agent result")
 
 
-def align_job(job_dir):
+def align_job(job_dir, prepare_parts=False):
     from harpor.physics import align
     from harpor.webapp import steps
 
     job_dir = Path(job_dir)
     f = job_dir / "job.json"
     links = steps.articulated(json.loads(f.read_text()) if f.is_file() else {})
-    glb, rule = pick_glb(job_dir)
+    glb, rule = (job_dir / "run/parts.glb", "Stage B split parts") if prepare_parts else pick_glb(job_dir)
     if not glb.exists():
         raise SystemExit(f"{glb} is missing; run the sam3d and place stages first")
     hint, info = up_hint(job_dir / "run")
     opaque = needs_opaque(glb)
-    out = job_dir / "physics"
+    out = job_dir / ("run/vomp_parts" if prepare_parts else "physics")
     out.mkdir(exist_ok=True, mode=0o700)
     up = {"hint": np.round(hint, 6).tolist(), "info": info, "glb": str(glb), "glb_rule": rule, "opaque": opaque}
     (out / "up.json").write_text(json.dumps(up, indent=1))
@@ -192,11 +192,19 @@ def align_job(job_dir):
 
 
 def main(argv=None):
+    from harpor.physics.material_transfer import transfer_job
+
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="step", required=True)
     sub.add_parser("align").add_argument("--job", required=True, help="job folder")
+    sub.add_parser("prepare-parts").add_argument("--job", required=True, help="job folder")
     a = ap.parse_args(argv)
+    if a.step == "prepare-parts":
+        align_job(a.job, prepare_parts=True)
+        return
+    (Path(a.job) / "physics/summary.json").unlink(missing_ok=True)
     align_job(a.job)
+    transfer_job(a.job)
 
 
 if __name__ == "__main__":

@@ -52,7 +52,7 @@
 </ul>
 <p>Each job builds one object from one capture. The build picks sharp frames, masks the object with SAM 3, estimates
   depth with Depth Anything 3 (DA3), chooses the views, makes a mesh with MV-SAM3D and fits it to the masks. An agent
-  then refines the mesh or sets the joints, and VoMP predicts the materials. <a href="#status">Job status and the
+  then refines the mesh or sets the joints. VoMP predicts materials before refinement: immediately after mesh generation for a rigid object, or after the split for an object with parts. <a href="#status">Job status and the
   log</a> lists every stage.</p>
 </section>
 
@@ -135,12 +135,13 @@
     <tr><td><code>lidar</code></td><td>Finds the metric scale from LiDAR.</td><td></td></tr>
     <tr><td><code>select</code></td><td>Chooses the views.</td><td></td></tr>
     <tr><td><code>sam3d</code></td><td>Makes the mesh with MV-SAM3D.</td><td>GPU</td></tr>
+    <tr><td><code>vomp</code></td><td>Predicts whole-object materials with VoMP (rigid objects).</td><td>GPU</td></tr>
     <tr><td><code>place</code></td><td>Fits the mesh's pose and scale to the masks.</td><td></td></tr>
     <tr><td><code>propose</code></td><td>Lists the parts of an articulated object.</td><td></td></tr>
     <tr><td><code>parts</code></td><td>Splits the mesh into parts.</td><td>GPU</td></tr>
+    <tr><td><code>vomp_parts</code></td><td>Predicts materials for each split part with VoMP.</td><td>GPU</td></tr>
     <tr><td><code>agent</code></td><td>The agent refines the mesh or sets the joints.</td><td>GPU</td></tr>
-    <tr><td><code>align</code></td><td>Turns the mesh upright.</td><td></td></tr>
-    <tr><td><code>vomp</code></td><td>Predicts the materials with VoMP.</td><td>GPU</td></tr>
+    <tr><td><code>align</code></td><td>Turns the mesh upright and transfers materials to recompute mass and inertia.</td><td></td></tr>
     <tr><td><code>mjcf</code></td><td>Builds the MuJoCo model.</td><td></td></tr>
     <tr><td><code>usd</code></td><td>Builds the USD model.</td><td></td></tr>
     <tr><td><code>urdf</code></td><td>Builds the URDF model.</td><td></td></tr>
@@ -682,8 +683,11 @@ time_offset_s: 0.0</pre>
 
 <section id="physics">
 <h2>Mass and materials</h2>
-<p>VoMP predicts the material of every occupied voxel of the aligned mesh, on a 64³ grid. An articulated object puts
-  each link on its own grid. A link with no VoMP result, such as a thin lid with no occupied voxel, gets its collision
+<p>VoMP predicts materials on a 64³ grid before agent refinement. A rigid object runs immediately after
+  MV-SAM3D; an object with parts runs once per split part after stage B, each on its own grid.
+  Later mesh edits reuse these predictions: each final voxel inherits the nearest predicted material,
+  within its own part when that part still exists. Mass and inertia are recomputed from the final geometry.
+  New geometry inherits nearby materials; VoMP does not run again in stage D. A link with no VoMP result, such as a thin lid with no occupied voxel, gets its collision
   hulls filled at the object's median density when the parts have joints. When they have none, it is left out.</p>
 <dl>
   <dt>Mass</dt>
@@ -709,6 +713,14 @@ time_offset_s: 0.0</pre>
 </dl>
 <p>The three material rows are medians of VoMP's prediction over the object's voxels. For an articulated object, the
   voxels of all links count, each by its volume.</p>
+<h3>Physics review during refinement</h3>
+<p>Each candidate uses the earlier VoMP estimates in MuJoCo. The host records settling and stability under
+  gravity, joint motion, and soft-part deformation where applicable. The VLM compares simulation frames,
+  material and mass estimates, and the original photo. A failed judgment feeds a repair round; missing
+  evidence or an unavailable judge cannot pass. The best verified candidate is preferred.</p>
+<p>The host keeps simulation GIF clips and contact sheets with the session evidence. A visual judgment
+  checks plausibility; a photo cannot establish an exact mass or stiffness. Soft parts still use their
+  selected foam, gel or rubber simulation parameters, which the judge also sees.</p>
 </section>
 
 <section id="downloads">
@@ -787,7 +799,7 @@ time_offset_s: 0.0</pre>
     fitted to the SAM 3 masks, and the metric scale. Its check gives each view's mask IoU and how close view 0's DA3
     points lie to the mesh.</dd>
   <dt><code>summary.json</code></dt>
-  <dd>VoMP's summary of the aligned mesh: the voxel counts, the median and the 5th to 95th percentile of Young's
+  <dd>The final physics summary, using transferred VoMP predictions: the voxel counts, the median and the 5th to 95th percentile of Young's
     modulus, Poisson ratio and density, and the mass, center of mass and inertia of the rigid body. For an articulated
     object it adds each link's numbers and the links that VoMP could not voxelize.</dd>
   <dt><code>lidar.json</code></dt>

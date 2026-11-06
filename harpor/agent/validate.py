@@ -94,10 +94,10 @@ SCOPE = {  # paper A.3: local repairs, structural replanning, or nothing an agen
     "invalid_joints": STRUCTURAL,
     "rest_collision": STRUCTURAL, "axis_blocked": STRUCTURAL, "surface_identity": STRUCTURAL,
     "soft_no_support": STRUCTURAL, "soft_no_response": STRUCTURAL, "soft_no_recovery": STRUCTURAL,
-    "soft_untestable": NONE, "sim_unavailable": NONE}
+    "soft_untestable": NONE, "sim_unavailable": NONE, "physics_unassessed": NONE, "physics_implausible": LOCAL}
 # the test could not be done: the requirement is inconclusive, not failed
 INCONCLUSIVE = ("compile_error", "sim_timeout", "sim_unavailable", "clearance_missing", "soft_untestable",
-                "validation_error")
+                "validation_error", "physics_unassessed")
 LABELS = (STRUCTURAL, LOCAL, NONE, "report only")  # the order of findings in feedback
 
 
@@ -223,6 +223,13 @@ def run_sim(folder, doc, binary, joints, sha, intervals, deadline):
         return {"code": "sim_timeout", "error": "the other checks used all of the check's time"}
     cmd = [*python, "-m", "harpor.physics.sim_check", "--glb", str(model), "--out", str(out), "--asset-sha", sha,
            "--intervals", str(file)]
+    from harpor.agent import physics_review
+
+    control = folder.parent.parent
+    if physics_review.enabled(control):
+        summary = physics_review.simulation_summary(control, model, folder / "properties")
+        cmd += ["--summary", str(summary)]
+        left = max(0.01, deadline - time.time())
     with open(folder / "sim.log", "w") as log:
         try:
             code = tools._run(cmd, log, left, cwd=REPO, env={**os.environ, "PYTHONPATH": str(REPO),
@@ -502,15 +509,16 @@ def assess(requirements, report):
     return {"records": records, "findings": findings, "scope": scope(findings), "outcome": "pass" if ok else "fail"}
 
 
-def _not_finished(pick, findings):
+def _not_finished(pick, findings, expected="articulated"):
     """The why of not_finished: how the round handed off its pick, with the agent's reason or open defect, and what
     is open."""
     how = (f"the round finished as {pick['verdict']}" if pick["source"] == "finish" else
            f"the round ended without finish, so its newest {pick['source']} was taken")
     if pick["source"] != "export" and pick.get("reason"):  # an export's reason is the controller's
         how += f": {pick['reason']}"
+    review = "review_articulation" if expected == "articulated" else "review"
     return how + ("; the other findings are open" if any(counts(f) for f in findings) else
-                  "; the checks passed, so review it with review_articulation and finish articulated")
+                  f"; the checks passed, so review it with {review} and finish {expected}")
 
 
 def round_report(control, report, pick, errors=()):
@@ -525,12 +533,14 @@ def round_report(control, report, pick, errors=()):
         report = {"version": 1, "sha256": None, "surface": {}, "errors": [], "records": [
             record(r) for r in requirements(control)], "findings": [], "outcome": "fail"}
     added = [finding("validation_error", why=e) for e in errors]
+    refinement = (read_json(Path(control) / "manifest.json") or {}).get("mode") == "refinement"
+    expected = "complete" if refinement else "articulated"
     if pick is None or pick["source"] == "fallback_original":
         added.append(finding("no_candidate", why="the round left no valid GLB: no finish, checkpoint or export that "
                                                  "passes the controller's checks"))
-    elif pick["verdict"] != "articulated":
-        added.append(finding("not_finished", measured=pick["verdict"], expected="articulated",
-                             why=_not_finished(pick, report["findings"] + added)))
+    elif pick["verdict"] not in (("complete", "unchanged") if refinement else ("articulated",)):
+        added.append(finding("not_finished", measured=pick["verdict"], expected=expected,
+                             why=_not_finished(pick, report["findings"] + added, expected)))
     findings = report["findings"] + added
     ok = report["outcome"] == "pass" and not added
     return {**report, "findings": findings, "scope": scope(findings), "outcome": "pass" if ok else "fail"}

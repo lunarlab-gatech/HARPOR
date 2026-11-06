@@ -136,7 +136,7 @@ def mode(job_dir, job):
 
 
 def run(job_dir, sif, key_file, agent="astra"):
-    from harpor.agent import controller
+    from harpor.agent import controller, physics_review
     from harpor.stage_a import mvsam3d
 
     J = Path(job_dir)
@@ -162,6 +162,7 @@ def run(job_dir, sif, key_file, agent="astra"):
                                source=source(job["prompt"], len(views), steps.source(job)["kind"], parts is not None),
                                metric=True, original=original, parts=parts, agent=AGENTS[agent],
                                effort=EFFORT.get(agent))
+    physics_review.prepare(root, J, key_file, agent)
     if controller.has_rounds(root, kind):
         check_mujoco()
     try:
