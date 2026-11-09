@@ -10,8 +10,8 @@ align may make aligned.glb opaque for VoMP. Blender runs in the agent's SIF, in 
 J/turntable, the GLB (read-only) and the Blender scripts (read-only), for at most RENDER_TIMEOUT_S. It writes
 FRAMES PNG frames of SIDE px into J/turntable/frames: one turn, seen from ELEVATION_DEG above, with the long side
 toward the camera in frame 1. Then J/turntable/render.json. Blender's arguments are J/turntable/args.json, and
-its log J/turntable/blender.log. --blender CMD (split like a shell) replaces the container and Blender; fake mode
-and the tests pass the fake Blender of harpor.agent.fake_agent.
+its log J/turntable/blender.log. --blender CMD (split like a shell) replaces the container and Blender; the tests pass the
+fake Blender of harpor.agent.fake_agent.
 
 encode makes J/turntable/turntable.mp4 from the frames with PyAV, as video.py makes the preview: H.264 (libx264,
 yuv420p, crf CRF, preset veryfast, a keyframe every 2 s) in MP4 with the index first, at FPS fps, so the video is

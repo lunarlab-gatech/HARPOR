@@ -730,7 +730,7 @@ def test_a_soft_part_passes_align_urdf_and_usd_as_a_rigid_link(tmp_path, monkeyp
     from harpor.physics import align, urdf, usd
     from harpor.physics.mjcf import build as build_mjcf
     from harpor.physics.mjcf import check as check_mjcf
-    from harpor.webapp.fake_steps import usd_links
+    from fake_steps import usd_links
 
     glb, summary = soft_cushion_chest(tmp_path)
     (tmp_path / "links").mkdir()

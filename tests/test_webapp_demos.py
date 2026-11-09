@@ -69,11 +69,11 @@ def hand_demo(folder, name="office-chair", title="Office chair", order=0, **spec
 
 
 @pytest.fixture(scope="module")
-def job(tmp_path_factory):
+def job(tmp_path_factory, fake_stages_module):
     """A finished fake job: an articulated office chair with the agent opus (so it has links and a joint) and the 360
     video. (job folder, the job as GET /api/jobs/{id} gives it, replies for app.js: its JSON files by URL)."""
     tmp = tmp_path_factory.mktemp("demojob")
-    cfg = steps.Config(G=tmp / "G", runs=tmp / "runs", fake=True)
+    cfg = steps.Config(G=tmp / "G", runs=tmp / "runs")
     with TestClient(server.make_app(cfg, TOKEN, key_dir=tmp / "keys")) as c:
         login(c)
         job_id = uploaded(c, tmp)

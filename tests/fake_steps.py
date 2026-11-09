@@ -1,6 +1,10 @@
-"""Stand-ins for the stages of a web-app job, so the whole app runs on a Mac without GPUs (WEBAPP_FAKE=1).
+"""Stand-ins for the stages of a web-app job, so the tests run whole jobs without GPUs or the GPU envs.
 
-    python -m harpor.webapp.fake_steps STAGE --job J [--key-file F] [--agent astra|opus]
+    python tests/fake_steps.py STAGE --job J [--key-file F] [--agent astra|opus]
+
+The fake_stages fixture (conftest.py) puts command in place of steps.command and ask_provider in place of
+jobs.ask_provider, and tests/fake_launch.py does the same for a test that starts the server or the terminal command
+as a process of its own.
 
 Each stage writes the files its real command writes (steps.py), in a second or two, and prints a
 few log lines and PROGRESS lines. The scene is synthetic and ignores the video's pixels: a box of
@@ -46,6 +50,7 @@ import importlib.util
 import json
 import re
 import runpy
+import shlex
 import shutil
 import signal
 import stat
@@ -56,6 +61,8 @@ from pathlib import Path
 import numpy as np
 
 from harpor.fileio import write_json
+
+ROOT = Path(__file__).resolve().parents[1]  # the repo, which the stand-ins import harpor from
 
 BOX_LO, BOX_HI = np.array([-0.15, -0.2, -0.1]), np.array([0.15, 0.0, 0.1])  # world: y down, floor at y = 0
 TARGET = np.array([0.0, -0.1, 0.0])
@@ -71,6 +78,28 @@ FAKE_PARTS = [{"name": "body", "parent": None, "joint": "fixed"},
               {"name": "lid", "parent": "body", "joint": "revolute", "count": 1,
                "axis_hint": "a hinge along the back top edge; the lid opens upward"}]
 FAKE_BLENDER = [sys.executable, "-m", "harpor.agent.fake_agent", "--blender"]  # the videos' Blender
+
+
+def command(stage, job, cfg, key_file=None):
+    """steps.command for the tests: (argv, cwd, env additions) that run this file's stand-in of stage. It refuses
+    what steps.command refuses: an unknown stage, and a stage that needs the key file (steps.needs_key) without one."""
+    from harpor.webapp import steps
+
+    if stage not in steps.NAMES:
+        raise ValueError(f"unknown stage {stage!r}")
+    key = steps.needs_key(stage, job)
+    if key and key_file is None:
+        raise ValueError(f"the {stage} stage needs the key file")
+    q = shlex.quote
+    script = f"exec {q(sys.executable)} {q(str(Path(__file__).resolve()))} {stage} --job {q(str(Path(cfg.runs) / job['id']))}"
+    if key:
+        script += f" --key-file {q(str(key_file))} --agent {steps.agent(job)}"
+    return ["bash", "-c", script], str(ROOT), {"PYTHONUNBUFFERED": "1", "PYTHONPATH": str(ROOT)}
+
+
+def ask_provider(key, agent):
+    """jobs.ask_provider for the tests: every key that passes jobs.check_key's own checks passes, with no request."""
+    return True, "key accepted (test)"
 
 
 def pace(n=4):

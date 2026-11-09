@@ -19,20 +19,7 @@ simulation files (D).
 
 The soft parts and the repair rounds have only run in tests so far, not on a real object.
 
-## Try it
-
-You can try the interface on a laptop without a GPU. In fake mode, each stage runs a quick stand-in:
-
-```bash
-git clone https://github.com/lunarlab-gatech/HARPOR.git && cd HARPOR
-python3.12 -m venv .venv && .venv/bin/pip install fastapi uvicorn httpx numpy scipy pillow av rosbags pyyaml trimesh
-.venv/bin/python -m harpor.webapp --fake --runs ./runs --host 127.0.0.1 --port 8765
-```
-
-Open the link it prints, then add a short video. The Help page explains every setting. A standalone static demo
-gallery can be built separately; see [docs/public_site.md](docs/public_site.md).
-
-## Real runs
+## Install
 
 You need a Linux x86_64 machine with an NVIDIA GPU from Ampere to Hopper (RTX 30xx/40xx, A100, A6000, L40S,
 H100/H200) and a driver for CUDA 13.0 or newer. Blackwell cards (RTX 50xx, B200) don't work yet. You also need Hugging
@@ -90,6 +77,14 @@ python -m harpor.webapp.run cup.mp4 --prompt mug --agent opus      # without doc
 
 - [docs/build_plan.md](docs/build_plan.md) explains how HARPOR works, and [docs/research.md](docs/research.md) has the
   research notes.
-- To run the tests: `.venv/bin/pip install pytest "anthropic==1.15.0" rtree && .venv/bin/python -m pytest -q tests`.
+- The tests need no GPU. They run whole jobs with stand-in stages (`tests/fake_steps.py`):
+
+  ```bash
+  python3.12 -m venv .venv
+  .venv/bin/pip install pytest fastapi uvicorn httpx numpy scipy pillow av rosbags pyyaml trimesh "anthropic==1.15.0" rtree
+  .venv/bin/python -m pytest -q tests
+  ```
+
   Tests that need a package you don't have are skipped.
+- A standalone static demo gallery can be built separately; see [docs/public_site.md](docs/public_site.md).
 - HARPOR's code is MIT licensed ([LICENSE](LICENSE)). SAM 3, SAM 3D Objects and MV-SAM3D keep their own SAM License.

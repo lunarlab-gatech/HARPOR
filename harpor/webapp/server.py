@@ -4,17 +4,14 @@ views, build a simulation-ready object.
 Runs in envs/web (fastapi, uvicorn, av, numpy, pillow, scipy, rosbags) on the GPU machine, from the repo
 root (start_slurm.sh starts it there, inside a Slurm job):
 
-    python -m harpor.webapp [--runs DIR] [--host 127.0.0.1] [--port 0] [--fake]
-                           [--demos DIR]
+    python -m harpor.webapp [--runs DIR] [--host 127.0.0.1] [--port 0] [--demos DIR]
 
 It makes a login token, writes ~/.config/harpor/webapp.json (0600: node, port, token, url_path, and
 slurm_job and slurm_node from SLURM_JOB_ID and SLURMD_NODENAME, so start_slurm.sh reuses the server
 only in the same job), prints the URL and the port forward from another computer, and serves the app
 with one uvicorn worker. When the server stops, it shuts down the runner and its stage processes.
 --host defaults to 127.0.0.1; start_slurm.sh passes 0.0.0.0, so that the login node can reach the server.
---port 0 takes a free port. --fake runs every stage with harpor.webapp.fake_steps, so the app works
-on a Mac without GPUs (OpenAI keys that start with sk- and Anthropic keys that start with sk-ant-
-pass). The runs folder defaults to steps.config_from_env(): WEBAPP_RUNS, else $G/webapp_runs. --demos DIR (default:
+--port 0 takes a free port. The runs folder defaults to steps.config_from_env(): WEBAPP_RUNS, else $G/webapp_runs. --demos DIR (default:
 WEBAPP_DEMOS, else none) names a demos folder (demos.py), which the server reads and checks once when it starts: add
 or change a demo, then start it again.
 
@@ -1063,13 +1060,12 @@ def main(argv=None):
     ap.add_argument("--runs", help="folder of the job folders (default: WEBAPP_RUNS, else $G/webapp_runs)")
     ap.add_argument("--host", default="127.0.0.1", help="the address to listen on (default 127.0.0.1)")
     ap.add_argument("--port", type=int, default=0, help="0 takes a free port")
-    ap.add_argument("--fake", action="store_true", help="run every stage with harpor.webapp.fake_steps (no GPU)")
     ap.add_argument("--demos", metavar="DIR", help="a demos folder to show at /demos.html (default: WEBAPP_DEMOS)")
     a = ap.parse_args(argv)
     import uvicorn
 
     cfg = steps.config_from_env()
-    cfg = replace(cfg, runs=Path(a.runs).resolve() if a.runs else cfg.runs, fake=cfg.fake or a.fake,
+    cfg = replace(cfg, runs=Path(a.runs).resolve() if a.runs else cfg.runs,
                   demos=Path(a.demos).expanduser().resolve() if a.demos else cfg.demos)
     # The socket is bound here, so the port is known (also for --port 0) before webapp.json is written.
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1088,7 +1084,7 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
     info = write_info({"node": node, "port": port, "token": token, "url_path": f"/?token={token}",
                        "slurm_job": os.environ.get("SLURM_JOB_ID"), "slurm_node": os.environ.get("SLURMD_NODENAME")})
-    print(f"HARPOR web app on {node}:{port}, runs in {cfg.runs}" + (" (fake stages)" if cfg.fake else ""))
+    print(f"HARPOR web app on {node}:{port}, runs in {cfg.runs}")
     print(f"login details in {info}")
     if cfg.demos:
         print(f"demos: {len(app.app.state.demos)} from {cfg.demos}")

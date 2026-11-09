@@ -71,7 +71,7 @@ from harpor.webapp import jobs, server, steps, views
 
 POLL_S = 0.5
 DONE, FAILED, BAD, WAITS = 0, 1, 2, 3  # exit codes
-ALWAYS = ("runs", "key_file", "fake")  # the flags that every next command repeats
+ALWAYS = ("runs", "key_file")  # the flags that every next command repeats
 # The flags that reach job.json at the Start route, so a next command repeats them until then (Run.again).
 SETTINGS = ("prompt", "camera_topic", "lidar_topic", "calibration", "no_lidar", "n_views", "picks", "view0", "review",
             "articulated", "parts", "edit_parts", "turntable", "agent")
@@ -602,14 +602,13 @@ def parser():
                     help="on a resume: use SAM 3's instance K of a view (K, K,L or none)")
     ap.add_argument("--runs", metavar="DIR",
                     help="the folder of the job folders (default: WEBAPP_RUNS, else $G/webapp_runs)")
-    ap.add_argument("--fake", action="store_true", help="run every stage with harpor.webapp.fake_steps (no GPU)")
     return ap
 
 
 def main(argv=None):
     a = parser().parse_args(argv)
     cfg = steps.config_from_env()
-    cfg = replace(cfg, runs=Path(a.runs).resolve() if a.runs else cfg.runs, fake=cfg.fake or a.fake, demos=None)
+    cfg = replace(cfg, runs=Path(a.runs).resolve() if a.runs else cfg.runs, demos=None)
     try:
         check_input(a)
         if a.input:

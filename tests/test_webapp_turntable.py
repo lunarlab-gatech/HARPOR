@@ -447,7 +447,7 @@ def test_soft_part_video_renders_and_encodes(tmp_path, capsys):
     and UPRIGHT_TO_W) on the 360 video's GLB and matrix, FRAMES frames of the fake Blender in J/softvideo/frames, and
     render.json with the motion's record; encode: an H.264 MP4 of FRAMES / FPS s, then softvideo.json last, without the
     frames. Without the motion, render stops, and a Blender that fails names the stage's log."""
-    from harpor.webapp import fake_steps
+    import fake_steps
 
     J = soft_job(tmp_path)
     with pytest.raises(SystemExit, match="the motion step did not finish"):

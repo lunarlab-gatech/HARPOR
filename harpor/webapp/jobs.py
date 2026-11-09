@@ -348,21 +348,24 @@ def key_kind_error(key, agent):
     return None if key.startswith("sk-") else "OpenAI keys start with sk-"
 
 
-def check_key(key, fake, agent="astra"):
-    """(ok, message) for the API key of agent astra (OpenAI: GET https://api.openai.com/v1/models with
-    it) or opus (Anthropic: the model record of claude-opus-5-5, with the anthropic SDK). A key whose
-    prefix belongs to the other provider (key_kind_error) is refused before any request. In fake mode
-    every key that passes that check passes. The message never holds the key."""
-    import urllib.error
-    import urllib.request
-
+def check_key(key, agent="astra"):
+    """(ok, message) for the API key of agent astra or opus. A key that is not one word, or whose prefix belongs to
+    the other provider (key_kind_error), is refused before any request; ask_provider then asks the provider. The
+    message never holds the key."""
     if not isinstance(key, str) or not KEY.fullmatch(key):
         return False, "an API key is one word of letters, digits, - and _"
     why = key_kind_error(key, agent)
     if why:
-        return False, ("fake mode: " if fake else "") + why
-    if fake:
-        return True, "fake mode: key accepted"
+        return False, why
+    return ask_provider(key, agent)
+
+
+def ask_provider(key, agent):
+    """(ok, message) from the provider of agent astra (OpenAI: GET https://api.openai.com/v1/models with the key) or
+    opus (Anthropic: the model record of claude-opus-5-5, with the anthropic SDK)."""
+    import urllib.error
+    import urllib.request
+
     if agent == "opus":
         return check_anthropic_key(key)
     req = urllib.request.Request("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {key}"})
@@ -478,7 +481,7 @@ class Runner:
         return self.runs / job_id
 
     def check_key(self, key, agent="astra"):
-        return check_key(key, self.cfg.fake, agent)
+        return check_key(key, agent)
 
     # ---- requests from the server ----
 

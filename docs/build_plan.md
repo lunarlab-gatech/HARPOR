@@ -45,7 +45,7 @@ What works (the notes hold the main results; git history holds the run logs):
 - Articulated objects: the office chair went through the stages from the command line (note 11).
 - Soft parts, requirements, repair rounds and the surface check (note 11): built, and they pass their
   tests on the Mac. MuJoCo ran for real there, but Blender and the agent were the fake ones.
-- Metric scale: MV-SAM3D is scale-equivariant, and the `lidar` stage works in fake mode (note 12).
+- Metric scale: MV-SAM3D is scale-equivariant, and the `lidar` stage works in the tests' stand-in jobs (note 12).
 
 Not verified yet:
 - No rosbag job is recorded end to end.
@@ -805,8 +805,13 @@ bash harpor/webapp/open_slurm.sh JOBID
 `open_slurm.sh` runs `start_slurm.sh` on the login node, which starts the server inside the job with
 `srun --overlap` in `envs/web`. It then forwards `localhost:8765` to the server's node and port on
 the socket and opens the login URL, which sets the login cookie. If the job already runs a
-server, `start_slurm.sh` reuses it. `python -m harpor.webapp --fake` runs every stage with stand-ins, so the UI
-works on a Mac without GPUs. For an articulated job, the fake `parts` stage cuts the box at 75% of its
+server, `start_slurm.sh` reuses it.
+
+**Stand-in stages, for the tests.** The app has no fake mode (removed on 2026-11-09): it needs the GPU machine. The
+tests run whole jobs with stand-ins of every stage instead, from `tests/fake_steps.py`: the `fake_stages` fixture
+(`tests/conftest.py`) puts its `command` in place of `steps.command` and accepts a well-formed API key without a
+request (`jobs.ask_provider`), and `tests/fake_launch.py` does the same for a test that starts the server or the
+terminal command as a process of its own. For an articulated job, the stand-in `parts` stage cuts the box at 75% of its
 height with `trimesh.intersections.slice_faces_plane` and caps the cut with a fan of triangles, because
 trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs/web` has no shapely.
 
@@ -907,7 +912,7 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    (`steps.OPTIONAL`): when it fails, its record says failed, job.json "warnings" gets
    "360 video: <why>", and the build goes on to `results.zip`, which then has no `turntable.mp4`. Retry
    from turntable (shown on a done job whose video failed) runs it and `package` again (`Runner.resume`).
-   The render has `RENDER_TIMEOUT_S`. Fake mode runs the real stage with the fake Blender, whose frames are the GLB's
+   The render has `RENDER_TIMEOUT_S`. The tests' stand-in jobs run the real stage with the fake Blender, whose frames are the GLB's
    outline. `tests/test_webapp_turntable.py` checks the upright turn, the binds, the render with the fake
    Blender, the encode, and `blender/turntable.py` itself on stand-ins for `bpy`. Not checked on ICE yet: the upright turn, the render time and the file size.
 
@@ -1698,8 +1703,8 @@ and CoACD.
   `bpy` and `mathutils`. The agents are `fake_agent` scripts with a list per round. The round tests
   use `fake_agent --sim` in place of MuJoCo, with outcomes from `GATOR_FAKE_SIM`. One web-app test
   runs the real `agent_step.run` with requirements, `fake_agent` rounds and the fake `--sim`.
-- Fake mode (`python -m harpor.webapp --fake`): `propose` and `parts` write requirements, and the
-  fake agent stage writes the result keys and `agent/evidence.json` of a session in rounds without
+- The stand-in stages (`tests/fake_steps.py`): `propose` and `parts` write requirements, and the
+  stand-in agent stage writes the result keys and `agent/evidence.json` of a session in rounds without
   running the round code. A typed list `body / pad > body : soft` gives a soft part, and the
   `softvideo` stage then runs for real with the fake Blender (with a synthetic dent where MuJoCo is
   not installed).
@@ -2359,8 +2364,8 @@ the job's current calibration (see the last bullet), it is the stage's done mark
 
 **Web app:** note 10.
 
-**Fake mode.** `python -m harpor.webapp --fake` runs the real `lidar` stage. For a job with LiDAR, the
-fake `da3` multiplies the depth, the pointmaps and the camera translations by 0.8
+**Stand-in stages.** The tests' stand-in jobs (`tests/fake_steps.py`) run the real `lidar` stage. For a job with
+LiDAR, the stand-in `da3` multiplies the depth, the pointmaps and the camera translations by 0.8
 (`FAKE_DA3_SCALE`), so the stage must find 1.25. The fake `place` sizes the box in the run's DA3 units
 (`run_scale`). So a scale that `select` did not apply shows as 0.8 times the size in `placement.json`
 and in `physics/aligned.json`.
@@ -2368,12 +2373,12 @@ and in `physics/aligned.json`.
 **Checks so far:**
 - Phase 0 on ICE (2026-10-21): see "Where the scale enters".
 - All test data is synthetic: ROS1, MCAP and db3 bags and Stray captures.
-- Fake mode (2026-10-21): the stage found 1.25 for a rosbag with a PointCloud2 and `/tf_static`, and
+- Fake mode (2026-10-21, since removed): the stage found 1.25 for a rosbag with a PointCloud2 and `/tf_static`, and
   for a synthetic Stray capture in landscape and in portrait. In the browser, the start form showed
   the LiDAR topic, the TF chain and the calibration upload. The review page showed "Metric scale
   from LiDAR: x1.250 (8 of 8 views, spread 0.0%)" with the check images, and a results page showed
   "x1.250 from LiDAR (/lidar/points, 16 views, spread 0.0%)".
-- Points for the Inputs tab (2026-10-25, Mac only): in fake mode, a bag with 3,000 points behind the
+- Points for the Inputs tab (2026-10-25, Mac only): in fake mode (since removed), a bag with 3,000 points behind the
   camera and a portrait Stray capture showed their points; drag, wheel, arrow keys, Reset and a view
   change worked, in light and dark mode and at 375 px, with no console errors. Not yet run on ICE or on
   a real bag.

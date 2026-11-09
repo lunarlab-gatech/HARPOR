@@ -19,7 +19,7 @@ from scipy.spatial.transform import Rotation
 
 pytest.importorskip("av")
 from harpor.stage_a import lidar_scale  # noqa: E402
-from harpor.webapp import fake_steps as F  # noqa: E402
+import fake_steps as F  # noqa: E402
 from harpor.webapp import stray  # noqa: E402
 from harpor.webapp import video as V  # noqa: E402
 

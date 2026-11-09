@@ -41,7 +41,7 @@ class Term:
         return code, self.capsys.readouterr().out
 
     def __call__(self, *args):
-        return self.exact([*map(str, args), "--runs", str(self.runs), "--fake"])
+        return self.exact([*map(str, args), "--runs", str(self.runs)])
 
     def folder(self, out):
         """The folder of the job that out names."""
@@ -60,7 +60,7 @@ class Term:
 
 
 @pytest.fixture
-def term(tmp_path, monkeypatch, capsys):
+def term(tmp_path, monkeypatch, capsys, fake_stages):
     monkeypatch.setattr(jobs, "default_key_dir", lambda: tmp_path / "shm" / "gator-webapp-1")
     monkeypatch.setattr(run, "POLL_S", 0.05)
     return Term(tmp_path, capsys)
@@ -248,7 +248,7 @@ def test_the_view_review_stops_and_a_resume_goes_on(term):
     assert f"mask check images: {J / 'scene' / 'sam3_box' / 'check'}, named <view>.jpg" in out
     spare = [c["name"] for c in sel["candidates"] if c["status"] == "available"]
     assert f"left out: {spare[0]} at " in out and ": usable, not picked" in out
-    assert printed(out) == ["--resume", J.name, f"--runs={term.runs}", "--fake"]
+    assert printed(out) == ["--resume", J.name, f"--runs={term.runs}"]
 
     # Each answer selects again, adds to the earlier ones and stops here again.
     drop = sel["picks"][1]["name"]
@@ -574,14 +574,15 @@ def test_a_server_on_the_runs_folder_keeps_the_command_out(term):
 
 
 def command(video, runs, ignore=()):
-    """The command in a process of its own, with SIGINT as a terminal gives it and the signals of ignore ignored."""
+    """The command in a process of its own (with the stand-in stages, tests/fake_launch.py), with SIGINT as a terminal
+    gives it and the signals of ignore ignored."""
     def signals():
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         for sig in ignore:
             signal.signal(sig, signal.SIG_IGN)
 
-    return subprocess.Popen([sys.executable, "-m", "harpor.webapp.run", str(video), "--prompt", "box", "--n-views", "3",
-                             "--runs", str(runs), "--fake"], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    return subprocess.Popen([sys.executable, str(ROOT / "tests" / "fake_launch.py"), "harpor.webapp.run", str(video),
+                             "--prompt", "box", "--n-views", "3", "--runs", str(runs)], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, preexec_fn=signals)
 
 
@@ -625,13 +626,13 @@ def test_nohup_keeps_the_job_running(term):
     assert p.returncode == run.DONE and "results: " in out, out
 
 
-def test_a_running_command_holds_its_runs_folder(term):
+def test_a_running_command_holds_its_runs_folder(term, fake_stages):
     """The Runner of a second process sees this command as a live server, by "harpor.webapp" in its command line."""
     p = command(term.video(), term.runs)
     try:
         read_until(p, "job ")
         with pytest.raises(SystemExit, match="another HARPOR server runs the jobs in"):
-            jobs.Runner(steps.Config(G=term.tmp, runs=term.runs, fake=True), key_dir=term.tmp / "keys")
+            jobs.Runner(steps.Config(G=term.tmp, runs=term.runs), key_dir=term.tmp / "keys")
     finally:
         p.terminate()
         p.communicate(timeout=60)

@@ -39,11 +39,12 @@ VOMP = ('eval "$($G/tools/micromamba shell hook -s bash)"; micromamba activate $
 
 
 @pytest.fixture
-def make_runner(tmp_path):
+def make_runner(tmp_path, fake_stages):
+    """Runners whose stages are the stand-ins of tests/fake_steps.py, unless a test puts its own steps.command."""
     made = []
 
-    def make(fake=True, **kw):
-        cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=fake)
+    def make(**kw):
+        cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs")
         r = jobs.Runner(cfg, key_dir=tmp_path / "keys", **kw)
         made.append(r)
         return r, cfg
@@ -125,9 +126,12 @@ def test_commands_have_the_ice_environment():
                            'cd $C && $G/envs/web/bin/python -m harpor.webapp.lidar scale --job "$J"')
     with pytest.raises(ValueError):
         steps.command("agent", JOB, ICE)
-    fake_cfg = steps.Config(G=ICE.G, runs=ICE.runs, fake=True)
-    fake = steps.command("agent", JOB, fake_cfg, key_file="/k/x.env")
-    assert fake[0][2] == (f"exec {sys.executable} -m harpor.webapp.fake_steps agent --job "
+    import fake_steps  # the tests' stand-in for steps.command refuses the same calls
+
+    with pytest.raises(ValueError):
+        fake_steps.command("agent", JOB, ICE)
+    fake = fake_steps.command("agent", JOB, ICE, key_file="/k/x.env")
+    assert fake[0][2] == (f"exec {sys.executable} {ROOT}/tests/fake_steps.py agent --job "
                           "/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef --key-file /k/x.env --agent astra")
     assert fake[1] == str(ROOT)
 
@@ -139,11 +143,11 @@ def test_commands_have_the_ice_environment():
         steps.command("propose", ART, ICE)
     for typed in ({**ART, "parts": {**ART["parts"], "mode": "user"}}, {**ART, "agent": "none"}):
         assert steps.command("propose", typed, ICE)[0][2] == sc["propose"]
-        assert steps.command("propose", typed, fake_cfg)[0][2].endswith("fake_steps propose --job "
-                                                                         "/storage/ice1/5/0/ali497/gator/webapp_runs/"
-                                                                         "20261015-120000-abcdef")
-    assert steps.command("propose", ART, fake_cfg, key_file="/k/x.env")[0][2].endswith(
-        "fake_steps propose --job /storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef "
+        assert fake_steps.command("propose", typed, ICE)[0][2].endswith("fake_steps.py propose --job "
+                                                                        "/storage/ice1/5/0/ali497/gator/webapp_runs/"
+                                                                        "20261015-120000-abcdef")
+    assert fake_steps.command("propose", ART, ICE, key_file="/k/x.env")[0][2].endswith(
+        "fake_steps.py propose --job /storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef "
         "--key-file /k/x.env --agent astra")
     stage = 'cd $C && $G/envs/sam3d/bin/python -m harpor.parts.stage '
     assert sc["parts"].endswith(
@@ -270,12 +274,10 @@ def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
 def test_config_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("HARPOR_ROOT", str(tmp_path))
     monkeypatch.delenv("WEBAPP_RUNS", raising=False)
-    monkeypatch.setenv("WEBAPP_FAKE", "1")
     cfg = steps.config_from_env()
-    assert cfg.G == tmp_path and cfg.runs == tmp_path / "webapp_runs" and cfg.fake
+    assert cfg.G == tmp_path and cfg.runs == tmp_path / "webapp_runs"
     monkeypatch.setenv("WEBAPP_RUNS", str(tmp_path / "r"))
-    monkeypatch.delenv("WEBAPP_FAKE")
-    assert steps.config_from_env().runs == tmp_path / "r" and not steps.config_from_env().fake
+    assert steps.config_from_env().runs == tmp_path / "r"
     assert [s["name"] for s in steps.STAGES if s["gpu"]] == ["masks", "da3", "sam3d", "vomp", "parts", "vomp_parts", "agent", "turntable",
                                                             "softvideo"]
 
@@ -504,7 +506,8 @@ def test_lidar_settings_and_the_build_that_stores_them(make_runner, tmp_path, mo
     pytest.importorskip("rosbags")
     from test_webapp_lidar import CAMERA, LIVOX, POINTS, T_CAM_LIDAR, upload, write_scene_bag
 
-    from harpor.webapp import fake_steps, rosbag
+    import fake_steps
+    from harpor.webapp import rosbag
 
     runner, cfg = make_runner()
 
@@ -753,12 +756,13 @@ def test_every_stage_has_its_record(tmp_path):
         jobs.update_stage(J, "turntable", status="done")
 
 
-def test_check_key(monkeypatch):
+def test_check_key(monkeypatch, fake_stages):
     import urllib.error
     import urllib.request
 
-    assert jobs.check_key("sk-abc", fake=True)[0] and not jobs.check_key("abc", fake=True)[0]
-    assert not jobs.check_key("sk-abc\nOTHER=1", fake=True)[0] and not jobs.check_key("sk abc", fake=True)[0]
+    assert jobs.check_key("sk-abc")[0] and not jobs.check_key("abc")[0]
+    assert not jobs.check_key("sk-abc\nOTHER=1")[0] and not jobs.check_key("sk abc")[0]
+    monkeypatch.undo()  # the real ask_provider below
     seen = []
 
     def refuse(req, timeout):
@@ -766,11 +770,11 @@ def test_check_key(monkeypatch):
         raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
 
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
-    ok, msg = jobs.check_key(KEY, fake=False)
+    ok, msg = jobs.check_key(KEY)
     assert not ok and msg == "OpenAI rejected the key (HTTP 401)" and KEY not in msg
     assert seen == [("https://api.openai.com/v1/models", f"Bearer {KEY}", 10)]
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: open(os.devnull, "rb"))
-    assert jobs.check_key(KEY, fake=False) == (True, "OpenAI accepted the key")
+    assert jobs.check_key(KEY) == (True, "OpenAI accepted the key")
 
 
 OPUS_KEY = "sk-ant-fake-" + secrets.token_hex(16)
@@ -797,9 +801,8 @@ def test_check_anthropic_key(monkeypatch):
     import anthropic
     import httpx2
 
-    assert jobs.check_key(OPUS_KEY, fake=True, agent="opus") == (True, "fake mode: key accepted")
-    assert jobs.check_key(KEY, fake=True, agent="opus") == (False, "fake mode: Anthropic keys start with sk-ant-")
-    assert not jobs.check_key(OPUS_KEY + "\nX=1", fake=True, agent="opus")[0]
+    assert jobs.check_key(KEY, agent="opus") == (False, "Anthropic keys start with sk-ant-")
+    assert not jobs.check_key(OPUS_KEY + "\nX=1", agent="opus")[0]
     req = httpx2.Request("GET", "https://api.anthropic.com/v1/models/claude-opus-5-5")
     seen, raises = [], []
 
@@ -825,16 +828,16 @@ def test_check_anthropic_key(monkeypatch):
                         (anthropic.APIConnectionError(request=req), (False, "could not reach the Anthropic API")),
                         (anthropic.APITimeoutError(req), (False, "could not reach the Anthropic API"))]:
         raises.append(error)
-        assert jobs.check_key(OPUS_KEY, fake=False, agent="opus") == want
+        assert jobs.check_key(OPUS_KEY, agent="opus") == want
     assert seen[:2] == [{"api_key": OPUS_KEY, "max_retries": 1, "timeout": 20}, "claude-opus-5-5"]
     monkeypatch.setitem(sys.modules, "anthropic", None)  # envs/web without the SDK
-    assert jobs.check_key(OPUS_KEY, fake=False, agent="opus") == (
+    assert jobs.check_key(OPUS_KEY, agent="opus") == (
         False, "the server cannot check Anthropic keys: envs/web needs anthropic==1.15.0")
 
 
 def test_a_key_of_the_other_provider_is_never_sent(monkeypatch):
     """A key pasted under the wrong agent is refused by its prefix before any request, so it never goes
-    to the other company's API; fake mode applies the same rule."""
+    to the other company's API."""
     pytest.importorskip("anthropic")  # the Claude client
     import urllib.request
 
@@ -845,15 +848,12 @@ def test_a_key_of_the_other_provider_is_never_sent(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", no_request)
     monkeypatch.setattr(anthropic, "Anthropic", no_request)
-    for fake in (False, True):
-        pre = "fake mode: " if fake else ""
-        for key, agent, why in [(KEY, "opus", "Anthropic keys start with sk-ant-"),
-                                ("sk-proj-" + KEY[8:], "opus", "Anthropic keys start with sk-ant-"),
-                                (OPUS_KEY, "astra", "this is an Anthropic key (sk-ant-); this agent needs an OpenAI key"),
-                                ("ant-" + KEY, "astra", "OpenAI keys start with sk-")]:
-            ok, msg = jobs.check_key(key, fake=fake, agent=agent)
-            assert (ok, msg) == (False, pre + why) and key not in msg
-    assert jobs.check_key(OPUS_KEY, fake=True, agent="opus") == jobs.check_key(KEY, fake=True) == (True, "fake mode: key accepted")
+    for key, agent, why in [(KEY, "opus", "Anthropic keys start with sk-ant-"),
+                            ("sk-proj-" + KEY[8:], "opus", "Anthropic keys start with sk-ant-"),
+                            (OPUS_KEY, "astra", "this is an Anthropic key (sk-ant-); this agent needs an OpenAI key"),
+                            ("ant-" + KEY, "astra", "OpenAI keys start with sk-")]:
+        ok, msg = jobs.check_key(key, agent=agent)
+        assert (ok, msg) == (False, why) and key not in msg
 
 
 def test_runner_opus_key_and_a_change_of_agent(make_runner, tmp_path, monkeypatch):
@@ -1244,7 +1244,7 @@ def test_resume_starts_from_a_lidar_stage_that_is_not_current(make_runner, monke
     assert jobs.load(J)["status"] == "review"
 
 
-def test_a_stale_scale_says_why(tmp_path):
+def test_a_stale_scale_says_why(tmp_path, fake_stages):
     """GET /api/jobs/{id} gives why a done lidar stage's scale is stale as lidar_stale, and the selection's LiDAR
     record gives it as calibration_changed and estimator_changed. "calibration": the calibration was uploaded or
     deleted since the scale was found. "estimator": an older lidar_scale.VERSIONS found it with the job's
@@ -1255,7 +1255,7 @@ def test_a_stale_scale_says_why(tmp_path):
     from harpor.webapp import server
 
     token = "tok-" + secrets.token_hex(16)
-    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=True)
+    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs")
     job_id, _ = jobs.create_job(cfg.runs, "scan.bag")
     J = cfg.runs / job_id
     cal = {"name": "c.yaml", "bytes": 300, "sha256": "1" * 64, "T_cam_lidar": np.eye(4).tolist(), "lidar_topic": "/points"}
@@ -1949,7 +1949,7 @@ def test_agent_step_runs_a_claude_session_for_opus(tmp_path, monkeypatch, capsys
 
 
 def test_fake_agent_stage_stands_in_for_both_agents(tmp_path):
-    from harpor.webapp import fake_steps
+    import fake_steps
 
     J = run_folder(tmp_path)
     key = J / "fake.env"
@@ -1977,7 +1977,7 @@ def test_fake_agent_stage_alone_skips_the_round_code(tmp_path, monkeypatch, caps
     from harpor.agent import controller as C
     from harpor.agent import validate
     from harpor.agent.fake_agent import write_glb
-    from harpor.webapp import fake_steps
+    import fake_steps
 
     J = run_folder(tmp_path)
     (J / "job.json").write_text(json.dumps({**json.loads((J / "job.json").read_text()), "articulated": True}))
@@ -2030,7 +2030,7 @@ def test_fake_agent_stage_alone_skips_the_round_code(tmp_path, monkeypatch, caps
     assert "requirements: 1 pass, 0 fail, 0 inconclusive, 1 unassessed" in out
 
 
-def test_agent_step_publishes_the_evidence_of_its_rounds(tmp_path, monkeypatch, capsys):
+def test_agent_step_publishes_the_evidence_of_its_rounds(tmp_path, monkeypatch, capsys, fake_stages):
     """The real agent_step.run on an articulation whose parts.json has a found requirement: the session runs in rounds,
     the fake agent exports in round 1 (the lid has no joint yet) and hinges the lid in round 2 with the API key in its
     reason, and harpor.agent.fake_agent --sim stands in for MuJoCo. agent/evidence.json is control/evidence.json
@@ -2053,7 +2053,7 @@ def test_agent_step_publishes_the_evidence_of_its_rounds(tmp_path, monkeypatch, 
     from harpor.agent.fake_agent import write_glb
     from harpor.webapp import server
 
-    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=True)
+    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs")
     job_id, _ = jobs.create_job(cfg.runs, "lid.mp4")
     J = cfg.runs / job_id
     job = jobs.load(J)

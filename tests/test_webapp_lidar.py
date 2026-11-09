@@ -18,7 +18,7 @@ pytest.importorskip("rosbags")
 from test_webapp_rosbag import CI, IMG, PC2, TFM, matrix, write_bag  # noqa: E402
 
 from harpor.stage_a import lidar_scale, mvsam3d  # noqa: E402
-from harpor.webapp import fake_steps as F  # noqa: E402
+import fake_steps as F  # noqa: E402
 from harpor.webapp import lidar as L  # noqa: E402
 from harpor.webapp import jobs, rosbag, steps  # noqa: E402
 

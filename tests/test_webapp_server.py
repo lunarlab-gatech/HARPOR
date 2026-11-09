@@ -28,8 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def client(tmp_path):
-    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=True)
+def client(tmp_path, fake_stages):
+    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs")
     with TestClient(server.make_app(cfg, TOKEN, key_dir=tmp_path / "keys")) as c:
         yield c, cfg
 
@@ -146,7 +146,7 @@ def test_token_gate(client):
     assert c.get("/api/jobs").status_code == 401
 
 
-def test_demos_pages(tmp_path, capsys):
+def test_demos_pages(tmp_path, capsys, fake_stages):
     """/demos.html shows the demos of the server's demos folder as cards, with the cards of its placeholders.json (or
     "No demos yet." without either), and /demos/<name>/<file> serves only the files that a demo.json lists, with their
     type, Range and HEAD. A demos folder that breaks a rule, or a bad placeholders.json, stops the server with the
@@ -158,7 +158,7 @@ def test_demos_pages(tmp_path, capsys):
     from harpor.webapp import demos
 
     def app(folder, runs="runs"):
-        cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / runs, fake=True, demos=folder)
+        cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / runs, demos=folder)
         return server.make_app(cfg, TOKEN, key_dir=tmp_path / "keys")
 
     with TestClient(app(None)) as c:
@@ -719,7 +719,7 @@ def test_a_run_from_lidar_checks_the_intrinsics_first(client, tmp_path):
     the review's Build and a run again from lidar answer 400 with the reason, before anything is deleted. Before,
     they skipped the camera_info check: the run deleted the results, and then the lidar stage failed on it. A bag
     that is gone from the server is refused too, also when the calibration gives K."""
-    from harpor.webapp import fake_steps as F
+    import fake_steps as F
     from test_webapp_lidar import POINTS, T_CAM_LIDAR
 
     bag = scene_bag(tmp_path / "no_info.bag", info=False)
@@ -1052,15 +1052,15 @@ def test_upload_refuses_other_files_and_too_large_uploads(client, monkeypatch, t
     assert r.status_code == 413 and "larger than 20 GB" in r.json()["detail"]
     r = c.put("/api/upload", params={"name": "a.bag"}, content=iter([b"x" * 1000]))  # chunked: no Content-Length
     assert r.status_code == 411 and "Content-Length" in r.json()["detail"] and "content-length" not in r.request.headers
-    monkeypatch.setattr(server.shutil, "disk_usage", lambda p: shutil._ntuple_diskusage(100 << 30, 99 << 30, 1 << 30))
-    r = c.put("/api/upload", params={"name": "a.mcap"}, content=b"x" * 1000)
-    assert r.status_code == 413 and "1.0 GB free" in r.json()["detail"]
-    # A zip is unpacked next to itself, so it needs 2.2 x its size free (+ 2 GB) where a bag needs 1.2 x.
-    for name, need in (("a.bag", 3.2), ("capture.zip", 4.2)):
-        r = c.put("/api/upload", params={"name": name}, content=b"x", headers={"Content-Length": str(1 << 30)})
-        assert (r.status_code, r.json()["detail"]) == (413, f"the server has 1.0 GB free and this upload needs {need} GB")
-    assert c.get("/api/jobs").json() == [] and not list(cfg.runs.glob("*/video"))
-    monkeypatch.undo()
+    with monkeypatch.context() as m:  # the stand-in stages of the client stay
+        m.setattr(server.shutil, "disk_usage", lambda p: shutil._ntuple_diskusage(100 << 30, 99 << 30, 1 << 30))
+        r = c.put("/api/upload", params={"name": "a.mcap"}, content=b"x" * 1000)
+        assert r.status_code == 413 and "1.0 GB free" in r.json()["detail"]
+        # A zip is unpacked next to itself, so it needs 2.2 x its size free (+ 2 GB) where a bag needs 1.2 x.
+        for name, need in (("a.bag", 3.2), ("capture.zip", 4.2)):
+            r = c.put("/api/upload", params={"name": name}, content=b"x", headers={"Content-Length": str(1 << 30)})
+            assert (r.status_code, r.json()["detail"]) == (413, f"the server has 1.0 GB free and this upload needs {need} GB")
+        assert c.get("/api/jobs").json() == [] and not list(cfg.runs.glob("*/video"))
     # The kind is that of the name the file is saved under: "..bag" is kept as video.bag, a rosbag.
     pytest.importorskip("rosbags")
     bag = write_bag(tmp_path / "src.bag", ["/cam/image_rect/compressed"], n=20)
@@ -1088,12 +1088,12 @@ def test_opus_build_and_a_change_of_agent(client, tmp_path):
     opus = "sk-ant-test-" + secrets.token_hex(16)
     start = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": True, "agent": "opus"}
     r = c.post(f"/api/jobs/{job_id}/start", json={**start, "api_key": KEY})  # an OpenAI key for Opus
-    assert r.status_code == 400 and r.json()["detail"] == "fake mode: Anthropic keys start with sk-ant-" and KEY not in r.text
+    assert r.status_code == 400 and r.json()["detail"] == "Anthropic keys start with sk-ant-" and KEY not in r.text
     for wrong in ("gpt", None, 1):
         r = c.post(f"/api/jobs/{job_id}/start", json={**start, "agent": wrong, "api_key": opus})
         assert r.status_code == 400 and r.json()["detail"] == "agent is astra, opus, none", wrong
     r = c.post(f"/api/jobs/{job_id}/start", json={**start, "api_key": opus})
-    assert r.status_code == 200 and r.json()["key"] == "fake mode: key accepted"
+    assert r.status_code == 200 and r.json()["key"] == "key accepted (test)"
     job = wait(c, job_id, "done", "failed")
     assert job["status"] == "done", job["error"]
     a = job["agent_result"]
@@ -1351,7 +1351,7 @@ def test_main_writes_the_login_file(tmp_path, monkeypatch, capsys):
     ran = []  # (port, webapp.json, its mode) while the server runs
     monkeypatch.setattr(uvicorn.Server, "run", lambda self, sockets: ran.append(
         (sockets[0].getsockname()[1], json.loads(info.read_text()), oct(info.stat().st_mode & 0o777))))
-    args = ["--fake", "--runs", str(tmp_path / "runs"), "--host", "127.0.0.1"]
+    args = ["--runs", str(tmp_path / "runs"), "--host", "127.0.0.1"]
     server.main(args)
     port, d, mode = ran[0]
     assert mode == "0o600" and d["port"] == port > 0
@@ -1375,7 +1375,7 @@ def test_sigterm_deletes_the_login_file(tmp_path):
     home = tmp_path / "home"
     info = home / ".config" / "harpor" / "webapp.json"
     env = {**os.environ, "HOME": str(home), "TMPDIR": str(tmp_path), "PYTHONPATH": str(ROOT)}
-    p = subprocess.Popen([sys.executable, "-m", "harpor.webapp", "--fake", "--runs", str(tmp_path / "runs"),
+    p = subprocess.Popen([sys.executable, "-m", "harpor.webapp", "--runs", str(tmp_path / "runs"),
                           "--host", "127.0.0.1"], cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
         lines = _lines_until(p.stdout, b"Application startup complete")
@@ -1737,12 +1737,12 @@ def test_preview_video_and_view_images_are_served(client, tmp_path):
     assert not (J / "frames" / ".tmp_preview.mp4").exists()
 
 
-def test_no_delete_while_uploading(tmp_path):
+def test_no_delete_while_uploading(tmp_path, fake_stages):
     """The jobs list shows a job as soon as its upload starts; deleting it must wait for the upload."""
     import anyio
     import httpx
 
-    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", fake=True)
+    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs")
     app = server.make_app(cfg, TOKEN, key_dir=tmp_path / "keys")
     video = write_video(tmp_path / "src.mp4").read_bytes()
     seen = {}

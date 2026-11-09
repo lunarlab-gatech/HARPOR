@@ -50,15 +50,11 @@ G/webapp_runs (or WEBAPP_RUNS). "The SIF" below is the agent's sandbox: G/sif/ha
                         (Blender in the SIF),   pressed in MuJoCo and let go. Optional too, and apart
            envs/web     softvideo encode        from turntable
   package  envs/web     jobs package            results.zip
-
-With WEBAPP_FAKE=1 every stage runs `python -m harpor.webapp.fake_steps STAGE --job J` instead,
-with the same outputs, so the app works on a Mac without GPUs.
 """
 
 import json
 import os
 import shlex
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,7 +68,7 @@ OPTIONAL = {"turntable": "360 video", "softvideo": "soft-part video"}
 REVIEW_AFTER = "select"
 PARTS_AFTER = "propose"  # an unconfirmed "vlm_edit" part list pauses the job here (pause_after)
 STAGES = [{"name": n, "gpu": n in GPU} for n in NAMES]
-CODE = Path(__file__).resolve().parents[2]  # the repo root, which fake mode runs from and Config.code defaults to
+CODE = Path(__file__).resolve().parents[2]  # the repo root, which Config.code defaults to
 
 # Copied from the cluster run scripts of Stage A and of VoMP, with two differences. OMP_NUM_THREADS is 16 unless the
 # server's environment sets it. No stage sets TORCH_CUDA_ARCH_LIST: nvdiffrast, which builds its plugin at run time,
@@ -105,7 +101,6 @@ PARTS_MODES = ("vlm", "vlm_edit", "user")
 class Config:
     G: Path            # HARPOR_ROOT, by default ~/harpor: envs/, sif/, the model clones
     runs: Path         # the job folders
-    fake: bool = False
     demos: Path | None = None  # the demos folder (WEBAPP_DEMOS), shown at /demos.html (demos.py)
     code: Path = CODE  # the repo that the real stages run from
     sandbox: str | None = None  # HARPOR_SANDBOX: "docker:IMAGE" for docker containers, else G/sif/harpor-agent.sif
@@ -115,8 +110,7 @@ def config_from_env():
     G = Path(os.environ.get("HARPOR_ROOT") or Path("~/harpor").expanduser())
     demos = os.environ.get("WEBAPP_DEMOS")
     return Config(G=G, runs=Path(os.environ.get("WEBAPP_RUNS") or G / "webapp_runs"),
-                  fake=os.environ.get("WEBAPP_FAKE") == "1", demos=Path(demos).expanduser() if demos else None,
-                  sandbox=os.environ.get("HARPOR_SANDBOX") or None)
+                  demos=Path(demos).expanduser() if demos else None, sandbox=os.environ.get("HARPOR_SANDBOX") or None)
 
 
 def job(job_dir):
@@ -175,12 +169,6 @@ def command(stage, job, cfg, key_file=None):
         raise ValueError(f"the {stage} stage needs the key file")
     q = shlex.quote
     env = {"PYTHONUNBUFFERED": "1"}  # so PROGRESS lines reach the log as they are printed
-    if cfg.fake:
-        script = f"exec {q(sys.executable)} -m harpor.webapp.fake_steps {stage} --job {q(str(Path(cfg.runs) / job['id']))}"
-        if key:
-            script += f" --key-file {q(str(key_file))} --agent {agent(job)}"
-        return ["bash", "-c", script], str(CODE), env
-
     lines = ["set -eo pipefail", f"G={q(str(cfg.G))}", f"J={q(str(Path(cfg.runs) / job['id']))}",
              f"C={q(str(cfg.code))}"]
     run = "cd $C && "
