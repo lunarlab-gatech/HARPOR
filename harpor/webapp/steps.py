@@ -2,8 +2,9 @@
 
 Every stage is one subprocess, `bash -c SCRIPT`, so the server itself needs only envs/web. The
 scripts are those of our runs on the GPU machine: the same interpreters by full path and the same environment
-lines, with G the root (HARPOR_ROOT, by default $(readlink -f ~/scratch)/gator), C the repo (Config.code) and the
-job folder J under G/webapp_runs:
+lines, with G the root (HARPOR_ROOT, by default ~/harpor), C the repo (Config.code) and the job folder J under
+G/webapp_runs (or WEBAPP_RUNS). "The SIF" below is the agent's sandbox: G/sif/harpor-agent.sif under Apptainer, or
+"docker:IMAGE" from HARPOR_SANDBOX, whose containers run beside HARPOR's own docker container (controller.container):
 
   topics   envs/web     video topics            frames/topics.json (rosbag input; skipped for a video and
                                                 a Stray Scanner capture)
@@ -73,7 +74,7 @@ PARTS_AFTER = "propose"  # an unconfirmed "vlm_edit" part list pauses the job he
 STAGES = [{"name": n, "gpu": n in GPU} for n in NAMES]
 CODE = Path(__file__).resolve().parents[2]  # the repo root, which fake mode runs from and Config.code defaults to
 
-# Copied from the ICE run scripts of Stage A and of VoMP, with two differences. OMP_NUM_THREADS is 16 unless the
+# Copied from the cluster run scripts of Stage A and of VoMP, with two differences. OMP_NUM_THREADS is 16 unless the
 # server's environment sets it. No stage sets TORCH_CUDA_ARCH_LIST: nvdiffrast, which builds its plugin at run time,
 # clears it and builds for the visible GPUs.
 STAGE_A_ENV = ('HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions '
@@ -102,18 +103,20 @@ PARTS_MODES = ("vlm", "vlm_edit", "user")
 
 @dataclass
 class Config:
-    G: Path            # HARPOR_ROOT, by default $(readlink -f ~/scratch)/gator: envs/, sif/, the model clones
+    G: Path            # HARPOR_ROOT, by default ~/harpor: envs/, sif/, the model clones
     runs: Path         # the job folders
     fake: bool = False
     demos: Path | None = None  # the demos folder (WEBAPP_DEMOS), shown at /demos.html (demos.py)
     code: Path = CODE  # the repo that the real stages run from
+    sandbox: str | None = None  # HARPOR_SANDBOX: "docker:IMAGE" for docker containers, else G/sif/harpor-agent.sif
 
 
 def config_from_env():
-    G = Path(os.environ.get("HARPOR_ROOT") or Path("~/scratch").expanduser().resolve() / "gator")
+    G = Path(os.environ.get("HARPOR_ROOT") or Path("~/harpor").expanduser())
     demos = os.environ.get("WEBAPP_DEMOS")
     return Config(G=G, runs=Path(os.environ.get("WEBAPP_RUNS") or G / "webapp_runs"),
-                  fake=os.environ.get("WEBAPP_FAKE") == "1", demos=Path(demos).expanduser() if demos else None)
+                  fake=os.environ.get("WEBAPP_FAKE") == "1", demos=Path(demos).expanduser() if demos else None,
+                  sandbox=os.environ.get("HARPOR_SANDBOX") or None)
 
 
 def job(job_dir):
@@ -181,7 +184,8 @@ def command(stage, job, cfg, key_file=None):
     lines = ["set -eo pipefail", f"G={q(str(cfg.G))}", f"J={q(str(Path(cfg.runs) / job['id']))}",
              f"C={q(str(cfg.code))}"]
     run = "cd $C && "
-    sif = " --sif $G/sif/harpor-agent.sif"  # the agent's container, which also runs Blender
+    # The agent's sandbox, which also runs Blender: an Apptainer SIF, or docker:IMAGE (controller.container).
+    sif = f" --sif {q(cfg.sandbox)}" if cfg.sandbox else " --sif $G/sif/harpor-agent.sif"
     if stage in ("topics", "frames", "extract", "lidar", "select", "package"):
         module = {"topics": "harpor.webapp.video topics", "frames": "harpor.webapp.video analyze",
                   "extract": "harpor.webapp.video extract", "lidar": "harpor.webapp.lidar scale",

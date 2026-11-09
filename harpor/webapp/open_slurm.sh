@@ -1,27 +1,27 @@
 #!/bin/bash
-# Open the HARPOR web app on your computer (macOS or Linux). Export these once in your shell profile:
+# Open the HARPOR web app of a Slurm cluster on your computer (macOS or Linux). Export these once in your shell profile:
 #
 #   HARPOR_SSH_HOST     user@login-node of the cluster (required)
-#   HARPOR_SSH_SOCKET   the ControlMaster socket (default ~/.ssh/cm-ice)
-#   HARPOR_REMOTE_CODE  the repo on the login node (default ~/scratch/gator/gator_clone). Quote a value
-#                       with a ~, such as '~/code/HARPOR', so that the login node expands it
+#   HARPOR_REMOTE_CODE  the repo on the login node (required). Quote a value with a ~, such as '~/code/HARPOR', so
+#                       that the login node expands it
+#   HARPOR_SSH_SOCKET   the ControlMaster socket (default ~/.ssh/cm-harpor)
 #
-# Log in to the cluster first, so that the ControlMaster socket is up, then:
+# Log in to the cluster first, so that the ControlMaster socket is up (ssh -M -S SOCKET HOST), then:
 #
-#   bash harpor/webapp/open_mac.sh JOBID [LOCAL_PORT]      (LOCAL_PORT defaults to 8765)
+#   bash harpor/webapp/open_slurm.sh JOBID [LOCAL_PORT]      (LOCAL_PORT defaults to 8765)
 #
-# It runs start_ice.sh on the login node over that socket (start or reuse the server in job JOBID),
+# It runs start_slurm.sh on the login node over that socket (start or reuse the server in job JOBID),
 # forwards localhost:LOCAL_PORT to the server's node and port on the same socket and opens
 # http://localhost:LOCAL_PORT/?token=... in the browser, which sets the login cookie. The forward
 # lasts as long as the ControlMaster. The last forward of each local port is kept in
 # ~/.config/harpor/webapp_forward_<port>, so a later run cancels it when the node or port changed.
 set -euo pipefail
-JOB=${1:?usage: open_mac.sh JOBID [LOCAL_PORT]}
+JOB=${1:?usage: open_slurm.sh JOBID [LOCAL_PORT]}
 LPORT=${2:-8765}
 [[ $JOB =~ ^[0-9]+$ && $LPORT =~ ^[0-9]+$ ]] || { echo "JOBID and LOCAL_PORT must be numbers" >&2; exit 2; }
-SOCK=${HARPOR_SSH_SOCKET:-~/.ssh/cm-ice}
+SOCK=${HARPOR_SSH_SOCKET:-~/.ssh/cm-harpor}
 HOST=${HARPOR_SSH_HOST:?set HARPOR_SSH_HOST=user@login-node}
-REMOTE=${HARPOR_REMOTE_CODE:-'~/scratch/gator/gator_clone'}  # the remote shell expands the ~
+REMOTE=${HARPOR_REMOTE_CODE:?set HARPOR_REMOTE_CODE to the repo on the login node}  # the remote shell expands a ~
 STATE=~/.config/harpor/webapp_forward_$LPORT
 
 if ! ssh -S "$SOCK" -O check "$HOST" 2>/dev/null; then
@@ -29,12 +29,12 @@ if ! ssh -S "$SOCK" -O check "$HOST" 2>/dev/null; then
   exit 1
 fi
 echo "ControlMaster $SOCK is up; starting the server in job $JOB"
-out=$(ssh -S "$SOCK" "$HOST" "bash $REMOTE/harpor/webapp/start_ice.sh $JOB")
+out=$(ssh -S "$SOCK" "$HOST" "bash $REMOTE/harpor/webapp/start_slurm.sh $JOB")
 NODE=$(sed -n 's/^NODE=//p' <<< "$out")
 PORT=$(sed -n 's/^PORT=//p' <<< "$out")
 TOKEN=$(sed -n 's/^TOKEN=//p' <<< "$out")
 if [ -z "$NODE" ] || [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
-  echo "start_ice.sh gave no NODE, PORT and TOKEN" >&2
+  echo "start_slurm.sh gave no NODE, PORT and TOKEN" >&2
   exit 1
 fi
 

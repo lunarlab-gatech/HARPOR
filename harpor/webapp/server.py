@@ -2,16 +2,16 @@
 views, build a simulation-ready object.
 
 Runs in envs/web (fastapi, uvicorn, av, numpy, pillow, scipy, rosbags) on the GPU machine, from the repo
-root (start_ice.sh starts it there, inside a Slurm job):
+root (start_slurm.sh starts it there, inside a Slurm job):
 
     python -m harpor.webapp [--runs DIR] [--host 127.0.0.1] [--port 0] [--fake]
                            [--demos DIR]
 
 It makes a login token, writes ~/.config/harpor/webapp.json (0600: node, port, token, url_path, and
-slurm_job and slurm_node from SLURM_JOB_ID and SLURMD_NODENAME, so start_ice.sh reuses the server
+slurm_job and slurm_node from SLURM_JOB_ID and SLURMD_NODENAME, so start_slurm.sh reuses the server
 only in the same job), prints the URL and the port forward from another computer, and serves the app
 with one uvicorn worker. When the server stops, it shuts down the runner and its stage processes.
---host defaults to 127.0.0.1; start_ice.sh passes 0.0.0.0, so that the login node can reach the server.
+--host defaults to 127.0.0.1; start_slurm.sh passes 0.0.0.0, so that the login node can reach the server.
 --port 0 takes a free port. --fake runs every stage with harpor.webapp.fake_steps, so the app works
 on a Mac without GPUs (OpenAI keys that start with sk- and Anthropic keys that start with sk-ant-
 pass). The runs folder defaults to steps.config_from_env(): WEBAPP_RUNS, else $G/webapp_runs. --demos DIR (default:
@@ -1035,7 +1035,7 @@ class TokenGate:
 
 
 def write_info(info):
-    """~/.config/harpor/webapp.json (0600), replaced atomically, for start_ice.sh. The folder is made with
+    """~/.config/harpor/webapp.json (0600), replaced atomically, for start_slurm.sh. The folder is made with
     mode 0700 when it is missing; an existing folder is used as it is."""
     d = config_dir()
     d.mkdir(parents=True, exist_ok=True, mode=0o700)

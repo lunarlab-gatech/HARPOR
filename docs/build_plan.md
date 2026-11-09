@@ -9,7 +9,8 @@ Stray Scanner capture of one object into a textured GLB and MJCF, USD and URDF m
 two stages of GATOR (arXiv 2610.11215v1): Stage A generates a posed mesh from several views (here
 MV-SAM3D; we do not build GATOR's own generator), and Stage B is an LLM agent
 that repairs the mesh in Blender. VoMP predicts materials before agent refinement: after MV-SAM3D for rigid objects, or per part after splitting. The web app runs
-every stage on PACE ICE or on a user's own GPU machine (note 10, Flow).
+every stage on a Linux GPU machine, from the docker image or from envs that `setup/install.sh` builds, such as on a
+Slurm cluster (notes 7 and 10).
 
 ### Decisions
 
@@ -18,9 +19,13 @@ every stage on PACE ICE or on a user's own GPU machine (note 10, Flow).
   package (note 3).
 - **Agent:** GPT-6-Astra through the Codex CLI (the paper's setup) by default, or Claude Opus 5.5
   through our own Messages API loop (note 5). The user picks one per job and brings its key.
-- **Web app:** one object per job, in the user's ICE job through the SSH tunnel, or on the user's own
-  GPU machine through an SSH tunnel (note 10).
-- **Environments:** micromamba envs and venvs, and Apptainer for the agent and Blender (note 7).
+- **Web app:** one object per job, on the user's GPU machine (in docker, or in a Slurm job), reached through
+  localhost or an SSH tunnel (note 10).
+- **Environments:** seven micromamba envs and venvs from `setup/install.sh` (note 7), in one docker image
+  (`containers/Dockerfile`) or built on the machine. The agent and Blender run in a sandbox: sibling docker
+  containers of the same image, or Apptainer (note 5).
+- **GPUs:** NVIDIA, from Ampere to Hopper (compute capability 8.0 to 9.0). The torch versions of `envs/sam3d`
+  and `envs/vomp11` build for nothing newer, so Blackwell is not supported yet.
 - **Licenses:** SAM 3D Objects, MV-SAM3D and SAM 3 use the SAM License, and the Depth Anything 3 model we
   use is CC BY-NC 4.0. So this version is research-only.
 - **Articulated objects:** an optional toggle per job; the agent sets the joints of the mesh split
@@ -32,7 +37,7 @@ every stage on PACE ICE or on a user's own GPU machine (note 10, Flow).
 ### Status
 
 What works (the notes hold the main results; git history holds the run logs):
-- The web app runs the whole pipeline from a video on ICE (note 10). A separate static demo gallery is available (`docs/public_site.md`).
+- The web app runs the whole pipeline from a video on PACE ICE, our Slurm cluster (note 10). A separate static demo gallery is available (`docs/public_site.md`).
 - Stage A: SAM 3 masks, Depth Anything 3 and MV-SAM3D with the pose fitted to the masks (notes 3
   and 4b).
 - Stage B: GPT-6-Astra and Claude Opus 5.5 refine meshes under the controller's deadline (note 5).
@@ -49,6 +54,8 @@ Not verified yet:
   ICE, in real Blender or with a real agent. Milestones 11 and 12 in note 11 list what is left.
 - No real rosbag with a LiDAR and no real Stray capture has run (note 12).
 - The 360 video has not run on ICE (note 10).
+- The docker image (`containers/Dockerfile`) has not been built yet, and the docker sandbox has run only in tests
+  with a fake docker. Its install scripts and its folder layout ran a real job on ICE (note 7).
 
 ### Files
 
@@ -158,18 +165,10 @@ flowchart TB
     of one run give masks that overlap with IoU above 0.5.
   - The step adds one padding box (label -10) so that the prompt gets the CLS token that Meta's
     code appends (`research.md` section 4.1).
-  - Setup, once (the torch build is the one `envs/da3` runs on ICE's driver):
-
-    ```bash
-    module purge; G=$(readlink -f ~/scratch)/gator; cd $G
-    export MAMBA_ROOT_PREFIX=$G/micromamba PIP_CACHE_DIR=$G/.cache/pip PIP_CONFIG_FILE=/dev/null
-    tools/micromamba create -y -p $G/envs/sam3seg -c conda-forge python=3.12 pip
-    envs/sam3seg/bin/pip install torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cu130
-    envs/sam3seg/bin/pip install transformers==5.20.0 scipy pillow
-    ```
-
-    The first run downloads the weights into `$HF_HOME`. The token there must belong to the
-    Hugging Face account that has access to `facebook/sam3`.
+  - Setup, once: `bash setup/sam3seg.sh` builds `envs/sam3seg` (Python 3.12, torch 2.14.1+cu130,
+    transformers 5.20.0), and `setup/weights.sh` downloads the weights into `$HF_HOME`. The token must
+    belong to the Hugging Face account that has access to `facebook/sam3`. torch's cu130 build needs a
+    driver for CUDA 13.0.
   - On real photos, the top scores are much closer to those of Meta's code with the padding box than
     without it, and with it the masks agree closely with Meta's.
   - With weights revision `3c879f3`, "plate" gets no instance above 0.5 in one tabletop photo (Meta's
@@ -178,9 +177,11 @@ flowchart TB
 
 ### 4. Stage A: SAM 3D Objects on ICE (`harpor/stage_a/sam3d.py`)
 
-Everything lives under `G=$(readlink -f ~/scratch)/gator`. Run the steps in a terminal of an ICE
-L40S session. The GPU is needed only for step 4, but SAM 3D's setup guide expects the build on a
-GPU node.
+`bash setup/sam3d.sh` builds the env of step 2 (with anthropic 1.15.0 for note 5 added), and `setup/weights.sh`
+downloads the weights of step 3. The steps below record the first build, on ICE (2026-10-14), under
+`G=$(readlink -f ~/scratch)/gator`, in a terminal of an L40S session. Step 1 copies the code from the laptop to the
+cluster, which a machine that clones the repo does not need. The GPU is needed only for step 4: the scripts build
+without one when `TORCH_CUDA_ARCH_LIST` is set, as the docker build does.
 
 1. **Copy the code.** From the repo root on the laptop, on the GT network or VPN:
    `rsync -a --exclude .git --filter=':- .gitignore' ./ <user>@<login node>:scratch/gator/gator_clone/`
@@ -494,6 +495,28 @@ apptainer exec --nv --containall --no-mount bind-paths \
   part's vertices to the positions of a MuJoCo press (note 11). `python3 harpor/agent/loop_trace.py RUN_DIR` prints
   a session's loop in order.
 
+#### The sandbox: Apptainer or docker
+
+Every container of the agent stage (the Codex CLI, the Claude shell and the helpers' Blender) and the Blender of the
+part split, the 360 video and the soft-part video comes from one function, `controller.container`. Its sandbox
+argument (`--sif` of the stages) is an Apptainer SIF, `$G/sif/harpor-agent.sif`, which `setup/agent.sh` builds, or
+`docker:IMAGE` (`HARPOR_SANDBOX`, set by the docker image). Both give each container the same view:
+
+- only the binds of the call, at the same paths: `/work` and `/session` of the session, the helper client at
+  `/opt/gator/bin` and the tool server's socket folder at `/opt/gator/sock`, or a job's folders for Blender;
+- no API key except in the Codex container (`--env-file`), and no network in the Claude shell;
+- the GPU, for Blender's Cycles OptiX.
+
+In docker, HARPOR runs in its own container, which has the host's docker socket, and starts each sandbox as a
+sibling container of the same image (`docker run --rm --init --gpus all --user UID:GID`). The docker daemon reads
+bind paths on the host, so a path under `/data`, the data folder, maps to `HARPOR_HOST_DATA`, the folder's path on
+the host; a path in the repo is not bound, because the sibling has the same image (and `/opt/gator/bin` links to
+`harpor/agent/bin`); any other path is refused. TMPDIR is in the data folder, so the socket folder is shared too.
+Blender's docker containers also have no network. A killed `docker run` does not stop its container, so every
+`docker run` goes through `harpor/agent/docker_guard.py`, whose guardian, in a session of its own, removes the
+container by name when its `docker run` ends; the watchdogs and the cancel that kill process groups then work as
+under Apptainer. Tested with a fake docker command only (`tests/test_docker_sandbox.py`).
+
 #### Agent setup and pilot checks on ICE
 
 Files: `containers/harpor-agent.def` (Ubuntu 24.04, Node.js 24.21.0, Codex CLI 0.162.1, Blender
@@ -505,7 +528,7 @@ the rest of scratch (including other projects' data) out of the agent's reach. T
 is the only one that needs the network, so only it binds `/etc/resolv.conf` and `/etc/hosts`,
 read-only. The Claude shell (`--net --network none`) and the Blender containers do not.
 
-1. **Build the image** in a terminal of the ICE session:
+1. **Build the image** in a terminal of the ICE session (`bash setup/agent.sh` runs the same build):
 
    ```bash
    module purge; G=$(readlink -f ~/scratch)/gator; mkdir -p $G/sif
@@ -570,25 +593,51 @@ read-only. The Claude shell (`--net --network none`) and the Blender containers 
 
 The photo-match scores were removed. `harpor/eval/photo_match.py` is in commit 91003c9.
 
-### 7. Runtime environments (all on ICE, under `~/scratch/gator`)
+### 7. Runtime environments (under `$HARPOR_ROOT`, by default `~/harpor`)
 
 | Environment | Contents | Notes |
 |---|---|---|
-| `envs/sam3d` (micromamba) | SAM 3D Objects, MoGe, nvdiffrast (note 4), anthropic 1.15.0 (note 5) | MV-SAM3D runs here too, with its clone first on `sys.path` (note 4b); so does the agent controller |
+| `envs/sam3d` (micromamba) | SAM 3D Objects, MoGe, nvdiffrast (note 4), anthropic 1.15.0 (note 5) | MV-SAM3D runs here too, with its clone first on `sys.path` (note 4b); so does the agent controller. Built by `setup/sam3d.sh` |
 | `envs/da3` (venv) | Depth Anything 3, torch 2.14.1+cu130 (note 4b) | Separate so DA3's dependencies cannot change `envs/sam3d`. Built by `setup/mvsam3d.sh` |
-| `envs/web` (micromamba) | Python 3.12, fastapi 0.143.2, uvicorn 0.54.0, av 19.0.1, rosbags 0.11.8, anthropic 1.15.0 (note 10) | The web app's server; every stage runs in its own env |
-| `envs/sam3seg` (micromamba) | Python 3.12, torch 2.14.1+cu130, transformers 5.20.0 (note 3) | SAM 3 masks; transformers 5.20 needs torch 2.6 or newer, so it cannot go into `envs/sam3d` |
-| `sif/harpor-agent.sif` (Apptainer) | Node.js 24.21.0, Codex CLI 0.162.1, Blender 5.2.2 | Built from `containers/harpor-agent.def` with `--fakeroot` (note 5); run with `--nv` for Cycles OptiX |
-| `envs/mujoco` (micromamba) | Python 3.11, mujoco 3.16.0, coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF export, the host's MuJoCo check of the agent's rounds and the soft-part press (note 11); no pytest. Built by `setup/mujoco.sh`, which has not been run as a recipe (note 9) |
+| `envs/web` (micromamba) | Python 3.12, fastapi 0.143.2, uvicorn 0.54.0, av 19.0.1, rosbags 0.11.8, anthropic 1.15.0 (note 10) | The web app's server; every stage runs in its own env. Built by `setup/web.sh` |
+| `envs/sam3seg` (micromamba) | Python 3.12, torch 2.14.1+cu130, transformers 5.20.0 (note 3) | SAM 3 masks; transformers 5.20 needs torch 2.6 or newer, so it cannot go into `envs/sam3d`. Built by `setup/sam3seg.sh` |
+| `sif/harpor-agent.sif` (Apptainer) | Node.js 24.21.0, Codex CLI 0.162.1, Blender 5.2.2 | Built from `containers/harpor-agent.def` with `--fakeroot` by `setup/agent.sh` (note 5); run with `--nv` for Cycles OptiX. The docker image has these tools inside instead |
+| `envs/mujoco` (micromamba) | Python 3.11, mujoco 3.16.0, coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF export, the host's MuJoCo check of the agent's rounds and the soft-part press (note 11); no pytest. Built by `setup/mujoco.sh` (first run as a recipe on 2026-11-08) |
 | `envs/vomp11` (micromamba) | VoMP v1.1 (641a22d) in `VoMP/`, Python 3.11, torch 2.4.0+cu121, bpy 4.2.0, kaolin 0.18.0, spconv-cu121 2.3.8 (note 9) | Built by `setup/vomp11.sh` |
 
-`setup/mvsam3d.sh` builds `envs/da3`, `setup/vomp11.sh` builds `envs/vomp11` and `setup/mujoco.sh` builds
-`envs/mujoco`, and they fetch the code and weights that go with them. Run them with `bash`. `setup/mvsam3d.sh` needs
-`envs/sam3d` from note 4 first, and the other two need nothing from it. They work under `$HARPOR_ROOT`, by default
-`~/scratch/gator`, and they are not tied to ICE. `setup/common.sh`, which they all source, runs `module purge` only
-where the `module` command exists, and it fetches micromamba when `tools/` has none.
+`bash setup/install.sh` builds all of them in order and then the weights: `setup/web.sh`, `setup/sam3d.sh`,
+`setup/mvsam3d.sh` (`envs/da3`), `setup/sam3seg.sh`, `setup/vomp11.sh`, `setup/mujoco.sh`, `setup/agent.sh` (the
+Apptainer image, skipped without apptainer or with `HARPOR_SKIP_AGENT=1`) and `setup/weights.sh` (skipped with
+`HARPOR_SKIP_WEIGHTS=1`). Each script also runs on its own, skips what is built, and works under `$HARPOR_ROOT`.
+`setup/common.sh`, which they all source, runs `module purge` only where the `module` command exists, fetches
+micromamba when `tools/` has none, and sets `TORCH_CUDA_ARCH_LIST` from the machine's GPUs unless it is set. It stops
+at a GPU newer than 9.0. The envs bring their own CUDA toolkits and compilers, so the machine needs only Linux
+x86_64, curl, git, bzip2, the X and GL libraries of the Dockerfile and an NVIDIA driver for CUDA 13.0 (`envs/da3`
+and `envs/sam3seg` use cu130 builds of torch). The weights need a Hugging Face token with access to `facebook/sam3`
+and `facebook/sam-3d-objects` (`HF_TOKEN`). The whole install is about 90 GB.
 
-ICE limits that matter: 300 GB of scratch and 1 million files, 30 GB home, and GPU sessions of at
+**The docker image.** `containers/Dockerfile` (Ubuntu 22.04) runs `setup/install.sh` with both skips and
+`TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"`, adds the agent's tools at the versions of `containers/harpor-agent.def`
+and the docker CLI, and copies the code last, to `/opt/harpor/code`, with `HARPOR_ROOT=/opt/harpor`. The data
+folder is mounted at `/data`: links in the image put `.cache`, `webapp_runs`, `sam-3d-objects/checkpoints` and
+`VoMP/weights` there, so the image holds no weights and no jobs. `containers/harpor-docker` starts it as the user,
+with the GPUs, the docker socket and the data folder (`HARPOR_DATA`, by default `~/harpor-data`); its commands are
+`check`, `weights`, `serve` and `run` (`containers/entrypoint.sh`).
+
+On 2026-11-08 a fresh `setup/install.sh` ran on an ICE L40S node (16 cores) into an empty root on the node's local
+disk, with `CUDA_VISIBLE_DEVICES=` and `TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"`, to stand in for the docker build.
+Every step passed in 34 minutes, the weights included: `envs/sam3d` took 20 minutes (most of it pytorch3d and gsplat
+for four GPU kinds), `envs/vomp11` 5, the Apptainer image 3 and the weights 1. Its torch, pytorch3d, kaolin,
+flash_attn, gsplat, nvdiffrast and anthropic match the ICE envs. Unpinned packages came out newer by patch releases;
+trimesh came out 5.2.0, so `setup/sam3d.sh` now pins the 5.1.1 that HARPOR was tested with. `setup/mujoco.sh` ran as
+a recipe for the first time there. The install was then laid out as the image lays it out (the root and the code
+read-only, the caches and weights in a data folder through the same links) and ran a rigid job from a 1.3 MB phone
+video ("globe", no agent, with the 360 video): every stage passed in 10 minutes, Blender in the new Apptainer image,
+and nothing was written into the root. The first try stopped at `masks`: a gated model asks the hub with the token
+even from the cache, so `setup/weights.sh` now keeps the token in `$HF_HOME/token`. Not tested: the docker build
+itself, the GPU in a docker container, and the docker sandbox outside `tests/test_docker_sandbox.py`.
+
+On ICE, the limits that matter: 300 GB of scratch and 1 million files, 30 GB home, and GPU sessions of at
 most 16 h. Scratch is not backed up, and files untouched for 120 days are deleted at the end of the
 semester. `~/.config/pip/pip.conf` (written by NVIDIA PyIndex) adds `pypi.ngc.nvidia.com`, which does
 not resolve, and pip retries it on every package, so the installs set `PIP_CONFIG_FILE=/dev/null` and
@@ -731,18 +780,32 @@ masks, Depth Anything 3, the metric scale from LiDAR (optional, note 12), MV-SAM
 fit, the part list and the part split (for an articulated object only, note 11), the agent
 (GPT-6-Astra or Claude Opus 5.5), alignment and transfer of the earlier VoMP predictions, MJCF, USD and URDF.
 
-**Start it.** Run `export HARPOR_SSH_HOST=<user>@<login node>` once in the Mac's shell profile.
-`HARPOR_SSH_SOCKET` (default `~/.ssh/cm-ice`) and `HARPOR_REMOTE_CODE` (default `~/scratch/gator/gator_clone`) are
-optional. Log in to ICE on the Mac so that the socket is up, start an L40S job, then:
+**Start it.** With docker (`containers/Dockerfile`, note 7), on the GPU machine:
 
 ```bash
-bash harpor/webapp/open_mac.sh JOBID
+containers/harpor-docker check
+HF_TOKEN=hf_... containers/harpor-docker weights
+containers/harpor-docker serve
 ```
 
-`open_mac.sh` runs `start_ice.sh` on the login node, which starts the server inside the job with
+`serve` publishes the server on `localhost:8765` only and prints the login URL; from another computer, forward the
+port with `ssh -L 8765:localhost:8765 <machine>`. Without docker, build the envs with `setup/install.sh` (the
+server's own env, `envs/web`, comes from `setup/web.sh`) and run
+`$HARPOR_ROOT/envs/web/bin/python -m harpor.webapp` from the repo, which listens on 127.0.0.1.
+
+On a Slurm cluster without docker, such as ICE, the server runs inside a GPU job. Export
+`HARPOR_SSH_HOST=<user>@<login node>` and `HARPOR_REMOTE_CODE=<repo on the login node>` once in the laptop's
+shell profile, and `HARPOR_ROOT` on the cluster when the envs are not in `~/harpor`. `HARPOR_SSH_SOCKET` (default
+`~/.ssh/cm-harpor`) is optional. Log in so that the socket is up, start a GPU job, then:
+
+```bash
+bash harpor/webapp/open_slurm.sh JOBID
+```
+
+`open_slurm.sh` runs `start_slurm.sh` on the login node, which starts the server inside the job with
 `srun --overlap` in `envs/web`. It then forwards `localhost:8765` to the server's node and port on
 the socket and opens the login URL, which sets the login cookie. If the job already runs a
-server, `start_ice.sh` reuses it. `python -m harpor.webapp --fake` runs every stage with stand-ins, so the UI
+server, `start_slurm.sh` reuses it. `python -m harpor.webapp --fake` runs every stage with stand-ins, so the UI
 works on a Mac without GPUs. For an articulated job, the fake `parts` stage cuts the box at 75% of its
 height with `trimesh.intersections.slice_faces_plane` and caps the cut with a fan of triangles, because
 trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs/web` has no shapely.
@@ -1045,7 +1108,8 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
 
 **Static demo gallery:** `docs/public_site.md`.
 
-**Security.** The server port on the compute node is open to other ICE users, so every request
+**Security.** The server port on a cluster's compute node is open to the cluster's other users, and in docker
+the agent's Codex container shares the docker network, so every request
 needs the login cookie (a random token), except the help page and its stylesheet, which hold no
 job data. The API key lives only in the server's memory. For the
 agent stage, and for the `propose` stage when the VLM lists the parts, it is written to a 0600 file
@@ -1165,7 +1229,7 @@ and its *Tested so far* says what ran where.
   `harpor.physics.mjcf` refuses joints in W.
 
 **Steps.** Each command runs from the repo root, with `G` the root folder (`$HARPOR_ROOT`, by default
-`$(readlink -f ~/scratch)/gator`) and `J` the job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step 1 as the stage
+`~/harpor`) and `J` the job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step 1 as the stage
 `propose`, steps 2 to 5 as the stage `parts`, and step 6 as its agent stage.
 
 1. **Propose** (`envs/sam3d`): `python -m harpor.parts.stage propose --job "$J" [--key-file F] [--agent astra|opus|none]`
@@ -2287,7 +2351,7 @@ the job's current calibration (see the last bullet), it is the stage's done mark
   tab shows each pool view's points by frame name, to check the calibration (up to about 55 MB with 32
   views).
 
-**Steps** (`envs/web`, from `$G/gator_clone` on ICE, or from the repo root on the Mac).
+**Steps** (`envs/web`, from the repo root).
 1. **Stage:** `python -m harpor.webapp.lidar scale --job "$J"` gathers the samples (from the cache
    first), runs the estimate, writes the check images and then `pool/lidar.json`, and prints one line
    per view. It exits 1 with the reason when the record is not ok.

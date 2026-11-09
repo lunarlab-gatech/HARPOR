@@ -91,9 +91,15 @@ HELPER_ENV = {"GATOR_SOCKET": "/opt/gator/sock/tools.sock", "PREPEND_PATH": "/op
 CODEX_MODEL, CLAUDE_MODEL, EFFORTS = tools.CODEX_MODEL, tools.CLAUDE_MODEL, tools.EFFORTS
 CLAUDE_EFFORT = "xhigh"  # the effort of the Astra comparison runs; Opus 5.5's own default is medium, so it is always sent
 LOGS = {"codex": "codex.jsonl", "claude": "claude.jsonl"}  # each agent's event log, in root/session
-# --no-mount bind-paths turns off every bind path in the site's apptainer.conf: on ICE, /scratch and /storage.
+# --no-mount bind-paths turns off every bind path in the site's apptainer.conf, such as a cluster's /scratch and
+# /storage.
 CONTAINER = ["apptainer", "exec", "--nv", "--containall", "--no-mount", "bind-paths"]
 DNS_FILES = ("/etc/resolv.conf", "/etc/hosts")  # only the Codex container binds these, since only it needs the network
+# A sandbox named "docker:IMAGE" runs each container as a sibling docker container of IMAGE instead (container): the
+# docker image of HARPOR names itself so. docker_guard.py removes a container whose `docker run` was killed.
+DOCKER = "docker:"
+DOCKER_RUN = ["docker", "run", "--rm", "--init", "--entrypoint=", "--gpus", "all", "--label", "harpor.sandbox=1"]
+DOCKER_GUARD = AGENT_DIR / "docker_guard.py"
 # Shell commands that reach the network. Nothing in the container blocks them, so result.json lists
 # the ones that ran.
 NETWORK = re.compile(
@@ -124,29 +130,80 @@ def codex_command():
 
 
 def _bind(src, dst, ro=False):
+    """One bind of a container (container): (src, dst, ro), with src on this machine."""
     src = str(src)
     if any(c in src for c in ":,"):
         raise ValueError(f"Apptainer cannot bind a path with ':' or ',': {src}")
-    return ["--bind", f"{src}:{dst}" + (":ro" if ro else "")]
+    return str(src), str(dst), ro
 
 
 def _mounts(root, sock_dir, session=True):
     root = Path(root).resolve()
-    return [*_bind(root / "work", "/work"), *(_bind(root / "session", "/session") if session else []),
-            *_bind(AGENT_DIR / "bin", "/opt/gator/bin", ro=True), *_bind(sock_dir, "/opt/gator/sock", ro=True)]
+    return [_bind(root / "work", "/work"), *([_bind(root / "session", "/session")] if session else []),
+            _bind(AGENT_DIR / "bin", "/opt/gator/bin", ro=True), _bind(sock_dir, "/opt/gator/sock", ro=True)]
 
 
-def _env_flags(env):
-    return [a for k, v in env.items() for a in ("--env", f"{k}={v}")]
+def docker_image(sif):
+    """IMAGE when the sandbox sif is "docker:IMAGE" (docker containers), else None (an Apptainer SIF)."""
+    s = str(sif)
+    return s[len(DOCKER):] if s.startswith(DOCKER) else None
+
+
+def _docker_source(src):
+    """Where a sibling docker container finds src: its path for the docker daemon, or None when the image already has it.
+
+    Inside HARPOR's own container (HARPOR_HOST_DATA set, harpor-docker), the daemon sees the host's paths: a path
+    under HARPOR_DATA (the data folder) maps to HARPOR_HOST_DATA, and a path in the repo is skipped, since the sibling
+    runs the same image with the repo at the same path (and /opt/gator/bin linked to its harpor/agent/bin). Any other
+    path is not on the host, and a ValueError says so. Outside a container, every path is the daemon's own."""
+    host = os.environ.get("HARPOR_HOST_DATA")
+    if not host:
+        return src
+    p, data = Path(src).resolve(), Path(os.environ.get("HARPOR_DATA") or "/data")
+    if p == REPO or REPO in p.parents:
+        return None
+    if p == data or data in p.parents:
+        return str(Path(host) / p.relative_to(data))
+    raise ValueError(f"a sibling container cannot see {src}: only HARPOR_DATA ({data}) is shared with the host")
+
+
+def container(sif, binds, cmd, env=None, *, env_file=None, pwd=None, network=True, dns=False, stdin=False):
+    """The argv that runs cmd in a sandbox container: sif names an Apptainer SIF, or "docker:IMAGE" (docker_image).
+
+    binds: (src, dst, ro) triples from _bind, and nothing else of this machine is visible. env: variables set inside;
+    env_file: a KEY=VALUE file whose lines are set inside too (the API key, which stays off argv). pwd: the working
+    folder inside. network False: loopback only. dns: bind DNS_FILES read-only (Apptainer only; a docker container
+    has its own). stdin: cmd reads the caller's stdin (docker run needs -i for that).
+
+    Apptainer runs as the caller with the GPU (--nv) and --containall. A docker container runs as the caller's uid and
+    gid with every GPU, HOME and TMPDIR in its own /tmp, and the image's entrypoint off, through docker_guard.py, so
+    that it ends when its `docker run` ends."""
+    env = env or {}
+    image = docker_image(sif)
+    if image is None:
+        return [*CONTAINER, *([] if network else ["--net", "--network", "none"]),
+                *(a for src, dst, ro in [*binds, *([(p, p, True) for p in DNS_FILES] if dns else [])]
+                  for a in ("--bind", f"{src}:{dst}" + (":ro" if ro else ""))),
+                *(["--env-file", str(env_file)] if env_file else []),
+                *(a for k, v in env.items() for a in ("--env", f"{k}={v}")),
+                *(["--pwd", pwd] if pwd else []), str(sif), *cmd]
+    volumes = []
+    for src, dst, ro in binds:
+        host = _docker_source(src)
+        if host is not None:
+            volumes += ["-v", f"{host}:{dst}" + (":ro" if ro else "")]
+    return [sys.executable, str(DOCKER_GUARD), *DOCKER_RUN, "--user", f"{os.getuid()}:{os.getgid()}",
+            *(["-i"] if stdin else []), *([] if network else ["--network", "none"]), *volumes,
+            *(a for k, v in {"HOME": "/tmp", "TMPDIR": "/tmp", **env}.items() for a in ("-e", f"{k}={v}")),
+            *(["--env-file", str(env_file)] if env_file else []), *(["-w", pwd] if pwd else []), image, *cmd]
 
 
 def apptainer_command(root, sif, key_file, sock_dir, agent=None):
     """The codex agent's container (note 5): /work and /session writable, the helper client, the
-    socket folder and DNS_FILES read-only, no /scratch or /storage, GPU for Blender. agent replaces
-    the CLI command in tests."""
-    return [*CONTAINER, *_mounts(root, sock_dir), *(a for p in DNS_FILES for a in _bind(p, p, ro=True)),
-            "--env-file", str(key_file), *_env_flags({**CODEX_ENV, **HELPER_ENV}), "--pwd", "/work", str(sif),
-            *(agent or [*CODEX_KEY_WRAPPER, *codex_command()])]
+    socket folder and DNS_FILES read-only, no other folder of this machine, GPU for Blender. agent replaces
+    the CLI command in tests. sif may also name a docker image (container)."""
+    return container(sif, _mounts(root, sock_dir), agent or [*CODEX_KEY_WRAPPER, *codex_command()],
+                     {**CODEX_ENV, **HELPER_ENV}, env_file=key_file, pwd="/work", dns=True, stdin=True)
 
 
 def shell_command(root, sif, sock_dir):
@@ -155,25 +212,27 @@ def shell_command(root, sif, sock_dir):
     network (--network none; with --containall the container keeps only loopback). root/session holds
     claude_agent's log, which result.json takes the cost and the tool calls from, so the model's
     commands must not reach it. claude_agent writes the commands to its stdin."""
-    return [*CONTAINER, "--net", "--network", "none", *_mounts(root, sock_dir, session=False),
-            *_env_flags(HELPER_ENV), "--pwd", "/work", str(sif), "bash", "--noprofile", "--norc"]
+    return container(sif, _mounts(root, sock_dir, session=False), ["bash", "--noprofile", "--norc"], HELPER_ENV,
+                     pwd="/work", network=False, stdin=True)
 
 
 def claude_command(root, sif, sock_dir, key_file, effort=CLAUDE_EFFORT):
     """The claude agent (note 5): harpor.agent.claude_agent with the controller's own interpreter, on
     the host. It reads the key from key_file into its memory and starts its shell with shell_command.
     Paths are absolute, because it runs from the repository and not from the work folder."""
-    return [sys.executable, "-m", "harpor.agent.claude_agent", os.path.abspath(root), "--sif", os.path.abspath(sif),
+    sandbox = sif if docker_image(sif) else os.path.abspath(sif)
+    return [sys.executable, "-m", "harpor.agent.claude_agent", os.path.abspath(root), "--sif", sandbox,
             "--sock-dir", str(sock_dir), "--key-file", os.path.abspath(key_file), "--effort", effort]
 
 
 def sif_blender(sif, rw=(), ro=(), aliases=()):
-    """Blender in the agent's SIF, in a container that sees only the paths rw (read-write) and ro
-    (read-only), each at its host path, and the Blender scripts (read-only). aliases: (host path,
-    container path) pairs, bound read-write."""
+    """Blender in the agent's sandbox (a SIF or "docker:IMAGE", container), in a container that sees only the paths
+    rw (read-write) and ro (read-only), each at its path on this machine, and the Blender scripts (read-only).
+    aliases: (path on this machine, container path) pairs, bound read-write. A docker container also has no
+    network: Blender needs none."""
     binds = [*(_bind(p, p) for p in rw), *(_bind(src, dst) for src, dst in aliases),
              *(_bind(p, p, ro=True) for p in ro), _bind(tools.BLENDER_SCRIPTS, tools.BLENDER_SCRIPTS, ro=True)]
-    return [*CONTAINER, *(a for b in binds for a in b), str(sif), "blender"]
+    return container(sif, binds, ["blender"], network=docker_image(sif) is None)
 
 
 def blender_command(root, sif):
@@ -1087,7 +1146,9 @@ def run_container_session(root, sif, key_file, agent=None, **watchdog):
     command, for tests of the launcher: for codex the CLI inside the container, for claude the whole
     host command."""
     info = agent_info(root)
-    sock_dir = tempfile.mkdtemp(prefix="gator-")  # short path: Unix socket paths are limited to 107 bytes
+    # A short path: Unix socket paths are limited to 107 bytes. In HARPOR's docker container TMPDIR is in the data
+    # folder, which the sibling containers can see.
+    sock_dir = tempfile.mkdtemp(prefix="gator-")
     try:
         if info["agent"] == "claude":
             cmd = agent or claude_command(root, sif, sock_dir, key_file, info["effort"])

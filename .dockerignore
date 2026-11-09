@@ -1,0 +1,25 @@
+# The docker build context (containers/Dockerfile): the code only. Large or private files stay out.
+.git
+.claude
+.venv
+.pytest_cache
+**/__pycache__
+results
+runs
+webapp_runs
+site
+*.bag
+*.mcap
+*.db3
+*.mp4
+*.mov
+*.MOV
+*.zip
+*.m4v
+*.avi
+*.mkv
+*.webm
+*.env
+*.pem
+*.key
+.DS_Store

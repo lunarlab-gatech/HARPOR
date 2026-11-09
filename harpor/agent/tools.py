@@ -1200,7 +1200,7 @@ def main(argv=None):
     f.add_argument("--limitation", action="append", default=[], help="repeat up to 3 times")
     a = p.parse_args(argv)
     # Resolved, as controller.blender_command binds them: Blender's container has no path through a symlink, such as
-    # ~/scratch on ICE.
+    # a home folder's link to a scratch file system.
     work = Path(os.environ.get("GATOR_WORK", "/work")).resolve()
     control = Path(os.environ.get("GATOR_CONTROL", work.parent / "control")).resolve()
     blender = shlex.split(os.environ.get("GATOR_BLENDER", "blender"))

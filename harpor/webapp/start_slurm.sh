@@ -1,7 +1,7 @@
 #!/bin/bash
-# Start the HARPOR web app inside a running Slurm job on PACE ICE. Run it on the login node:
+# Start the HARPOR web app inside a running Slurm job on a cluster without docker. Run it on the login node:
 #
-#   bash ~/scratch/gator/gator_clone/harpor/webapp/start_ice.sh JOBID [PORT]
+#   bash <repo>/harpor/webapp/start_slurm.sh JOBID [PORT]
 #
 # The server runs on the job's compute node as a job step (srun --overlap), so the pipeline stages it
 # starts share the job's GPU. It writes ~/.config/harpor/webapp.json (node, port, token, job); home is
@@ -9,19 +9,16 @@
 # the server pick a free port. A server from an earlier start is reused only when webapp.json says it
 # runs in job JOBID on one of its nodes (slurm_job, slurm_node) and it still answers; a webapp.json
 # from another job (the server deletes it when it stops, but not when it is killed) is ignored.
-# Messages go to stderr; stdout ends with NODE=, PORT= and TOKEN= lines for open_mac.sh.
+# Messages go to stderr; stdout ends with NODE=, PORT= and TOKEN= lines for open_slurm.sh.
 #
-# One-time setup of envs/web, the server's Python:
-#   G=$(readlink -f ~/scratch)/gator
-#   $G/tools/micromamba create -y -p $G/envs/web -c conda-forge python=3.12 pip
-#   $G/envs/web/bin/pip install fastapi==0.143.2 uvicorn==0.54.0 av==19.0.1 rosbags==0.11.8 anthropic==1.15.0 numpy pillow scipy
-# The agent stage also needs: $G/envs/sam3d/bin/pip install anthropic==1.15.0
+# The envs come from setup/install.sh, under HARPOR_ROOT (by default ~/harpor); set it in the login shell's profile
+# when it is elsewhere, such as on a scratch file system.
 set -euo pipefail
 umask 077  # server.log and webapp.json hold the login token; job folders stay private
 JOB=${1:?usage: start_ice.sh JOBID [PORT]}
 PORT=${2:-0}
 [[ $JOB =~ ^[0-9]+$ && $PORT =~ ^[0-9]+$ ]] || { echo "JOBID and PORT must be numbers" >&2; exit 2; }
-G=${HARPOR_ROOT:-$(readlink -f ~/scratch)/gator}
+G=${HARPOR_ROOT:-$HOME/harpor}
 CODE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 PY=$G/envs/web/bin/python
 INFO=~/.config/harpor/webapp.json
@@ -40,7 +37,7 @@ alive() {  # the server's token gate answers 401 to a request without the cookie
   [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$1:$2/api/jobs" || true)" = 401 ]
 }
 
-[ -x "$PY" ] || { say "no $PY; set up envs/web first (see the top of this script)"; exit 1; }
+[ -x "$PY" ] || { say "no $PY; build the envs first (setup/install.sh, or setup/web.sh for this one)"; exit 1; }
 state=$(squeue -h -j "$JOB" -o '%T %N' 2>/dev/null || true)
 [[ $state == RUNNING* ]] || { say "job $JOB is not running (squeue: ${state:-no such job})"; exit 1; }
 # One name per line; squeue prints a list such as atl1-1-[02-03] for a job on more than one node.
@@ -54,7 +51,7 @@ else
   mkdir -p "$G/webapp_runs"
   rm -f "$INFO"  # so that the file this start writes is the one read below
   # bash -l, so that module exists and purges what the login profile loaded; setsid -w keeps $!
-  # alive as long as srun runs, also if setsid has to fork. HARPOR_ROOT goes by name, because open_mac.sh
+  # alive as long as srun runs, also if setsid has to fork. HARPOR_ROOT goes by name, because open_slurm.sh
   # runs this script without the login profile that the server's bash -l reads.
   nohup setsid -w srun --jobid="$JOB" --overlap --ntasks=1 \
     bash -lc "module purge 2>/dev/null; cd $CODE && HARPOR_ROOT=$G exec $PY -m harpor.webapp --host 0.0.0.0 --port $PORT" \

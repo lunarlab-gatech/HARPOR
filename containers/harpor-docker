@@ -1,0 +1,51 @@
+#!/bin/bash
+# Run HARPOR's docker image on this Linux machine (containers/Dockerfile). It needs docker, the NVIDIA Container
+# Toolkit and an NVIDIA GPU from Ampere to Hopper.
+#
+#   containers/harpor-docker check            the GPU, docker and the agent's sandbox
+#   containers/harpor-docker weights          download the weights once, about 30 GB (needs HF_TOKEN)
+#   containers/harpor-docker serve [PORT]     the web app at http://localhost:PORT (default 8765)
+#   containers/harpor-docker run INPUT ARGS   one job from the terminal (python -m harpor.webapp.run --help)
+#   containers/harpor-docker bash             a shell in the container
+#
+# Settings, from the environment:
+#   HARPOR_IMAGE  the image (default harpor:0.1)
+#   HARPOR_DATA   the data folder on this machine (default ~/harpor-data): weights, caches, jobs and, in
+#                 home/.config/harpor, the key files of the terminal command (openai.env, anthropic.env)
+#   HF_TOKEN      a Hugging Face Read token with access to facebook/sam3 and facebook/sam-3d-objects (weights only)
+#
+# The container runs as you, so the data folder stays yours. It gets the docker socket, because the agent and Blender
+# run in sibling containers of the same image (build_plan.md note 5): this gives it the same power over docker that
+# you have. The web app listens on localhost only; reach it from another computer with ssh -L PORT:localhost:PORT.
+set -euo pipefail
+IMAGE=${HARPOR_IMAGE:-harpor:0.1}
+DATA=${HARPOR_DATA:-$HOME/harpor-data}
+mkdir -p "$DATA"
+DATA=$(cd "$DATA" && pwd -P)
+SOCK=/var/run/docker.sock
+[ -S "$SOCK" ] || { echo "no $SOCK: is docker running on this machine?" >&2; exit 1; }
+cmd=${1:-serve}
+shift || true
+
+args=(--rm --init --gpus all --shm-size 16g --user "$(id -u):$(id -g)" --group-add "$(stat -c %g "$SOCK")"
+      -v "$SOCK:$SOCK" -v "$DATA:/data" -e HARPOR_HOST_DATA="$DATA" -e HARPOR_SANDBOX="docker:$IMAGE")
+[ -t 0 ] && [ -t 1 ] && args+=(-it)
+[ -n "${HF_TOKEN:-}" ] && args+=(-e HF_TOKEN)  # by name, so the token stays off the command line
+case "$cmd" in
+  serve)
+    port=${1:-8765}
+    [[ $port =~ ^[0-9]+$ ]] || { echo "PORT must be a number" >&2; exit 2; }
+    [ $# -gt 0 ] && shift
+    args+=(-p "127.0.0.1:$port:8765")
+    echo "open the URL with ?token= that the server prints, with port $port" >&2
+    ;;
+  run)
+    # The input file goes in read-only at /input; --resume ID has none.
+    if [ $# -gt 0 ] && [ -f "$1" ]; then
+      dir=$(cd "$(dirname "$1")" && pwd -P)
+      args+=(-v "$dir:/input:ro")
+      set -- "/input/$(basename "$1")" "${@:2}"
+    fi
+    ;;
+esac
+exec docker run "${args[@]}" "$IMAGE" "$cmd" "$@"

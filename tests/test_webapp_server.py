@@ -1360,7 +1360,7 @@ def test_main_writes_the_login_file(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert f"ssh -L {d['port']}:127.0.0.1:{d['port']} <this machine>" in out and d["token"] in out
     assert (tmp_path / "runs").is_dir()
-    assert not info.exists()  # the server stopped, so start_ice.sh must not find it
+    assert not info.exists()  # the server stopped, so start_slurm.sh must not find it
     # A later start replaced the file meanwhile: it stays.
     monkeypatch.setattr(uvicorn.Server, "run", lambda self, sockets: info.write_text(json.dumps({"token": "later"})))
     server.main(args)
@@ -1399,8 +1399,8 @@ def _lines_until(f, text, limit=200):
     return out
 
 
-def test_start_ice_reuses_only_a_server_of_the_same_job(tmp_path):
-    """start_ice.sh with a stand-in squeue: a webapp.json left by another job, or naming another node, is
+def test_start_slurm_reuses_only_a_server_of_the_same_job(tmp_path):
+    """start_slurm.sh with a stand-in squeue: a webapp.json left by another job, or naming another node, is
     not trusted, even when something on its node and port answers 401 as the server does."""
     import http.server
     import threading
@@ -1408,7 +1408,7 @@ def test_start_ice_reuses_only_a_server_of_the_same_job(tmp_path):
     if shutil.which("curl") is None:
         pytest.skip("no curl")
     home, bin_ = tmp_path / "home", tmp_path / "bin"
-    web = home / "scratch" / "gator" / "envs" / "web" / "bin"
+    web = home / "harpor" / "envs" / "web" / "bin"  # the default root
     web.mkdir(parents=True)
     (web / "python").symlink_to(sys.executable)
     bin_.mkdir()
@@ -1433,7 +1433,7 @@ def test_start_ice_reuses_only_a_server_of_the_same_job(tmp_path):
 
     def start(**recorded):
         info.write_text(json.dumps({"node": "127.0.0.1", "port": port, "token": "tok", **recorded}))
-        return subprocess.run(["bash", str(ROOT / "harpor" / "webapp" / "start_ice.sh"), "222"], capture_output=True,
+        return subprocess.run(["bash", str(ROOT / "harpor" / "webapp" / "start_slurm.sh"), "222"], capture_output=True,
                               text=True, timeout=60, env={**os.environ, "HOME": str(home), "PATH": f"{bin_}:{os.environ['PATH']}"})
 
     try:
@@ -1448,14 +1448,12 @@ def test_start_ice_reuses_only_a_server_of_the_same_job(tmp_path):
         other.shutdown()
 
 
-def test_start_ice_starts_a_server_that_the_login_node_can_reach(tmp_path):
-    """start_ice.sh with stand-ins for squeue and setsid: its alive check calls http://$node:$port from the login
+def test_start_slurm_starts_a_server_that_the_login_node_can_reach(tmp_path):
+    """start_slurm.sh with stand-ins for squeue and setsid: its alive check calls http://$node:$port from the login
     node, so the server it starts listens on every address, not on the 127.0.0.1 default. The server runs from
-    this script's repo and gets the script's root by name: HARPOR_ROOT, else ~/scratch/gator."""
+    this script's repo and gets the script's root by name: HARPOR_ROOT, else ~/harpor."""
     home, bin_, argv = tmp_path / "home", tmp_path / "bin", tmp_path / "argv"
     home.mkdir()
-    (tmp_path / "storage").mkdir()
-    (home / "scratch").symlink_to(tmp_path / "storage")  # as on ICE
     bin_.mkdir()
     (bin_ / "squeue").write_text("#!/bin/bash\necho 'RUNNING atl1-node-07'\n")
     (bin_ / "setsid").write_text(f"#!/bin/bash\necho \"$*\" > {argv}\nexit 1\n")  # records the command, starts nothing
@@ -1467,50 +1465,52 @@ def test_start_ice_starts_a_server_that_the_login_node_can_reach(tmp_path):
         web = root / "envs" / "web" / "bin"
         web.mkdir(parents=True)
         (web / "python").symlink_to(sys.executable)
-        p = subprocess.run(["bash", str(ROOT / "harpor" / "webapp" / "start_ice.sh"), "222"], capture_output=True, text=True,
+        p = subprocess.run(["bash", str(ROOT / "harpor" / "webapp" / "start_slurm.sh"), "222"], capture_output=True, text=True,
                            timeout=60, env={"HOME": str(home), "PATH": f"{bin_}:{os.environ['PATH']}", **roots})
         assert p.returncode == 1 and "the server did not start" in p.stderr, p.stderr
         assert (f"cd {ROOT} && HARPOR_ROOT={root} exec {web}/python -m harpor.webapp --host 0.0.0.0 --port 0"
                 in argv.read_text())
 
-    start((tmp_path / "storage").resolve() / "gator", GATOR_ROOT=str(tmp_path / "old"))  # the old name is not read
+    start(home / "harpor", GATOR_ROOT=str(tmp_path / "old"))  # the old name is not read
     start(tmp_path / "new", HARPOR_ROOT=str(tmp_path / "new"))
 
 
-def test_open_mac_reads_its_settings(tmp_path):
-    """open_mac.sh with stand-ins for ssh and the browser openers, and only those on PATH: the ssh host has no
-    default, the socket and the remote folder do, and the remote folder's ~ stays for the remote shell."""
+def test_open_slurm_reads_its_settings(tmp_path):
+    """open_slurm.sh with stand-ins for ssh and the browser openers, and only those on PATH: the ssh host and the
+    remote folder have no default, the socket does, and the remote folder's ~ stays for the remote shell."""
     home, bin_, calls = tmp_path / "home", tmp_path / "bin", tmp_path / "calls"
     home.mkdir()
     bin_.mkdir()
     for tool in ("cat", "mkdir", "sed"):
         (bin_ / tool).symlink_to(shutil.which(tool))
     record = f'#!/bin/bash\necho "${{0##*/}} $*" >> {calls}\n'
-    (bin_ / "ssh").write_text(record + "case $* in *start_ice.sh*) printf 'NODE=n\\nPORT=7\\nTOKEN=tok\\n';; esac\n")
+    (bin_ / "ssh").write_text(record + "case $* in *start_slurm.sh*) printf 'NODE=n\\nPORT=7\\nTOKEN=tok\\n';; esac\n")
     (bin_ / "open").write_text(record)
     (bin_ / "ssh").chmod(0o755)
     (bin_ / "open").chmod(0o755)
 
     def run(**env):
         calls.write_text("")
-        p = subprocess.run([shutil.which("bash"), str(ROOT / "harpor" / "webapp" / "open_mac.sh"), "222"], text=True,
+        p = subprocess.run([shutil.which("bash"), str(ROOT / "harpor" / "webapp" / "open_slurm.sh"), "222"], text=True,
                            capture_output=True, timeout=60, env={"HOME": str(home), "PATH": str(bin_), **env})
         return p, calls.read_text().splitlines()
 
     p, ran = run()
     assert p.returncode == 1 and "set HARPOR_SSH_HOST=user@login-node" in p.stderr and ran == []
     p, ran = run(HARPOR_SSH_HOST="me@login")
+    assert p.returncode == 1 and "set HARPOR_REMOTE_CODE" in p.stderr and ran == []
+    p, ran = run(HARPOR_SSH_HOST="me@login", HARPOR_REMOTE_CODE="~/code/HARPOR")
     assert p.returncode == 0, p.stderr
-    sock = f"-S {home}/.ssh/cm-ice"
+    sock = f"-S {home}/.ssh/cm-harpor"
     assert ran == [f"ssh {sock} -O check me@login",
-                   f"ssh {sock} me@login bash ~/scratch/gator/gator_clone/harpor/webapp/start_ice.sh 222",
+                   f"ssh {sock} me@login bash ~/code/HARPOR/harpor/webapp/start_slurm.sh 222",
                    f"ssh {sock} -O forward -L 8765:n:7 me@login", "open http://localhost:8765/?token=tok"]
     assert (home / ".config" / "harpor").stat().st_mode & 0o777 == 0o700  # as fileio.private_folder asks
     (bin_ / "xdg-open").write_text(record)  # some Linux systems have an unrelated open
     (bin_ / "xdg-open").chmod(0o755)
     p, ran = run(HARPOR_SSH_HOST="me@login", HARPOR_SSH_SOCKET="/s/cm", HARPOR_REMOTE_CODE="/code")
     assert p.returncode == 0, p.stderr
-    assert ran == ["ssh -S /s/cm -O check me@login", "ssh -S /s/cm me@login bash /code/harpor/webapp/start_ice.sh 222",
+    assert ran == ["ssh -S /s/cm -O check me@login", "ssh -S /s/cm me@login bash /code/harpor/webapp/start_slurm.sh 222",
                    "ssh -S /s/cm -O forward -L 8765:n:7 me@login", "xdg-open http://localhost:8765/?token=tok"]
 
 

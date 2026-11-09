@@ -1,6 +1,7 @@
 """One terminal command that runs a whole HARPOR job, with no web server and no browser.
 
-Runs in envs/web on the GPU machine, from the repo root (on ICE inside a Slurm job, as the server does):
+Runs in envs/web on the GPU machine, from the repo root (in the docker image, containers/harpor-docker run, or on a
+cluster inside a Slurm job, as the server does):
 
     python -m harpor.webapp.run INPUT [--prompt NOUN] [settings]
     python -m harpor.webapp.run --resume ID [answers]

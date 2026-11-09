@@ -9,7 +9,7 @@ few log lines and PROGRESS lines. The scene is synthetic and ignores the video's
 and the posed mesh all come from that one scene, so the real view selection and the real gravity
 alignment work on them.
 
-Real code runs wherever it needs no GPU and no ICE env: topics, frames and extract (video.py, also
+Real code runs wherever it needs no GPU and none of the GPU envs: topics, frames and extract (video.py, also
 for a rosbag, since rosbags is pure Python, and for a Stray Scanner zip), prep (mvsam3d.prep), lidar
 (lidar.py, with the LiDAR points of the views), select (views.py), align (physics_auto.py), cameras.json
 (mvsam3d.cameras), turntable (harpor.webapp.turntable with the fake Blender of harpor.agent.fake_agent,

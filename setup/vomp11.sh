@@ -1,21 +1,14 @@
 #!/bin/bash
 # VoMP v1.1 (641a22d) in envs/vomp11 (build_plan.md note 9): Python 3.11, torch 2.4.0 cu121, bpy 4.2.0 pip module, under
-# $HARPOR_ROOT (by default ~/scratch/gator).
+# $HARPOR_ROOT (by default ~/harpor). The weights come from setup/weights.sh.
 # This follows VoMP's install_env.sh with CUDA_VERSION=12.1, minus the sudo apt steps (they install the X and GL libs,
-# which a machine must already have, as ICE nodes do), diff-gaussian-rasterization (splat path only) and torch-tensorrt
-# (use_trt only).
-# Run it on a GPU node. On Slurm, start it from the login node, in the repo:
+# which the machine must already have; the Dockerfile installs them), diff-gaussian-rasterization (splat path only)
+# and torch-tensorrt (use_trt only).
+# On Slurm, start it from the login node, in the repo:
 #   nohup setsid srun --jobid=<job> --overlap --ntasks=1 bash setup/vomp11.sh > output.log 2>&1 &
 set -exo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-# The CUDA extensions below are built for the GPUs in TORCH_CUDA_ARCH_LIST, and a build for the wrong GPU does not run.
-# The list comes from the environment, or else from the GPUs that this machine sees. On a cluster with mixed GPUs, set
-# the whole list by hand: see build_plan.md note 9.
-if [ -z "$TORCH_CUDA_ARCH_LIST" ]; then
-  TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | sort -u | paste -sd ';' -) \
-    || { echo "nvidia-smi found no GPU: run this on a GPU node, or set TORCH_CUDA_ARCH_LIST" >&2; exit 1; }
-fi
-export TORCH_CUDA_ARCH_LIST
+cuda_arch  # the GPUs that the CUDA extensions are built for (common.sh)
 [ -d VoMP ] || git clone https://github.com/nv-tlabs/VoMP.git
 git -C VoMP checkout -q 641a22d958054b8f4644aaddd4b1cba2a0d45491
 [ -d envs/vomp11 ] || tools/micromamba create -y -p "$G/envs/vomp11" -c conda-forge python=3.11 \
@@ -31,9 +24,10 @@ pip install kaolin==0.18.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/t
 pip install --no-build-isolation -r requirements_inference.txt
 pip install --no-build-isolation extensions/vox2seq/
 pip install -e .
-python -c "from huggingface_hub import snapshot_download as s; print(s('nvidia/PhysicalAI-Simulation-VoMP-Model', allow_patterns=['vomp_1_1/*'], local_dir='weights'))"
-ls -la weights/vomp_1_1
-python -c "import torch, torchvision, xformers, flash_attn, spconv.pytorch, kaolin, gsplat, igl, bpy, vox2seq, vomp.inference
-print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0), 'bpy', bpy.app.version_string, 'kaolin', kaolin.__version__)
+check_imports torch torchvision xformers flash_attn spconv.pytorch kaolin gsplat igl bpy vox2seq vomp.inference  # common.sh
+# No GPU is needed here (a docker build has none), so the device name is printed only when there is one.
+python -c "import torch, bpy, kaolin
+gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no GPU'
+print(torch.__version__, torch.version.cuda, gpu, 'bpy', bpy.app.version_string, 'kaolin', kaolin.__version__)
 assert torch.__version__.startswith('2.4.0')"
 echo SETUP_OK

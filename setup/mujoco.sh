@@ -1,7 +1,7 @@
 #!/bin/bash
 # envs/mujoco, the Python of the MJCF, USD and URDF stages (build_plan.md notes 7 and 9), under $HARPOR_ROOT (by default
-# ~/scratch/gator).
-# Rebuilt on 2026-11-01 from the installed versions in envs/mujoco on ICE (pip freeze). It has not been run as a recipe.
+# ~/harpor).
+# Rebuilt on 2026-11-01 from the installed versions in envs/mujoco on ICE (pip freeze). First run as a recipe on 2026-11-08.
 # It pins the packages that HARPOR imports, and pillow, which trimesh needs to read a GLB's textures. pip picks their
 # dependencies, such as glfw and PyOpenGL for mujoco.viewer.
 set -exo pipefail

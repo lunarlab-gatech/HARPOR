@@ -284,7 +284,22 @@ def test_config_from_env_takes_only_harpor_root(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("HARPOR_ROOT", raising=False)
     monkeypatch.setenv("GATOR_ROOT", str(tmp_path / "old"))
-    assert steps.config_from_env().G == (tmp_path / "scratch").resolve() / "gator"
+    monkeypatch.delenv("HARPOR_SANDBOX", raising=False)
+    cfg = steps.config_from_env()
+    assert cfg.G == tmp_path / "harpor" and cfg.sandbox is None
+
+
+def test_the_sandbox_setting_reaches_the_stages_that_use_blender(monkeypatch, tmp_path):
+    """HARPOR_SANDBOX names the docker image; without it the stages take the SIF under the root."""
+    job = {"id": "j1", "prompt": "cup", "slug": "cup", "agent": "none", "turntable": True, "overrides": {},
+           "articulated": False, "parts": {}}
+    cfg = steps.Config(G=tmp_path, runs=tmp_path / "runs")
+    assert "--sif $G/sif/harpor-agent.sif" in steps.command("turntable", job, cfg)[0][2]
+    monkeypatch.setenv("HARPOR_SANDBOX", "docker:harpor:0.1")
+    monkeypatch.setenv("HARPOR_ROOT", str(tmp_path))
+    cfg = steps.config_from_env()
+    assert cfg.sandbox == "docker:harpor:0.1"
+    assert "--sif docker:harpor:0.1" in steps.command("turntable", job, cfg)[0][2]
 
 
 def test_done_markers_guard_and_skip(tmp_path):
