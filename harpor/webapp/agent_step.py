@@ -1,9 +1,9 @@
-"""Agent stage of a web-app job: GPT-6-Astra or Claude Opus 5.5 refines the Stage A mesh (build_plan.md note 5),
-or gives the parts of an articulated job their joints (note 11).
+"""Agent stage of a web-app job: GPT-6-Astra, Claude Opus 5.5 or Claude Fable 5.2 refines the Stage A mesh
+(build_plan.md note 5), or gives the parts of an articulated job their joints (note 11).
 
 Runs in envs/sam3d from the repo root, with apptainer on the PATH:
 
-    python -m harpor.webapp.agent_step --job J --sif harpor-agent.sif --key-file F [--agent astra|opus]
+    python -m harpor.webapp.agent_step --job J --sif harpor-agent.sif --key-file F [--agent astra|opus|fable]
 
 It prepares a fresh session in J/agent/s from J/run, runs it with controller.run_container_session and
 writes a copy of J/agent/s/result.json, without the key, to J/agent/result.json. The session is a
@@ -11,8 +11,9 @@ refinement of posed.glb (600 s) or, for an articulated job (job.json "articulate
 stage made run/parts.glb, an articulation of parts.glb with run/parts.json as input/parts.json (900 s).
 Both use every view of cameras.json. --agent astra (the default) runs GPT-6-Astra through the Codex
 CLI in Apptainer, and F holds OPENAI_API_KEY; --agent opus runs Claude Opus 5.5 through
-harpor.agent.claude_agent at xhigh effort (envs/sam3d needs anthropic==1.15.0), and F holds
-ANTHROPIC_API_KEY. The web app writes F to /dev/shm for this stage only.
+harpor.agent.claude_agent at xhigh effort, and --agent fable runs Claude Fable 5.2 through it at high
+effort (EFFORT; envs/sam3d needs anthropic==1.15.0), and F holds ANTHROPIC_API_KEY. The web app writes
+F to /dev/shm for this stage only.
 
 The Codex agent can read the key (from /proc), so its finish text or its commands may hold it. Every
 string of the result has each key of F (controller.read_keys) replaced by "[redacted API key]" before
@@ -46,13 +47,16 @@ import shutil
 import signal
 from pathlib import Path
 
-from harpor.agent.tools import printable
+from harpor.agent.tools import MODELS, printable
 from harpor.fileio import read_json, write_json
 from harpor.webapp import steps
 
 REDACTED = "[redacted API key]"
-AGENTS = {"astra": "codex", "opus": "claude"}  # the web app's name -> the controller's
-EFFORT = {"opus": "xhigh"}
+AGENTS = {"astra": "codex", "opus": "claude", "fable": "claude"}  # the web app's name -> the controller's
+# The claude agent's effort per model. Opus runs at the xhigh of the Astra comparison runs. Fable runs at high,
+# Anthropic's advice for Fable 5.2: its xhigh turns run longer and use many more tokens, for uneven gains.
+EFFORT = {"opus": "xhigh", "fable": "high"}
+MODEL = {a: MODELS[a] for a, c in AGENTS.items() if c == "claude"}  # the claude agent's model (Codex has its own)
 BUDGET_S = {"refinement": 600.0, "articulation": 900.0}
 
 
@@ -141,7 +145,7 @@ def run(job_dir, sif, key_file, agent="astra"):
 
     J = Path(job_dir)
     if agent not in AGENTS:
-        raise SystemExit(f"--agent is astra or opus, not {agent!r}")
+        raise SystemExit(f"--agent is {', '.join(AGENTS)}, not {agent!r}")
     if not Path(key_file).is_file():
         raise SystemExit(f"no key file {key_file}")
     keys = controller.read_keys(key_file)  # every key of the file, not only the one this agent uses
@@ -161,7 +165,7 @@ def run(job_dir, sif, key_file, agent="astra"):
     controller.prepare_session(root, kind, None, views,
                                source=source(job["prompt"], len(views), steps.source(job)["kind"], parts is not None),
                                metric=True, original=original, parts=parts, agent=AGENTS[agent],
-                               effort=EFFORT.get(agent))
+                               effort=EFFORT.get(agent), model=MODEL.get(agent))
     physics_review.prepare(root, J, key_file, agent)
     if controller.has_rounds(root, kind):
         check_mujoco()
@@ -199,7 +203,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--job", required=True)
     ap.add_argument("--sif", required=True)
-    ap.add_argument("--key-file", required=True, help="env file with OPENAI_API_KEY=... (astra) or ANTHROPIC_API_KEY=... (opus)")
+    ap.add_argument("--key-file", required=True,
+                    help="env file with OPENAI_API_KEY=... (astra) or ANTHROPIC_API_KEY=... (opus, fable)")
     ap.add_argument("--agent", choices=sorted(AGENTS), default="astra")
     a = ap.parse_args(argv)
     from harpor.agent import tools

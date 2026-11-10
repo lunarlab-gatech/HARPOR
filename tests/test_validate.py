@@ -503,6 +503,55 @@ def test_requirement_outcomes():
     assert outcomes([requirement("r2", "door_2", parent="gone")], hung)[1] == []  # a parent that is not a link
 
 
+def missing(rid="r2", reserve="door_2", **more):
+    """The requirement of a part that the split did not find, with the name reserved for its link."""
+    return requirement(rid, None, prompt="door", status="not_found", reserve=reserve, **more)
+
+
+def test_a_missing_part_fails_until_its_reserved_link_exists():
+    """A part of the list that the split did not find has a reserve. Without a mesh node of that name the round
+    fails with part_missing, a local finding, so the next round is a repair. With the node the requirement is
+    assessed as a found part's: its joint, type, parent, span and trajectory. Any joint kind, any part."""
+    rep = report()
+    assert V.link_of(requirement()) == "door" and V.link_of(missing()) == "door_2"
+    assert V.link_of(requirement("r1", None, status="not_found")) is None  # a parts.json older than the reserves
+    assert outcomes([requirement(), missing()], rep) == (["pass", "fail"], [("part_missing", "r2")], "local", "fail")
+    a = V.assess([requirement(), missing()], rep)
+    (f,) = a["findings"]
+    assert (f["link"], f["expected"]) == ("door_2", "door_2") and "add_part --name door_2" in f["why"]
+    assert [r["target"] for r in a["records"]] == [["door"], ["door_2"]]
+    # the link exists but has no joint yet
+    both = report(links=("frame", "door", "door_2"))
+    assert outcomes([requirement(), missing()], both) == (["pass", "fail"], [("joint_missing", "r2")], "local", "fail")
+    # the link with its joint, swept and simulated: the requirement passes, and so does the round
+    states = [{"t": 0.25 * k} for k in range(3)]
+    done = report({"door": hinge(), "door_2": hinge()}, links=("frame", "door", "door_2"),
+                  clearance={k: rep["clearance"]["door"] for k in ("door", "door_2")},
+                  sim={**rep["sim"], "joints": [{"link": k, "states": states} for k in ("door", "door_2")]})
+    assert outcomes([requirement(), missing()], done) == (["pass", "pass"], [], "none", "pass")
+    assert V.assess([missing()], done)["records"][0]["measured"]["type"] == "revolute"
+    # its own findings are its requirement's, as a found link's are
+    assert outcomes([missing(joint="prismatic")], done)[1:] == ([("joint_type_mismatch", "r2")], "structural", "fail")
+    assert outcomes([missing(test={"min_span": 3.0})], done)[1] == [("range_short", "r2")]
+    assert outcomes([missing(parent="gone_part")], done)[1] == []
+    slide = {"version": 1, "frame": "W", "parent": "frame", "type": "prismatic", "origin": [0.0, 0.0, 0.0],
+             "axis": [1.0, 0.0, 0.0], "lower": 0.0, "upper": 0.2}
+    drawer = report({"drawer": slide}, links=("frame", "drawer"), clearance={"drawer": rep["clearance"]["door"]},
+                    sim={**rep["sim"], "joints": [{"link": "drawer", "states": states}]})
+    assert outcomes([missing("r1", "drawer", joint="prismatic")], drawer) == (["pass"], [], "none", "pass")
+    soft = {"version": 1, "frame": "W", "parent": "frame", "type": "soft", "material": "foam"}
+    pad = report({"pad": soft}, links=("frame", "pad"), clearance={},
+                 sim={**rep["sim"], "joints": [], "soft": [{"link": "pad", "states": states, "dmax_m": 0.01}]})
+    a = V.assess([missing("r1", "pad", joint="soft", kind="soft")], pad)
+    assert (a["outcome"], a["records"][0]["outcome"], a["records"][0]["measured"]["dmax_m"]) == ("pass", "pass", 0.01)
+    # a new link has no native surface, so the surface assignment of a found part is not asked of it
+    areas = {"findings": [], "blocks": False, "links": {"door": {"native": 1.0, "kept": 1.0}}}
+    assert outcomes([requirement(), missing()], {**done, "surface": areas})[1] == []
+    # an older record without a reserve stays unassessed and blocks nothing
+    old = requirement("r2", None, status="not_found")
+    assert outcomes([requirement(), old], rep) == (["pass", "unassessed"], [], "none", "pass")
+
+
 def test_findings_decide_scope_and_outcome():
     rep, req = report(), requirement()
     tracking = {"code": "tracking", "link": "door", "measured": 0.1, "expected": 0.087, "why": "q ends at 1.4"}

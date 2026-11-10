@@ -17,11 +17,13 @@ implemented in the controller and `tools.py`.
 `articulation_prompt.md` is our own prompt for the articulation mode (build_plan.md note 11), not
 the paper's. The agent gets it when an articulated job's parts stage has split the mesh: it gives
 the moving parts their joints with `set_joint`, checks them with `review_articulation` and hands
-off within 900 seconds. Since it is not copied from the paper, `CHANGES["articulation"]` is empty:
+off within 900 seconds. A part of the part list that the split missed has a requirement with a
+`reserve` name, and the agent cuts it out of the mesh with `add_part` first (after PhysAg3D, whose
+agent selects each part's surface itself). Since it is not copied from the paper, `CHANGES["articulation"]` is empty:
 there is no original text to record edits against, and the file is edited directly.
 
-`repair_prompt.md` and `replan_prompt.md` are our own too. When `input/parts.json` has a found
-requirement, the articulation session runs in rounds (`controller.run_rounds`, after PhysAg3D's
+`repair_prompt.md` and `replan_prompt.md` are our own too. When `input/parts.json` has a requirement
+with a link (a found part, or the reserve of a missing one), the articulation session runs in rounds (`controller.run_rounds`, after PhysAg3D's
 repair loop): the build round gets the articulation prompt, and the host's check of each build
 (`harpor.agent.validate`) decides the next round, a repair or a planning round (replan). Each round
 is a new agent with no memory of the others, so `round_prompt(kind, budget_s, feedback, best,

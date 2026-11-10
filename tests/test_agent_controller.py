@@ -86,6 +86,15 @@ LID = {"id": "r1", "part": "lid", "prompt": "lid", "parent": "body", "kind": "jo
        "status": "found", "required": True}
 
 
+# The requirement of a part of the list that the split did not find: flap is the name reserved for its link, which
+# add_part creates. The fake Blender makes it a slab on the body's +x side (fake_agent.slab), and FLAP_HINGE turns
+# that slab outward about its top edge.
+FLAP = {**LID, "id": "r2", "part": None, "prompt": "flap", "text": "folds down", "test": {}, "status": "not_found",
+        "reserve": "flap"}
+FLAP_HINGE = {"origin": [0.5, -0.25, 0.0], "axis": [0.0, 0.0, -1.0], "lower": 0.0, "upper": 1.5}
+HALF = ["--plane", "0", "0", "0", "1", "0", "0", "--seed", "0.5", "0", "0"]  # the body's half at x >= 0
+
+
 def lid_joint(hinge, kind="revolute"):
     return {"version": 1, "frame": "W", "parent": "body", "type": kind, **hinge}
 
@@ -786,9 +795,13 @@ def test_tool_server_rejects_bad_requests(tmp_path):
         server = ToolServer(path, work, work.parent / "control", FAKE_BLENDER).start()
         try:
             assert gator_tool.call(["rm", "-rf", "/"], path) == ("unknown command 'rm'; use one of export_glb, "
-                                                                 "review, checkpoint, finish, set_joint, "
+                                                                 "review, checkpoint, finish, set_joint, add_part, "
                                                                  "review_articulation, simulate\n", 2)
             assert gator_tool.call([], path)[1] == 2
+            # add_part with its 6 planes and a seed is the longest command line: 51 arguments
+            longest = ["add_part", "--name", "x", *["--plane", *"000100"] * 6, "--seed", "0", "0", "0"]
+            assert len(longest) == 49 and gator_tool.call(longest, path)[0].startswith("add_part works only in the")
+            assert "argv must be a list of 1 to 64 strings" in gator_tool.call(["review"] * 65, path)[0]
             with socket.socket(socket.AF_UNIX) as s:
                 s.connect(path)
                 s.sendall(b"not json\n")
@@ -1312,7 +1325,8 @@ def test_articulation_session(runs):
     assert r["candidate_built"] is True and r["previews_built"] is True and r["rejected"] == []
     assert r["glb"] == "work/exports/002.glb" and edge(root / r["glb"]) == PARTS_SIZE and C.check_glb(root / r["glb"]) is None
     assert J.load(root / r["glb"]) == ({"lid": lid_joint(HINGE)}, ["body", "lid"])
-    assert r["counts"] == {"exports": 2, "reviews": 0, "checkpoints": 0, "joints": 1, "articulation_reviews": 1}
+    assert r["counts"] == {"exports": 2, "reviews": 0, "checkpoints": 0, "joints": 1, "parts_added": 0,
+                           "articulation_reviews": 1}
     assert r["joints_delivered"] == 1
     assert (root / "work" / "prompt_seen.txt").read_text(encoding="utf-8") == PROMPT
     blocks = agent_log(root).split("$ ")[1:]
@@ -1577,6 +1591,132 @@ def test_set_joint_checks_its_arguments(tmp_path, monkeypatch):
     for cmd in (["set_joint", "--child", "lid", "--remove"], ["review_articulation"], ["simulate"]):
         with pytest.raises(SystemExit, match="works only in the articulation mode"):
             T.main(cmd)
+
+
+def parts_session(tmp_path, monkeypatch, requirements, mode="articulation"):
+    """(work, control) of a session of the fake parts with these requirements, its scene saved and the helpers'
+    environment set, so that T.main runs a helper as the tool server would."""
+    work = prepare(tmp_path, mode)
+    control = work.parent / "control"
+    if mode == "articulation":
+        (control / "parts.json").write_text(json.dumps({**PARTS, "requirements": requirements}))
+        (work / "candidate.blend").write_text(json.dumps({"kind": "parts", "size": PARTS_SIZE, "seconds": 0.0,
+                                                          "objects": ["body", "lid"], "joints": {}}))
+    T.start_budget(work, control, time.time(), 900.0)
+    for k, v in (("GATOR_WORK", work), ("GATOR_CONTROL", control), ("GATOR_BLENDER", shlex.join(FAKE_BLENDER)),
+                 ("PYTHONPATH", REPO)):
+        monkeypatch.setenv(k, str(v))
+    return work, control
+
+
+def refused(args):
+    with pytest.raises(SystemExit) as e:
+        T.main(["add_part", *args])
+    return e.value.code.split("\n")[0]
+
+
+def test_add_part_checks_its_arguments(tmp_path, monkeypatch):
+    """add_part makes only the links that the requirements reserve, and takes one selection: a faces file in
+    work/, or planes with a seed. Nothing here runs Blender or logs an event: the scene stays as it was."""
+    work, control = parts_session(tmp_path, monkeypatch, [LID, FLAP])
+    np.save(work / "faces.npy", np.array([0, 1, 2]))
+    plane = ["--plane", "0", "0", "0", "1", "0", "0"]
+    for args, why in [
+            (["--name", "lid", *HALF], "'lid' is not a part to create; the requirements reserve flap"),
+            (["--name", "wing", *HALF], "'wing' is not a part to create; the requirements reserve flap"),
+            (["--name", "flap"], "give the faces of the part: --faces FILE, or --plane (1 to 6 times) with --seed"),
+            (["--name", "flap", "--faces", "faces.npy", *plane], "give the faces of the part"),
+            (["--name", "flap", "--faces", "faces.npy", "--seed", "0", "0", "0"], "--seed goes with --plane"),
+            (["--name", "flap", "--faces", "none.npy"], "none.npy is missing, not a regular file, or over 64 MB"),
+            (["--name", "flap", "--faces", "/etc/hosts"], "/etc/hosts is outside /work"),
+            (["--name", "flap", *plane], "--plane needs --seed X Y Z"),
+            (["--name", "flap", "--plane", "0", "0", "0", "0", "0", "0", "--seed", "0", "0", "0"], "bad plane"),
+            (["--name", "flap", "--plane", "0", "0", "0", "nan", "0", "1", "--seed", "0", "0", "0"], "bad plane"),
+            (["--name", "flap", *plane * 7, "--seed", "0", "0", "0"], "7 planes given; at most 6 are allowed"),
+            (["--name", "flap", "--source", "flap", *HALF], "flap cannot be cut from itself")]:
+        assert refused(args).startswith(why), args
+    assert T.read_events(control) == [] and not (work / "add_part").exists()
+    assert json.loads((work / "candidate.blend").read_text())["objects"] == ["body", "lid"]
+    # with every part found there is nothing to create, and a refinement has no parts at all
+    (control / "parts.json").write_text(json.dumps({**PARTS, "requirements": [LID]}))
+    assert refused(["--name", "flap", *HALF]) == "'flap' is not a part to create; the split found every part of the list"
+    parts_session(tmp_path / "r", monkeypatch, [], mode="refinement")
+    assert refused(["--name", "flap", *HALF]) == "add_part works only in the articulation mode"
+
+
+def test_add_part_cuts_a_reserved_part_and_logs_the_selection(tmp_path, monkeypatch, capsys):
+    """A cut that Blender refuses leaves the scene as it was and is logged with its reason. A good cut adds the
+    object under its reserved name, keeps the scene from before as a backup, and logs which surface became the
+    part: the planes and the seed, or the faces file by its sha256. The new object is a link of every export and
+    takes a joint as any part does. Both selections work, each for its own reserve."""
+    flap_2 = {**FLAP, "id": "r3", "reserve": "flap_2"}
+    work, control = parts_session(tmp_path, monkeypatch, [LID, FLAP, flap_2])
+    before = (work / "candidate.blend").read_bytes()
+    np.save(work / "none.npy", np.array([12]))
+    for args, why in [(["--faces", "none.npy"], "refused: polygon indices must be 0 to 11; the file holds 12 to 12"),
+                      (["--plane", "5", "0", "0", "1", "0", "0", "--seed", "0", "0", "0"],
+                       "refused: no face of body has a vertex on the normal's side of every plane"),
+                      (["--plane", "-5", "0", "0", "1", "0", "0", "--seed", "0", "0", "0"],
+                       "refused: the selection holds every face of body; a part is a piece of it"),
+                      (["--source", "door", *HALF], "refused: no mesh object is named 'door'")]:
+        assert refused(["--name", "flap", *args]) == why
+    assert (work / "candidate.blend").read_bytes() == before
+    events = T.read_events(control)
+    assert [(e["event"], e["ok"], e["requirement"]) for e in events] == [("part", False, "r2")] * 4
+    assert events[1]["why"].startswith("refused: no face of body") and events[3]["source"] == "door"
+    capsys.readouterr()
+
+    T.main(["add_part", "--name", "flap", *HALF])
+    out = capsys.readouterr().out
+    assert out.startswith("part flap cut from body for requirement r2; candidate.blend is saved\n")
+    assert "flap: 6 faces and 2 cap faces (1 holes closed, 0 cut edges left open); body keeps 6 faces" in out
+    assert "50.0% of body, 25.0% of the object; connected pieces 1\n" in out
+    assert "box in W: min 0.5000 -0.2500 -0.5000, max 0.5500 0.5000 0.5000\n" in out
+    assert "see it with review --tint flap; it has no joint yet (set_joint --child flap)" in out
+    assert "To take the cut back: cp /work/add_part/005_before.blend /work/candidate.blend" in out
+    assert out.splitlines()[-1].startswith("time left: ")
+    assert (work / "add_part" / "005_before.blend").read_bytes() == before
+    assert json.loads((work / "candidate.blend").read_text())["objects"] == ["body", "lid", "flap"]
+    part = T.read_events(control)[-1]
+    assert {k: part[k] for k in ("event", "name", "source", "requirement", "ok", "faces", "pieces")} == {
+        "event": "part", "name": "flap", "source": "body", "requirement": "r2", "ok": True, "faces": 6, "pieces": 1}
+    assert part["selection"] == {"planes": [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]], "seed": [0.5, 0.0, 0.0]}
+    assert part["blend_sha256"] == T.sha256(work / "candidate.blend")
+    assert refused(["--name", "flap", *HALF]) == "refused: an object named 'flap' exists already"
+
+    np.save(work / "sel.npy", np.array([3, 1, 1, 0]))
+    T.main(["add_part", "--name", "flap_2", "--source", "body", "--faces", "/work/sel.npy"])
+    assert "flap_2: 3 faces and 2 cap faces" in capsys.readouterr().out
+    part = T.read_events(control)[-1]
+    assert part["selection"] == {"faces": "sel.npy", "sha256": T.sha256(work / "sel.npy")} and part["requirement"] == "r3"
+
+    T.main(["export_glb"])
+    assert "nodes 4: body, lid, flap, flap_2; joints 0" in capsys.readouterr().out
+    T.main(["set_joint", "--child", "flap", "--parent", "body", "--type", "revolute", "--origin", "0.5", "-0.25", "0",
+            "--axis", "0", "0", "-1", "--lower", "0", "--upper", "1.5"])
+    assert "joint of flap set" in capsys.readouterr().out
+    glb = sorted((work / "exports").glob("*.glb"))[-1]
+    T.main(["export_glb"])
+    newest = sorted((work / "exports").glob("*.glb"))[-1]
+    assert newest != glb and J.load(newest) == ({"flap": lid_joint(FLAP_HINGE)}, ["body", "lid", "flap", "flap_2"])
+
+
+def test_review_tints_links_but_not_in_clay(tmp_path, monkeypatch, capsys):
+    """review --tint names the candidate's links to render in one flat color each, so a new part shows against the
+    rest. The names go to review.py and into the receipt; clay gives every surface one gray, so the two do not mix."""
+    work, control = parts_session(tmp_path, monkeypatch, [LID, FLAP])
+    T.main(["add_part", "--name", "flap", *HALF])
+    capsys.readouterr()
+    T.main(["review", "--tint", "flap", "--tint", "lid", "--tint", "flap"])
+    receipt = capsys.readouterr().out.split()[1]
+    folder = work / "reviews" / receipt
+    assert json.loads((folder / "args.json").read_text())["tint"] == ["flap", "lid"]
+    assert json.loads((folder / "receipt.json").read_text())["tint"] == ["flap", "lid"]
+    for args, why in [(["--tint", "flap", "--clay"], "--tint and --clay do not go together"),
+                      ([x for k in range(5) for x in ("--tint", f"p{k}")], "5 links to tint; at most 4 are allowed")]:
+        with pytest.raises(SystemExit) as e:
+            T.main(["review", *args])
+        assert e.value.code.startswith(why)
 
 
 def test_set_joint_restores_a_refused_change_and_reports_the_problems_left(tmp_path, monkeypatch, capsys):
@@ -1847,7 +1987,7 @@ class Messages:
                                 "view_image": kw["tools"][2]["description"], "history": plain(kw["messages"])}) + "\\n")
         self.n += 1
         return Stream(BetaMessage.model_validate({"id": f"msg_{self.n}", "type": "message", "role": "assistant",
-                                                  "model": "claude-opus-5-5", "stop_sequence": None, **script[self.n - 1]}))
+                                                  "model": kw["model"], "stop_sequence": None, **script[self.n - 1]}))
 
 
 sys.exit(claude_agent.main([*argv, "--shell", "host"], client=SimpleNamespace(beta=SimpleNamespace(messages=Messages()))))
@@ -1894,8 +2034,8 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     (tmp_path / "script.json").write_text(json.dumps(CLAUDE_SCRIPT))
     real, built = C.claude_command, []
 
-    def stand_in(*args):
-        built.append(real(*args))
+    def stand_in(*args, **kw):
+        built.append(real(*args, **kw))
         return [sys.executable, str(tmp_path / "stand_in.py"), str(tmp_path / "script.json"),
                 str(tmp_path / "requests.jsonl"), *built[-1][3:]]
 
@@ -1905,7 +2045,7 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
 
     cmd = built[0]
     assert cmd[:4] == [sys.executable, "-m", "harpor.agent.claude_agent", str(root.resolve())]
-    assert cmd[cmd.index("--key-file") + 1] == str(key_file) and cmd[-2:] == ["--effort", "xhigh"]
+    assert cmd[cmd.index("--key-file") + 1] == str(key_file) and cmd[-4:] == ["--model", "claude-opus-5-5", "--effort", "xhigh"]
     assert (r["agent"], r["model"], r["effort"]) == ("claude", "claude-opus-5-5", "xhigh")
     assert (r["source"], r["verdict"], r["reason"], r["glb"]) == ("finish", "complete", "fixed the handle", "work/exports/001.glb")
     assert edge(root / r["glb"]) == 1.2 and r["rejected"] == [] and r["candidate_built"] is True
@@ -2018,7 +2158,7 @@ def test_loop_trace_skips_what_the_agent_wrote_in_another_shape(runs, tmp_path):
 
 
 def test_claude_session_with_every_tool(tmp_path, monkeypatch):
-    """A claude session at effort low, through prepare_session and run_container_session: the shell
+    """A claude session of Claude Fable 5.2 at effort low, through prepare_session and run_container_session: the shell
     keeps its directory and variables across turns, the text editor views a file and edits another,
     view_image shows a PNG that a command made, and finish ends the session. Every request repeats the
     one before it and appends to it, and the key the shell prints reaches neither the model nor any
@@ -2026,7 +2166,7 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     pytest.importorskip("anthropic")  # the Claude client
     monkeypatch.setenv("PYTHONPATH", str(REPO))
     manual = C.AGENT_DIR / "claude" / "SYSTEM.md"
-    root = prepare(tmp_path, "refinement", agent="claude", effort="low").parent
+    root = prepare(tmp_path, "refinement", agent="claude", effort="low", model=T.FABLE_MODEL).parent
     key_file = tmp_path / "anthropic.env"
     key_file.write_text(f"ANTHROPIC_API_KEY={ANTHROPIC_KEY}\n")
     (tmp_path / "stand_in.py").write_text(STAND_IN)
@@ -2056,8 +2196,8 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     (tmp_path / "script.json").write_text(json.dumps(script))
     real, built = C.claude_command, []
 
-    def stand_in(*args):
-        built.append(real(*args))
+    def stand_in(*args, **kw):
+        built.append(real(*args, **kw))
         return [sys.executable, str(tmp_path / "stand_in.py"), str(tmp_path / "script.json"),
                 str(tmp_path / "requests.jsonl"), *built[-1][3:]]
 
@@ -2065,20 +2205,21 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "blender_command", lambda root, sif: FAKE_BLENDER)
     r = C.run_container_session(root, "/sif/agent.sif", key_file, **{**FAST, "finish_wait_s": 10.0})
 
-    assert built[0][-2:] == ["--effort", "low"]
-    assert C.agent_info(root) == {"agent": "claude", "model": "claude-opus-5-5", "effort": "low"}
+    assert built[0][-4:] == ["--model", "claude-fable-5-2", "--effort", "low"]
+    assert C.agent_info(root) == {"agent": "claude", "model": "claude-fable-5-2", "effort": "low"}
     assert (root / "session" / "system.md").read_bytes() == manual.read_bytes()
-    assert (r["agent"], r["model"], r["effort"], r["source"], r["verdict"]) == ("claude", "claude-opus-5-5", "low", "finish", "complete")
+    assert (r["agent"], r["model"], r["effort"], r["source"], r["verdict"]) == ("claude", "claude-fable-5-2", "low", "finish", "complete")
     assert r["glb"] == "work/exports/001.glb" and edge(root / r["glb"]) == 1.2 and r["counts"]["reviews"] == 1
     assert (r["exit"], r["returncode"], r["cli_exit"], r["end_reason"], r["turns"]) == ("exited", 0, "ended", "finished", 3)
     tokens = {k: sum(s["usage"][k] for s in script) for k in T.TOKENS}
     assert r["tokens"] == tokens
-    assert r["cost_usd"] == pytest.approx(sum(tokens[k] * T.PRICES[T.CLAUDE_MODEL][k] for k in tokens) / 1e6, abs=1e-4)
+    assert r["cost_usd"] == pytest.approx(sum(tokens[k] * T.PRICES[T.FABLE_MODEL][k] for k in tokens) / 1e6, abs=1e-4)
     assert (root / "work" / "edit.py").read_text() == "size = 1.2\n"
 
     reqs = [json.loads(line) for line in (tmp_path / "requests.jsonl").read_text().splitlines()]
     assert [q["messages"] for q in reqs] == [1, 3, 5]
-    assert all(q["output_config"] == {"effort": "low"} and q["speed"] is None and q["cache_control"] == {"type": "ephemeral"}
+    assert all(q["model"] == "claude-fable-5-2" and q["output_config"] == {"effort": "low"} and q["speed"] is None
+               and q["cache_control"] == {"type": "ephemeral"}
                and q["betas"] == ["server-side-fallback-2026-07-01"] for q in reqs)
     assert all(q["system"] == [{"type": "text", "text": manual.read_text(encoding="utf-8"),
                                 "cache_control": {"type": "ephemeral"}}] for q in reqs)
@@ -2121,7 +2262,9 @@ def test_claude_session_layout_and_agent_record(tmp_path):
     codex = prepare(tmp_path / "codex", "refinement").parent
     assert C.agent_info(codex) == {"agent": "codex", "model": "gpt-6-astra", "effort": "xhigh"}
     for bad, why in [({"agent": "gpt"}, "agent is codex or claude"), ({"agent": "claude", "effort": "extreme"}, "effort is one of"),
-                     ({"effort": "high"}, "effort is a setting of the claude agent")]:
+                     ({"effort": "high"}, "effort is a setting of the claude agent"),
+                     ({"agent": "claude", "model": "claude-opus-5"}, "model is one of claude-opus-5-5, claude-fable-5-2"),
+                     ({"model": "claude-fable-5-2"}, "model is a setting of the claude agent")]:
         with pytest.raises(ValueError, match=why):
             C.prepare_session(tmp_path / "bad", "refinement", "p", [], source="s", metric=False, **bad)
         assert not (tmp_path / "bad").exists()
@@ -2145,8 +2288,11 @@ def test_claude_shell_and_agent_commands(tmp_path):
     assert shell[-6:] == ["--pwd", "/work", "/sif/agent.sif", "bash", "--noprofile", "--norc"]
     cmd = C.claude_command("s", "agent.sif", "/tmp/gator-x", "key.env")
     assert cmd == [sys.executable, "-m", "harpor.agent.claude_agent", os.path.abspath("s"), "--sif", os.path.abspath("agent.sif"),
-                   "--sock-dir", "/tmp/gator-x", "--key-file", os.path.abspath("key.env"), "--effort", "xhigh"]
+                   "--sock-dir", "/tmp/gator-x", "--key-file", os.path.abspath("key.env"), "--model", "claude-opus-5-5",
+                   "--effort", "xhigh"]
     assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "low")[-2:] == ["--effort", "low"]
+    assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "high", model="claude-fable-5-2")[-4:] == \
+        ["--model", "claude-fable-5-2", "--effort", "high"]
     assert [C.cli_exit(c, "claude") for c in (0, 2, 3, 130, 1, -signal.SIGKILL)] == \
         ["ended", "refusal", "api_error", "interrupted", "exit 1", "signal SIGKILL"]
 
@@ -2322,13 +2468,19 @@ ROUND_SESSIONS = {
     "rounds_review_then_pass": [[edit(PARTS_SIZE, "parts"), *hinged("needs_review")],
                                 [REVIEW_ART, articulated("articulated")]],
     "rounds_unchanged": [[REVIEW, finish("unchanged")]] * 3,
+    # The part list has a flap that the split did not find (FLAP). Round 1 hinges the lid and hands off, so the
+    # host finds part_missing; the repair cuts the flap out of the body, hinges it and hands off.
+    "rounds_add_part": [[edit(PARTS_SIZE, "parts"), *hinged()],
+                        [READ_PROMPT, tool("add_part", "--name", "flap", *HALF),
+                         set_joint("flap", "body", "revolute", FLAP_HINGE), REVIEW_ART, articulated("articulated")]],
 }
+ROUND_REQUIREMENTS = {"rounds_add_part": [LID, FLAP]}  # the others have LID alone
 
 
-def run_in_rounds(root, rounds, budget_s=LONG):
-    """A session of the fake parts whose control/parts.json has LID, with a fake agent script of rounds."""
+def run_in_rounds(root, rounds, budget_s=LONG, requirements=(LID,)):
+    """A session of the fake parts whose control/parts.json has requirements, with a fake agent script of rounds."""
     work = prepare(root, "articulation")
-    (work.parent / "control" / "parts.json").write_text(json.dumps({**PARTS, "requirements": [LID]}))
+    (work.parent / "control" / "parts.json").write_text(json.dumps({**PARTS, "requirements": list(requirements)}))
     (root / "script.json").write_text(json.dumps({"rounds": rounds}))
     with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
         env = {**os.environ, "PYTHONPATH": str(REPO), "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
@@ -2343,7 +2495,9 @@ def round_runs(tmp_path_factory):
     with pytest.MonkeyPatch.context() as m, ThreadPoolExecutor(len(ROUND_SESSIONS)) as ex:
         m.setenv("GATOR_MUJOCO", shlex.join(FAKE_SIM))
         m.delenv("GATOR_FAKE_SIM", raising=False)  # every run passes
-        results = list(ex.map(lambda name: run_in_rounds(roots[name], ROUND_SESSIONS[name]), ROUND_SESSIONS))
+        results = list(ex.map(lambda name: run_in_rounds(roots[name], ROUND_SESSIONS[name],
+                                                         requirements=ROUND_REQUIREMENTS.get(name, [LID])),
+                              ROUND_SESSIONS))
     return {name: (roots[name] / "s", r) for name, r in zip(ROUND_SESSIONS, results)}
 
 
@@ -2393,7 +2547,8 @@ def test_a_session_with_a_found_requirement_runs_in_rounds(round_runs):
     assert r["requirements"] == {"pass": 1, "fail": 0, "inconclusive": 0, "unassessed": 0}
     assert r["simulations"] == 0 and r["surface"]["shares"]["present"] == pytest.approx(1.0)
     assert r["timings"]["budget_s"] == LONG and r["joints_delivered"] == 1
-    assert r["counts"] == {"exports": 1, "reviews": 0, "checkpoints": 0, "joints": 1, "articulation_reviews": 1}
+    assert r["counts"] == {"exports": 1, "reviews": 0, "checkpoints": 0, "joints": 1, "parts_added": 0,
+                           "articulation_reviews": 1}
     events = T.read_events(control)
     assert {k: events[0][k] for k in ("event", "round", "kind")} == {"event": "round_start", "round": 1, "kind": "build"}
     budget = json.loads((work / "run_budget.json").read_text())
@@ -2443,6 +2598,33 @@ def test_a_local_failure_gets_a_repair_round(round_runs):
     starts = [e for e in T.read_events(root / "control") if e["event"] == "round_start"]
     assert [(e["round"], e["kind"]) for e in starts] == [(1, "build"), (2, "repair")]
     assert json.loads((root / "result.json").read_text()) == r
+
+
+def test_a_missing_part_gets_a_repair_round_that_creates_it(round_runs):
+    """The split did not find the flap of the part list. Round 1 hands off without it, which the host fails with
+    part_missing, a local finding, so a repair follows and is told of it. The repair cuts the flap out of the body
+    with add_part and gives it its joint, and the round passes with both requirements."""
+    root, r = round_runs["rounds_add_part"]
+    work, control = root / "work", root / "control"
+    assert [(x["round"], x["kind"], x["outcome"], x["scope"]) for x in r["rounds"]] == [
+        (1, "build", "fail", "local"), (2, "repair", "pass", "none")]
+    first = r["rounds"][0]
+    assert codes(first) == ["part_missing"]
+    assert {k: first["findings"][0][k] for k in ("requirement", "link", "expected")} == {
+        "requirement": "r2", "link": "flap", "expected": "flap"}
+    assert (r["source"], r["verdict"], r["glb"]) == ("finish", "articulated", "control/candidates/v02/candidate.glb")
+    joints, nodes = J.load(root / r["glb"])[:2]
+    assert joints == {"lid": lid_joint(HINGE), "flap": lid_joint(FLAP_HINGE)}
+    assert sorted(nodes) == ["body", "flap", "lid"]
+    assert (r["requirements"]["pass"], r["counts"]["parts_added"], r["joints_delivered"]) == (2, 1, 2)
+    prompt = (work / "prompt_seen.txt").read_text(encoding="utf-8")
+    assert "part_missing" in prompt and "add_part --name flap" in prompt and "Parts the split missed" in prompt
+    (part,) = [e for e in T.read_events(control) if e["event"] == "part"]
+    assert (part["name"], part["source"], part["requirement"], part["ok"]) == ("flap", "body", "r2", True)
+    assert part["selection"] == {"planes": [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]], "seed": [0.5, 0.0, 0.0]}
+    evidence = json.loads((work / "evidence" / "round_02.json").read_text())
+    assert [(x["requirement"], x["target"], x["outcome"]) for x in evidence["records"]] == [
+        ("r1", ["lid"], "pass"), ("r2", ["flap"], "pass")]
 
 
 def test_a_structural_failure_gets_one_planning_round(round_runs):
@@ -2929,6 +3111,7 @@ def test_a_planning_round_refuses_every_helper(tmp_path, monkeypatch):
     monkeypatch.setenv("GATOR_CONTROL", str(control))
     receipt = "a001-0123456789ab"
     args = {"checkpoint": ["--receipt", receipt, "--defect", "x"], "set_joint": ["--child", "lid", "--remove"],
+            "add_part": ["--name", "flap", "--faces", "faces.npy"],
             "finish": ["--receipt", receipt, "--verdict", "articulated", "--reason", "x"]}
     before = T.read_events(control)
     for cmd in COMMANDS:

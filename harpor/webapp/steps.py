@@ -89,10 +89,10 @@ MARKERS = {"topics": "frames/topics.json", "frames": "frames/meta.json", "prep":
            "vomp": "run/vomp/summary.json", "vomp_parts": "run/vomp_parts/summary.json", "turntable": "turntable/turntable.json",
            "softvideo": "softvideo/softvideo.json", "package": "results.zip"}
 MIN_IOU = 0.5
-# job.json "agent": GPT-6-Astra (Codex CLI), Claude Opus 5.5 (claude_agent) or no agent stage
-AGENTS = ("astra", "opus", "none")
-PROVIDER = {"astra": "OpenAI", "opus": "Anthropic"}  # whose API key each agent takes
-KEY_VAR = {"astra": "OPENAI_API_KEY", "opus": "ANTHROPIC_API_KEY"}  # the key file's line, per agent
+# job.json "agent": GPT-6-Astra (Codex CLI), Claude Opus 5.5 or Claude Fable 5.2 (claude_agent), or no agent stage
+AGENTS = ("astra", "opus", "fable", "none")
+PROVIDER = {"astra": "OpenAI", "opus": "Anthropic", "fable": "Anthropic"}  # whose API key each agent takes
+KEY_VAR = {"astra": "OPENAI_API_KEY", "opus": "ANTHROPIC_API_KEY", "fable": "ANTHROPIC_API_KEY"}  # the key file's line
 # job.json "parts" "mode": the job's VLM lists the parts, the VLM proposes and the user edits, or the user types them
 PARTS_MODES = ("vlm", "vlm_edit", "user")
 
@@ -123,7 +123,7 @@ def _json(path):
 
 
 def agent(job):
-    """job.json's "agent": astra, opus or none. ValueError for anything else."""
+    """job.json's "agent": astra, opus, fable or none. ValueError for anything else."""
     a = job.get("agent")
     if isinstance(a, str) and a in AGENTS:
         return a

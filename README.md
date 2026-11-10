@@ -71,7 +71,8 @@ containers/harpor-docker run cup.mp4 --prompt mug --agent opus     # with docker
 python -m harpor.webapp.run cup.mp4 --prompt mug --agent opus      # without docker, in envs/web
 ```
 
-`--help` lists every option and explains what to do when a job stops to ask you something.
+`--agent` is `astra` (GPT-6-Astra), `opus` (Claude Opus 5.5), `fable` (Claude Fable 5.2) or `none`. `--help` lists
+every option and explains what to do when a job stops to ask you something.
 
 ## More
 

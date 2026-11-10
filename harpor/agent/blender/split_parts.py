@@ -5,7 +5,7 @@ blender -b --factory-startup --python-exit-code 1 --python split_parts.py -- POS
 FACES.npz is the face vote of harpor.parts.vote: part (one id per face of POSED.glb as trimesh loads
 it), names (id -> part name, the base first) and centroids (every face's centroid in W). The stock glTF
 importer maps glTF to W, so Blender world coordinates are W. The steps (parts, weld, cut and cap, export
-and check): build_plan.md note 11, step 4.
+and check): build_plan.md note 11, step 4. The cut-and-cap code is cutting.py, which add_part.py shares.
 Writes REPORT.json (the face mapping, faces, cap faces, holes and open seam edges per part, the names
 found again, warnings) before it fails on a name mismatch, so the report is there either way.
 Only bpy, bmesh, mathutils and numpy: the SIF's Blender has no trimesh.
@@ -14,11 +14,15 @@ Only bpy, bmesh, mathutils and numpy: the SIF's Blender has no trimesh.
 import json
 import sys
 import time
+from pathlib import Path
 
 import bmesh
 import bpy
 import numpy as np
 from mathutils import Matrix, kdtree
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cutting import cap  # noqa: E402
 
 posed, faces_npz, out, report = sys.argv[sys.argv.index("--") + 1:][:4]
 t0 = time.time()
@@ -104,80 +108,6 @@ bm.to_mesh(me)
 bm.free()
 
 
-def orient(bm, f, caps):
-    """Reverse f when it runs along a shared edge in the same direction as its non-cap neighbour."""
-    for loop in f.loops:
-        for g in loop.edge.link_faces:
-            if g is not f and g not in caps:
-                other = next(x for x in g.loops if x.edge == loop.edge)
-                if other.vert == loop.vert:
-                    bmesh.ops.reverse_faces(bm, faces=[f])
-                return
-
-
-def loops_of(edges):
-    """The closed chains of vertices that the given boundary edges form; a chain that does not close is left out."""
-    nbr = {}
-    for e in edges:
-        a, b = e.verts
-        nbr.setdefault(a, []).append(b)
-        nbr.setdefault(b, []).append(a)
-    seen, loops = set(), []
-    for start in nbr:
-        if start in seen or len(nbr[start]) != 2:
-            continue
-        chain, prev, v = [start], None, start
-        while True:
-            seen.add(v)
-            nxt = [w for w in nbr[v] if w is not prev]
-            if not nxt or len(nbr[v]) != 2:
-                chain = None
-                break
-            prev, v = v, nxt[0]
-            if v is start:
-                break
-            chain.append(v)
-        if chain and len(chain) >= 3:
-            loops.append(chain)
-    return loops
-
-
-def fill(bm, sl):
-    """Close every hole bounded by cut edges. Blender 5.2's holes_fill and edgenet_fill leave some simple loops
-    open that edgeloop_fill closes (seen on a real MV-SAM3D chair), so edgeloop_fill comes first, then
-    holes_fill, then a fan of triangles from a new vertex at the loop's centre. Returns (faces, methods)."""
-    faces, methods = [], []
-    for name, op in (("edgeloop_fill", lambda es: bmesh.ops.edgeloop_fill(bm, edges=es)["faces"]),
-                     ("holes_fill", lambda es: bmesh.ops.holes_fill(bm, edges=es, sides=0)["faces"])):
-        es = [e for e in bm.edges if e.is_boundary and e[sl]]
-        if not es:
-            break
-        try:
-            new = op(es)
-        except Exception:  # an edge set that the operator cannot take; the next one may
-            new = []
-        if new:
-            faces += new
-            methods.append(name)
-    for chain in loops_of([e for e in bm.edges if e.is_boundary and e[sl]]):
-        c = bm.verts.new(np.mean([v.co for v in chain], 0).tolist())
-        for a, b in zip(chain, chain[1:] + chain[:1]):
-            try:
-                faces.append(bm.faces.new((a, b, c)))
-            except ValueError:  # the face exists already
-                pass
-        methods.append("fan")
-    return faces, methods
-
-
-def mean_uv(f, uv, caps):
-    acc = [tuple(lp[uv].uv) for v in f.verts for lp in v.link_loops if lp.face is not f and lp.face not in caps]
-    if acc:
-        m = np.mean(acc, 0).tolist()
-        for lp in f.loops:
-            lp[uv].uv = m
-
-
 # 4. One object per part.
 if not me.materials:
     warnings.append("the mesh has no material; the caps have none either")
@@ -196,18 +126,8 @@ for k, name in enumerate(names):
         bpy.data.meshes.remove(pm)
         results.append(rec)
         continue
-    caps, rec["fill"] = fill(bm, sl)
-    capset = set(caps)
-    uv = bm.loops.layers.uv.active
-    for f in caps:
-        orient(bm, f, capset)
-        f.material_index, f.smooth = 0, False
-        if uv is not None:
-            mean_uv(f, uv, capset)
-    ngons = [f for f in caps if len(f.verts) > 3]
-    if ngons:  # a fan from each cap's centre: BEAUTY triangulation of a bent cut loop left zero-area slivers
-        bmesh.ops.poke(bm, faces=ngons, center_mode="MEAN")
-    rec.update(cap_faces=len(bm.faces) - rec["faces"], holes=len(caps),
+    holes, rec["fill"] = cap(bm, sl)
+    rec.update(cap_faces=len(bm.faces) - rec["faces"], holes=holes,
                open_seam_edges=sum(1 for e in bm.edges if e.is_boundary and e[sl]))
     bm.faces.layers.int.remove(pl)
     bm.edges.layers.int.remove(sl)

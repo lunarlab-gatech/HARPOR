@@ -34,7 +34,7 @@ starts again from the lidar stage: for other settings, start a new job.
 Ctrl-C, SIGTERM and a closed terminal cancel the running stage and leave a job that can resume. A SIGHUP that the
 caller ignores (nohup) stays ignored, and the job goes on.
 
-The key of --agent astra or opus comes from --key-file or from ~/.config/harpor/openai.env or anthropic.env, in the
+The key of --agent astra, opus or fable comes from --key-file or from ~/.config/harpor/openai.env or anthropic.env, in the
 KEY=VALUE format, and it is read again on each resume. The command never prints it.
 
 Exit codes: 0 for a finished job, 1 for a failed or cancelled job, 2 for bad arguments or a refused setting, 3 for a job
@@ -80,12 +80,12 @@ LEFT_OUT = {"available": "usable, not picked", "excluded": "excluded", "no_mask"
             "small": "the mask is under 1% of the image", "inconsistent": "the mask disagrees with the other views"}
 
 
-KEY_FILES = {"astra": "openai.env", "opus": "anthropic.env"}
+KEY_FILES = {"astra": "openai.env", "opus": "anthropic.env", "fable": "anthropic.env"}
 
 def local_key(agent, path=None):
     """The machine's own API key for agent (the terminal command's agent), read now: the
     OPENAI_API_KEY= line of ~/.config/harpor/openai.env (astra) or the ANTHROPIC_API_KEY= line of anthropic.env
-    (opus), or that line of the file path. The file must be this user's with mode 0600 in a folder of mode 0700. An
+    (opus, fable), or that line of the file path. The file must be this user's with mode 0600 in a folder of mode 0700. An
     error names the file and the line, never the text."""
     if agent not in KEY_FILES:
         raise ValueError(f"no key file for the agent {agent!r}")
@@ -204,10 +204,10 @@ def check_settings(a, kind):
             (a.lock or a.exclude or a.instance, "--lock, --exclude and --instance answer a view review, on a resume"),
             ((a.parts or a.edit_parts) and not a.articulated, "--parts and --edit-parts need --articulated"),
             (a.parts and a.edit_parts, "--parts gives the list and --edit-parts asks the VLM for it: choose one"),
-            (a.edit_parts and agent == "none", "--edit-parts needs --agent astra or opus: there is no VLM without one"),
+            (a.edit_parts and agent == "none", "--edit-parts needs --agent astra, opus or fable: there is no VLM without one"),
             (a.articulated and agent == "none" and not a.parts,
-             "without an agent there is no VLM to list the parts: give --parts, or --agent astra or opus"),
-            (a.key_file and agent == "none", "--key-file needs --agent astra or opus")):
+             "without an agent there is no VLM to list the parts: give --parts, or --agent astra, opus or fable"),
+            (a.key_file and agent == "none", "--key-file needs --agent astra, opus or fable")):
         if bad:
             raise Stop(BAD, why)
     if a.parts:

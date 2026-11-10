@@ -96,7 +96,7 @@ def test_help_page_holds_the_method_numbers():
     nviews = re.search(r'<input type="range" id="nviews" min="(\d+)" max="(\d+)"', (STATIC / "index.html").read_text())
     upload = re.search(r"^MAX_UPLOAD = (\d+) << 30$", (ROOT / "harpor" / "webapp" / "server.py").read_text(), re.M)
     assert nviews and upload
-    prices = [f"{usd(tools.PRICES[tools.CLAUDE_MODEL][k])} {w}"
+    prices = [f"{usd(tools.PRICES[m][k])} {w}" for m in tools.CLAUDE_MODELS
               for k, w in (("input_tokens", "input"), ("output_tokens", "output"),
                            ("cache_read_input_tokens", "cache read"), ("cache_creation_input_tokens", "cache write"))]
     size_err = 0.05  # mass goes with the size cubed
@@ -123,7 +123,8 @@ def test_help_page_holds_the_method_numbers():
                        f"{num(controller.ROUND_BUDGET_S['replan'])} s to plan", f"up to {controller.MAX_BUILDS - 1} repairs",
                        "Rounds", "Requirement r1", "inconclusive", "unassessed", "not required", "Surface retained",
                        "report only", "blocks articulated",
-                       f"{controller.CLAUDE_EFFORT} effort", f"below {iou}", "skipped", *prices, "A ? means",
+                       f"{controller.CLAUDE_EFFORT} effort", f"{agent_step.EFFORT['fable']} effort", "Claude Fable 5.2",
+                       "30 days", f"below {iou}", "skipped", *prices, "A ? means",
                        "refusal fallback", f"at most {tools.MAX_LIMITATIONS}", *tools.VERDICTS["refinement"],
                        *tools.VERDICTS["articulation"], "fallback_original", "checkpoint", "export", "API key",
                        "can reach the network", "no network access", "sk-ant-", "forgets the key", "key field",

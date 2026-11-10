@@ -2,7 +2,7 @@
 
 Runs in envs/sam3d from the repo root; J is the job folder:
 
-    python -m harpor.parts.stage propose --job J [--key-file F] [--agent astra|opus]
+    python -m harpor.parts.stage propose --job J [--key-file F] [--agent astra|opus|fable]
     python -m harpor.parts.stage vote --job J
     python -m harpor.parts.stage split --job J --sif SIF [--blender CMD]
     python -m harpor.parts.stage finish --job J
@@ -35,11 +35,14 @@ observe O, test psi and scope D. A proposal requirement makes max(count, found) 
 found link of its part, in the vote's order, then status not_found with part None for each one missing.
 The first count are required; a found link beyond the count is not, so that an agent that joins a
 fragment to its part does not miss a required link. A cluster that was not found makes no record. Each
-record holds id, part, prompt, parent (a link; the proposal's parent name when not found), kind (joint
-or soft), joint (unknown takes either moving joint), material (soft), text, action, observe, test (empty
-without a span target), scope, source, status (found or not_found) and required. A revolute part's
-range becomes its test min_span, in radians. A prismatic part's goes only into text, since a length
-depends on the scale, which is an estimate without LiDAR.
+record holds id, part, prompt, parent (a link), kind (joint or soft), joint (unknown takes either moving
+joint), material (soft), text, action, observe, test (empty without a span target), scope, source, status
+(found or not_found) and required. A not_found record also holds reserve: the name of the link that the
+agent may create for it (tools.add_part), in the vote's style (<slug>, or <slug>_3 after two found), and
+free among the links and the other reserves. Its parent is the first found link of its proposal parent,
+else that parent's own reserve, else up to the base. A revolute part's range becomes its test min_span,
+in radians. A prismatic part's goes only into text, since a length depends on the scale, which is an
+estimate without LiDAR.
 """
 
 import argparse
@@ -193,20 +196,55 @@ def requirements(proposal, clusters, names, parent):
     """The requirements of parts.json (see the module docstring). clusters: the found clusters by name;
     names: the found parts, the base first; parent: parents()."""
     from harpor.parts import propose as P
+    from harpor.stage_a.sam3_masks import slug
 
     by_prompt = {p["name"]: p for p in proposal["parts"]}
     reqs = proposal.get("requirements")
-    out = []
+    out, taken, reserves = [], set(names), {}
     for r in P.default_requirements(proposal["parts"]) if reqs is None else reqs:
         links = [n for n in names[1:] if clusters[n]["prompt"] == r["part"]]
         count = by_prompt.get(r["part"], {}).get("count", 1)
-        for k in range(max(count, len(links))):
+        total = max(count, len(links))
+        for k in range(total):
             link = links[k] if k < len(links) else None
-            out.append({"id": f"r{len(out) + 1}", "part": link, "prompt": r["part"],
-                        "parent": parent[link] if link else by_prompt.get(r["part"], {}).get("parent"),
-                        **eq2_fields(r), "source": r["source"], "status": "found" if link else "not_found",
-                        "required": k < count})
+            rec = {"id": f"r{len(out) + 1}", "part": link, "prompt": r["part"],
+                   "parent": parent[link] if link else None,
+                   **eq2_fields(r), "source": r["source"], "status": "found" if link else "not_found",
+                   "required": k < count}
+            if link is None:  # the name of the link that an agent may create for it (tools.add_part)
+                rec["reserve"] = _free(slug(r["part"]) if total == 1 else f"{slug(r['part'])}_{k + 1}", taken)
+                reserves.setdefault(r["part"], []).append(rec["reserve"])
+            out.append(rec)
+    for rec in out:
+        if rec["status"] == "not_found":
+            rec["parent"] = _missing_parent(rec["prompt"], proposal, by_prompt, clusters, names, reserves)
     return out
+
+
+def _free(name, taken):
+    """name, or name_2, name_3, ... when a link or a reserve already has it; the result joins taken."""
+    out, n = name, 1
+    while out in taken:
+        n += 1
+        out = f"{name}_{n}"
+    taken.add(out)
+    return out
+
+
+def _missing_parent(prompt, proposal, by_prompt, clusters, names, reserves):
+    """The parent link of a part that was not found: the first found link of its proposal parent, else that
+    parent's first reserve (a missing part on a missing part), else its parent's, up to the base."""
+    from harpor.stage_a.sam3_masks import slug
+
+    p = by_prompt.get(prompt, {}).get("parent")
+    while p is not None and p != proposal["base"] and slug(p) != names[0]:
+        found = [n for n in names[1:] if clusters[n]["prompt"] == p]
+        if found:
+            return found[0]
+        if reserves.get(p):
+            return reserves[p][0]
+        p = by_prompt.get(p, {}).get("parent")
+    return names[0]
 
 
 def finish(job):
@@ -289,8 +327,8 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="step", required=True)
     p = sub.add_parser("propose")
     p.add_argument("--job", required=True)
-    p.add_argument("--key-file", help="env file with OPENAI_API_KEY=... (astra) or ANTHROPIC_API_KEY=... (opus)")
-    p.add_argument("--agent", choices=("astra", "opus", "none"), help="default: the job's agent")
+    p.add_argument("--key-file", help="env file with OPENAI_API_KEY=... (astra) or ANTHROPIC_API_KEY=... (opus, fable)")
+    p.add_argument("--agent", choices=("astra", "opus", "fable", "none"), help="default: the job's agent")
     v = sub.add_parser("vote")
     v.add_argument("--job", required=True)
     s = sub.add_parser("split")

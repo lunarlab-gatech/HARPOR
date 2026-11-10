@@ -1,10 +1,14 @@
-"""Claude Opus 5.5 as the Stage B agent, through our own Messages API loop (build_plan.md note 5).
+"""Claude Opus 5.5 or Claude Fable 5.2 as the Stage B agent, through our own Messages API loop
+(build_plan.md note 5).
 
 The controller starts it as the session's agent process, from the repo root, with its own
 interpreter:
 
     python -m harpor.agent.claude_agent ROOT --sif SIF --sock-dir DIR --key-file FILE
-           [--effort high] [--model claude-opus-5-5] [--shell host]
+           [--effort high] [--model claude-opus-5-5|claude-fable-5-2] [--shell host]
+
+--model is one of tools.CLAUDE_MODELS (default Claude Opus 5.5). Both models take the same requests,
+so the model is the only thing that changes; the cost estimate uses each model's prices (tools.PRICES).
 
 The key comes from FILE (a line ANTHROPIC_API_KEY=...) into memory only. It goes to the anthropic
 client and nowhere else: not to the shell, not to the log, not to stdout. The system prompt is the
@@ -18,11 +22,11 @@ model has three tools:
                                runs on the host, so paths are confined to ROOT/work and no symlink is
                                followed out of it
   view_image                   a PNG or JPEG under ROOT/work, downscaled to at most MAX_IMAGE_SIDE px
-                               on the long side (2576, the limit of Opus 5.5), within the size caps
+                               on the long side (2576, the limit of Opus 5.5 and Fable 5.2), within the size caps
                                MAX_IMAGE_B64 and IMAGE_BUDGET_BYTES
 
 Each request is streamed with client.beta.messages.stream: adaptive thinking with summaries, the
-effort given (default high; the model's own default is medium), server-side refusal fallback
+effort given (default high; Opus 5.5's own default is medium, Fable 5.2's high), server-side refusal fallback
 ("default"), and one cache breakpoint on the system prompt plus automatic caching of the
 conversation. The history is append-only: response.content goes back unchanged as the assistant
 turn, and system and tools never change. The one exception is the API's rule for a
@@ -864,6 +868,8 @@ def run(root, sif=None, sock_dir=None, key_file=None, *, effort="high", model=MO
     """
     if effort not in EFFORTS:
         raise ValueError(f"effort must be one of {EFFORTS}")
+    if model not in tools.CLAUDE_MODELS:
+        raise ValueError(f"model must be one of {tools.CLAUDE_MODELS}")
     root, out = Path(root).resolve(), out or sys.stdout
     key = read_key(key_file) if key_file else None
     log = Log(root / "session" / "claude.jsonl", key)
@@ -999,7 +1005,7 @@ def main(argv=None, client=None):
     ap.add_argument("--sock-dir", required=True, help="the folder of the tool server's socket")
     ap.add_argument("--key-file", required=True, help="a file with the line ANTHROPIC_API_KEY=...")
     ap.add_argument("--effort", choices=EFFORTS, default="high")
-    ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--model", choices=tools.CLAUDE_MODELS, default=MODEL)
     ap.add_argument("--shell", choices=("container", "host"), default="container",
                     help="host: bash on the host in ROOT/work, for tests and local runs only")
     a = ap.parse_args(argv)

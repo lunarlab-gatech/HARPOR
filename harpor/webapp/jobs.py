@@ -15,9 +15,9 @@ Each stage is `bash -c SCRIPT` from steps.command in its own process group, with
 appended to logs/<stage>.log, where a line "== <stage> <time>" starts each run.
 
 job.json "agent" is the agent stage's agent (steps.AGENTS): "astra" (GPT-6-Astra through the Codex
-CLI, with the user's OpenAI API key), "opus" (Claude Opus 5.5 through claude_agent, with the user's
-Anthropic API key) or "none" (no key: the agent stage is skipped and physics uses run/posed.glb, or
-run/parts.glb for an articulated job, whose parts then get no joints).
+CLI, with the user's OpenAI API key), "opus" or "fable" (Claude Opus 5.5 or Claude Fable 5.2 through
+claude_agent, with the user's Anthropic API key) or "none" (no key: the agent stage is skipped and
+physics uses run/posed.glb, or run/parts.glb for an articulated job, whose parts then get no joints).
 
 job.json "lidar" (steps.lidar) turns on the metric scale from LiDAR: null, {"kind": "rosbag", "topic":
 T} for a LiDAR topic of the job's bag, or {"kind": "stray"} for the depth of a Stray Scanner capture,
@@ -47,7 +47,7 @@ every start of the server.
 The API key stays in the runner's memory, with the agent it was checked for. For the stages that take
 it (steps.needs_key: the agent stage, and the propose stage when the VLM lists the parts) it is
 written to /dev/shm/gator-webapp-<uid>/<job_id>.env (folder 0700, file 0600, OPENAI_API_KEY=<key>
-for astra, ANTHROPIC_API_KEY=<key> for opus) and deleted when the stage ends. A server that restarts
+for astra, ANTHROPIC_API_KEY=<key> for opus and fable) and deleted when the stage ends. A server that restarts
 has no key, and a change of agent drops the key held for the other one, so a job that reaches such a
 stage then waits in "review" until the key is given again. A build may also be queued without the key
 on purpose (submit_build with api_key None, resume with key_later): it then waits there with
@@ -85,7 +85,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from harpor.agent.tools import CLAUDE_MODEL as OPUS
+from harpor.agent.tools import CLAUDE_MODEL as OPUS, MODELS
 from harpor.fileio import write_json
 from harpor.webapp import steps
 
@@ -341,7 +341,7 @@ def key_kind_error(key, agent):
     """Why key cannot be a key of agent's provider, judged by its prefix alone, else None: Anthropic
     keys start with sk-ant-, OpenAI keys with sk- (and not sk-ant-). check_key asks this before any
     request, so a key pasted under the wrong agent never goes to the other company's API."""
-    if agent == "opus":
+    if steps.PROVIDER.get(agent) == "Anthropic":
         return None if key.startswith("sk-ant-") else "Anthropic keys start with sk-ant-"
     if key.startswith("sk-ant-"):
         return "this is an Anthropic key (sk-ant-); this agent needs an OpenAI key"
@@ -349,7 +349,7 @@ def key_kind_error(key, agent):
 
 
 def check_key(key, agent="astra"):
-    """(ok, message) for the API key of agent astra or opus. A key that is not one word, or whose prefix belongs to
+    """(ok, message) for the API key of agent astra, opus or fable. A key that is not one word, or whose prefix belongs to
     the other provider (key_kind_error), is refused before any request; ask_provider then asks the provider. The
     message never holds the key."""
     if not isinstance(key, str) or not KEY.fullmatch(key):
@@ -362,12 +362,13 @@ def check_key(key, agent="astra"):
 
 def ask_provider(key, agent):
     """(ok, message) from the provider of agent astra (OpenAI: GET https://api.openai.com/v1/models with the key) or
-    opus (Anthropic: the model record of claude-opus-5-5, with the anthropic SDK)."""
+    opus and fable (Anthropic: the model record of the agent's model, claude-opus-5-5 or claude-fable-5-2, with the
+    anthropic SDK)."""
     import urllib.error
     import urllib.request
 
-    if agent == "opus":
-        return check_anthropic_key(key)
+    if steps.PROVIDER.get(agent) == "Anthropic":
+        return check_anthropic_key(key, MODELS[agent])
     req = urllib.request.Request("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {key}"})
     try:
         with urllib.request.urlopen(req, timeout=10):
@@ -378,20 +379,20 @@ def ask_provider(key, agent):
         return False, f"could not reach api.openai.com: {getattr(e, 'reason', e)}"
 
 
-def check_anthropic_key(key):
-    """(ok, message) for an Anthropic API key: GET /v1/models/claude-opus-5-5 with it, one retry, 20 s.
-    Only the error's kind goes into the message, never the error's text."""
+def check_anthropic_key(key, model=OPUS):
+    """(ok, message) for an Anthropic API key: GET /v1/models/<model> with it (claude-opus-5-5 by default), one
+    retry, 20 s. Only the error's kind goes into the message, never the error's text."""
     try:
         import anthropic
     except ImportError:
         return False, "the server cannot check Anthropic keys: envs/web needs anthropic==1.15.0"
     try:
-        anthropic.Anthropic(api_key=key, max_retries=1, timeout=20).models.retrieve(OPUS)
-        return True, f"Anthropic accepted the key for {OPUS}"
+        anthropic.Anthropic(api_key=key, max_retries=1, timeout=20).models.retrieve(model)
+        return True, f"Anthropic accepted the key for {model}"
     except anthropic.AuthenticationError:
         return False, "the Anthropic key was rejected"
     except (anthropic.PermissionDeniedError, anthropic.NotFoundError):
-        return False, f"this key cannot use {OPUS}"
+        return False, f"this key cannot use {model}"
     except anthropic.APIStatusError as e:
         return False, f"the Anthropic API answered HTTP {e.status_code}"
     except anthropic.APIConnectionError:

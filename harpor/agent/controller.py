@@ -12,9 +12,10 @@ session in prepare_session and recorded in control/agent.json:
 
   codex    GPT-6-Astra through the Codex CLI, as in the paper. The CLI runs in an Apptainer
            container that holds the API key (apptainer_command).
-  claude   Claude Opus 5.5 through our own Messages API loop, harpor/agent/claude_agent.py. The loop
-           runs on the host with the key in its memory only, and runs the model's shell commands in
-           an Apptainer container without the key and without network (shell_command).
+  claude   Claude Opus 5.5, or Claude Fable 5.2 when agent.json's model names it, through our own
+           Messages API loop, harpor/agent/claude_agent.py. The loop runs on the host with the key in
+           its memory only, and runs the model's shell commands in an Apptainer container without the
+           key and without network (shell_command).
 
 Session layout:
 
@@ -216,13 +217,14 @@ def shell_command(root, sif, sock_dir):
                      pwd="/work", network=False, stdin=True)
 
 
-def claude_command(root, sif, sock_dir, key_file, effort=CLAUDE_EFFORT):
+def claude_command(root, sif, sock_dir, key_file, effort=CLAUDE_EFFORT, *, model=CLAUDE_MODEL):
     """The claude agent (note 5): harpor.agent.claude_agent with the controller's own interpreter, on
-    the host. It reads the key from key_file into its memory and starts its shell with shell_command.
-    Paths are absolute, because it runs from the repository and not from the work folder."""
+    the host, running model at effort. It reads the key from key_file into its memory and starts its
+    shell with shell_command. Paths are absolute, because it runs from the repository and not from the
+    work folder."""
     sandbox = sif if docker_image(sif) else os.path.abspath(sif)
     return [sys.executable, "-m", "harpor.agent.claude_agent", os.path.abspath(root), "--sif", sandbox,
-            "--sock-dir", str(sock_dir), "--key-file", os.path.abspath(key_file), "--effort", effort]
+            "--sock-dir", str(sock_dir), "--key-file", os.path.abspath(key_file), "--model", model, "--effort", effort]
 
 
 def sif_blender(sif, rw=(), ro=(), aliases=()):
@@ -269,23 +271,29 @@ def codex_config():
     return (AGENT_DIR / "codex" / "config.toml").read_text()
 
 
-def agent_record(agent, effort=None):
+def agent_record(agent, effort=None, model=None):
     """control/agent.json (agent, model, effort) for prepare_session, or ValueError for a setting the
-    agent does not take."""
+    agent does not take. The claude agent runs CLAUDE_MODEL unless model names another of
+    tools.CLAUDE_MODELS."""
     if agent == "codex":
         if effort not in (None, "xhigh"):
             raise ValueError("effort is a setting of the claude agent; Codex runs at xhigh (codex/config.toml)")
+        if model not in (None, CODEX_MODEL):
+            raise ValueError(f"model is a setting of the claude agent; Codex runs {CODEX_MODEL} (codex/config.toml)")
         return {"agent": "codex", "model": CODEX_MODEL, "effort": "xhigh"}
     if agent != "claude":
         raise ValueError(f"agent is codex or claude, not {agent!r}")
     effort = CLAUDE_EFFORT if effort is None else effort
     if effort not in EFFORTS:
         raise ValueError(f"effort is one of {', '.join(EFFORTS)}, not {effort!r}")
-    return {"agent": "claude", "model": CLAUDE_MODEL, "effort": effort}
+    model = CLAUDE_MODEL if model is None else model
+    if model not in tools.CLAUDE_MODELS:
+        raise ValueError(f"model is one of {', '.join(tools.CLAUDE_MODELS)}, not {model!r}")
+    return {"agent": "claude", "model": model, "effort": effort}
 
 
 def prepare_session(root, mode, prompt, views, *, source, metric, original=None, agent="codex", effort=None,
-                    parts=None):
+                    model=None, parts=None):
     """Write the session folder for mode 'refinement' or 'articulation'.
 
     Articulation (build_plan.md note 11) works like refinement on the split parts.glb as the original,
@@ -293,14 +301,14 @@ def prepare_session(root, mode, prompt, views, *, source, metric, original=None,
     and to control/parts.json, the copy that the host's checks read (harpor.agent.validate).
     prompt: None for the mode's prompt (harpor.agent.prompts). views: dicts with K, w2c
     (OpenCV world-to-camera in W), width, height, and image and mask files. agent: "codex" (GPT-6-Astra
-    through the Codex CLI, at the xhigh effort of codex/config.toml) or "claude" (Claude Opus 5.5
-    through claude_agent at effort, default xhigh).
+    through the Codex CLI, at the xhigh effort of codex/config.toml) or "claude" (model through
+    claude_agent at effort: by default Claude Opus 5.5 at xhigh; model can also be Claude Fable 5.2).
     """
     if mode not in tools.VERDICTS:
         raise ValueError(f"mode is one of {', '.join(tools.VERDICTS)}, not {mode!r}")
     if (parts is not None) != (mode == "articulation"):
         raise ValueError("parts (run/parts.json) goes with the articulation mode, and only with it")
-    record = agent_record(agent, effort)
+    record = agent_record(agent, effort, model)
     prompt = prompts.load(mode) if prompt is None else prompt
     root, work = Path(root), Path(root) / "work"
     for d in ("input", "exports", "reviews", "checkpoints"):
@@ -697,11 +705,12 @@ def build_candidate(root, blender, timeout=300):
 
 
 def has_rounds(root, mode):
-    """Rounds for sessions with physics supervision, or an articulation with a found requirement."""
+    """Rounds for sessions with physics supervision, or an articulation with a requirement that has a link: a
+    found part, or the reserve of a part that the split did not find (validate.link_of)."""
     from harpor.agent.physics_review import enabled
 
     return enabled(Path(root) / "control") or (mode == "articulation" and any(
-        r.get("status") == "found" for r in validate.requirements(Path(root) / "control")))
+        validate.link_of(r) for r in validate.requirements(Path(root) / "control")))
 
 
 def next_round(rounds):
@@ -1119,7 +1128,8 @@ def run_session(root, cmd, env=None, *, blender, sock_dir, **watchdog):
         "timings": total_timings(runs),
         "counts": {k: sum(e.get("event") == ev and e.get("ok", True) for e in events)
                    for k, ev in (("exports", "export_done"), ("reviews", "review"), ("checkpoints", "checkpoint"),
-                                 ("joints", "joint"), ("articulation_reviews", "review_articulation"))},
+                                 ("joints", "joint"), ("parts_added", "part"),
+                                 ("articulation_reviews", "review_articulation"))},
         "rejected": rejected,
         "candidate_built": candidate,
         "previews_built": previews,
@@ -1151,7 +1161,7 @@ def run_container_session(root, sif, key_file, agent=None, **watchdog):
     sock_dir = tempfile.mkdtemp(prefix="gator-")
     try:
         if info["agent"] == "claude":
-            cmd = agent or claude_command(root, sif, sock_dir, key_file, info["effort"])
+            cmd = agent or claude_command(root, sif, sock_dir, key_file, info["effort"], model=info["model"])
         else:
             cmd = apptainer_command(root, sif, key_file, sock_dir, agent)
         result = run_session(root, cmd, blender=blender_command(root, sif), sock_dir=sock_dir, **watchdog)

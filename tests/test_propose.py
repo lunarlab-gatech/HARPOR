@@ -204,6 +204,20 @@ def test_a_user_list_gets_the_default_requirements():
         {"part": "knob", "joint": "unknown", "text": "moves relative to its parent", "range": None, "source": "default"}]
 
 
+def test_fable_proposes_with_claude_fable_5_2(tmp_path):
+    """A fable job's VLM is Claude Fable 5.2, with the request of Opus 5.5 otherwise."""
+    J = job(tmp_path)
+    fake = FakeClient([GOOD])
+    proposal = P.propose_vlm("cabinet", J / "run" / "input" / "images" / "0.png", "fable", OPUS_KEY, client=fake)
+    call = fake.calls[0]
+    assert call["model"] == "claude-fable-5-2" and call["output_config"] == {"effort": "high"}
+    assert call["fallbacks"] == "default" and "temperature" not in call and "thinking" not in call
+    assert (proposal["agent"], proposal["model"]) == ("fable", "claude-fable-5-2")
+    with pytest.raises(SystemExit, match="claude-fable-5-2 declined"):
+        P.propose_vlm("cabinet", J / "run" / "input" / "images" / "0.png", "fable", OPUS_KEY,
+                      client=FakeClient([GOOD], stop="refusal"))
+
+
 def test_a_bad_answer_is_asked_once_more(tmp_path):
     J = job(tmp_path)
     fake = FakeClient(["I think it has a door.", GOOD])

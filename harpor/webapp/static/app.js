@@ -12,9 +12,12 @@ const BUILD = ["extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "v
 const OPTIONAL = ["turntable", "softvideo"];  // steps.OPTIONAL: when it fails, the job still ends done
 // job.json "agent" (steps.AGENTS): the key it takes and the placeholder of the key field.
 const AGENTS = { astra: { key: "OpenAI API key", placeholder: "sk-..." },
-  opus: { key: "Anthropic API key", placeholder: "sk-ant-..." }, none: { key: null, placeholder: "" } };
+  opus: { key: "Anthropic API key", placeholder: "sk-ant-..." }, fable: { key: "Anthropic API key", placeholder: "sk-ant-..." },
+  none: { key: null, placeholder: "" } };
 const RAN = { codex: "GPT-6-Astra", claude: "Claude Opus 5.5" };  // agent_result.agent, the controller's name
-const VLM = { astra: RAN.codex, opus: RAN.claude };  // proposal.json "agent": the model that listed the parts
+const MODEL_NAME = { "claude-fable-5-2": "Claude Fable 5.2" };  // agent_result.model, when it is not the agent's default
+const ranBy = (a) => MODEL_NAME[a.model] || RAN[a.agent];  // the model that ran the agent stage
+const VLM = { astra: RAN.codex, opus: RAN.claude, fable: MODEL_NAME["claude-fable-5-2"] };  // proposal.json "agent": the model that listed the parts
 // What each stage does, shown muted next to its name.
 const STAGE_LABEL = { topics: "camera topics", frames: "frame analysis", extract: "extract frames", masks: "SAM 3 masks",
   prep: "prepare views", da3: "depth (Depth Anything 3)", lidar: "metric scale (LiDAR)", select: "view selection",
@@ -1455,7 +1458,7 @@ async function renderResults(job) {
     return fig;
   };
   const off = job.agent === "none", a = job.agent_result, art = job.articulated === true;
-  const ran = a && RAN[a.agent];
+  const ran = a && ranBy(a);
   const rigged = !!a && a.mode === "articulation";  // the agent set the joints of the split parts
   const by = (title) => `${title} (${ran})`;
   const notRefined = art ? "off (parts welded into one body)" : "off";
@@ -1567,13 +1570,19 @@ function chosenRecords(ev) {
   const c = sel && sel.version != null ? cands.find((x) => x && x.version === sel.version) : null;
   return c && Array.isArray(c.records) ? c.records.filter((r) => r && typeof r === "object") : [];
 }
-// "lid, revolute: pass, clear from 0° to 86°", "pad, soft: pass, dents 4.0 mm", or for a part that was not split off
-// "drawer (not split off), prismatic: unassessed".
+// "lid, revolute: pass, clear from 0° to 86°", "pad, soft: pass, dents 4.0 mm". A part that was not split off has
+// the name reserved for its link as its target: "flap_3 (cut out by the agent), revolute: pass" once the agent
+// created that link, else "flap (not split off), revolute: fail" (the check's part_missing), and for a job from
+// before the reserves "drawer (not split off), prismatic: unassessed".
 function requirementText(r, ev) {
   const m = r.measured && typeof r.measured === "object" ? r.measured : {};
   const target = Array.isArray(r.target) ? r.target[0] : null;
   const req = (Array.isArray(ev.requirements) ? ev.requirements : []).find((q) => q && q.id === r.requirement) || {};
-  let text = `${target || `${req.prompt || "?"} (not split off)`}, ${r.joint}: ${r.outcome}`;
+  const absent = !target || r.outcome === "unassessed"
+    || (Array.isArray(r.findings) && r.findings.some((f) => f && f.code === "part_missing"));
+  const name = req.status !== "not_found" ? (target || `${req.prompt || "?"} (not split off)`)
+    : absent ? `${req.prompt || "?"} (not split off)` : `${target} (cut out by the agent)`;
+  let text = `${name}, ${r.joint}: ${r.outcome}`;
   const [lo, hi] = Array.isArray(m.achieved) ? m.achieved : [];
   if (typeof lo === "number" && typeof hi === "number") {
     text += m.type === "prismatic" ? `, clear from ${(100 * lo).toFixed(1)} to ${(100 * hi).toFixed(1)} cm`

@@ -33,8 +33,8 @@ Routes (JSON unless said otherwise; {id} is a job id):
   GET    /api/jobs                    every job: id, created, status ("uploading" while its upload runs),
                                       prompt, video (the file name), kind
   GET    /api/jobs/{id}               job.json with "kind" (video, rosbag or stray), the stages' progress,
-                                      the agent's verdict, model and, for opus, tokens and cost estimate
-                                      ("agent_result"; "agent" is the job's choice: astra, opus or none;
+                                      the agent's verdict, model and, for opus and fable, tokens and cost estimate
+                                      ("agent_result"; "agent" is the job's choice: astra, opus, fable or none;
                                       an articulation result adds mode, counts, joints_delivered and
                                       simulations, one in rounds also rounds, requirements, candidate and
                                       surface, and a refinement's surface, controller.run_session), the
@@ -78,7 +78,7 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       its part list); a lidar stage that ran with it is stale, as after a PUT
   POST   /api/jobs/{id}/start         {mode, prompt, n_views, picks, view0, auto_continue, agent, api_key,
                                       articulated?, parts_mode?, parts?, lidar?, turntable?} (agent astra: an
-                                      OpenAI key; opus: an Anthropic key; none: no key, physics uses the Stage A
+                                      OpenAI key; opus, fable: an Anthropic key; none: no key, physics uses the Stage A
                                       mesh). articulated (default false) builds an object with moving parts;
                                       parts_mode (steps.PARTS_MODES, default vlm) says who lists them, and parts is the
                                       typed list of mode user ([{name, parent, joint, count}], checked with
@@ -131,7 +131,7 @@ picks and view0 of the start request are frames as the user clicked them; video 
 to the sharpest frame within 0.25 s (frames/pool.json "picks"). The overrides name pool frames
 ("f00012").
 
-The API key of the job's agent (OpenAI for astra, Anthropic for opus) arrives in the start,
+The API key of the job's agent (OpenAI for astra, Anthropic for opus and fable) arrives in the start,
 overrides, parts and continue bodies. It is checked with jobs.check_key before anything runs and
 then lives only in the runner's memory (jobs.py). The VLM that lists the parts is the agent's model,
 so it takes the same key. A job with "agent": "none" takes no key. With "key_later": true and no
@@ -198,7 +198,7 @@ class Bad(Exception):
 
 
 def agent_of(b, job=None):
-    """The agent a body names ("agent": astra, opus or none), else the job's (job: the job.json dict, when
+    """The agent a body names ("agent": astra, opus, fable or none), else the job's (job: the job.json dict, when
     given), else astra; 400 for anything else."""
     if job is not None and b.get("agent") is None:
         return steps.agent(job)

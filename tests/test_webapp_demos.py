@@ -496,11 +496,11 @@ def test_demos_js_plays_the_open_demo():
 
 
 def test_mirrors_of_app_js():
-    """KIND and RAN are app.js's KIND_LABEL and RAN, and size_text is its fileSize."""
+    """KIND, RAN and MODEL_NAME are app.js's KIND_LABEL, RAN and MODEL_NAME, and size_text is its fileSize."""
     app = (server.STATIC / "app.js").read_text()
-    for name, mirror in (("KIND_LABEL", demos.KIND), ("RAN", demos.RAN)):
+    for name, mirror in (("KIND_LABEL", demos.KIND), ("RAN", demos.RAN), ("MODEL_NAME", demos.MODEL_NAME)):
         body = re.search(rf"const {name} = \{{(.*?)\}};", app)[1]
-        assert dict(re.findall(r'(\w+): "([^"]*)"', body)) == mirror, name
+        assert dict(re.findall(r'"?([\w-]+)"?: "([^"]*)"', body)) == mirror, name
     if shutil.which("node") is None:
         pytest.skip("no node")
     code = "\n".join(re.search(rf"^const {n} = .*;$", app, re.M)[0] for n in ("size", "fileSize"))

@@ -564,7 +564,9 @@ def articulate(J, out):
 def fake_check(root, glb, joints):
     """The report of harpor.agent.validate.check on the fake agent's GLB without running it: every found
     requirement of control/parts.json passes, a hinge over its whole range and a soft part with a 4 mm dent that
-    springs back, each with validate.MIN_STATES states. glb: the GLB's path in root; joints: its joints."""
+    springs back, each with validate.MIN_STATES states. glb: the GLB's path in root; joints: its joints. The fake
+    agent creates no part that the split missed, and such a requirement stays unassessed here, with its reserve
+    as its target; the real check fails it with part_missing (validate.assess)."""
     from harpor.agent import surface, tools, validate
     from harpor.parts.joints import load
 
@@ -651,7 +653,8 @@ def agent(J, key_file, which="astra"):
         result.update(mode="articulation", verdict="articulated" if n else "unchanged",
                       reason=said if n else "fake agent: the split has no part that moves", glb=rel,
                       sha256=tools.sha256(root / rel),
-                      counts={"exports": 1, "reviews": 0, "checkpoints": 0, "joints": n, "articulation_reviews": int(n > 0)},
+                      counts={"exports": 1, "reviews": 0, "checkpoints": 0, "joints": n, "parts_added": 0,
+                              "articulation_reviews": int(n > 0)},
                       joints_delivered=n, simulations=0)
         if controller.has_rounds(root, "articulation"):
             in_rounds(J, root, result, joints, controller.read_keys(key_file))

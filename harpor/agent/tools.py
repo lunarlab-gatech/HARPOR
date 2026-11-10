@@ -59,18 +59,25 @@ from harpor.fileio import write_json
 
 BLENDER_SCRIPTS = Path(__file__).resolve().parent / "blender"
 # The agents' models, here because this module needs only the standard library: claude_agent, the
-# controller, harpor.parts.propose and the web app's key check all read them.
-CODEX_MODEL, CLAUDE_MODEL = "gpt-6-astra", "claude-opus-5-5"
+# controller, harpor.parts.propose and the web app's key check all read them. The claude agent runs
+# CLAUDE_MODEL (Claude Opus 5.5) by default, or FABLE_MODEL (Claude Fable 5.2).
+CODEX_MODEL, CLAUDE_MODEL, FABLE_MODEL = "gpt-6-astra", "claude-opus-5-5", "claude-fable-5-2"
+CLAUDE_MODELS = (CLAUDE_MODEL, FABLE_MODEL)  # the models that the claude agent takes
+# The web app's agents (steps.AGENTS, without "none") and the model of each one. The same model also
+# lists the parts (harpor.parts.propose) and judges the physics (physics_review).
+MODELS = {"astra": CODEX_MODEL, "opus": CLAUDE_MODEL, "fable": FABLE_MODEL}
 EFFORTS = ("low", "medium", "high", "xhigh", "max")  # Claude's effort levels
 FALLBACK_BETA = "server-side-fallback-2026-07-01"  # Claude's server-side refusal fallback
 TOKENS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-# USD per million tokens of the models that can serve a turn: Claude Opus 5.5 and the refusal fallbacks
-# that "default" picks (Claude Opus 5, Claude Opus 4.8). cache_creation_input_tokens is the 5-minute
-# write (1.25x input), cache_creation_1h the 1-hour write (2x input). A model not listed is priced as
-# the dearest one.
+# USD per million tokens of the models that can serve a turn: the claude agent's models and the refusal
+# fallbacks that "default" picks for them (Claude Opus 5, Claude Opus 4.8). cache_creation_input_tokens
+# is the 5-minute write (1.25x input), cache_creation_1h the 1-hour write (2x input). A model not listed
+# is priced as the dearest one.
 PRICES = {
     CLAUDE_MODEL: {"input_tokens": 4.0, "output_tokens": 20.0, "cache_read_input_tokens": 0.20,
                    "cache_creation_input_tokens": 5.0, "cache_creation_1h": 8.0},
+    FABLE_MODEL: {"input_tokens": 8.0, "output_tokens": 40.0, "cache_read_input_tokens": 0.20,
+                  "cache_creation_input_tokens": 10.0, "cache_creation_1h": 16.0},
     "claude-opus-5": {"input_tokens": 5.0, "output_tokens": 25.0, "cache_read_input_tokens": 0.50,
                       "cache_creation_input_tokens": 6.25, "cache_creation_1h": 10.0},
     "claude-opus-4-8": {"input_tokens": 5.0, "output_tokens": 25.0, "cache_read_input_tokens": 0.50,
@@ -85,6 +92,10 @@ OFF_CLOCK = {"export": EXPORT_TIMEOUT_S, "simulate": SIMULATE_TIMEOUT_S}  # {kin
 MAX_EXCLUDED_S = 600.0  # cap on the export and simulate time that moves the deadline
 REVIEW_TIMEOUT_S = 300.0  # render only
 SET_JOINT_TIMEOUT_S = 120.0
+ADD_PART_TIMEOUT_S = 180.0
+MAX_PLANES = 6  # of one add_part: a box
+MAX_FACES_BYTES = 64 << 20  # an add_part --faces file
+MAX_TINTS = 4  # links that one review colors
 VERDICTS = {"refinement": ("complete", "unchanged", "needs_review"),
             "articulation": ("articulated", "unchanged", "needs_review")}
 MAX_LIMITATIONS = 3
@@ -468,13 +479,24 @@ def check_detail(detail):
     return detail
 
 
-def review(work, control, blender, clay=False, detail=()):
+def check_tint(tint, clay):
+    """The links that a review colors, each in one flat color (review.py), so that a part shows against the rest:
+    at most MAX_TINTS distinct names, and not with clay, which gives every surface one material."""
+    tint = list(dict.fromkeys(tint or []))
+    if tint and clay:
+        sys.exit("--tint and --clay do not go together: clay gives every surface the same gray")
+    if len(tint) > MAX_TINTS:
+        sys.exit(f"{len(tint)} links to tint; at most {MAX_TINTS} are allowed")
+    return tint
+
+
+def review(work, control, blender, clay=False, detail=(), tint=()):
     """Render the original and the candidate with the same cameras and lights. Returns the receipt. The receipt's
     sha256 and the render are of the host's copy of the export, which the agent cannot change meanwhile. The host
     writes the receipt's folder through descriptors (new_folder): the export and the render take minutes, in which
-    the agent can swap reviews/ for a link."""
+    the agent can swap reviews/ for a link. tint: the candidate's links to render in one flat color each."""
     work = Path(work).resolve()
-    detail = check_detail(detail)
+    detail, tint = check_detail(detail), check_tint(tint, clay)
     real_dir(work, "reviews")  # checked before the export too, so that a link there costs no export
     glb, _, cached = export_glb(work, control, blender)
     m = manifest(control)
@@ -485,14 +507,14 @@ def review(work, control, blender, clay=False, detail=()):
     with new_folder(work, "reviews", receipt, "review") as fd:
         put_json(fd, "args.json", {
             "root": str(work), "out": str(out), "clay": clay, "views": m["views"], "candidate": str(host),
-            "original": str(work / "original" / "original.glb"), "detail": detail,
+            "original": str(work / "original" / "original.glb"), "detail": detail, "tint": tint,
         })
         with open_new("blender.log", dir_fd=fd) as log:
             ok = run_ok(blender_argv(blender, "review.py", out / "args.json"), log, REVIEW_TIMEOUT_S)
         if not ok:
             sys.exit(f"review render failed; see {(out / 'blender.log').relative_to(work)}")
         rec = {"receipt": receipt, "glb": str(glb.relative_to(work)), "sha256": sha, "clay": clay, "cached": cached,
-               "sheet": str((out / "sheet.png").relative_to(work)),
+               "tint": tint, "sheet": str((out / "sheet.png").relative_to(work)),
                "review": str((out / "review.json").relative_to(work)), "time": time.time()}
         put_json(fd, "receipt.json", rec)
     log_event(control, "review", receipt=receipt, glb=rec["glb"], sha256=sha)
@@ -648,6 +670,105 @@ def set_joint(work, control, blender, child, spec):
     log_event(control, "joint", child=child, action=action, ok=True, joint=spec, joints=len(joints),
               blend_sha256=sha256(blend))
     return out
+
+
+def part_selection(work, faces=None, planes=None, seed=None):
+    """(spec, record) of an add_part selection: the SPEC of blender/add_part.py, and what the event log keeps of
+    it (a faces file by its path in work and its sha256; planes and seed as given, in W). Exits on a bad one."""
+    planes = [list(map(float, p)) for p in planes or []]
+    if (faces is None) == (not planes):
+        sys.exit(f"give the faces of the part: --faces FILE, or --plane (1 to {MAX_PLANES} times) with --seed")
+    if faces is not None:
+        if seed is not None:
+            sys.exit("--seed goes with --plane; a --faces file is the whole selection")
+        path = in_work(work, faces)
+        try:
+            data = read_file(path, MAX_FACES_BYTES)
+        except OSError:
+            sys.exit(f"{faces} is missing, not a regular file, or over {MAX_FACES_BYTES >> 20} MB; save the polygon "
+                     "indices with numpy.save")
+        return {"faces": str(path)}, {"faces": str(path.relative_to(Path(work).resolve())),
+                                      "sha256": hashlib.sha256(data).hexdigest()}
+    if len(planes) > MAX_PLANES:
+        sys.exit(f"{len(planes)} planes given; at most {MAX_PLANES} are allowed")
+    for q in planes:
+        if len(q) != 6 or not all(map(math.isfinite, q)) or not any(q[3:]):
+            sys.exit(f"bad plane {q}: give PX PY PZ NX NY NZ, a point on the plane and a nonzero normal that points "
+                     "to the part's side, in W")
+    if seed is None or len(seed) != 3 or not all(map(math.isfinite, seed)):
+        sys.exit("--plane needs --seed X Y Z: a point on the part, in W")
+    spec = {"planes": planes, "seed": [float(x) for x in seed]}
+    return spec, spec
+
+
+def reserves(control):
+    """{reserve: requirement} of control/parts.json: the links that add_part may create, each for a part of the
+    part list that the split did not find (harpor.parts.stage)."""
+    from harpor.agent import validate
+
+    return {r["reserve"]: r for r in validate.requirements(control)
+            if r.get("status") == "not_found" and isinstance(r.get("reserve"), str)}
+
+
+def add_part(work, control, blender, name, source=None, faces=None, planes=None, seed=None):
+    """Cut the new part name out of the part object source in candidate.blend (blender/add_part.py). name must be
+    a reserve of control/parts.json, so a part that the split did not find, and source defaults to that
+    requirement's parent. The .blend from before the cut is kept as add_part/NNN_before.blend, so the agent can
+    take a cut back by copying it over candidate.blend. Blender saves the .blend only when the cut succeeded.
+    Logs a part event with the selection, which is the record of which surface became the part, and returns the
+    script's record with requirement, backup and blend_sha256."""
+    work = Path(work).resolve()
+    _articulation_only(control, "add_part")
+    free = reserves(control)
+    if name not in free:
+        sys.exit(f"{name!r} is not a part to create; " + (f"the requirements reserve {', '.join(sorted(free))}"
+                                                           if free else "the split found every part of the list"))
+    req = free[name]
+    source = source or req.get("parent")
+    if not isinstance(source, str) or not source:
+        sys.exit("give --source, the part object to cut from")
+    if source == name:
+        sys.exit(f"{name} cannot be cut from itself")
+    spec, selection = part_selection(work, faces, planes, seed)
+    blend = in_work(work, "candidate.blend")
+    try:
+        before = read_file(blend)
+    except OSError:
+        sys.exit("candidate.blend is missing or not a regular file; save the scene first")
+    d = real_dir(work, "add_part")
+    label = f"{_count(control, 'part') + 1:03d}"
+    out, log_path, backup = d / f"{label}.json", d / f"{label}.log", d / f"{label}_before.blend"
+    rec = None
+    try:
+        if os.path.lexists(out):  # add_part.py would stop at it, after Blender started
+            sys.exit(f"{out.relative_to(work)} already exists; remove it and run add_part again")
+        try:
+            with folder(d) as fd:
+                with open_new(backup.name, "wb", dir_fd=fd) as f:
+                    f.write(before)
+                with open_new(log_path.name, dir_fd=fd) as log:
+                    ok = run_ok(blender_argv(blender, "add_part.py", out, name, source, json.dumps(spec), blend=blend),
+                                log, ADD_PART_TIMEOUT_S)
+            if ok:
+                rec = json.loads(read_file(out, 1 << 22))
+        except FileExistsError:
+            sys.exit(f"{backup.relative_to(work)} or {log_path.relative_to(work)} already exists; remove them and "
+                     "run add_part again")
+        except (OSError, ValueError):
+            pass
+        if not isinstance(rec, dict) or not isinstance(rec.get("links"), list):
+            sys.exit(f"add_part failed; see {log_path.relative_to(work)}")
+        if not rec.get("ok"):
+            sys.exit(f"refused: {rec.get('error') or 'add_part failed'}")
+    except SystemExit as e:
+        log_event(control, "part", name=name, source=source, requirement=req["id"], ok=False, selection=selection,
+                  why=str(e.code))
+        raise
+    sha = sha256(blend)
+    log_event(control, "part", name=name, source=source, requirement=req["id"], ok=True, selection=selection,
+              faces=rec["part"]["faces"], pieces=rec["pieces"], share_of_object=rec["share_of_object"],
+              blend_sha256=sha)
+    return {**rec, "requirement": req["id"], "backup": str(backup.relative_to(work)), "blend_sha256": sha}
 
 
 def carriers(joints, links, held):
@@ -946,12 +1067,12 @@ def _articulated(control, rec, data):
 
 
 def _surface_kept(control, rec, data):
-    """Exits when control/parts.json has a found requirement and the surface check of the GLB of a receipt against
+    """Exits when control/parts.json has a requirement with a link and the surface check of the GLB of a receipt against
     root/original.glb blocks it (harpor.agent.surface, which blocks only while its ENFORCE is on). The check reads
     the bytes that _receipt checked, from a host copy (host_file)."""
     from harpor.agent import surface, validate
 
-    if not any(r.get("status") == "found" for r in validate.requirements(control)):
+    if not any(validate.link_of(r) for r in validate.requirements(control)):
         return
     with host_file(control, data) as path:
         rep = surface.compare(path, Path(control).parent / "original.glb")
@@ -1074,7 +1195,7 @@ def _command(a, work, control, blender):
         for w in rep["warnings"][:5]:
             print(f"warning: {w}")
     elif a.cmd == "review":
-        rec = review(work, control, blender, a.clay, a.detail)
+        rec = review(work, control, blender, a.clay, a.detail, a.tint)
         print(f"receipt {rec['receipt']}")
         print(f"candidate {rec['glb']} ({'cached' if rec['cached'] else 'new'} export)")
         print(f"sheet {rec['sheet']}")
@@ -1112,6 +1233,27 @@ def _command(a, work, control, blender):
             n = len(rec["problems"])
             print(f"problem left from before this change: {rec['problems'][0]}"
                   + (f" (and {n - 1} more)" if n > 1 else ""))
+    elif a.cmd == "add_part":
+        rec = add_part(work, control, blender, a.name, a.source, a.faces, a.plane, a.seed)
+        part, rest = rec["part"], rec["rest"]
+        print(f"part {rec['name']} cut from {rec['source']} for requirement {rec['requirement']}; candidate.blend "
+              "is saved")
+        print(f"{rec['name']}: {part['faces']} faces and {part['cap_faces']} cap faces ({part['holes']} holes closed, "
+              f"{part['open_cut_edges']} cut edges left open); {rec['source']} keeps {rest['faces']} faces and "
+              f"{rest['cap_faces']} cap faces ({rest['open_cut_edges']} cut edges left open)")
+        shares = [f"{100 * rec[k]:.1f}% of {what}" for k, what in (("share_of_source", rec["source"]),
+                                                                  ("share_of_object", "the object"))
+                  if rec.get(k) is not None]
+        print(f"area {rec['area']:.4g} m2" + (": " + ", ".join(shares) if shares else "")
+              + f"; connected pieces {rec['pieces']}")
+        print("box in W: min " + " ".join(f"{x:.4f}" for x in rec["box"]["min"]) + ", max "
+              + " ".join(f"{x:.4f}" for x in rec["box"]["max"]))
+        if rec["pieces"] > 1:
+            print(f"warning: the part is in {rec['pieces']} pieces that share no edge; a part is usually one piece")
+        for w in rec["warnings"][:5]:
+            print(f"warning: {w}")
+        print(f"see it with review --tint {rec['name']}; it has no joint yet (set_joint --child {rec['name']}). To "
+              f"take the cut back: cp /work/{rec['backup']} /work/candidate.blend")
     elif a.cmd == "review_articulation":
         rec, rep = review_articulation(work, control, blender, a.states, a.clay)
         print(f"receipt {rec['receipt']}")
@@ -1173,6 +1315,20 @@ def main(argv=None):
     r.add_argument("--detail", nargs=7, type=float, action="append", metavar=("X", "Y", "Z", "R", "DX", "DY", "DZ"),
                    help="a close-up camera on the sphere at X Y Z with radius R, looking along DX DY DZ (all in W); "
                         f"repeat up to {MAX_DETAIL_VIEWS} times")
+    r.add_argument("--tint", action="append", metavar="LINK",
+                   help=f"render this link of the candidate in one flat color, to see a part against the rest; "
+                        f"repeat up to {MAX_TINTS} times; not with --clay")
+    n = sub.add_parser("add_part", help="cut a part that the split did not find out of a part object "
+                                        "(articulation mode)")
+    n.add_argument("--name", required=True, help="the new part: the reserve of its requirement in input/parts.json")
+    n.add_argument("--source", help="the part object to cut from; default: the requirement's parent")
+    n.add_argument("--faces", metavar="FILE", help="a .npy file in /work with the polygon indices of --source that "
+                                                   "become the part (or one bool per polygon)")
+    n.add_argument("--plane", nargs=6, type=float, action="append", metavar=("PX", "PY", "PZ", "NX", "NY", "NZ"),
+                   help="a plane in W, by a point and a normal that points to the part's side; the part is on that "
+                        f"side of every plane; repeat up to {MAX_PLANES} times, with --seed")
+    n.add_argument("--seed", nargs=3, type=float, metavar=("X", "Y", "Z"),
+                   help="with --plane: a point on the part, in W; the connected piece nearest it is taken")
     j = sub.add_parser("set_joint", help="set or remove the joint of one part in candidate.blend (articulation mode)")
     j.add_argument("--child", required=True, help="the part: its object's name")
     j.add_argument("--parent", help="the part it moves against, or world (with --type fixed) for a fixed base")

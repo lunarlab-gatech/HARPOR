@@ -17,8 +17,8 @@ Slurm cluster (notes 7 and 10).
 - **Stage A:** MV-SAM3D with Depth Anything 3 cameras and depth (note 4b).
 - **Masks:** SAM 3 from a text prompt, through Hugging Face transformers rather than Meta's `sam3`
   package (note 3).
-- **Agent:** GPT-6-Astra through the Codex CLI (the paper's setup) by default, or Claude Opus 5.5
-  through our own Messages API loop (note 5). The user picks one per job and brings its key.
+- **Agent:** GPT-6-Astra through the Codex CLI (the paper's setup) by default, or Claude Opus 5.5 or
+  Claude Fable 5.2 through our own Messages API loop (note 5). The user picks one per job and brings its key.
 - **Web app:** one object per job, on the user's GPU machine (in docker, or in a Slurm job), reached through
   localhost or an SSH tunnel (note 10).
 - **Environments:** seven micromamba envs and venvs from `setup/install.sh` (note 7), in one docker image
@@ -97,7 +97,8 @@ flowchart TB
 | GPT-6-Astra | OpenAI API, model `gpt-6-astra` | API key | the default agent, and the VLM that lists the parts (note 11) |
 | Codex CLI 0.162.1 | npm `@openai/codex@0.162.1` | Apache-2.0 | runs GPT-6-Astra |
 | Claude Opus 5.5 | Anthropic API, model `claude-opus-5-5` | API key | the alternative agent, and the VLM that lists the parts (note 11) |
-| anthropic 1.15.0 | pip, in `envs/sam3d` and `envs/web` | MIT | runs Claude Opus 5.5 (`harpor/agent/claude_agent.py`), the part list of `propose` (note 11) and the web app's key check |
+| Claude Fable 5.2 | Anthropic API, model `claude-fable-5-2` | API key, 30-day data retention | the second Claude agent, and its job's VLM (note 5) |
+| anthropic 1.15.0 | pip, in `envs/sam3d` and `envs/web` | MIT | runs Claude Opus 5.5 and Claude Fable 5.2 (`harpor/agent/claude_agent.py`), the part list of `propose` (note 11) and the web app's key check |
 | Blender 5.2.2 LTS | blender.org | GPL | agent workspace and review renders |
 | trimesh, scipy | pip | open source | GLB handling and the part vote |
 | PyAV 19.0.1, rosbags 0.11.8 (with ruamel.yaml 0.19.1), FastAPI 0.143.2, uvicorn 0.54.0 | pip | BSD (the PyAV wheel bundles FFmpeg, LGPL), Apache-2.0, MIT, BSD | the web app: video and rosbag decoding, the calibration file (note 12), the server (note 10) |
@@ -589,6 +590,21 @@ read-only. The Claude shell (`--net --network none`) and the Blender containers 
   that refuses `complete` while a filed defect has no later edit and review would have caught neither
   table session at effort `max`, because both fixed the defect they filed.
 
+**Claude Fable 5.2** (2026-11-09):
+- The claude agent can also run `claude-fable-5-2` (`tools.CLAUDE_MODELS`). The web app's agent `fable`,
+  `run.py --agent fable` and `prepare_session(..., agent="claude", model="claude-fable-5-2")` pick it.
+  `agent.json` records the model, and `claude_command` passes it as `--model`. The requests are the same
+  as for Opus 5.5; Fable 5.2 accepts all of them. The same model lists the parts (`propose`) and judges
+  the physics, as for the other agents, and the web app checks the key against it.
+- The web app runs Fable at effort `high`, not `xhigh`. Anthropic advises `high` for Fable 5.2, because its
+  `xhigh` turns run longer and use many more tokens, and the session keeps the 600 s and 900 s budgets.
+- Prices in `tools.PRICES`: $8 input, $40 output, $0.20 cache read, $10 for a 5-minute and $16 for a
+  1-hour cache write, per million tokens. Its refusal fallbacks go to Opus 5 or Opus 4.8, which cannot
+  read its thinking blocks, so a fallback turn runs without the earlier reasoning.
+- Fable 5.2 needs an organization with 30-day data retention (a zero-retention organization gets a 400),
+  checks every account for edited history (the history here is append-only), and has its own rate limit.
+  No Fable session has run yet.
+
 ### 6. Evaluation
 
 The photo-match scores were removed. `harpor/eval/photo_match.py` is in commit 91003c9.
@@ -834,8 +850,8 @@ trimesh 5.1.1's `slice_mesh_plane` imports shapely even without a cap, and `envs
    `meta.json` "preview" record. When the encoder fails, the analysis goes on without a preview.
 3. Choose Auto (the app picks N views, default 6) or Manual (click the frames; each click snaps to
    the sharpest frame within 0.25 s). Type the object noun for SAM 3, and pick the agent:
-   GPT-6-Astra (asks for an OpenAI key), Claude Opus 5.5 (asks for an Anthropic key, checked with
-   the `anthropic` SDK), or none (no key; the agent stage is skipped and physics uses the Stage A
+   GPT-6-Astra (asks for an OpenAI key), Claude Opus 5.5 or Claude Fable 5.2 (asks for an Anthropic
+   key, checked against that model with the `anthropic` SDK), or none (no key; the agent stage is skipped and physics uses the Stage A
    mesh). For an object with moving parts, tick "Articulated (has moving parts)" and choose who lists
    the parts under "Part list": "VLM", "VLM, then I check" or "I type them". The VLM is
    the agent's model, so in the two VLM modes the `propose` stage takes the agent's key too. With no
@@ -1156,7 +1172,7 @@ Decisions (2026-10-20, user):
 - The part meshes come from splitting the one MV-SAM3D mesh by a face vote. There are no MV-SAM3D
   runs per part, and hidden interiors are left to the agent.
 - The job's VLM lists the parts: GPT-6-Astra through the OpenAI Responses API, or Claude Opus 5.5
-  through the Anthropic API. The web app offers "VLM" or "VLM, then I check". With agent none there
+  or Claude Fable 5.2 through the Anthropic API. The web app offers "VLM" or "VLM, then I check". With agent none there
   is no VLM, so the user types the parts.
 - The export is MJCF and USD with links and joints, plus a URDF.
 - VoMP runs once per part after the split and before the agent, with the model loaded once. A rigid job runs once immediately after MV-SAM3D.
@@ -1237,7 +1253,7 @@ and its *Tested so far* says what ran where.
 `~/harpor`) and `J` the job folder (`job.json`, and `run/` with the MV-SAM3D run). The web app runs step 1 as the stage
 `propose`, steps 2 to 5 as the stage `parts`, and step 6 as its agent stage.
 
-1. **Propose** (`envs/sam3d`): `python -m harpor.parts.stage propose --job "$J" [--key-file F] [--agent astra|opus|none]`
+1. **Propose** (`envs/sam3d`): `python -m harpor.parts.stage propose --job "$J" [--key-file F] [--agent astra|opus|fable|none]`
    writes `run/proposal.json`. `--agent` defaults to the job's agent. In the mode user, or with agent
    none, it checks the typed list.
    Otherwise the VLM gets view 0's photo as a JPEG of at most 1024 px and a prompt that asks for one
@@ -1335,7 +1351,7 @@ and its *Tested so far* says what ran where.
    the one with the longest seam to the part. When that name was not found, the parent is the named
    part's own parent, and so on up to the base.
 6. **Agent, articulation mode** (`envs/sam3d`):
-   `python -m harpor.webapp.agent_step --job "$J" --sif $G/sif/harpor-agent.sif --key-file F --agent astra|opus`.
+   `python -m harpor.webapp.agent_step --job "$J" --sif $G/sif/harpor-agent.sif --key-file F --agent astra|opus|fable`.
    `agent_step` picks the mode `articulation` when the job is articulated and `run/parts.glb` exists.
    The original is `parts.glb`, `run/parts.json` becomes `work/input/parts.json`, and the budget is
    900 s (`agent_step.BUDGET_S`). Export and `simulate` time still moves the deadline by at most
@@ -1364,6 +1380,29 @@ and its *Tested so far* says what ran where.
      `work/joints.json` (the joints, links, holders and problems, and the root, `fixed_base` and the
      welded loose links when the tree is valid) and logs a `joint` event. Each Blender run has a 120 s
      limit.
+   - `add_part --name RESERVE [--source OBJECT] --faces FILE` and
+     `add_part --name RESERVE [--source OBJECT] --plane PX PY PZ NX NY NZ ... --seed X Y Z` (2026-11-10)
+     create a part that the split did not find, as PhysAg3D's agent selects each part's surface itself
+     (sections 3.3 and A.2). RESERVE must be the `reserve` of a `not_found` requirement in
+     `control/parts.json` (see *Requirements* below), so the tool makes only parts of the part list.
+     `--source` defaults to that requirement's parent. The tool assumes no shape. `--faces` is a `.npy`
+     file in `work/` with the polygon indices of the source object, which the agent computes with its
+     own rule (a box, a distance to an axis, a region between creases). `--plane`, up to 6 times with
+     `--seed`, takes the faces on the normal's side of every plane, in W, and of those the connected
+     piece nearest the seed; only the faces near that piece are bisected, so the cut edge is straight.
+     The selection maths is `blender/part_select.py`, in plain numpy, with tests on three different
+     shapes (`tests/test_part_select.py`). `blender/add_part.py` welds the vertices that the glTF import
+     split, marks the cut edges, and makes two meshes, the new part and the rest of the source, each
+     capped by the split's own code (`blender/cutting.py`, shared with `split_parts.py`). The new
+     object keeps the UVs and materials and has no joint. The tool refuses only an empty selection and
+     one that holds the whole source: a share limit would be wrong for a lid that is half the object
+     or a knob far under the split's 0.3%. It prints the face counts, the part's share of the source
+     and of the object, its connected pieces and its box, keeps the scene from before as
+     `work/add_part/<NNN>_before.blend`, and logs a `part` event with the selection (the planes and
+     seed, or the faces file's sha256), which is the record of which surface became the part.
+     `result.json` `counts.parts_added` counts the cuts. `review --tint LINK` renders a link of the
+     candidate in one flat color, so the agent can check the cut against the photos. The Blender run
+     has a 180 s limit.
    - `review_articulation [--states K] [--clay]`, with K from 2 to 5 (default 3), exports the scene and
      reads the joints from the host's copy of the GLB in `control/exports/`, which it also checks and
      renders (see *Exports* in note 5). It stops when the GLB has no joint, when its joints are not a valid
@@ -1496,7 +1535,11 @@ proposal requirement makes max(count, found) records, `r1`, `r2` and so on. Ther
 found link of its part, in the vote's order, then one with status `not_found` and part null for each
 missing link. The first `count` records are required. A found link beyond the count is not required,
 so an agent that joins a fragment to its part does not miss a required link. A cluster that was not
-found makes no record. The fields follow PhysAg3D's Eq. 2: `part` and `parent` are U, `action` is a,
+found makes no record. A `not_found` record also has a `reserve`: the name of the link that the agent
+may create for it with `add_part`, in the vote's style (`<slug>`, or `<slug>_3` after two found) and
+free among the links and the other reserves. Its `parent` is a link too: the first found link of its
+proposal parent, else that parent's own reserve (a missing part on a missing part), else up to the
+base. The fields follow PhysAg3D's Eq. 2: `part` and `parent` are U, `action` is a,
 `observe` is O, `test` is psi and `scope` is D. A revolute part's range becomes its test `min_span`,
 in radians. A prismatic part's range goes only into `text`, because a length depends on the scale,
 which is an estimate without LiDAR. A joint `unknown` takes either moving type.
@@ -1572,7 +1615,7 @@ cached. The check at a round's end has 600 s (`HOST_CHECK_TIMEOUT_S`).
 | Scope | Findings |
 |---|---|
 | structural | `link_missing`, `joint_type_mismatch`, `parent_mismatch`, `invalid_joints`, `rest_collision`, `axis_blocked`, `surface_identity`, `soft_no_support`, `soft_no_response`, `soft_no_recovery` |
-| local | `no_candidate`, `not_finished`, `bad_link_name`, `joint_missing`, `range_blocked`, `range_short`, `clearance_missing`, `tracking`, `unstable`, `compile_error`, `sim_timeout`, `binding_mismatch`, `surface_uv`, `surface_material`, `surface_deleted`, `surface_flipped`, `surface_error`, `surface_assignment`, `validation_error` |
+| local | `no_candidate`, `not_finished`, `bad_link_name`, `part_missing`, `joint_missing`, `range_blocked`, `range_short`, `clearance_missing`, `tracking`, `unstable`, `compile_error`, `sim_timeout`, `binding_mismatch`, `surface_uv`, `surface_material`, `surface_deleted`, `surface_flipped`, `surface_error`, `surface_assignment`, `validation_error` |
 | none (no agent can help) | `soft_untestable`, `sim_unavailable` |
 
 A round is structural with a structural finding, else local with a local one, else none.
@@ -1580,9 +1623,13 @@ A round is structural with a structural finding, else local with a local one, el
 scope none. A requirement fails with a finding that is not in `INCONCLUSIVE`. It is inconclusive with
 only such findings (`compile_error`, `sim_timeout`, `sim_unavailable`, `clearance_missing`,
 `soft_untestable`, `validation_error`) or without a trajectory of 3 states. Otherwise it passes. A part
-that the split did not find is unassessed, and it does not block a pass. A round passes only when the
-agent's verdict is `articulated`, every required found requirement passes, the surface does not
-block, and no finding is structural. `validate.feedback` turns the report into at most 6000
+that the split did not find fails with `part_missing` until a mesh node has its `reserve` name
+(2026-11-10; before, it was unassessed and blocked nothing). The finding is local, so the next round
+is a repair, which is told to create the part with `add_part`. With the node, the requirement is
+assessed as a found part's is, except for `surface_assignment`, since a new link has no native area.
+A `not_found` record without a `reserve` (a `parts.json` from before) is still unassessed. A round
+passes only when the agent's verdict is `articulated`, every required requirement with a link passes,
+the surface does not block, and no finding is structural. `validate.feedback` turns the report into at most 6000
 characters for the next prompt, structural findings first. Requirement text and the agent's text
 appear in it only as JSON, which `json.dumps` keeps ASCII.
 
@@ -1773,8 +1820,10 @@ Measured times on ICE for the real chair (5 views, 10,268 faces, 2 parts):
   until milestone 11 calibrates the limits.
 - The pin and press rules of a soft part were tested only on synthetic objects. A neighbouring part can
   pass through a soft part under load, because the hex mesh is a proxy.
-- Defaults that a real run should confirm. A part that the split did not find is unassessed, not
-  failed. A joint type unlike the requirement's fails it (`joint_type_mismatch`, structural), though
+- Defaults that a real run should confirm. A part that the split did not find fails its round
+  (`part_missing`) until the agent creates it, so a part list that counts a part the object does not
+  have costs the repair rounds and ends as `needs_review`. `add_part` and `review --tint` have run
+  only against the tests' stand-in for Blender, not in Blender. A joint type unlike the requirement's fails it (`joint_type_mismatch`, structural), though
   the VLM's type is a guess and the agent cannot change it. A link that is not closed gives
   `clearance_missing`: the requirement is inconclusive, and a repair is asked for. The soft-part video
   shows the dent at true scale, at most 12 mm.

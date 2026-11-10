@@ -103,9 +103,11 @@ PLACEHOLDERS, MAX_PLACEHOLDERS = "placeholders.json", 12  # in the demos folder,
 # a placeholder's title is plain text on one line: no control character, line or paragraph separator, or bidi control
 CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 CARD_FACTS, SHORT = ("Size", "Mass"), 24  # the facts that a card shows first; else others of at most SHORT characters
-# app.js KIND_LABEL (job.json source kind) and RAN (agent_result.agent); a test compares them.
+# app.js KIND_LABEL (job.json source kind), RAN (agent_result.agent) and MODEL_NAME (agent_result.model, when it is
+# not the agent's default); a test compares them.
 KIND = {"video": "video", "rosbag": "rosbag", "stray": "Stray capture"}
 RAN = {"codex": "GPT-6-Astra", "claude": "Claude Opus 5.5"}
+MODEL_NAME = {"claude-fable-5-2": "Claude Fable 5.2"}
 
 
 class DemoError(Exception):
@@ -467,7 +469,7 @@ def facts_of(J, job=None):
     if job and steps.agent(job) == "none":
         out.append(["Agent", "off"])
     elif isinstance(r, dict) and r.get("agent"):
-        out.append(["Agent", RAN.get(r["agent"], r["agent"])])
+        out.append(["Agent", MODEL_NAME.get(r.get("model")) or RAN.get(r["agent"], r["agent"])])
     return out
 
 

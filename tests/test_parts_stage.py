@@ -187,7 +187,8 @@ def test_parents_follow_the_longest_seam_and_skip_parts_not_found():
 def test_requirements_make_max_count_found_records():
     """3 drawers with 2 found: 2 found and 1 not_found, all required. 1 door with 2 found: the second is not
     required. A knob that was only dropped_small (not in clusters): not_found. Revolute range is a span target in
-    radians, prismatic range only text; a soft part gets the press."""
+    radians, prismatic range only text; a soft part gets the press. A not_found record has a reserve, the name of
+    the link an agent may create for it, and a link as its parent (the first found link of its proposal parent)."""
     proposal = {"base": "cabinet body", "parts": [
         {"name": "cabinet body", "parent": None, "joint": "fixed", "count": 1},
         {"name": "drawer", "parent": "cabinet body", "joint": "prismatic", "count": 3},
@@ -209,11 +210,13 @@ def test_requirements_make_max_count_found_records():
     assert [(r["id"], r["part"], r["prompt"], r["parent"], r["status"], r["required"]) for r in reqs] == [
         ("r1", "drawer_1", "drawer", "cabinet_body", "found", True),
         ("r2", "drawer_2", "drawer", "cabinet_body", "found", True),
-        ("r3", None, "drawer", "cabinet body", "not_found", True),
+        ("r3", None, "drawer", "cabinet_body", "not_found", True),
         ("r4", "door_1", "door", "cabinet_body", "found", True),
         ("r5", "door_2", "door", "cabinet_body", "found", False),
-        ("r6", None, "knob", "door", "not_found", True),
+        ("r6", None, "knob", "door_1", "not_found", True),
         ("r7", "pad", "pad", "door_1", "found", True)]
+    assert [r.get("reserve") for r in reqs] == [None, None, "drawer_3", None, None, "knob", None]
+    assert all("reserve" not in r for r in reqs if r["status"] == "found")
     drawer, door, knob, pad = reqs[0], reqs[3], reqs[5], reqs[6]
     assert (drawer["kind"], drawer["text"], drawer["test"]) == ("joint", "pulls out (full travel about 40 cm)", {})
     assert (door["text"], door["test"]) == ("swings open", {"min_span": 6.283})
@@ -225,3 +228,38 @@ def test_requirements_make_max_count_found_records():
                    "scope": {"start": "mesh pose", "base": "fixed", "support": "parent", "gravity": False},
                    "source": "vlm", "status": "found", "required": True}
     assert S.MIN_RESPONSE == sim_check.RESPONSE
+
+
+def _proposal(parts):
+    return {"base": parts[0][0], "parts": [{"name": n, "parent": p, "joint": j, "count": c} for n, p, j, c in parts]}
+
+
+def test_reserves_are_free_names_with_link_parents():
+    """The reserve of a missing part continues the vote's names and is free among the links and the other reserves.
+    A missing part on a missing part gets that part's reserve as its parent; with nothing between, the base. This
+    holds for any part list: nothing here is about one object."""
+    # a wheel hub that was not found, and the 2 wheels that hang on it: created in order, hub first
+    proposal = _proposal([("cart", None, "fixed", 1), ("hub", "cart", "revolute", 1), ("wheel", "hub", "revolute", 2),
+                          ("lid", "cart", "revolute", 1)])
+    clusters, names = {"cart": {"prompt": "cart"}, "lid": {"prompt": "lid"}}, ["cart", "lid"]
+    reqs = S.requirements(proposal, clusters, names, {"cart": None, "lid": "cart"})
+    assert [(r["prompt"], r["status"], r.get("reserve"), r["parent"]) for r in reqs] == [
+        ("hub", "not_found", "hub", "cart"), ("wheel", "not_found", "wheel_1", "hub"),
+        ("wheel", "not_found", "wheel_2", "hub"), ("lid", "found", None, "cart")]
+    # one of 2 found is named <slug>, so the missing one is <slug>_2; a link that has that name already moves it on
+    proposal = _proposal([("desk", None, "fixed", 1), ("drawer", "desk", "prismatic", 2),
+                          ("drawer 2", "desk", "prismatic", 1)])
+    clusters = {"desk": {"prompt": "desk"}, "drawer": {"prompt": "drawer"}, "drawer_2": {"prompt": "drawer 2"}}
+    reqs = S.requirements(proposal, clusters, list(clusters), {"desk": None, "drawer": "desk", "drawer_2": "desk"})
+    assert [(r["part"], r.get("reserve")) for r in reqs] == [("drawer", None), (None, "drawer_2_2"), ("drawer_2", None)]
+    reserves = [r["reserve"] for r in reqs if "reserve" in r]
+    assert not set(reserves) & set(clusters) and len(set(reserves)) == len(reserves)
+
+
+def test_a_split_that_found_every_part_reserves_nothing():
+    proposal = _proposal([("box", None, "fixed", 1), ("flap", "box", "revolute", 2), ("pad", "box", "soft", 1)])
+    clusters = {"box": {"prompt": "box"}, "flap_1": {"prompt": "flap"}, "flap_2": {"prompt": "flap"},
+                "pad": {"prompt": "pad"}}
+    reqs = S.requirements(proposal, clusters, list(clusters), {"box": None, "flap_1": "box", "flap_2": "box",
+                                                               "pad": "box"})
+    assert [r["status"] for r in reqs] == ["found"] * 3 and not any("reserve" in r for r in reqs)

@@ -262,6 +262,23 @@ def test_effort(root):
         A.run(root, client=FakeClient([]), effort="disabled")
 
 
+def test_model(root):
+    """--model claude-fable-5-2: the requests name Claude Fable 5.2 and are otherwise those of Opus 5.5, and its
+    turns bill at its prices ($8 input, $40 output, $0.20 cache read, $10 cache write per million tokens). A model outside
+    tools.CLAUDE_MODELS is refused before any request."""
+    fable = A.tools.FABLE_MODEL
+    code, client, lines, _ = run(root, [msg(text("hi"), stop="end_turn", model=fable)], model=fable, effort="high")
+    assert code == 0 and client.calls[0]["model"] == "claude-fable-5-2"
+    opus = json.loads(json.dumps(A.request_params(A.MODEL, "high", A.SYSTEM_FILE.read_text(encoding="utf-8"))))
+    assert {k: v for k, v in client.calls[0].items() if k != "messages"} == {**opus, "model": fable}
+    assert of(lines, "start")[0]["model"] == fable
+    assert of(lines, "response")[0]["cost_usd"] == round((100 * 8 + 50 * 40 + 1000 * 0.2 + 200 * 10) / 1e6, 6)
+    with pytest.raises(ValueError, match="model must be one of"):
+        A.run(root, client=FakeClient([]), model="claude-opus-5")
+    with pytest.raises(SystemExit):
+        A.main([str(root), "--key-file", "k.env", "--model", "claude-opus-5"])
+
+
 def test_system_prompt_is_the_work_folder_manual():
     s = A.SYSTEM_FILE.read_text(encoding="utf-8")
     for fact in ("no network", "300 s", "run_budget.json", "view_image", "export_glb", "review", "checkpoint",
@@ -406,7 +423,7 @@ def test_cost_counts_every_attempt_at_its_models_prices(root):
     assert end["totals"] == {"input_tokens": 211, "output_tokens": 562, "cache_read_input_tokens": 2000,
                              "cache_creation_input_tokens": 300}
     assert "fallback_message claude-opus-5 out 40" in out
-    assert A._attempt_cost(SimpleNamespace(input_tokens=1_000_000), "claude-unknown-9") == 5.0  # the dearest prices
+    assert A._attempt_cost(SimpleNamespace(input_tokens=1_000_000), "claude-unknown-9") == 8.0  # the dearest prices
 
 
 def test_fallback_mid_output(root):

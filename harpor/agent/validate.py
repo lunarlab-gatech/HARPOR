@@ -43,12 +43,16 @@ unknown takes either moving joint), parent_mismatch (the joint's parent does not
 parent, report carriers), range_short (an executed span short of its test min_span by more than SPAN_TOL) and
 surface_assignment (its link keeps under KEPT of its own native area). These stay in the record of a
 requirement that is not required, so an agent that joins a fragment to its part is not asked for it. A part that
-was not found, or one not required that is gone, is unassessed. The outcomes (paper A.3): fail with a finding not in
+the split did not find has a reserve (link_of): the name of the link that an agent may create for it with
+add_part. While no mesh node has that name the requirement adds part_missing, a local finding, so the next round
+is a repair; with the node it is assessed as a found part's is (a new link has no native area, so it gets no
+surface_assignment). A not_found record without a reserve (an older parts.json), or a part not required that is
+gone, is unassessed. The outcomes (paper A.3): fail with a finding not in
 INCONCLUSIVE; else inconclusive with a finding, or without a trajectory of at least MIN_STATES states of this
 candidate's sha256 for the link (A.6); else pass. Surface findings count only while surface.ENFORCE is on; until
 then they are reported and decide nothing. scope (SCOPE, paper A.3) is structural with a structural finding, else
 local with a local one, else none, and sim_unavailable makes it none, since no repair can be checked. outcome is
-pass when every required found requirement passes, the surface does not block and no finding is structural; the
+pass when every required requirement with a link passes, the surface does not block and no finding is structural; the
 agent's verdict is not part of it.
 
 round_report(control, report, pick, errors) is the report of a round of the session (harpor.agent.controller):
@@ -89,7 +93,7 @@ SCOPE = {  # paper A.3: local repairs, structural replanning, or nothing an agen
     "range_blocked": LOCAL, "range_short": LOCAL, "clearance_missing": LOCAL, "tracking": LOCAL, "unstable": LOCAL,
     "compile_error": LOCAL, "sim_timeout": LOCAL, "binding_mismatch": LOCAL, "surface_uv": LOCAL,
     "surface_material": LOCAL, "surface_deleted": LOCAL, "surface_flipped": LOCAL, "surface_error": LOCAL,
-    "surface_assignment": LOCAL, "validation_error": LOCAL,
+    "surface_assignment": LOCAL, "validation_error": LOCAL, "part_missing": LOCAL,
     "link_missing": STRUCTURAL, "joint_type_mismatch": STRUCTURAL, "parent_mismatch": STRUCTURAL,
     "invalid_joints": STRUCTURAL,
     "rest_collision": STRUCTURAL, "axis_blocked": STRUCTURAL, "surface_identity": STRUCTURAL,
@@ -405,11 +409,24 @@ def checks(report):
     return out + [finding("validation_error", why=e) for e in report["errors"]]
 
 
+def link_of(r):
+    """The link of a requirement: its found part, else the reserve of a part that the split did not find (the
+    name of the link that an agent may create for it with add_part). None without either, as in a parts.json
+    older than the reserves."""
+    if r.get("status") == "found":
+        return r.get("part")
+    return r.get("reserve") if r.get("status") == "not_found" else None
+
+
 def requirement_findings(r, report):
-    """The findings that a found requirement adds (see the module docstring)."""
-    link, rid, want = r.get("part"), r["id"], r.get("joint")
+    """The findings that a requirement with a link (link_of) adds (see the module docstring)."""
+    link, rid, want = link_of(r), r["id"], r.get("joint")
     if link not in report["links"]:
-        return [finding("link_missing", link, None, link, "no mesh node has the name of the found part", rid)]
+        if r.get("status") == "found":
+            return [finding("link_missing", link, None, link, "no mesh node has the name of the found part", rid)]
+        return [finding("part_missing", link, None, link,
+                        f"the split did not find this part ({r.get('prompt')!r}) and no mesh node has its "
+                        f"reserved name; cut it from its parent with add_part --name {link}", rid)]
     j = report["joints"].get(link)
     if not isinstance(j, dict):
         return [finding("joint_missing", link, None, want, "the part has no joint; set it with set_joint", rid)]
@@ -440,12 +457,12 @@ def trajectory(r, report):
     if sim.get("asset_sha256") != report["sha256"]:
         return []
     runs = sim.get("soft" if r.get("kind") == "soft" else "joints") or []
-    return next((x.get("states") or [] for x in runs if x.get("link") == r.get("part")), [])
+    return next((x.get("states") or [] for x in runs if x.get("link") == link_of(r)), [])
 
 
 def measured(r, report):
     """What a record measured: the joint's type, its clearance, the press and the trajectory's states."""
-    link = r.get("part")
+    link = link_of(r)
     j = report["joints"].get(link)
     out = {"type": j.get("type") if isinstance(j, dict) else None}
     c = report["clearance"].get(link)
@@ -480,8 +497,8 @@ def scope(findings):
 
 def record(r, measures=None):
     """A requirement's record, unassessed until assess gives it findings and an outcome."""
-    found = r.get("status") == "found"
-    return {"requirement": r["id"], "target": [r["part"]] if found else [], "kind": r.get("kind"),
+    link = link_of(r)
+    return {"requirement": r["id"], "target": [link] if link else [], "kind": r.get("kind"),
             "joint": r.get("joint"), "text": r.get("text"), "required": bool(r.get("required", True)),
             "action": r.get("action"), "initial_state": (r.get("scope") or {}).get("start"),
             "measured": measures or {}, "findings": [], "outcome": "unassessed"}
@@ -489,18 +506,18 @@ def record(r, measures=None):
 
 def assess(requirements, report):
     """{records, findings, scope, outcome} of a report's steps under requirements (see the module docstring)."""
-    owner = {r["part"]: r["id"] for r in requirements if r.get("status") == "found" and r.get("part")}
+    owner = {link_of(r): r["id"] for r in requirements if link_of(r)}
     findings = [{**f, "requirement": owner.get(f["link"])} for f in checks(report)]
     records, required = [], []
     for r in requirements:
-        found, keep = r.get("status") == "found", bool(r.get("required", True))
-        own = requirement_findings(r, report) if found else []
+        link, keep = link_of(r), bool(r.get("required", True))
+        own = requirement_findings(r, report) if link else []
         rec = {**record(r, measured(r, report)), "findings": own + [f for f in findings if f["requirement"] == r["id"]]}
-        if not found or (not keep and r["part"] not in report["links"]):
+        if not link or (not keep and link not in report["links"]):
             rec.update(findings=[], outcome="unassessed")
         else:
             rec["outcome"] = outcome(rec["findings"], len(trajectory(r, report)) >= MIN_STATES)
-        if found and keep:
+        if link and keep:
             findings += own
             required.append(rec)
         records.append(rec)

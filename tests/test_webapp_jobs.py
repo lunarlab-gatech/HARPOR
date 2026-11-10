@@ -781,9 +781,9 @@ OPUS_KEY = "sk-ant-fake-" + secrets.token_hex(16)
 
 
 def test_agent_choice():
-    assert [steps.agent({"agent": a}) for a in steps.AGENTS] == ["astra", "opus", "none"]
+    assert [steps.agent({"agent": a}) for a in steps.AGENTS] == ["astra", "opus", "fable", "none"]
     for job in ({}, *({"agent": bad} for bad in ("gpt", 1, None, ["opus"], True, False))):
-        with pytest.raises(ValueError, match="agent is one of astra, opus, none"):
+        with pytest.raises(ValueError, match="agent is one of astra, opus, fable, none"):
             steps.agent(job)
 
 
@@ -830,6 +830,13 @@ def test_check_anthropic_key(monkeypatch):
         raises.append(error)
         assert jobs.check_key(OPUS_KEY, agent="opus") == want
     assert seen[:2] == [{"api_key": OPUS_KEY, "max_retries": 1, "timeout": 20}, "claude-opus-5-5"]
+    # A fable job's key is checked against Claude Fable 5.2, with the same prefix rule.
+    raises.append(None)
+    assert jobs.check_key(OPUS_KEY, agent="fable") == (True, "Anthropic accepted the key for claude-fable-5-2")
+    assert seen[-1] == "claude-fable-5-2"
+    raises.append(status(anthropic.PermissionDeniedError, 403))
+    assert jobs.check_key(OPUS_KEY, agent="fable") == (False, "this key cannot use claude-fable-5-2")
+    assert jobs.check_key(KEY, agent="fable") == (False, "Anthropic keys start with sk-ant-")
     monkeypatch.setitem(sys.modules, "anthropic", None)  # envs/web without the SDK
     assert jobs.check_key(OPUS_KEY, agent="opus") == (
         False, "the server cannot check Anthropic keys: envs/web needs anthropic==1.15.0")
@@ -1659,7 +1666,8 @@ def test_runner_builds_without_a_key_and_asks_for_it_later(make_runner, monkeypa
     runner, cfg = make_runner()
     stub_stages(monkeypatch)
     assert jobs.NO_KEY_LATER == {"astra": "The job needs the OpenAI API key now; paste it and press Build.",
-                                 "opus": "The job needs the Anthropic API key now; paste it and press Build."}
+                                 "opus": "The job needs the Anthropic API key now; paste it and press Build.",
+                                 "fable": "The job needs the Anthropic API key now; paste it and press Build."}
     job_id, J = ready_job(cfg, auto_continue=True)
     runner.submit_build(job_id, None, agent="opus")
     assert jobs.load(J)["key_ok"] is False and not runner.has_key(job_id)
@@ -2368,7 +2376,7 @@ def test_fake_articulated_build_end_to_end(make_runner, tmp_path, mode, agent):
     else:
         r = json.loads((J / "agent" / "result.json").read_text())
         assert (r["mode"], r["verdict"], r["joints_delivered"]) == ("articulation", "articulated", 1)
-        assert set(r["counts"]) == {"exports", "reviews", "checkpoints", "joints", "articulation_reviews"}
+        assert set(r["counts"]) == {"exports", "reviews", "checkpoints", "joints", "parts_added", "articulation_reviews"}
         # The lid's requirement is found, so the result has the keys of a session in rounds, and the evidence.
         assert [x["kind"] for x in r["rounds"]] == ["build"] and r["requirements"]["pass"] == 1
         assert [q["part"] for q in parts["requirements"] if q["status"] == "found"] == [lid]

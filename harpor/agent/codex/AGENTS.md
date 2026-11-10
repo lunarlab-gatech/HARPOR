@@ -50,7 +50,7 @@ replace an earlier one; only a hand-off whose round passed the host's check is d
   also the mesh node names and the number of joints. An unchanged scene returns the previous export,
   unless its file in `exports/` changed. The host keeps its own copy of each export, which the other
   helpers read; `checkpoint` and `finish` refuse a GLB whose file in `exports/` changed.
-- `review [--clay] [--detail X Y Z R DX DY DZ ...]`: export the scene, then render the original and
+- `review [--clay] [--tint LINK ...] [--detail X Y Z R DX DY DZ ...]`: export the scene, then render the original and
   the candidate with the same cameras and lights: every input view, cropped to the object, and 6
   orbit views. Prints a receipt ID, `sheet.png` (one row per view: photo, original, candidate,
   overlay) and `review.json` (bounding boxes, center shift, extent ratio, and mask IoU and crop
@@ -58,6 +58,8 @@ replace an earlier one; only a hand-off whose round passed the host's check is d
   `--clay` renders every surface opaque gray. `--detail` adds a close-up camera on the sphere
   with center X Y Z and radius R, looking along DX DY DZ, all in Blender world coordinates; give
   it up to 4 times.
+  `--tint LINK` renders that mesh object of the candidate in one flat color, so that a part shows
+  against the rest; give it up to 4 times, without `--clay`.
 - `set_joint --child NAME --parent NAME --type revolute|prismatic --origin X Y Z --axis X Y Z --lower L
   --upper U`, `set_joint --child NAME --parent NAME|world --type fixed`,
   `set_joint --child NAME --parent NAME --type soft --material foam|gel|rubber` and
@@ -68,6 +70,19 @@ replace an earlier one; only a hand-off whose round passed the host's check is d
   dents under a press and springs back, and no part can hang from it. The helper then checks the
   joints of the whole scene and undoes a change that adds a problem, such as a cycle or a second root.
   Prints the joints (also in `joints.json`), the root and the parts without a joint.
+- `add_part --name RESERVE [--source OBJECT] --faces FILE` and
+  `add_part --name RESERVE [--source OBJECT] --plane PX PY PZ NX NY NZ [--plane ...] --seed X Y Z`
+  (articulation only): create a part that the split did not find, by cutting its faces out of a part
+  object in `candidate.blend`, in one Blender run that saves the scene. RESERVE is the `reserve` of a
+  requirement in `input/parts.json` whose part is null; no other name is taken. `--source` defaults to
+  that requirement's parent. `--faces` is a `.npy` file under `/work` with the polygon indices of the
+  source object as the saved scene holds them (or one bool per polygon). `--plane`, up to 6 times,
+  with `--seed`, takes the faces on the normal's side of every plane, and of those the connected piece
+  nearest the seed; all in W. The new object keeps the UVs and materials, and the cut openings of both
+  objects are closed. Prints the face counts, the part's share of the source's and of the object's
+  area, its connected pieces and its box in W. It refuses an empty selection and one that holds the
+  whole source. The scene from before the cut is kept as `add_part/NNN_before.blend`; copy it over
+  `candidate.blend` to take the cut back.
 - `review_articulation [--states K] [--clay]` (articulation only): export the scene, then move every
   joint from lower to upper in K steps (default 3, from 2 to 5), all joints at once. Renders each
   state under every input view, cropped to the object, and 2 orbit views, and checks each moving

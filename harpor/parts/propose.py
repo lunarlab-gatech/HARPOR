@@ -5,9 +5,10 @@ Runs in envs/sam3d through `python -m harpor.parts.stage propose` and writes run
   {source: vlm|user, agent, model, noun, base, parts: [{name, parent, joint, count, axis_hint}],
    requirements: [{part, joint, text, range or material, source}], warnings, seconds}
 
-The VLM is the job's agent model. Opus is Claude Opus 5.5 through the anthropic SDK (beta messages
-with the server-side refusal fallback, as claude_agent; effort high; Opus 5.5 always thinks and takes
-no temperature). Astra is GPT-6-Astra through the OpenAI Responses API, called with urllib (no openai
+The VLM is the job's agent model (tools.MODELS). Opus is Claude Opus 5.5 and Fable is Claude Fable
+5.2, both through the anthropic SDK with the same request (beta messages with the server-side refusal
+fallback, as claude_agent; effort high; both always think and take no temperature). Astra is
+GPT-6-Astra through the OpenAI Responses API, called with urllib (no openai
 SDK is installed). Both get view 0's photo (run/input/images, as JPEG, at most 1024 px) and a prompt
 that asks for one JSON object. parse() takes the first JSON object of the answer; an answer that does
 not parse or validate is asked again once, with the reason.
@@ -50,7 +51,7 @@ import re
 import time
 from pathlib import Path
 
-from harpor.agent.tools import CLAUDE_MODEL, CODEX_MODEL, FALLBACK_BETA, env_values
+from harpor.agent.tools import CLAUDE_MODEL, CODEX_MODEL, FALLBACK_BETA, MODELS, env_values
 from harpor.fileio import write_json
 from harpor.parts.joints import SOFT_MATERIALS, WORLD
 from harpor.stage_a.sam3_masks import slug
@@ -312,8 +313,9 @@ def jpeg(path, max_side=IMAGE_SIDE):
     return buf.getvalue()
 
 
-def ask_opus(key, prompt, image, client=None):
-    """Claude Opus 5.5's answer text. client: an anthropic.Anthropic or a stand-in (tests)."""
+def ask_claude(key, prompt, image, client=None, model=CLAUDE_MODEL):
+    """The answer text of model, Claude Opus 5.5 by default or Claude Fable 5.2. client: an
+    anthropic.Anthropic or a stand-in (tests)."""
     import anthropic
 
     client = client or anthropic.Anthropic(api_key=key, max_retries=2, timeout=TIMEOUT_S)
@@ -321,19 +323,19 @@ def ask_opus(key, prompt, image, client=None):
                                             "data": base64.standard_b64encode(image).decode("ascii")}},
                {"type": "text", "text": prompt}]
     try:
-        msg = client.beta.messages.create(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, output_config={"effort": EFFORT},
+        msg = client.beta.messages.create(model=model, max_tokens=MAX_TOKENS, output_config={"effort": EFFORT},
                                           betas=OPUS_BETAS, fallbacks="default",
                                           messages=[{"role": "user", "content": content}])
     except anthropic.AuthenticationError:
         raise SystemExit("the Anthropic key was rejected") from None
     except (anthropic.PermissionDeniedError, anthropic.NotFoundError):
-        raise SystemExit(f"this key cannot use {CLAUDE_MODEL}") from None
+        raise SystemExit(f"this key cannot use {model}") from None
     except anthropic.APIStatusError as e:
         raise SystemExit(f"the Anthropic API answered HTTP {e.status_code}") from None
     except anthropic.APIConnectionError:
         raise SystemExit("could not reach the Anthropic API") from None
     if msg.stop_reason == "refusal":
-        raise SystemExit(f"{CLAUDE_MODEL} declined to list the parts; type the parts instead")
+        raise SystemExit(f"{model} declined to list the parts; type the parts instead")
     return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
 
 
@@ -367,16 +369,17 @@ def ask_astra(key, prompt, image):
 
 
 def propose_vlm(noun, image, agent, key, client=None, keys=()):
-    """The proposal of the job's VLM for the photo at image. agent: astra or opus. Every answer is
-    scrubbed of key and keys (the other keys of the key file) before anything reads it."""
+    """The proposal of the job's VLM for the photo at image. agent: astra, opus or fable (MODELS). Every
+    answer is scrubbed of key and keys (the other keys of the key file) before anything reads it."""
     from harpor.webapp.agent_step import scrub
 
     if agent not in KEY_VAR:
-        raise SystemExit(f"the VLM is astra or opus, not {agent!r}")
+        raise SystemExit(f"the VLM is {', '.join(KEY_VAR)}, not {agent!r}")
     t0, photo = time.time(), jpeg(image)
     prompt, extra = PROMPT.format(noun=noun, most=MAX_PARTS - 1), ""
     for attempt in (1, 2):
-        text = ask_opus(key, prompt + extra, photo, client) if agent == "opus" else ask_astra(key, prompt + extra, photo)
+        text = (ask_astra(key, prompt + extra, photo) if agent == "astra"
+                else ask_claude(key, prompt + extra, photo, client, MODELS[agent]))
         text = scrub(unescape(text), [key, *keys])
         try:
             parts, warnings = from_answer(text, noun)
@@ -385,7 +388,7 @@ def propose_vlm(noun, image, agent, key, client=None, keys=()):
             if attempt == 2:
                 raise SystemExit(f"the VLM gave no usable part list twice; the second time: {e}") from None
             extra = f"\n\nYour previous answer could not be used: {e}. Answer with the JSON object only."
-    return {"source": "vlm", "agent": agent, "model": CLAUDE_MODEL if agent == "opus" else CODEX_MODEL, "noun": noun,
+    return {"source": "vlm", "agent": agent, "model": MODELS[agent], "noun": noun,
             "base": parts[0]["name"], "parts": parts, "requirements": requirements_from(parse(text).get("parts") or [], parts),
             "warnings": warnings, "seconds": round(time.time() - t0, 1), "attempts": attempt, "answer": text[:4000]}
 

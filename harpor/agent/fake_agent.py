@@ -24,9 +24,11 @@ past the last).
 
 GLB kinds: good (a box of edge `size` with a PBR material), nan, no_material, garbage and parts (the
 same cube as two named nodes in W: body, the lower three quarters, and lid on top; with joints in the
-lid's extras when the scene has them). The fake .blend of parts also lists its objects and joints.
+nodes' extras when the scene has them). The fake .blend of parts also lists its objects and joints.
+An object that the fake add_part.py added is a thin slab on one side of the body (SIDES), a node of
+its own in every export.
 `python -m harpor.agent.fake_agent --blender ...` stands in for Blender, following the file contracts
-of blender/export_glb.py, review.py, set_joint.py and review_articulation.py without bpy, those of
+of blender/export_glb.py, review.py, set_joint.py, add_part.py and review_articulation.py without bpy, those of
 blender/split_parts.py for harpor.parts.stage split, and the frames_dir contract of blender/turntable.py
 for harpor.webapp.turntable render and, with "soft", harpor.webapp.softvideo render.
 `python -m harpor.agent.fake_agent --sim` stands in for the python of envs/mujoco: harpor.agent.validate
@@ -47,11 +49,29 @@ from pathlib import Path
 from harpor.agent.bin import gator_tool
 
 PARTS = ("body", "lid")
+SIDES = ((1, 0), (-1, 0), (0, 1), (0, -1))  # the body's sides in x and z, where the added parts sit, in this order
+SLAB = 0.05  # the thickness of an added part, of the cube's edge
 
 
-def write_parts(path, size=1.0, joints=None):
+def added(objects):
+    """The objects of a fake scene that add_part made: those that are not the two parts of the split."""
+    return [o for o in objects or [] if o not in PARTS]
+
+
+def slab(k, size=1.0):
+    """The box [min, max] in W of the k-th added part: a slab against the body's side SIDES[k], as high as the
+    body. Its top edge on the body is the line that a hinge of it would turn about."""
+    h, (sx, sz) = size / 2, SIDES[k]
+    lo, hi = [-h, -h / 2, -h], [h, h, h]
+    axis = 0 if sx else 2
+    lo[axis], hi[axis] = (h, h + SLAB * size) if sx + sz > 0 else (-h - SLAB * size, -h)
+    return [lo, hi]
+
+
+def write_parts(path, size=1.0, joints=None, objects=None):
     """The parts GLB: a cube of edge size about the origin of W (y down), split at a quarter of its height
-    into body (below) and lid (on top), as named root nodes with a PBR material; joints go to the extras."""
+    into body (below) and lid (on top), as named root nodes with a PBR material; joints go to the extras.
+    objects: the scene's objects; each one that add_part added is a slab (slab) with its own node."""
     import numpy as np
     import trimesh
 
@@ -61,9 +81,11 @@ def write_parts(path, size=1.0, joints=None):
 
     h = size / 2
     scene = trimesh.Scene()
-    for name, (y0, y1), color in (("body", (-h / 2, h), [200, 120, 60, 255]),
-                                  ("lid", (-h, -h / 2), [60, 120, 200, 255])):
-        box = trimesh.creation.box(bounds=np.array([[-h, y0, -h], [h, y1, h]]))
+    boxes = [("body", [[-h, -h / 2, -h], [h, h, h]], [200, 120, 60, 255]),
+             ("lid", [[-h, -h, -h], [h, -h / 2, h]], [60, 120, 200, 255])]
+    boxes += [(name, slab(k, size), [200, 120, 60, 255]) for k, name in enumerate(added(objects))]
+    for name, bounds, color in boxes:
+        box = trimesh.creation.box(bounds=np.array(bounds))
         mesh = trimesh.Trimesh(frames.w_to_gltf(box.vertices), box.faces, process=False)
         mesh.visual = trimesh.visual.TextureVisuals(material=trimesh.visual.material.PBRMaterial(
             baseColorFactor=color, metallicFactor=0.0, roughnessFactor=0.7))
@@ -74,12 +96,12 @@ def write_parts(path, size=1.0, joints=None):
         write_doc(path, write_joints(doc, joints), binary)
 
 
-def write_glb(path, kind="good", size=1.0, joints=None):
+def write_glb(path, kind="good", size=1.0, joints=None, objects=None):
     if kind == "garbage":
         Path(path).write_bytes(b"this is not a GLB file")
         return
     if kind == "parts":
-        write_parts(path, size, joints)
+        write_parts(path, size, joints, objects)
         return
     import trimesh
 
@@ -129,6 +151,48 @@ def set_joint(blend, out, child, spec):
                 joints[child] = spec
             Path(blend).write_text(json.dumps(scene))
         rec.update(joints=joints, links=objects, holders=scene.get("holders", {}), seconds=0.0)
+        json.dump(rec, f)
+
+
+def add_part(blend, out, name, source, spec):
+    """blender/add_part.py on the fake .blend of parts. The source is a box of 12 triangles, so a faces file holds
+    indices 0 to 11 (checked as the real script checks them), and planes select by the box's 8 corners: none on
+    the planes' side is an empty selection, all 8 the whole source. The new object joins the scene's objects and
+    is a slab in the exports (slab). OUT.json is created first, and an error leaves the .blend as it was."""
+    import numpy as np
+
+    from harpor.agent.blender import part_select as S
+
+    with open(out, "x") as f:
+        scene, spec = json.loads(Path(blend).read_text()), json.loads(spec)
+        objects = scene.setdefault("objects", [])
+        rec = {"ok": False, "error": None, "name": name, "source": source, "warnings": []}
+        try:
+            if source not in objects:
+                raise ValueError(f"no mesh object is named {source!r}")
+            if name in objects:
+                raise ValueError(f"an object named {name!r} exists already")
+            if len(added(objects)) >= len(SIDES):
+                raise ValueError("the fake Blender has no side left for another part")
+            if "faces" in spec:
+                n = len(S.face_indices(np.load(spec["faces"], allow_pickle=False), 12))
+            else:
+                h = scene["size"] / 2
+                corners = np.array([[x, y, z] for x in (-h, h) for y in (-h / 2, h) for z in (-h, h)])
+                n = int(S.inside(corners, S.unit_planes(spec["planes"])).sum()) * 12 // 8
+                if not n:
+                    raise ValueError(f"no face of {source} has a vertex on the normal's side of every plane")
+            if n == 12:
+                raise ValueError(f"the selection holds every face of {source}; a part is a piece of it")
+            lo, hi = slab(len(added(objects)), scene["size"])
+            objects.append(name)
+            Path(blend).write_text(json.dumps(scene))
+            counts = {"cap_faces": 2, "holes": 1, "fill": ["edgeloop_fill"], "open_cut_edges": 0}
+            rec.update(ok=True, part={"faces": n, **counts}, rest={"faces": 12 - n, **counts}, pieces=1,
+                       area=n / 12, share_of_source=n / 12, share_of_object=n / 24, box={"min": lo, "max": hi})
+        except ValueError as e:
+            rec["error"] = str(e)
+        rec.update(links=objects, seconds=0.0)
         json.dump(rec, f)
 
 
@@ -196,18 +260,20 @@ def fake_blender(argv):
     elif script == "export_glb.py":
         scene = json.loads(Path(blend).read_text())
         time.sleep(scene["seconds"])
-        write_glb(rest[0], scene["kind"], scene["size"], scene.get("joints"))
+        write_glb(rest[0], scene["kind"], scene["size"], scene.get("joints"), scene.get("objects"))
         time.sleep(scene.get("pause", 0.0))  # the real script re-imports the GLB before it writes the report
         rep = {"meshes": 1, "materials": int(scene["kind"] != "no_material"), "images": 0, "triangles": 12,
                "warnings": []}
         if scene["kind"] == "parts":
-            rep.update(meshes=len(PARTS), triangles=12 * len(PARTS), nodes=list(PARTS),
-                       joints=scene.get("joints") or {})
+            nodes = [*PARTS, *added(scene.get("objects"))]
+            rep.update(meshes=len(nodes), triangles=12 * len(nodes), nodes=nodes, joints=scene.get("joints") or {})
         Path(rest[1]).write_text(json.dumps(rep))
     elif script == "split_parts.py":
         split_parts(*rest[:4])
     elif script == "set_joint.py":
         set_joint(blend, *rest[:3])
+    elif script == "add_part.py":
+        add_part(blend, *rest[:4])
     elif script == "turntable.py":
         turntable_frames(json.loads(Path(rest[0]).read_text()))
     elif script == "review_articulation.py":

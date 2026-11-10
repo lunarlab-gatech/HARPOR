@@ -351,11 +351,15 @@ drawer x3 &gt; cabinet body : prismatic</pre>
 <ul>
   <li>GPT-6-Astra runs through the Codex CLI. It needs an OpenAI key, which starts with sk-.</li>
   <li>Claude Opus 5.5 runs through the Anthropic API. It needs an Anthropic key, which starts with sk-ant-.</li>
+  <li>Claude Fable 5.2 runs the same way as Claude Opus 5.5, with the same kind of key. It is Anthropic's most
+    capable model, and it costs twice as much per token. Your Anthropic organization must keep data for 30 days to
+    use it.</li>
 
   <li>None runs no agent and needs no key.</li>
 
 </ul>
-<p>Both models run at xhigh effort. The agent has 600 s to edit the mesh, or 900 s to set the joints. Time spent
+<p>GPT-6-Astra and Claude Opus 5.5 run at xhigh effort. Claude Fable 5.2 runs at high effort, because at xhigh its
+  turns run longer and use many more tokens. The agent has 600 s to edit the mesh, or 900 s to set the joints. Time spent
   exporting GLBs or checking them with the simulate helper does not count, up to 600 s in each round. The agent is
   skipped when it is turned off, or when the mean mask IoU is below 0.5 (see <a href="#results">Results</a>).
   Physics then uses the posed mesh, or the split parts without joints.</p>
@@ -375,7 +379,7 @@ drawer x3 &gt; cabinet body : prismatic</pre>
 <h3>GPT-6-Astra and the network</h3>
 <p>GPT-6-Astra runs the Codex CLI in a container that can reach the network. Text in your video or images, such as a
   sign or a label, could steer it to run commands that reach the network. These commands run on the GPU machine that
-  runs the job. Claude Opus 5.5 runs its shell with no network access. If this matters to you, choose Opus.</p>
+  runs the job. The Claude models run their shell with no network access. If this matters to you, choose one of them.</p>
 
 <h3>API keys</h3>
 <p>Each job uses your own key, and your provider bills you for it. A key is one word of letters, digits, - and _.
@@ -412,11 +416,14 @@ drawer x3 &gt; cabinet body : prismatic</pre>
     check, pass or fail, and the round whose GLB the job delivered. A replan round has no check. <b>no candidate
     delivered</b> means that no round left a GLB that the app could deliver.</dd>
   <dt>Requirements</dt>
-  <dd>How many requirements the delivered GLB meets, of all of them. A part that was not split off counts too.</dd>
+  <dd>How many requirements the delivered GLB meets, of all of them. A part that was not split off counts too: the
+    agent is asked to cut it out of the mesh itself, and the requirement fails until it has.</dd>
   <dt>Requirement r1, r2, …</dt>
   <dd>Each requirement with its part, its joint and the outcome of the check of the delivered GLB: <b>pass</b>;
     <b>fail</b>, when the check found a flaw; <b>inconclusive</b>, when the check could not be done, for example when
-    MuJoCo did not run; <b>unassessed</b>, when the part was not split off or was not checked. <b>clear from</b> gives
+    MuJoCo did not run; <b>unassessed</b>, when the part was not checked. <b>not split off</b> marks a part of the
+    list that the split did not find and the agent did not create, which fails the check; <b>cut out by the
+    agent</b> marks one that the agent created. <b>clear from</b> gives
     the range of a hinge or slide in which the part passes through no other part. <b>dents</b> gives how deep MuJoCo
     pressed a soft part. <b>not required</b> marks a piece of a part found more often than its count.</dd>
   <dt>Surface retained</dt>
@@ -426,11 +433,12 @@ drawer x3 &gt; cabinet body : prismatic</pre>
     findings follow. <b>report only</b> means that they decide nothing, as long as the app's limits for them are not
     set from real runs. <b>blocks articulated</b> means that they keep the GLB from the verdict articulated.</dd>
   <dt>Agent tokens</dt>
-  <dd>For Claude Opus 5.5: the tokens of the whole session, from its log: new input, output, cache reads and cache
+  <dd>For the Claude models: the tokens of the whole session, from its log: new input, output, cache reads and cache
     writes. A turn is one reply of the model.</dd>
   <dt>Agent cost (estimate)</dt>
-  <dd>An estimate from the token counts at Claude Opus 5.5's prices per million tokens: $4 input, $20 output, $0.20
-    cache read and $5 cache write. In a turn with a refusal fallback, both tries count, each at its own model's prices.
+  <dd>An estimate from the token counts at the model's prices per million tokens. Claude Opus 5.5 costs $4 input,
+    $20 output, $0.20 cache read and $5 cache write. Claude Fable 5.2 costs $8 input, $40 output, $0.20 cache read
+    and $10 cache write. In a turn with a refusal fallback, both tries count, each at its own model's prices.
     A try that failed and was sent again does not count, so the estimate can be low. A ? means that the log gave no
     cost. Your Anthropic bill gives the real cost.</dd>
 </dl>

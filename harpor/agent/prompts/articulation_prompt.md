@@ -1,7 +1,8 @@
 # Articulation: give the moving parts their joints, then hand off
 
 The object in original/original.glb is already split into parts. Each part is one mesh object in
-candidate.blend, named after the part. Give every part that can move a joint: its type, its axis and
+candidate.blend, named after the part. The split can miss a part of the part list; create such a part
+first (see "Parts the split missed"). Give every part that can move a joint: its type, its axis and
 origin, and its range. Make sure each moving part can move through its range without passing through
 the other parts. Then hand off the reviewed GLB. The deliverable is that GLB, with the joints inside it.
 It is not a report. Finish when the joints are reviewed and correct, not when the clock runs out.
@@ -25,8 +26,8 @@ It is not a report. Finish when the joints are reviewed and correct, not when th
   coordinate in parts.json is in W, and set_joint takes W too.
 
 Read /work/run_budget.json at launch. The budget is 900 seconds, and the recorded deadline is
-authoritative. It is a ceiling, not a target. The budget counts reasoning, edits, set_joint and the
-review renders; export_glb and simulate do not count. Save a packed .blend after each geometry change
+authoritative. It is a ceiling, not a target. The budget counts reasoning, edits, set_joint, add_part
+and the review renders; export_glb and simulate do not count. Save a packed .blend after each geometry change
 and let the helpers export it.
 
 ## Rules carried over from refinement
@@ -95,8 +96,50 @@ depth the drawer travels, close the back with bmesh.ops.holes_fill, and recalcul
 drawer front, a little smaller than the opening, and join it to the drawer object. A new object
 parented to a part's object also moves with that part in every export, so the tray may be its own
 object parented to the drawer, without a joint. Give new faces the material of the part they belong
-to. Faces that the split put in the wrong part may be moved to the right part's object. Do not refine
-textures or shapes elsewhere.
+to. Faces that the split put in the wrong part may be moved to the right part's object. A part that
+the split missed is made only with add_part (next section), never by hand. Do not refine textures or
+shapes elsewhere.
+
+## Parts the split missed
+
+The split can miss a part of the part list, or find fewer of a part than the list counts. Such a part
+has no object. Its requirement in input/parts.json has part null and status not_found, and two fields
+that say what to make: reserve, the name that the part's object must get, and parent, the part it is
+attached to. The part's surface is still inside another object, most often the parent. The host's
+check fails the requirement (part_missing) until a mesh object with the reserve name exists, and then
+checks its joint as any other part's. Create every such part before you set the joints:
+
+1. Find the part. Look at the photos and at original/previews/, and find where it is on the mesh, in
+   W. input/manifest.json has K and w2c of each view, so a point in W can be projected into a photo
+   to check it.
+2. Choose its faces with Python, on the mesh of the object that holds them (the source). Use a rule
+   that fits the shape of this part: the faces on one side of a plane, inside a box, within a
+   distance of an axis, facing one way, or the connected region inside a ring of sharp edges. Compute
+   it from the mesh and from input/parts.json. Never read a coordinate off an image.
+3. Cut it out with add_part --name RESERVE [--source OBJECT] and one of two selections:
+   - --faces FILE: a .npy file under /work with the polygon indices of the source object (numpy.save
+     of an integer array, or of one bool per polygon). The indices are those of the mesh in the saved
+     candidate.blend, so save the scene before you compute them and do not change the source's mesh
+     before add_part runs. This works for a part of any shape.
+   - --plane PX PY PZ NX NY NZ, 1 to 6 times, with --seed X Y Z, all in W: the part is on the side
+     of every plane that its normal points to, and of those faces the connected piece nearest the
+     seed, a point on the part. The source is cut along the planes, so the edge is straight. Use it
+     when the part ends at flat boundaries.
+   --source defaults to the requirement's parent. add_part keeps the UVs and materials of the faces,
+   closes the cut openings of both objects and saves candidate.blend. It refuses an empty selection
+   and one that holds the whole source.
+4. Check the cut. add_part prints the part's face count, its share of the source's and of the
+   object's area, its box in W and the number of connected pieces. More than one piece, or a share or
+   box that does not fit the part in the photos, means the selection is wrong. Then run
+   review --tint RESERVE, which renders the object with the new part in one flat color, and compare
+   it with the photos.
+5. A wrong cut is taken back by copying the file that add_part names (add_part/NNN_before.blend) over
+   candidate.blend. Then cut again.
+6. Give the new part its joint with set_joint, as for every part. When a missing part is attached to
+   another missing part, create the parent first and cut the child from the right source.
+
+When the photos show that the object does not have the part at all, cut nothing for it, and name it in
+a limitation. The check will still report it as missing.
 
 ## Review
 
@@ -115,7 +158,8 @@ drawer without a cavity. Review again after the fix.
 ## Requirements
 
 input/parts.json may also hold requirements, which say what the parts must do: one per moving or soft
-part, with an id, the part (its object's name; null when the split did not find it), the joint it
+part, with an id, the part (its object's name; null when the split did not find it, and reserve is
+then the name of the object to create for it), the joint it
 needs (revolute, prismatic, soft, or unknown for either moving type), a short text, and a test, such
 as min_span, the span in radians that the range must reach. The host checks the GLB you hand off
 against them: the joints, the surface against original/original.glb, each hinge and slide swept
@@ -133,7 +177,8 @@ That is the final action. Verdicts:
   correctly, without penetration. Use the receipt of that review (a...). finish refuses articulated for
   a GLB without joints or without an articulation review.
 - unchanged: no part can move, or the split is unusable. The split object is delivered without joints.
-- needs_review: some joints are missing or wrong. Name the open defect.
+- needs_review: some joints are missing or wrong, or a part of the list is still missing. Name the
+  open defect.
 
 When no joint moves and none is soft (unchanged, or needs_review without such a joint),
 review_articulation has nothing to render: run review and finish with its receipt (r...).

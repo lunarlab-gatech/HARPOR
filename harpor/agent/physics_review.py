@@ -138,7 +138,9 @@ def judge(root, folder, simulation, config):
     facts = {k: simulation[k] for k in ("materials", "dynamics", "settling", "soft_materials", "fixed_base")}
     prompt = PROMPT + "\nObject: " + manifest["source"] + "\nMeasurements:\n" + json.dumps(finite(facts))
     image = propose.jpeg(folder / "judge.jpg", max_side=2400)
-    ask = propose.ask_opus if config["agent"] == "opus" else propose.ask_astra
+    agent = config["agent"]
+    ask = (propose.ask_astra if agent == "astra"
+           else lambda k, p, i: propose.ask_claude(k, p, i, model=tools.MODELS[agent]))
     for attempt in range(2):
         answer = scrub(propose.unescape(ask(key, prompt, image)), keys)
         try:

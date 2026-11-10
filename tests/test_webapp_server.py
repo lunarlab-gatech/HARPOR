@@ -1091,7 +1091,7 @@ def test_opus_build_and_a_change_of_agent(client, tmp_path):
     assert r.status_code == 400 and r.json()["detail"] == "Anthropic keys start with sk-ant-" and KEY not in r.text
     for wrong in ("gpt", None, 1):
         r = c.post(f"/api/jobs/{job_id}/start", json={**start, "agent": wrong, "api_key": opus})
-        assert r.status_code == 400 and r.json()["detail"] == "agent is astra, opus, none", wrong
+        assert r.status_code == 400 and r.json()["detail"] == "agent is astra, opus, fable, none", wrong
     r = c.post(f"/api/jobs/{job_id}/start", json={**start, "api_key": opus})
     assert r.status_code == 200 and r.json()["key"] == "key accepted (test)"
     job = wait(c, job_id, "done", "failed")
@@ -1224,7 +1224,7 @@ def test_part_list_review_confirms_or_edits_the_list(client, tmp_path):
         job["files"])  # but LiDAR and the videos
     a = job["agent_result"]
     assert (a["mode"], a["verdict"], a["joints_delivered"]) == ("articulation", "articulated", 1)
-    assert set(a["counts"]) == {"exports", "reviews", "checkpoints", "joints", "articulation_reviews"}
+    assert set(a["counts"]) == {"exports", "reviews", "checkpoints", "joints", "parts_added", "articulation_reviews"}
     # The VLM's lid has a requirement, so the fake agent's result has the keys of a session in rounds, and its evidence.
     assert ([x["outcome"] for x in a["rounds"]], a["requirements"]["pass"], a["candidate"]["round"], a["simulations"]) == (
         ["pass"], 1, 1, 0)
@@ -1796,7 +1796,7 @@ def test_agent_of_and_key_later_at_module_level():
                    ({"agent": {}}, None), ({"agent": "Opus"}, None), ({"agent": "gpt"}, {"agent": "opus"})]:
         with pytest.raises(server.Bad) as e:
             server.agent_of(b, job)
-        assert e.value.args == (400, "agent is astra, opus, none"), b
+        assert e.value.args == (400, "agent is astra, opus, fable, none"), b
     assert [server.key_later(b) for b in ({}, {"key_later": False}, {"key_later": True}, {"key_later": True, "api_key": KEY},
                                           {"key_later": True, "api_key": ""})] == [False, False, True, False, True]
     for v in (1, 0, "true", None, []):
@@ -4904,6 +4904,26 @@ EVIDENCE = {"version": 1, "requirements": [{"id": f"r{k}", "prompt": p} for k, p
                        {"requirement": "r5", "target": ["door_2"], "kind": "joint", "joint": "revolute", "required": False,
                         "outcome": "unassessed", "measured": {}}, "not a record"]}],
     "selected": {"version": 2}}
+
+
+def test_app_js_names_a_part_that_was_not_split_off():
+    """A part of the list that the split did not find has the name reserved for its link as its record's target.
+    The row says whether the agent created that link: cut out by the agent, or not split off (the check's
+    part_missing). A found part and a record from before the reserves read as they did."""
+    ev = {"requirements": [{"id": "r1", "prompt": "lid", "status": "found"},
+                           {"id": "r2", "prompt": "flap", "status": "not_found", "reserve": "flap_3"},
+                           {"id": "r3", "prompt": "knob", "status": "not_found"}]}
+    rec = lambda rid, target, outcome, **more: {"requirement": rid, "target": target, "joint": "revolute",  # noqa: E731
+                                                "outcome": outcome, "measured": {}, **more}
+    records = [rec("r1", ["lid"], "pass"), rec("r2", ["flap_3"], "pass", measured={"achieved": [0, 1.5]}),
+               rec("r2", ["flap_3"], "fail", findings=[{"code": "part_missing"}]),
+               rec("r2", ["flap_3"], "fail", findings=[{"code": "joint_missing"}]),
+               rec("r2", ["flap_3"], "unassessed"), rec("r3", [], "unassessed")]
+    out = run_dom_js("console.log(JSON.stringify(" + json.dumps(records) + ".map((r) => requirementText(r, "
+                     + json.dumps(ev) + "))))", {})
+    assert out == ["lid, revolute: pass", "flap_3 (cut out by the agent), revolute: pass, clear from 0° to 86°",
+                   "flap (not split off), revolute: fail", "flap_3 (cut out by the agent), revolute: fail",
+                   "flap (not split off), revolute: unassessed", "knob (not split off), revolute: unassessed"]
 
 
 def test_app_js_results_of_a_session_in_rounds():
