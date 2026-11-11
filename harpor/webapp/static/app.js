@@ -1589,6 +1589,11 @@ function requirementText(r, ev) {
       : `, clear from ${degrees(lo)}° to ${degrees(hi)}°`;
   }
   if (typeof m.dmax_m === "number") text += `, dents ${(1000 * m.dmax_m).toFixed(1)} mm`;
+  // The part list's range is graded: a joint that reaches less of it still meets the requirement, as reduced.
+  const red = m.reduced && typeof m.reduced === "object" ? m.reduced : null;
+  if (red && typeof red.span === "number" && typeof red.target === "number") {
+    text += `, reduced: ${degrees(red.span)}° of the ${degrees(red.target)}° that the part list estimated`;
+  }
   return text + (r.required === false ? ", not required" : "");
 }
 // "99.5% kept: 98.0% as it was, 1.5% changed", with the share whose UVs cannot be checked and the surface findings.

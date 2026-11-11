@@ -11,7 +11,9 @@ It is not a report. Finish when the joints are reviewed and correct, not when th
 
 - input/parts.json describes the split. parts has one entry per part: name (the object's name),
   parent (the part it is attached to; the base comes first and has none), joint_guess (revolute,
-  prismatic, fixed, soft or unknown, from the part list), axis_hint, faces, confidence, and two boxes in W:
+  prismatic, fixed, soft or unknown, from the part list), axis_hint, faces, confidence, pieces (how many
+  connected pieces the part's surface is in) with largest_piece (the share of its area in the largest), and
+  two boxes in W:
   aabb (min, max, center, extent) and obb (center, axes as rows with the longest first, extents along
   those axes, and the 8 corners). The base's joint_guess is always fixed; it does not mean a fixed
   base. Only entries with status found have an object. The others have name null and come last.
@@ -26,8 +28,8 @@ It is not a report. Finish when the joints are reviewed and correct, not when th
   coordinate in parts.json is in W, and set_joint takes W too.
 
 Read /work/run_budget.json at launch. The budget is 900 seconds, and the recorded deadline is
-authoritative. It is a ceiling, not a target. The budget counts reasoning, edits, set_joint, add_part
-and the review renders; export_glb and simulate do not count. Save a packed .blend after each geometry change
+authoritative. It is a ceiling, not a target. The budget counts reasoning, edits, set_joint, add_part,
+move_faces and the review renders; export_glb and simulate do not count. Save a packed .blend after each geometry change
 and let the helpers export it.
 
 ## Rules carried over from refinement
@@ -96,9 +98,9 @@ depth the drawer travels, close the back with bmesh.ops.holes_fill, and recalcul
 drawer front, a little smaller than the opening, and join it to the drawer object. A new object
 parented to a part's object also moves with that part in every export, so the tray may be its own
 object parented to the drawer, without a joint. Give new faces the material of the part they belong
-to. Faces that the split put in the wrong part may be moved to the right part's object. A part that
-the split missed is made only with add_part (next section), never by hand. Do not refine textures or
-shapes elsewhere.
+to. Faces that the split put in the wrong part are moved with move_faces, and a part that the split
+missed is made with add_part (the next two sections), never by hand. Do not refine textures or shapes
+elsewhere.
 
 ## Parts the split missed
 
@@ -141,6 +143,29 @@ checks its joint as any other part's. Create every such part before you set the 
 When the photos show that the object does not have the part at all, cut nothing for it, and name it in
 a limitation. The check will still report it as missing.
 
+## Parts the split got wrong
+
+The split can also put surface in the wrong part: one part object that holds the surface of two
+parts, a part with a piece of its neighbour, or a part whose rest is still in the body. A joint on
+such a part moves the wrong surface. Check every part before you set the joints:
+
+1. Look at the parts. review --tint NAME (up to 4 names) renders those parts in one flat color each;
+   compare with the photos. In input/parts.json, a part with pieces above 1 and largest_piece well
+   under 1 is in several pieces, which often means it holds the surface of two things.
+2. Choose the faces that are in the wrong object, as for add_part: with Python on the mesh of the
+   object that holds them now, by a rule that fits their shape.
+3. Move them with move_faces --from HOLDER --to OWNER and --faces FILE, or --plane ... --seed X Y Z
+   (the same selections as add_part). Both are part objects; either may be the body. The two objects
+   are cut and closed again as one surface, so the seam between them moves and neither keeps faces
+   inside it. Both keep their names and joints.
+4. Check the move: move_faces prints the faces moved and, per object, its faces and connected
+   pieces. Then run review --tint on both.
+5. A wrong move is taken back by copying the file that move_faces names (move_faces/NNN_before.blend)
+   over candidate.blend.
+
+When a part object holds two parts of the list and one of them is missing (it has a reserve), cut
+that one out of the object with add_part --source OBJECT.
+
 ## Review
 
 Run review_articulation after the joints are set. It needs at least one revolute, prismatic or soft
@@ -161,12 +186,16 @@ input/parts.json may also hold requirements, which say what the parts must do: o
 part, with an id, the part (its object's name; null when the split did not find it, and reserve is
 then the name of the object to create for it), the joint it
 needs (revolute, prismatic, soft, or unknown for either moving type), a short text, and a test, such
-as min_span, the span in radians that the range must reach. The host checks the GLB you hand off
+as min_span, the span in radians that the part list expects of the range. The host checks the GLB you hand off
 against them: the joints, the surface against original/original.glb, each hinge and slide swept
 through its range for clearance, and MuJoCo, which drives each hinge and slide through its range and
 presses each soft part. Run simulate before finish: it runs the same check on the scene, outside the
 time budget, and prints one line per requirement and the top findings (the report is in simulate/).
-The requirements cannot be changed, and a smaller range does not meet a span target.
+The requirements cannot be changed. A span target (min_span) is the part list's estimate of the
+part's full travel, made from one photo. Set each range to what the part can really do: it must be
+clear in the sweep and reachable in MuJoCo, so narrow a range that is blocked. A range that reaches
+less than its target still meets the requirement, and is recorded as reduced, while it keeps a
+fifth of the target and 10 degrees. Do not widen a range to reach a target through other parts.
 
 ## Hand-off
 

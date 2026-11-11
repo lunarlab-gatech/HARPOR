@@ -423,7 +423,9 @@ drawer x3 &gt; cabinet body : prismatic</pre>
     <b>fail</b>, when the check found a flaw; <b>inconclusive</b>, when the check could not be done, for example when
     MuJoCo did not run; <b>unassessed</b>, when the part was not checked. <b>not split off</b> marks a part of the
     list that the split did not find and the agent did not create, which fails the check; <b>cut out by the
-    agent</b> marks one that the agent created. <b>clear from</b> gives
+    agent</b> marks one that the agent created. <b>reduced</b> marks a joint that passes with less
+    range than the part list estimated, with the angle it reaches: the estimate is the part's full travel, guessed
+    from one photo, and the joint stops where it would hit another part. <b>clear from</b> gives
     the range of a hinge or slide in which the part passes through no other part. <b>dents</b> gives how deep MuJoCo
     pressed a soft part. <b>not required</b> marks a piece of a part found more often than its count.</dd>
   <dt>Surface retained</dt>

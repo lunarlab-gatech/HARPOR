@@ -24,7 +24,8 @@ import threading
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-COMMANDS = ("export_glb", "review", "checkpoint", "finish", "set_joint", "add_part", "review_articulation", "simulate")
+COMMANDS = ("export_glb", "review", "checkpoint", "finish", "set_joint", "add_part", "move_faces", "review_articulation",
+            "simulate")
 MAX_ARGS, MAX_ARG_CHARS, MAX_OUTPUT_CHARS = 64, 4096, 16384  # add_part with 6 planes, a seed and a source has 51 arguments
 TERM_GRACE_S = 3.0
 

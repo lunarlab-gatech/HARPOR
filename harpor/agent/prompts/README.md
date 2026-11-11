@@ -19,7 +19,8 @@ the paper's. The agent gets it when an articulated job's parts stage has split t
 the moving parts their joints with `set_joint`, checks them with `review_articulation` and hands
 off within 900 seconds. A part of the part list that the split missed has a requirement with a
 `reserve` name, and the agent cuts it out of the mesh with `add_part` first (after PhysAg3D, whose
-agent selects each part's surface itself). Since it is not copied from the paper, `CHANGES["articulation"]` is empty:
+agent selects each part's surface itself). Surface that the split put in the wrong part is moved
+with `move_faces`. Since it is not copied from the paper, `CHANGES["articulation"]` is empty:
 there is no original text to record edits against, and the file is edited directly.
 
 `repair_prompt.md` and `replan_prompt.md` are our own too. When `input/parts.json` has a requirement
@@ -35,6 +36,6 @@ evidence)` gives it the whole task:
 - replan: `replan_prompt.md` alone; its agent writes `/work/plan.md`, and every helper is refused
 
 Both templates say that `candidate.blend` holds the last round's work, name the check's report under
-`evidence/`, and say that the requirements cannot change and that a smaller range does not meet a
-span target. They take the check's feedback, the best candidate so far, the round's budget and
+`evidence/`, and say that the requirements cannot change and that a span target is graded: a
+range must be clear and reachable, and one that reaches less than its target is recorded as reduced. They take the check's feedback, the best candidate so far, the round's budget and
 (repair) the plan sentence through `str.format`, so their own text has no braces. `FILES` and `load` serve only the two modes.

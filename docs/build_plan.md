@@ -1403,6 +1403,21 @@ and its *Tested so far* says what ran where.
      `result.json` `counts.parts_added` counts the cuts. `review --tint LINK` renders a link of the
      candidate in one flat color, so the agent can check the cut against the photos. The Blender run
      has a 180 s limit.
+   - `move_faces --from HOLDER --to OWNER` with `--faces FILE` or `--plane ... --seed X Y Z`
+     (2026-11-10) moves surface that the split put in the wrong part object to the object it belongs
+     to. The first full Box run showed the need: a found part held strips of two flaps, and the agent
+     had no way to re-cut it. Both are links of the scene, and either may be the body. The selection
+     is `add_part`'s (`tools.part_selection`, `blender/part_cut.select`). `blender/move_faces.py`
+     splits the two objects again as one surface with a new labelling, as `split_parts.py` splits the
+     whole object: it deletes the caps of copies of both meshes (a cap has one UV for all its corners,
+     `part_cut.is_cap`), joins the copies, welds them, marks the edges between the two labels as cut
+     edges, and makes two capped meshes (`part_cut.piece`). So neither link is left with faces inside
+     it, which would make it not closed and the clearance check `clearance_missing`. Both objects keep
+     their name, joint, transform and parent. It refuses an empty selection, one that holds all of the
+     holder's surface, and objects with different transforms. The host keeps
+     `work/move_faces/<NNN>_before.blend`, logs a `faces_moved` event with the selection, and counts
+     the moves in `result.json` `counts.faces_moved`. `parts.json` gives each found part `pieces` and
+     `largest_piece` (`geometry.pieces`), so the agent sees a part that is in several pieces.
    - `review_articulation [--states K] [--clay]`, with K from 2 to 5 (default 3), exports the scene and
      reads the joints from the host's copy of the GLB in `control/exports/`, which it also checks and
      renders (see *Exports* in note 5). It stops when the GLB has no joint, when its joints are not a valid
@@ -1541,7 +1556,11 @@ free among the links and the other reserves. Its `parent` is a link too: the fir
 proposal parent, else that parent's own reserve (a missing part on a missing part), else up to the
 base. The fields follow PhysAg3D's Eq. 2: `part` and `parent` are U, `action` is a,
 `observe` is O, `test` is psi and `scope` is D. A revolute part's range becomes its test `min_span`,
-in radians. A prismatic part's range goes only into `text`, because a length depends on the scale,
+in radians. That target is graded (2026-11-10): it is the VLM's estimate of the part's full travel,
+from one photo. A range within 5 degrees of it meets the requirement. One that reaches less but keeps
+20% of the target, and 10 degrees, also meets it, and the record's `measured.reduced` keeps the span,
+the target and the share (`validate.reduced`); `result.json` lists these under `reduced`. Under that
+floor the requirement is `range_short`. A prismatic part's range goes only into `text`, because a length depends on the scale,
 which is an estimate without LiDAR. A joint `unknown` takes either moving type.
 
 ```json
@@ -1569,16 +1588,20 @@ alive while `simulate` runs. The steps:
    letters, digits, spaces, `_`, `.` and `-`, with no leading dot), else `bad_link_name`, since `mjcf`
    makes files and XML of them. MuJoCo does not run on such names.
 3. Clearance in W on the link meshes, one hinge or slide at a time with every other joint at 0. The
-   reference interval [l0, h0] is the joint's limits, each side widened to the entry `<link>|<type>`
-   of `control/ranges.json`. Only the check at a round's end writes that file. So the reference stays
-   across repairs, and a narrower range does not lower it. At rest the moving links must not lie in
+   reference interval [l0, h0] is the joint's own limits (2026-11-10; before, each side was widened to
+   the widest range of an earlier round, so a range could never be narrowed, and on the Box the agent
+   widened its ranges to 329 degrees instead). `control/ranges.json` keeps, per `<link>|<type>`, the
+   widest interval that the joint had at a round's end, and only the check at a round's end writes
+   it. That entry sets only the floor below, so a range cannot be shrunk to nothing. At rest the moving links must not lie in
    another link (`rest_collision`), and every other link must be closed (`clearance_missing`). Either
    one ends the search. Then the interval [l0, h0] (2/3)^n, for n = 0, 1 and 2, is swept with 4 states
    each way from rest until one passes. A state fails when a surface sample lies deeper than the
    tolerance inside another link (0.5% of the diagonal, at most a quarter of that link's thinnest
-   side, as in `review_articulation`). A reduced interval must keep 20% of h0 - l0, and 10 degrees for
-   a hinge. No interval passing is `axis_blocked`, and one passing after a reduction is
-   `range_blocked`. A span under that floor, or one that the joint's limits cut, is `range_short`.
+   side, as in `review_articulation`). A reduced interval must keep the floor: 20% of the widest span
+   (of the limits now and of the entry of `control/ranges.json`), and 10 degrees for a hinge. No
+   interval passing is `axis_blocked`. One passing after a reduction is `range_blocked`: the declared
+   range collides, and the repair is to narrow it to what is clear. A span under the floor is
+   `range_short`.
 4. MuJoCo. `model.glb` is the copy with its joints marked S but with W's numbers. The command is
    `GATOR_MUJOCO -m harpor.physics.sim_check` (below), from the repository with `PYTHONSAFEPATH=1`.
    It builds the model with a fixed base, zero gravity and no floor, so up does not matter. It gets
@@ -1622,7 +1645,9 @@ A round is structural with a structural finding, else local with a local one, el
 `sim_unavailable` (`GATOR_MUJOCO` unset or not starting, or `sim_check` without its modules) makes the
 scope none. A requirement fails with a finding that is not in `INCONCLUSIVE`. It is inconclusive with
 only such findings (`compile_error`, `sim_timeout`, `sim_unavailable`, `clearance_missing`,
-`soft_untestable`, `validation_error`) or without a trajectory of 3 states. Otherwise it passes. A part
+`soft_untestable`, `validation_error`) or without a trajectory of 3 states. Otherwise it passes, as
+reduced when its range is short of its span target. The physics judge is told each requirement's
+text, target and the range that ran (`physics_review.targets`). A part
 that the split did not find fails with `part_missing` until a mesh node has its `reserve` name
 (2026-11-10; before, it was unassessed and blocked nothing). The finding is local, so the next round
 is a repair, which is told to create the part with `add_part`. With the node, the requirement is
@@ -1820,13 +1845,21 @@ Measured times on ICE for the real chair (5 views, 10,268 faces, 2 parts):
   until milestone 11 calibrates the limits.
 - The pin and press rules of a soft part were tested only on synthetic objects. A neighbouring part can
   pass through a soft part under load, because the hex mesh is a proxy.
-- Defaults that a real run should confirm. A part that the split did not find fails its round
-  (`part_missing`) until the agent creates it, so a part list that counts a part the object does not
-  have costs the repair rounds and ends as `needs_review`. `add_part` and `review --tint` have run
-  only against the tests' stand-in for Blender, not in Blender. A joint type unlike the requirement's fails it (`joint_type_mismatch`, structural), though
-  the VLM's type is a guess and the agent cannot change it. A link that is not closed gives
-  `clearance_missing`: the requirement is inconclusive, and a repair is asked for. The soft-part video
-  shows the dent at true scale, at most 12 mm.
+- Defaults that a real run should confirm:
+  - A part that the split did not find fails its round (`part_missing`) until the agent creates it. So
+    a part list that counts a part the object does not have costs the repair rounds and ends as
+    `needs_review`.
+  - The span target is graded, and a range can be narrowed. No real job has run with these rules.
+  - A joint type unlike the requirement's fails it (`joint_type_mismatch`, structural), though the
+    VLM's type is a guess and the agent cannot change it.
+  - A link that is not closed gives `clearance_missing`: the requirement is inconclusive, and a repair
+    is asked for.
+  - The soft-part video shows the dent at true scale, at most 12 mm.
+- What ran in Blender 5.2 (2026-11-10, the Box on ICE): `add_part`, the split's shared cut code and
+  `review --tint` in a full job, where the split found 3 of 4 flaps and Opus 5.5 cut the fourth and
+  hinged all four; `move_faces` by hand on that job's parts. No agent has used `move_faces` yet.
+- The mesh sweep misses a part that passes through a thin wall. A range can pass the sweep while the
+  frames show it going through a wall, and the judge is then the only guard.
 
 ### 12. Metric scale from LiDAR (`harpor/stage_a/lidar_scale.py`, `harpor/webapp/lidar.py`)
 

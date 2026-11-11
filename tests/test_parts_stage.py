@@ -230,6 +230,28 @@ def test_requirements_make_max_count_found_records():
     assert S.MIN_RESPONSE == sim_check.RESPONSE
 
 
+def test_pieces_count_the_connected_pieces_of_each_part():
+    """geometry.pieces: per label the connected pieces of its faces, by shared edges, and the share of its area in
+    the largest. Two boxes under one label are two pieces; a label over half a box is one. This is the hint, in
+    parts.json, that a found part may hold the surface of two things."""
+    import trimesh
+
+    from harpor.parts import geometry
+
+    big = trimesh.creation.box(bounds=[[0, 0, 0], [1, 1, 1]])
+    small = trimesh.creation.box(bounds=[[2, 0, 0], [2.5, 0.5, 0.5]])
+    mesh = geometry.topology(*(lambda m: (m.vertices, m.faces))(trimesh.util.concatenate([big, small])))
+    one = np.zeros(24, int)
+    assert geometry.pieces(mesh, one, 2) == [(2, pytest.approx(6 / 7.5)), (0, 0.0)]
+    two = np.r_[np.zeros(12, int), np.ones(12, int)]
+    assert geometry.pieces(mesh, two, 2) == [(1, 1.0), (1, 1.0)]
+    # the top face of the big box as its own label: both labels stay in one piece each
+    top = np.isclose(mesh.triangles_center[:, 2], 1.0)
+    lab = np.where(top, 1, 0)
+    lab[12:] = 0
+    assert [n for n, _ in geometry.pieces(mesh, lab, 2)] == [2, 1]
+
+
 def _proposal(parts):
     return {"base": parts[0][0], "parts": [{"name": n, "parent": p, "joint": j, "count": c} for n, p, j, c in parts]}
 

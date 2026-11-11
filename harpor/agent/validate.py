@@ -8,24 +8,25 @@ hashes it and copies it to control/validate/<sha16>/candidate.glb, and every lat
    safe_links), since harpor.physics.mjcf makes files and XML of them: else bad_link_name, and MuJoCo does not run.
 2. The surface against original, root/original.glb (harpor.agent.surface.compare); its failure is surface_error.
 3. Clearance in W on the link meshes (tools.link_meshes, tools.penetration), one hinge or slide at a time with every
-   other joint at 0. The reference [l0, h0] (reference) is the joint's limits, each side widened to the entry
-   "<link>|<type>" of control/ranges.json, since the original interval stays the reference across repairs (paper
-   A.5): a repair can widen a range, or turn it around, as a side whose limit is 0 has no reference, but a narrower
-   range keeps the wider reference. Only check(..., pin_ranges=True), the check at a round's end, writes entries,
-   so a draft that simulate checks does not set one, and a new type gets its own. At rest the moving links (the
-   joint's child and the links it carries) must not lie in another link (rest_collision), and every other link must
-   be closed, or inside and outside say nothing (clearance_missing); either ends the search (paper A.5). Then for
+   other joint at 0. The reference [l0, h0] is the joint's own limits, so a repair can narrow a range
+   that collides as well as widen it or turn it around. control/ranges.json keeps, per "<link>|<type>", the widest
+   interval that the joint had at a round's end (pin), and it sets only the floor below: a range cannot be shrunk
+   to nothing to pass a test. Only check(..., pin_ranges=True), the check at a round's end, writes entries, so a
+   draft that simulate checks does not set one, and a new type gets its own. At rest the moving links (the joint's
+   child and the links it carries) must not lie in another link (rest_collision), and every other link must be
+   closed, or inside and outside say nothing (clearance_missing); either ends the search (paper A.5). Then for
    n = 0, 1, 2 the interval [l0, h0] (2/3)^n is swept at STEPS states each way from rest to its ends (none toward an
    end at 0) until one passes; a state fails when a sample lies deeper than the tolerance inside another link. A
-   reduced interval is tried only while its span keeps MIN_SHARE of h0 - l0, and MIN_HINGE for a hinge or the
-   tolerance for a slide, under which a joint that does not move would still track. None passing is axis_blocked,
-   one passing after a reduction range_blocked, and an achieved span under those floors, or one that the joint's
-   limits cut, range_short. The search stops with sim_timeout when the check's time is up.
+   reduced interval is tried only while its span keeps the floor: MIN_SHARE of the widest span (of the limits now
+   and of the entry of control/ranges.json), and MIN_HINGE for a hinge or the tolerance for a slide, under which a
+   joint that does not move would still track. None passing is axis_blocked, one passing after a reduction
+   range_blocked (the declared range collides: narrow it to what is clear), and an achieved span under the floor
+   range_short. The search stops with sim_timeout when the check's time is up.
 4. MuJoCo: model.glb is the copy with its joints marked S but W's numbers (J.transform with the identity), which
    harpor.physics.sim_check builds with a fixed base, zero gravity and no floor, so up does not matter. It runs as
    GATOR_MUJOCO (split like a shell) -m harpor.physics.sim_check through tools._run, from the repository with
    PYTHONSAFEPATH=1, so the helper's SIGTERM kills it too, within what the other steps left of timeout. Each hinge
-   and slide runs over its achieved interval within its limits (executed; without one it does not run) and each
+   and slide runs over its achieved interval, which lies within its limits (without one it does not run), and each
    soft part is pressed; their findings count as sim_check gives them, the codes of mjcf.json soft_rigid among them.
    Its error is compile_error; GATOR_MUJOCO unset, not starting, exiting without a report or without its modules is
    sim_unavailable, and running out of time sim_timeout. A GLB without a hinge, slide or soft joint is not
@@ -40,7 +41,8 @@ assess gives each requirement a record {requirement, target, kind, joint, text, 
 measured, findings, outcome}. A finding is {code, requirement, link, measured, expected, why}: a link's finding is
 the requirement's of that link, and a requirement adds link_missing, joint_missing, joint_type_mismatch (joint
 unknown takes either moving joint), parent_mismatch (the joint's parent does not move with the requirement's
-parent, report carriers), range_short (an executed span short of its test min_span by more than SPAN_TOL) and
+parent, report carriers), range_short (an achieved span under MIN_SHARE of its test min_span; a span between that
+floor and the target meets the requirement as reduced, see reduced: the target is the part list's estimate) and
 surface_assignment (its link keeps under KEPT of its own native area). These stay in the record of a
 requirement that is not required, so an agent that joins a fragment to its part is not asked for it. A part that
 the split did not find has a reserve (link_of): the name of the link that an agent may create for it with
@@ -148,19 +150,21 @@ def in_time(deadline):
         raise OutOfTime("the clearance search ran past the check's time")
 
 
-def clearance(meshes, joints, links, held, child, reference, deadline=math.inf):
+def clearance(meshes, joints, links, held, child, reference, deadline=math.inf, widest=0.0):
     """The clearance search of the hinge or slide of child from reference [l0, h0] (see the module docstring):
-    {type, limits, reference, floor, tolerance, rest, open, tests [{n, interval, blocked}], achieved, reductions}.
-    meshes: tools.link_meshes; joints: full; held: holders. Raises OutOfTime when a sweep would start after
-    deadline."""
+    {type, limits, reference, widest, floor, tolerance, rest, open, tests [{n, interval, blocked}], achieved,
+    reductions}. meshes: tools.link_meshes; joints: full; held: holders; widest: the widest span that the joint had
+    at a round's end (span), which with the reference's sets the floor. Raises OutOfTime when a sweep would start
+    after deadline."""
     j = joints[child]
     carrier = tools.carriers(joints, links, held)
     l0, h0 = reference
     in_time(deadline)
     rest = tools.penetration(meshes, {child: j}, tools.sweep_poses(joints, links, held, child, [0.0]), carrier)
     group = rest["joints"][child]["moving_links"]
-    rec = {"type": j["type"], "limits": [j["lower"], j["upper"]], "reference": [l0, h0],
-           "floor": max(MIN_SHARE * (h0 - l0), MIN_HINGE if j["type"] == "revolute" else rest["tolerance"]),
+    widest = max(h0 - l0, widest)
+    rec = {"type": j["type"], "limits": [j["lower"], j["upper"]], "reference": [l0, h0], "widest": widest,
+           "floor": max(MIN_SHARE * widest, MIN_HINGE if j["type"] == "revolute" else rest["tolerance"]),
            "tolerance": rest["tolerance"], "rest": blocked(rest, child, [0.0]),
            "open": [k for k, v in rest["links"].items() if k not in group and not v["watertight"]],
            "tests": [], "achieved": None, "reductions": None}
@@ -180,22 +184,10 @@ def clearance(meshes, joints, links, held, child, reference, deadline=math.inf):
     return rec
 
 
-def reference(pinned, lower, upper):
-    """The reference [l0, h0] of a hinge or slide with limits [lower, upper] (see the module docstring): each side
-    the wider of the limit and the end of pinned, the entry of control/ranges.json (None without one), and 0 where
-    the limit is 0."""
-    if not pinned:
-        return [lower, upper]
-    return [min(pinned[0], lower) if lower else 0.0, max(pinned[1], upper) if upper else 0.0]
-
-
-def executed(rec):
-    """The interval that MuJoCo runs of a clearance record: its achieved interval within the joint's limits, None
-    without one."""
-    if not rec["achieved"]:
-        return None
-    (lo, hi), (a, b) = rec["limits"], rec["achieved"]
-    return [max(lo, a), min(hi, b)]
+def span(pinned):
+    """The span of pinned, the entry of control/ranges.json of a joint: the widest interval that it had at a
+    round's end; 0.0 without one."""
+    return float(pinned[1] - pinned[0]) if pinned else 0.0
 
 
 def clearances(copy, doc, joints, links, ranges, deadline=math.inf):
@@ -205,8 +197,8 @@ def clearances(copy, doc, joints, links, ranges, deadline=math.inf):
     if sorted(meshes) != sorted(links):
         raise ValueError(f"the mesh nodes {sorted(links)} load as the meshes {sorted(meshes)}")
     full, held = {c: J.full(j) for c, j in joints.items()}, J.holders(doc)
-    return {c: clearance(meshes, full, links, held, c, reference(ranges.get(f"{c}|{j['type']}"), j["lower"],
-                                                                 j["upper"]), deadline)
+    return {c: clearance(meshes, full, links, held, c, [j["lower"], j["upper"]], deadline,
+                         span(ranges.get(f"{c}|{j['type']}")))
             for c, j in full.items() if j["type"] not in J.STATIC}
 
 
@@ -302,7 +294,7 @@ def run(folder, sha, original, ranges, deadline):
     elif all(j["type"] == "fixed" for j in joints.values()):
         report["sim"] = {"skipped": "no hinge, slide or soft joint"}
     else:
-        intervals = {c: executed(rec) for c, rec in report["clearance"].items() if rec["achieved"]}
+        intervals = {c: rec["achieved"] for c, rec in report["clearance"].items() if rec["achieved"]}
         report["sim"] = (_step(report, "simulation", run_sim, folder, doc, binary, joints, sha, intervals, deadline)
                          or {"skipped": "the simulation step failed"})
     return report
@@ -314,20 +306,22 @@ def failed(report):
 
 
 def cached(path, sha, ranges):
-    """The report at path when it is of sha and its references are those of ranges now, else None."""
+    """The report at path when it is of sha and its floors rest on the widest spans of ranges now, else None."""
     report = read_json(path)
     if not isinstance(report, dict) or report.get("sha256") != sha:
         return None
     clear = report["clearance"]
-    now = {k: reference(ranges.get(f"{k}|{c['type']}"), *c["limits"]) for k, c in clear.items()}
-    return report if now == {k: c["reference"] for k, c in clear.items()} else None
+    now = {k: max(c["limits"][1] - c["limits"][0], span(ranges.get(f"{k}|{c['type']}"))) for k, c in clear.items()}
+    return report if now == {k: c.get("widest") for k, c in clear.items()} else None
 
 
 def pin(control, report, ranges):
-    """Write the references of the report's hinges and slides to control/ranges.json where they differ from its
-    entries: a new entry, or one that a repair widened or turned around (reference)."""
+    """Write the references of the report's hinges and slides to control/ranges.json where they are new or wider
+    than its entries: each entry is the widest interval that the joint had at a round's end, which sets the floor
+    of a later, narrower range (clearance)."""
     new = {f"{k}|{c['type']}": c["reference"] for k, c in report["clearance"].items()}
-    if any(ranges.get(k) != v for k, v in new.items()):
+    new = {k: v for k, v in new.items() if k not in ranges or v[1] - v[0] > span(ranges[k])}
+    if new:
         write_json(Path(control) / "ranges.json", {**ranges, **new})
 
 
@@ -376,16 +370,14 @@ def clearance_finding(link, rec):
                        f"{where(last['blocked'])}")
     if rec["reductions"]:
         return finding("range_blocked", link, rec["achieved"], rec["reference"],
-                       f"the reference interval is blocked at {where(rec['tests'][0]['blocked'])}; it passed after "
-                       f"{rec['reductions']} reduction{'s' if rec['reductions'] > 1 else ''} by 2/3")
-    if executed(rec) != rec["achieved"]:
-        return finding("range_short", link, rec["limits"], rec["achieved"],
-                       f"the joint's limits do not reach the ends of the interval that is clear; the reference "
-                       f"{rec['reference']} stays across repairs, so a smaller range does not meet it")
-    span = rec["achieved"][1] - rec["achieved"][0]
-    if span < rec["floor"]:
-        return finding("range_short", link, span, rec["floor"],
-                       f"the span is under the retained span: {MIN_SHARE} of the reference and "
+                       f"the joint's range is blocked at {where(rec['tests'][0]['blocked'])}; it passed after "
+                       f"{rec['reductions']} reduction{'s' if rec['reductions'] > 1 else ''} by 2/3: narrow the "
+                       f"range to an interval that is clear")
+    reach = rec["achieved"][1] - rec["achieved"][0]
+    if reach < rec["floor"]:
+        return finding("range_short", link, reach, rec["floor"],
+                       f"the span is under the retained span: {MIN_SHARE} of the widest range that this joint has had "
+                       f"({rec.get('widest', rec['reference'][1] - rec['reference'][0]):.4g} {unit}) and "
                        + (f"{math.degrees(MIN_HINGE):g} degrees for a hinge" if unit == "rad" else
                           f"the tolerance of {rec['tolerance']:.3g} m for a slide"))
     return None
@@ -438,17 +430,30 @@ def requirement_findings(r, report):
         out.append(finding("parent_mismatch", link, j.get("parent"), parent,
                            "the part hangs on a part that does not move with the requirement's parent; give it that "
                            "parent, or a part fixed to it", rid))
-    clear, span = report["clearance"].get(link), (r.get("test") or {}).get("min_span")
-    ran = executed(clear) if clear else None
-    if ran and span and ran[1] - ran[0] + SPAN_TOL < span:
-        out.append(finding("range_short", link, ran[1] - ran[0], span,
-                           f"the achieved span is short of the requirement's by more than "
-                           f"{math.degrees(SPAN_TOL):g} degrees; a smaller range does not meet it", rid))
+    short = reduced(r, report)
+    if short and short["span"] < short["floor"]:
+        out.append(finding("range_short", link, short["span"], short["floor"],
+                           f"the achieved span is under {MIN_SHARE} of the requirement's target of "
+                           f"{short['target']:.4g} rad (and {math.degrees(MIN_HINGE):g} degrees): the part must move "
+                           f"through more of what it does", rid))
     area = report["surface"].get("links", {}).get(link)
     if area and area["native"] > 0 and area["kept"] < KEPT * area["native"]:
         out.append(finding("surface_assignment", link, area["kept"] / area["native"], KEPT,
                            "share of its own native surface that the part's link keeps", rid))
     return out
+
+
+def reduced(r, report):
+    """{span, target, share, floor} of a requirement whose achieved span is short of its test min_span by more than
+    SPAN_TOL, else None. The target is the part list's estimate of the part's full travel, so it is graded and not
+    a hard test: a span of at least floor (MIN_SHARE of the target, and MIN_HINGE) still meets the requirement,
+    which is then reduced, and one under it is range_short (requirement_findings)."""
+    clear, target = report["clearance"].get(link_of(r)), (r.get("test") or {}).get("min_span")
+    ran = clear["achieved"] if clear else None
+    if not ran or not target or ran[1] - ran[0] + SPAN_TOL >= target:
+        return None
+    return {"span": ran[1] - ran[0], "target": target, "share": (ran[1] - ran[0]) / target,
+            "floor": max(MIN_SHARE * target, MIN_HINGE)}
 
 
 def trajectory(r, report):
@@ -470,6 +475,9 @@ def measured(r, report):
         out.update(reference=c["reference"], achieved=c["achieved"], reductions=c["reductions"])
     press = next((x for x in report["sim"].get("soft") or [] if x.get("link") == link), {})
     out.update({k: press[k] for k in ("dmax_m", "visible_dmax_m", "residual_m", "cap_limited") if k in press})
+    short = reduced(r, report)
+    if short:
+        out["reduced"] = {k: short[k] for k in ("span", "target", "share")}
     return {**out, "states": len(trajectory(r, report))}
 
 

@@ -17,8 +17,11 @@ write /work/plan.md and stop: for each finding, its cause and the change that fi
 its parent, the joint type and, for a hinge or slide, the origin and axis in W (computed from
 input/parts.json) and the range. A new agent carries out the plan in the next round.
 
-The requirements cannot be changed. A smaller range does not meet a span target: the achieved span
-must reach the requirement's min_span. A joint must have the requirement's type.
+The requirements cannot be changed. A span target (min_span) is the part list's estimate of the
+part's full travel, made from one photo. Set each range to what the part can really do: it must be
+clear in the sweep and reachable in MuJoCo, so narrow a range that is blocked. A range that reaches
+less than its target still meets the requirement, and is recorded as reduced, while it keeps a
+fifth of the target and 10 degrees. Do not widen a range to reach a target through other parts. A joint must have the requirement's type.
 
 Read /work/run_budget.json at launch. The budget is {budget_s:.0f} seconds, and the recorded deadline
 is authoritative. The round ends when you stop or at the deadline.

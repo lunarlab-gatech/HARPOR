@@ -28,7 +28,8 @@ nodes' extras when the scene has them). The fake .blend of parts also lists its 
 An object that the fake add_part.py added is a thin slab on one side of the body (SIDES), a node of
 its own in every export.
 `python -m harpor.agent.fake_agent --blender ...` stands in for Blender, following the file contracts
-of blender/export_glb.py, review.py, set_joint.py, add_part.py and review_articulation.py without bpy, those of
+of blender/export_glb.py, review.py, set_joint.py, add_part.py, move_faces.py and review_articulation.py without
+bpy, those of
 blender/split_parts.py for harpor.parts.stage split, and the frames_dir contract of blender/turntable.py
 for harpor.webapp.turntable render and, with "soft", harpor.webapp.softvideo render.
 `python -m harpor.agent.fake_agent --sim` stands in for the python of envs/mujoco: harpor.agent.validate
@@ -159,10 +160,6 @@ def add_part(blend, out, name, source, spec):
     indices 0 to 11 (checked as the real script checks them), and planes select by the box's 8 corners: none on
     the planes' side is an empty selection, all 8 the whole source. The new object joins the scene's objects and
     is a slab in the exports (slab). OUT.json is created first, and an error leaves the .blend as it was."""
-    import numpy as np
-
-    from harpor.agent.blender import part_select as S
-
     with open(out, "x") as f:
         scene, spec = json.loads(Path(blend).read_text()), json.loads(spec)
         objects = scene.setdefault("objects", [])
@@ -174,14 +171,7 @@ def add_part(blend, out, name, source, spec):
                 raise ValueError(f"an object named {name!r} exists already")
             if len(added(objects)) >= len(SIDES):
                 raise ValueError("the fake Blender has no side left for another part")
-            if "faces" in spec:
-                n = len(S.face_indices(np.load(spec["faces"], allow_pickle=False), 12))
-            else:
-                h = scene["size"] / 2
-                corners = np.array([[x, y, z] for x in (-h, h) for y in (-h / 2, h) for z in (-h, h)])
-                n = int(S.inside(corners, S.unit_planes(spec["planes"])).sum()) * 12 // 8
-                if not n:
-                    raise ValueError(f"no face of {source} has a vertex on the normal's side of every plane")
+            n = _selected(scene, spec, source)
             if n == 12:
                 raise ValueError(f"the selection holds every face of {source}; a part is a piece of it")
             lo, hi = slab(len(added(objects)), scene["size"])
@@ -190,6 +180,53 @@ def add_part(blend, out, name, source, spec):
             counts = {"cap_faces": 2, "holes": 1, "fill": ["edgeloop_fill"], "open_cut_edges": 0}
             rec.update(ok=True, part={"faces": n, **counts}, rest={"faces": 12 - n, **counts}, pieces=1,
                        area=n / 12, share_of_source=n / 12, share_of_object=n / 24, box={"min": lo, "max": hi})
+        except ValueError as e:
+            rec["error"] = str(e)
+        rec.update(links=objects, seconds=0.0)
+        json.dump(rec, f)
+
+
+def _selected(scene, spec, source):
+    """How many of the 12 triangles of a fake part object a selection takes, as add_part and move_faces count
+    them: a faces file holds indices 0 to 11 (checked as the real scripts check them), and planes select by the
+    box's 8 corners. ValueError for a selection of no face."""
+    import numpy as np
+
+    from harpor.agent.blender import part_select as S
+
+    if "faces" in spec:
+        return len(S.face_indices(np.load(spec["faces"], allow_pickle=False), 12))
+    h = scene["size"] / 2
+    corners = np.array([[x, y, z] for x in (-h, h) for y in (-h / 2, h) for z in (-h, h)])
+    n = int(S.inside(corners, S.unit_planes(spec["planes"])).sum()) * 12 // 8
+    if not n:
+        raise ValueError(f"no face of {source} has a vertex on the normal's side of every plane")
+    return n
+
+
+def move_faces(blend, out, source, target, spec):
+    """blender/move_faces.py on the fake .blend of parts: both objects must be in the scene, and the selection is
+    counted as add_part's (_selected). The move is recorded in the scene's "moved" list, which changes the .blend
+    and so the next export's name; the boxes of the exports stay as they are. OUT.json is created first, and an
+    error leaves the .blend as it was."""
+    with open(out, "x") as f:
+        scene, spec = json.loads(Path(blend).read_text()), json.loads(spec)
+        objects = scene.setdefault("objects", [])
+        rec = {"ok": False, "error": None, "source": source, "target": target, "warnings": []}
+        try:
+            if source == target:
+                raise ValueError(f"{source} cannot give faces to itself")
+            for name, flag in ((source, "--from"), (target, "--to")):
+                if name not in objects:
+                    raise ValueError(f"no mesh object ({flag}) is named {name!r}")
+            n = _selected(scene, spec, source)
+            if n == 12:
+                raise ValueError(f"the selection holds all of {source}'s surface; that would remove the link")
+            scene.setdefault("moved", []).append({"from": source, "to": target, "faces": n})
+            Path(blend).write_text(json.dumps(scene))
+            counts = {"cap_faces": 2, "holes": 1, "fill": ["edgeloop_fill"], "open_cut_edges": 0, "pieces": 1}
+            rec.update(ok=True, moved=n, area=n / 12, share_of_source=n / 12,
+                       after={source: {"faces": 12 - n, **counts}, target: {"faces": 12 + n, **counts}})
         except ValueError as e:
             rec["error"] = str(e)
         rec.update(links=objects, seconds=0.0)
@@ -274,6 +311,8 @@ def fake_blender(argv):
         set_joint(blend, *rest[:3])
     elif script == "add_part.py":
         add_part(blend, *rest[:4])
+    elif script == "move_faces.py":
+        move_faces(blend, *rest[:4])
     elif script == "turntable.py":
         turntable_frames(json.loads(Path(rest[0]).read_text()))
     elif script == "review_articulation.py":

@@ -83,6 +83,15 @@ replace an earlier one; only a hand-off whose round passed the host's check is d
   area, its connected pieces and its box in W. It refuses an empty selection and one that holds the
   whole source. The scene from before the cut is kept as `add_part/NNN_before.blend`; copy it over
   `candidate.blend` to take the cut back.
+- `move_faces --from HOLDER --to OWNER --faces FILE` and
+  `move_faces --from HOLDER --to OWNER --plane PX PY PZ NX NY NZ [--plane ...] --seed X Y Z`
+  (articulation only): move faces that the split put in the wrong part object to the object they
+  belong to, in one Blender run that saves the scene. Both are part objects of `candidate.blend`, and
+  either may be the body. The selection is `add_part`'s: a `.npy` file of polygon indices of HOLDER, or
+  planes with a seed, in W. The two objects are cut and closed again as one surface, and both keep
+  their names and joints. Prints the faces moved and, per object, its faces and connected pieces. It
+  refuses an empty selection and one that holds all of HOLDER's surface. The scene from before is
+  kept as `move_faces/NNN_before.blend`; copy it over `candidate.blend` to take the move back.
 - `review_articulation [--states K] [--clay]` (articulation only): export the scene, then move every
   joint from lower to upper in K steps (default 3, from 2 to 5), all joints at once. Renders each
   state under every input view, cropped to the object, and 2 orbit views, and checks each moving

@@ -1080,6 +1080,13 @@ def requirement_counts(root, report):
     return {k: outcomes.count(k) for k in OUTCOMES}
 
 
+def reduced_requirements(report):
+    """[{requirement, link, span, target, share}] of the requirements that a round's report met with less than
+    their span target (validate.reduced): the part list's range is graded, and these are shown with the result."""
+    return [{"requirement": r["requirement"], "link": r["target"][0], **r["measured"]["reduced"]}
+            for r in (report or {}).get("records", []) if r["outcome"] == "pass" and r["measured"].get("reduced")]
+
+
 def run_session(root, cmd, env=None, *, blender, sock_dir, **watchdog):
     """Run one prepared session and write root/result.json.
 
@@ -1128,7 +1135,7 @@ def run_session(root, cmd, env=None, *, blender, sock_dir, **watchdog):
         "timings": total_timings(runs),
         "counts": {k: sum(e.get("event") == ev and e.get("ok", True) for e in events)
                    for k, ev in (("exports", "export_done"), ("reviews", "review"), ("checkpoints", "checkpoint"),
-                                 ("joints", "joint"), ("parts_added", "part"),
+                                 ("joints", "joint"), ("parts_added", "part"), ("faces_moved", "faces_moved"),
                                  ("articulation_reviews", "review_articulation"))},
         "rejected": rejected,
         "candidate_built": candidate,
@@ -1140,7 +1147,7 @@ def run_session(root, cmd, env=None, *, blender, sock_dir, **watchdog):
         result["simulations"] = sum(e.get("event") == "simulate_done" and bool(e.get("ok")) for e in events)
     if rounds is not None:
         result.update(rounds=rounds, candidate=candidate_summary(chosen, selected),
-                      requirements=requirement_counts(root, report),
+                      requirements=requirement_counts(root, report), reduced=reduced_requirements(report),
                       surface=(report or {}).get("surface") or surface.compare(glb, root / "original.glb"))
     if mode == "refinement":
         result["surface"] = surface.compare(glb, root / "original.glb")

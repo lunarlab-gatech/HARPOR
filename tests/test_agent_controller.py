@@ -796,7 +796,7 @@ def test_tool_server_rejects_bad_requests(tmp_path):
         try:
             assert gator_tool.call(["rm", "-rf", "/"], path) == ("unknown command 'rm'; use one of export_glb, "
                                                                  "review, checkpoint, finish, set_joint, add_part, "
-                                                                 "review_articulation, simulate\n", 2)
+                                                                 "move_faces, review_articulation, simulate\n", 2)
             assert gator_tool.call([], path)[1] == 2
             # add_part with its 6 planes and a seed is the longest command line: 51 arguments
             longest = ["add_part", "--name", "x", *["--plane", *"000100"] * 6, "--seed", "0", "0", "0"]
@@ -1326,7 +1326,7 @@ def test_articulation_session(runs):
     assert r["glb"] == "work/exports/002.glb" and edge(root / r["glb"]) == PARTS_SIZE and C.check_glb(root / r["glb"]) is None
     assert J.load(root / r["glb"]) == ({"lid": lid_joint(HINGE)}, ["body", "lid"])
     assert r["counts"] == {"exports": 2, "reviews": 0, "checkpoints": 0, "joints": 1, "parts_added": 0,
-                           "articulation_reviews": 1}
+                           "faces_moved": 0, "articulation_reviews": 1}
     assert r["joints_delivered"] == 1
     assert (root / "work" / "prompt_seen.txt").read_text(encoding="utf-8") == PROMPT
     blocks = agent_log(root).split("$ ")[1:]
@@ -1609,9 +1609,9 @@ def parts_session(tmp_path, monkeypatch, requirements, mode="articulation"):
     return work, control
 
 
-def refused(args):
+def refused(args, cmd="add_part"):
     with pytest.raises(SystemExit) as e:
-        T.main(["add_part", *args])
+        T.main([cmd, *args])
     return e.value.code.split("\n")[0]
 
 
@@ -1699,6 +1699,60 @@ def test_add_part_cuts_a_reserved_part_and_logs_the_selection(tmp_path, monkeypa
     T.main(["export_glb"])
     newest = sorted((work / "exports").glob("*.glb"))[-1]
     assert newest != glb and J.load(newest) == ({"flap": lid_joint(FLAP_HINGE)}, ["body", "lid", "flap", "flap_2"])
+
+
+def test_move_faces_moves_surface_between_parts_and_logs_it(tmp_path, monkeypatch, capsys):
+    """move_faces takes any two links of the scene, the body included, and add_part's selections. A move that
+    Blender refuses leaves the scene as it was and is logged with its reason. A good one keeps the scene from
+    before as a backup and logs which surface changed parts. The links and their joints stay."""
+    work, control = parts_session(tmp_path, monkeypatch, [LID])
+    before = (work / "candidate.blend").read_bytes()
+    np.save(work / "sel.npy", np.array([0, 1, 2]))
+    for args, why in [(["--from", "body", "--to", "body", *HALF], "body cannot give faces to itself"),
+                      (["--from", "body", "--to", "lid"], "give the faces of the part"),
+                      (["--from", "body", "--to", "lid", "--faces", "none.npy"], "none.npy is missing")]:
+        assert refused(args, "move_faces").startswith(why), args
+    assert T.read_events(control) == [] and not (work / "move_faces").exists()
+    for args, why in [(["--from", "door", "--to", "lid", *HALF], "refused: no mesh object (--from) is named 'door'"),
+                      (["--from", "body", "--to", "door", *HALF], "refused: no mesh object (--to) is named 'door'"),
+                      (["--from", "body", "--to", "lid", "--plane", "5", "0", "0", "1", "0", "0", "--seed", "0", "0", "0"],
+                       "refused: no face of body has a vertex on the normal's side of every plane"),
+                      (["--from", "body", "--to", "lid", "--plane", "-5", "0", "0", "1", "0", "0", "--seed", "0", "0", "0"],
+                       "refused: the selection holds all of body's surface; that would remove the link")]:
+        assert refused(args, "move_faces") == why
+    assert (work / "candidate.blend").read_bytes() == before
+    assert [(e["event"], e["ok"], e["source"], e["target"]) for e in T.read_events(control)] == [
+        ("faces_moved", False, "door", "lid"), ("faces_moved", False, "body", "door"),
+        ("faces_moved", False, "body", "lid"), ("faces_moved", False, "body", "lid")]
+    capsys.readouterr()
+
+    T.main(["set_joint", "--child", "lid", "--parent", "body", "--type", "revolute", "--origin", "0", "-0.25", "0.5",
+            "--axis", "-1", "0", "0", "--lower", "0", "--upper", "1.5"])
+    jointed = (work / "candidate.blend").read_bytes()
+    capsys.readouterr()
+    T.main(["move_faces", "--from", "body", "--to", "lid", *HALF])
+    out = capsys.readouterr().out
+    assert out.startswith("6 faces moved from body (50.0% of its surface) to lid; candidate.blend is saved\n")
+    assert "body: 6 faces and 2 cap faces (0 cut edges left open), connected pieces 1\n" in out
+    assert "lid: 18 faces and 2 cap faces (0 cut edges left open), connected pieces 1\n" in out
+    assert "see both with review --tint body --tint lid. The joints are as they were." in out
+    assert "To take the move back: cp /work/move_faces/005_before.blend /work/candidate.blend" in out
+    assert (work / "move_faces" / "005_before.blend").read_bytes() == jointed
+    scene = json.loads((work / "candidate.blend").read_text())
+    assert scene["objects"] == ["body", "lid"] and scene["joints"] == {"lid": lid_joint(HINGE)}
+    assert scene["moved"] == [{"from": "body", "to": "lid", "faces": 6}]
+    moved = T.read_events(control)[-1]
+    assert {k: moved[k] for k in ("event", "source", "target", "ok", "faces", "share_of_source")} == {
+        "event": "faces_moved", "source": "body", "target": "lid", "ok": True, "faces": 6, "share_of_source": 0.5}
+    assert moved["selection"] == {"planes": [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]], "seed": [0.5, 0.0, 0.0]}
+    assert moved["blend_sha256"] == T.sha256(work / "candidate.blend")
+    T.main(["move_faces", "--from", "lid", "--to", "body", "--faces", "sel.npy"])
+    assert "3 faces moved from lid (25.0% of its surface) to body" in capsys.readouterr().out
+    assert T.read_events(control)[-1]["selection"] == {"faces": "sel.npy", "sha256": T.sha256(work / "sel.npy")}
+    T.main(["export_glb"])
+    assert "nodes 2: body, lid; joints 1" in capsys.readouterr().out
+    parts_session(tmp_path / "r", monkeypatch, [], mode="refinement")
+    assert refused(["--from", "body", "--to", "lid", *HALF], "move_faces") == "move_faces works only in the articulation mode"
 
 
 def test_review_tints_links_but_not_in_clay(tmp_path, monkeypatch, capsys):
@@ -2470,11 +2524,19 @@ ROUND_SESSIONS = {
     "rounds_unchanged": [[REVIEW, finish("unchanged")]] * 3,
     # The part list has a flap that the split did not find (FLAP). Round 1 hinges the lid and hands off, so the
     # host finds part_missing; the repair cuts the flap out of the body, hinges it and hands off.
+    # Round 1 hinges the lid over [0, 1.5] and asks for a review; the repair narrows it to [0, 1.0], which a repair
+    # could not do before: the range is clear, and 1.0 of the 1.5 rad target is met as reduced.
+    "rounds_narrow": [[edit(PARTS_SIZE, "parts"), *hinged("needs_review")],
+                      [READ_PROMPT, set_joint("lid", "body", "revolute", {**HINGE, "upper": 1.0}), REVIEW_ART,
+                       articulated("articulated")]],
+    # The part list expects 3.0 rad of a lid that opens 1.5: the build passes at once, as reduced.
+    "rounds_far_target": [[edit(PARTS_SIZE, "parts"), *hinged()]],
     "rounds_add_part": [[edit(PARTS_SIZE, "parts"), *hinged()],
                         [READ_PROMPT, tool("add_part", "--name", "flap", *HALF),
                          set_joint("flap", "body", "revolute", FLAP_HINGE), REVIEW_ART, articulated("articulated")]],
 }
-ROUND_REQUIREMENTS = {"rounds_add_part": [LID, FLAP]}  # the others have LID alone
+ROUND_REQUIREMENTS = {"rounds_add_part": [LID, FLAP],  # the others have LID alone, with its span target of 1.5 rad
+                      "rounds_far_target": [{**LID, "test": {"min_span": 3.0}}]}
 
 
 def run_in_rounds(root, rounds, budget_s=LONG, requirements=(LID,)):
@@ -2548,7 +2610,7 @@ def test_a_session_with_a_found_requirement_runs_in_rounds(round_runs):
     assert r["simulations"] == 0 and r["surface"]["shares"]["present"] == pytest.approx(1.0)
     assert r["timings"]["budget_s"] == LONG and r["joints_delivered"] == 1
     assert r["counts"] == {"exports": 1, "reviews": 0, "checkpoints": 0, "joints": 1, "parts_added": 0,
-                           "articulation_reviews": 1}
+                           "faces_moved": 0, "articulation_reviews": 1}
     events = T.read_events(control)
     assert {k: events[0][k] for k in ("event", "round", "kind")} == {"event": "round_start", "round": 1, "kind": "build"}
     budget = json.loads((work / "run_budget.json").read_text())
@@ -2625,6 +2687,31 @@ def test_a_missing_part_gets_a_repair_round_that_creates_it(round_runs):
     evidence = json.loads((work / "evidence" / "round_02.json").read_text())
     assert [(x["requirement"], x["target"], x["outcome"]) for x in evidence["records"]] == [
         ("r1", ["lid"], "pass"), ("r2", ["flap"], "pass")]
+
+
+def test_a_repair_can_narrow_a_range_and_a_short_one_passes_as_reduced(round_runs):
+    """The span target is graded and a range can be narrowed. The repair narrows the lid from [0, 1.5] to [0, 1.0]:
+    the host sweeps and runs the joint's own limits, the round passes, and the result lists the requirement as
+    reduced with the share of its target that it reaches. control/ranges.json keeps the widest range, for the
+    floor. A target twice what the lid can do is met as reduced in the build round, with no repair."""
+    root, r = round_runs["rounds_narrow"]
+    assert [(x["round"], x["kind"], x["outcome"], x["scope"]) for x in r["rounds"]] == [
+        (1, "build", "fail", "local"), (2, "repair", "pass", "none")]
+    assert codes(r["rounds"][0]) == ["not_finished"]
+    assert (r["verdict"], J.load(root / r["glb"])[0]) == ("articulated", {"lid": lid_joint({**HINGE, "upper": 1.0})})
+    assert r["requirements"] == {"pass": 1, "fail": 0, "inconclusive": 0, "unassessed": 0}
+    assert r["reduced"] == [{"requirement": "r1", "link": "lid", "span": 1.0, "target": 1.5,
+                             "share": pytest.approx(2 / 3)}]
+    assert json.loads((root / "control" / "ranges.json").read_text()) == {"lid|revolute": [0.0, 1.5]}
+    evidence = json.loads((root / "work" / "evidence" / "round_02.json").read_text())
+    lid = evidence["clearance"]["lid"]
+    assert (lid["reference"], lid["achieved"], lid["widest"], lid["reductions"]) == ([0.0, 1.0], [0.0, 1.0], 1.5, 0)
+    prompt = (root / "work" / "prompt_seen.txt").read_text(encoding="utf-8")
+    assert "is recorded as reduced" in prompt and "does not meet a span target" not in prompt
+    root, r = round_runs["rounds_far_target"]
+    assert [(x["kind"], x["outcome"]) for x in r["rounds"]] == [("build", "pass")] and r["verdict"] == "articulated"
+    assert r["reduced"] == [{"requirement": "r1", "link": "lid", "span": 1.5, "target": 3.0, "share": 0.5}]
+    assert round_runs["rounds_pass"][1]["reduced"] == []
 
 
 def test_a_structural_failure_gets_one_planning_round(round_runs):
@@ -3084,7 +3171,7 @@ def test_round_prompts_carry_the_whole_task():
     replan = PR.round_prompt("replan", 300.0, feedback, None, "evidence/round_02.json")
     assert replan.startswith("# Planning round") and base.splitlines()[0] not in replan
     rules = ("candidate.blend is your work from the last round", "holds the details", "The requirements cannot be "
-             "changed", "A smaller range does not meet a span target")
+             "changed", "is recorded as reduced", "Do not widen a range to reach a target through other parts")
     for text, facts in ((repair, ("evidence/round_01.json", "/work/exports/002.glb, from round 1: 0 of 2", "simulate")),
                         (replan, ("evidence/round_02.json", "No round has handed off a valid candidate yet",
                                   "every helper command is refused", "The budget is 300 seconds", "/work/plan.md"))):
@@ -3112,6 +3199,7 @@ def test_a_planning_round_refuses_every_helper(tmp_path, monkeypatch):
     receipt = "a001-0123456789ab"
     args = {"checkpoint": ["--receipt", receipt, "--defect", "x"], "set_joint": ["--child", "lid", "--remove"],
             "add_part": ["--name", "flap", "--faces", "faces.npy"],
+            "move_faces": ["--from", "body", "--to", "lid", "--faces", "faces.npy"],
             "finish": ["--receipt", receipt, "--verdict", "articulated", "--reason", "x"]}
     before = T.read_events(control)
     for cmd in COMMANDS:

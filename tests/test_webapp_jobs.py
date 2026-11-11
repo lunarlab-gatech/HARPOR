@@ -2376,7 +2376,8 @@ def test_fake_articulated_build_end_to_end(make_runner, tmp_path, mode, agent):
     else:
         r = json.loads((J / "agent" / "result.json").read_text())
         assert (r["mode"], r["verdict"], r["joints_delivered"]) == ("articulation", "articulated", 1)
-        assert set(r["counts"]) == {"exports", "reviews", "checkpoints", "joints", "parts_added", "articulation_reviews"}
+        assert set(r["counts"]) == {"exports", "reviews", "checkpoints", "joints", "parts_added", "faces_moved",
+                               "articulation_reviews"}
         # The lid's requirement is found, so the result has the keys of a session in rounds, and the evidence.
         assert [x["kind"] for x in r["rounds"]] == ["build"] and r["requirements"]["pass"] == 1
         assert [q["part"] for q in parts["requirements"] if q["status"] == "found"] == [lid]

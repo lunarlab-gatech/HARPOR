@@ -653,7 +653,7 @@ def agent(J, key_file, which="astra"):
         result.update(mode="articulation", verdict="articulated" if n else "unchanged",
                       reason=said if n else "fake agent: the split has no part that moves", glb=rel,
                       sha256=tools.sha256(root / rel),
-                      counts={"exports": 1, "reviews": 0, "checkpoints": 0, "joints": n, "parts_added": 0,
+                      counts={"exports": 1, "reviews": 0, "checkpoints": 0, "joints": n, "parts_added": 0, "faces_moved": 0,
                               "articulation_reviews": int(n > 0)},
                       joints_delivered=n, simulations=0)
         if controller.has_rounds(root, "articulation"):

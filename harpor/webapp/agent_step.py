@@ -119,6 +119,9 @@ def print_rounds(r):
         print(f"  round {x['round']} {x['kind']}: {got}" + (f"; findings: {', '.join(found)}" if found else ""))
     n = r.get("requirements") or {}
     print("  requirements: " + ", ".join(f"{n.get(k, 0)} {k}" for k in ("pass", "fail", "inconclusive", "unassessed")))
+    for x in r.get("reduced") or []:  # met with less than the part list's range (validate.reduced)
+        print(f"  {x['requirement']} {printable(x['link'])}: reduced, {x['span']:.3g} of the {x['target']:.3g} rad that "
+              f"the part list estimated ({x['share']:.0%})")
     c = r.get("candidate")
     print(f"  delivered candidate v{c['version']:02d} of round {c['round']}: {c['why']}" if c else
           "  delivered no stored candidate")

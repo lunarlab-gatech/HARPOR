@@ -20,7 +20,9 @@ Runs in envs/sam3d from the repo root; J is the job folder:
   finish   run/parts.json, the stage's done marker, written last. parts.glb must pass controller.check_glb,
            and its mesh nodes must be the found parts, flat, without transforms. Per part: name, role,
            prompt, parent, joint_guess, axis_hint, faces, area_share, confidence, status, aabb and obb
-           in W, visibility per view, views, cap_faces; parts that were not found or were dropped come
+           in W, visibility per view, views, cap_faces, and pieces and largest_piece (its connected pieces
+           and the share of its area in the largest: a part of two sizeable pieces often holds two things,
+           which the agent can then move with move_faces); parts that were not found or were dropped come
            last, with no name (status not_found, dropped_small or unconfirmed, and why, from vote.json).
            Per pair of adjacent parts the seam (geometry.seams): edges, length, center, up to 4 fitted
            lines (hinge-axis candidates) and the normals of both sides. The requirements, see below.
@@ -276,7 +278,8 @@ def finish(job):
     if len(faces) != len(label):
         raise SystemExit(f"faces.npz has {len(label)} faces, posed.glb {len(faces)}; run vote again")
 
-    seams = geometry.seams(geometry.topology(x_w, faces), label, names)
+    topo = geometry.topology(x_w, faces)
+    seams, split = geometry.seams(topo, label, names), geometry.pieces(topo, label, len(names))
     clusters = {c["name"]: c for c in vote_rec["clusters"] if c["status"] == "found"}
     by_prompt = {p["name"]: p for p in proposal["parts"]}
     caps = {p["name"]: p for p in split_rec.get("parts", [])}
@@ -293,7 +296,8 @@ def finish(job):
                       "aabb": geometry.aabb(pts) if len(pts) else None, "obb": geometry.obb(pts) if len(pts) else None,
                       "visibility": c["visibility"], "views": c.get("views", []),
                       "cap_faces": caps.get(name, {}).get("cap_faces"),
-                      "open_seam_edges": caps.get(name, {}).get("open_seam_edges")})
+                      "open_seam_edges": caps.get(name, {}).get("open_seam_edges"),
+                      "pieces": split[k][0], "largest_piece": round(split[k][1], 4)})
     for c in vote_rec["clusters"]:
         if c["status"] != "found":
             p = by_prompt.get(c["prompt"], {})
@@ -310,7 +314,8 @@ def finish(job):
     print(f"parts.json: {len(names)} parts ({', '.join(names)}), {len(seams)} seams")
     for p in parts:
         if p["status"] == "found" and p["parent"]:
-            print(f"  {p['name']} > {p['parent']} : {p['joint_guess']}, confidence {p['confidence']:.2f}")
+            print(f"  {p['name']} > {p['parent']} : {p['joint_guess']}, confidence {p['confidence']:.2f}"
+                  + (f", in {p['pieces']} pieces (the largest holds {p['largest_piece']:.0%})" if p["pieces"] > 1 else ""))
     for r in reqs:
         print(f"  {r['id']} {r['part'] or r['prompt']!r}: {r['kind']} {r['joint']}, {r['status']}"
               + ("" if r["required"] else ", not required")

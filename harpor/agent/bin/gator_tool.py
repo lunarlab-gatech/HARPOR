@@ -4,9 +4,11 @@ The helpers run on the host in the controller's tool server. This script sends i
 the Unix socket in GATOR_SOCKET, prints the reply and exits with the helper's exit code. It uses only
 the standard library, because it runs on the container's system python3.
 
-    gator_tool.py export_glb|review|checkpoint|finish|set_joint|add_part|review_articulation|simulate [args...]
+    gator_tool.py export_glb|review|checkpoint|finish|set_joint|add_part|move_faces|review_articulation|simulate
+                  [args...]
 
-set_joint, add_part, review_articulation and simulate work only in the articulation mode (build_plan.md note 11).
+set_joint, add_part, move_faces, review_articulation and simulate work only in the articulation mode
+(build_plan.md note 11).
 """
 
 import json

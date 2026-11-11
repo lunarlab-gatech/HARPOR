@@ -92,7 +92,7 @@ OFF_CLOCK = {"export": EXPORT_TIMEOUT_S, "simulate": SIMULATE_TIMEOUT_S}  # {kin
 MAX_EXCLUDED_S = 600.0  # cap on the export and simulate time that moves the deadline
 REVIEW_TIMEOUT_S = 300.0  # render only
 SET_JOINT_TIMEOUT_S = 120.0
-ADD_PART_TIMEOUT_S = 180.0
+ADD_PART_TIMEOUT_S = 180.0  # one Blender run of add_part or move_faces
 MAX_PLANES = 6  # of one add_part: a box
 MAX_FACES_BYTES = 64 << 20  # an add_part --faces file
 MAX_TINTS = 4  # links that one review colors
@@ -710,13 +710,54 @@ def reserves(control):
             if r.get("status") == "not_found" and isinstance(r.get("reserve"), str)}
 
 
+def _cut_run(work, control, blender, command, event, args, spec, **fields):
+    """Run blender/<command>.py once on candidate.blend for add_part or move_faces, with args and the selection
+    spec after its OUT.json. The .blend from before is kept as <command>/NNN_before.blend, so the agent can take
+    the change back by copying it over candidate.blend, and Blender saves the .blend only when it succeeded. A
+    run that fails or that the script refuses logs event with ok False, fields and why, and exits. Returns (the
+    script's record, the backup's path in work, the sha256 of the saved .blend); the caller logs the success."""
+    blend = in_work(work, "candidate.blend")
+    try:
+        before = read_file(blend)
+    except OSError:
+        sys.exit("candidate.blend is missing or not a regular file; save the scene first")
+    d = real_dir(work, command)
+    label = f"{_count(control, event) + 1:03d}"
+    out, log_path, backup = d / f"{label}.json", d / f"{label}.log", d / f"{label}_before.blend"
+    rec = None
+    try:
+        if os.path.lexists(out):  # the script would stop at it, after Blender started
+            sys.exit(f"{out.relative_to(work)} already exists; remove it and run {command} again")
+        try:
+            with folder(d) as fd:
+                with open_new(backup.name, "wb", dir_fd=fd) as f:
+                    f.write(before)
+                with open_new(log_path.name, dir_fd=fd) as log:
+                    ok = run_ok(blender_argv(blender, f"{command}.py", out, *args, json.dumps(spec), blend=blend),
+                                log, ADD_PART_TIMEOUT_S)
+            if ok:
+                rec = json.loads(read_file(out, 1 << 22))
+        except FileExistsError:
+            sys.exit(f"{backup.relative_to(work)} or {log_path.relative_to(work)} already exists; remove them and "
+                     f"run {command} again")
+        except (OSError, ValueError):
+            pass
+        if not isinstance(rec, dict) or not isinstance(rec.get("links"), list):
+            sys.exit(f"{command} failed; see {log_path.relative_to(work)}")
+        if not rec.get("ok"):
+            sys.exit(f"refused: {rec.get('error') or command + ' failed'}")
+    except SystemExit as e:
+        log_event(control, event, **fields, ok=False, why=str(e.code))
+        raise
+    return rec, str(backup.relative_to(work)), sha256(blend)
+
+
 def add_part(work, control, blender, name, source=None, faces=None, planes=None, seed=None):
     """Cut the new part name out of the part object source in candidate.blend (blender/add_part.py). name must be
     a reserve of control/parts.json, so a part that the split did not find, and source defaults to that
-    requirement's parent. The .blend from before the cut is kept as add_part/NNN_before.blend, so the agent can
-    take a cut back by copying it over candidate.blend. Blender saves the .blend only when the cut succeeded.
-    Logs a part event with the selection, which is the record of which surface became the part, and returns the
-    script's record with requirement, backup and blend_sha256."""
+    requirement's parent. The run is _cut_run's: the .blend from before the cut is kept as
+    add_part/NNN_before.blend. Logs a part event with the selection, which is the record of which surface became
+    the part, and returns the script's record with requirement, backup and blend_sha256."""
     work = Path(work).resolve()
     _articulation_only(control, "add_part")
     free = reserves(control)
@@ -730,45 +771,32 @@ def add_part(work, control, blender, name, source=None, faces=None, planes=None,
     if source == name:
         sys.exit(f"{name} cannot be cut from itself")
     spec, selection = part_selection(work, faces, planes, seed)
-    blend = in_work(work, "candidate.blend")
-    try:
-        before = read_file(blend)
-    except OSError:
-        sys.exit("candidate.blend is missing or not a regular file; save the scene first")
-    d = real_dir(work, "add_part")
-    label = f"{_count(control, 'part') + 1:03d}"
-    out, log_path, backup = d / f"{label}.json", d / f"{label}.log", d / f"{label}_before.blend"
-    rec = None
-    try:
-        if os.path.lexists(out):  # add_part.py would stop at it, after Blender started
-            sys.exit(f"{out.relative_to(work)} already exists; remove it and run add_part again")
-        try:
-            with folder(d) as fd:
-                with open_new(backup.name, "wb", dir_fd=fd) as f:
-                    f.write(before)
-                with open_new(log_path.name, dir_fd=fd) as log:
-                    ok = run_ok(blender_argv(blender, "add_part.py", out, name, source, json.dumps(spec), blend=blend),
-                                log, ADD_PART_TIMEOUT_S)
-            if ok:
-                rec = json.loads(read_file(out, 1 << 22))
-        except FileExistsError:
-            sys.exit(f"{backup.relative_to(work)} or {log_path.relative_to(work)} already exists; remove them and "
-                     "run add_part again")
-        except (OSError, ValueError):
-            pass
-        if not isinstance(rec, dict) or not isinstance(rec.get("links"), list):
-            sys.exit(f"add_part failed; see {log_path.relative_to(work)}")
-        if not rec.get("ok"):
-            sys.exit(f"refused: {rec.get('error') or 'add_part failed'}")
-    except SystemExit as e:
-        log_event(control, "part", name=name, source=source, requirement=req["id"], ok=False, selection=selection,
-                  why=str(e.code))
-        raise
-    sha = sha256(blend)
-    log_event(control, "part", name=name, source=source, requirement=req["id"], ok=True, selection=selection,
-              faces=rec["part"]["faces"], pieces=rec["pieces"], share_of_object=rec["share_of_object"],
+    fields = {"name": name, "source": source, "requirement": req["id"], "selection": selection}
+    rec, backup, sha = _cut_run(work, control, blender, "add_part", "part", [name, source], spec, **fields)
+    log_event(control, "part", **fields, ok=True, faces=rec["part"]["faces"], pieces=rec["pieces"],
+              share_of_object=rec["share_of_object"], blend_sha256=sha)
+    return {**rec, "requirement": req["id"], "backup": backup, "blend_sha256": sha}
+
+
+def move_faces(work, control, blender, source, target, faces=None, planes=None, seed=None):
+    """Move the selected faces of the part object source to the part object target in candidate.blend
+    (blender/move_faces.py): for a part that the split got wrong. Any two links of the scene, the base included; the
+    selection is add_part's (part_selection). The run is _cut_run's: the .blend from before is kept as
+    move_faces/NNN_before.blend. Logs a faces_moved event with the selection, which is the record of which surface
+    changed parts, and returns the script's record with backup and blend_sha256."""
+    work = Path(work).resolve()
+    _articulation_only(control, "move_faces")
+    for flag, link in (("--from", source), ("--to", target)):
+        if not isinstance(link, str) or not link:
+            sys.exit(f"give {flag}, a part object")
+    if source == target:
+        sys.exit(f"{source} cannot give faces to itself")
+    spec, selection = part_selection(work, faces, planes, seed)
+    fields = {"source": source, "target": target, "selection": selection}
+    rec, backup, sha = _cut_run(work, control, blender, "move_faces", "faces_moved", [source, target], spec, **fields)
+    log_event(control, "faces_moved", **fields, ok=True, faces=rec["moved"], share_of_source=rec["share_of_source"],
               blend_sha256=sha)
-    return {**rec, "requirement": req["id"], "backup": str(backup.relative_to(work)), "blend_sha256": sha}
+    return {**rec, "backup": backup, "blend_sha256": sha}
 
 
 def carriers(joints, links, held):
@@ -1157,6 +1185,8 @@ def _requirement_row(r):
     m = r["measured"]
     if m.get("achieved"):
         row += ", achieved [{}, {}] of [{}, {}]".format(*map(_fmt, [*m["achieved"], *m["reference"]]))
+    if m.get("reduced"):
+        row += ", reduced: {:.0%} of its span target of {} rad".format(m["reduced"]["share"], _fmt(m["reduced"]["target"]))
     codes = list(dict.fromkeys(f["code"] for f in r["findings"]))
     return row + (f"; {', '.join(codes)}" if codes else "")
 
@@ -1254,6 +1284,18 @@ def _command(a, work, control, blender):
             print(f"warning: {w}")
         print(f"see it with review --tint {rec['name']}; it has no joint yet (set_joint --child {rec['name']}). To "
               f"take the cut back: cp /work/{rec['backup']} /work/candidate.blend")
+    elif a.cmd == "move_faces":
+        rec = move_faces(work, control, blender, a.source, a.target, a.faces, a.plane, a.seed)
+        share = f" ({100 * rec['share_of_source']:.1f}% of its surface)" if rec.get("share_of_source") is not None else ""
+        print(f"{rec['moved']} faces moved from {rec['source']}{share} to {rec['target']}; candidate.blend is saved")
+        for link in (rec["source"], rec["target"]):
+            c = rec["after"][link]
+            print(f"{link}: {c['faces']} faces and {c['cap_faces']} cap faces ({c['open_cut_edges']} cut edges left "
+                  f"open), connected pieces {c['pieces']}")
+        for w in rec["warnings"][:5]:
+            print(f"warning: {w}")
+        print(f"see both with review --tint {rec['source']} --tint {rec['target']}. The joints are as they were. To "
+              f"take the move back: cp /work/{rec['backup']} /work/candidate.blend")
     elif a.cmd == "review_articulation":
         rec, rep = review_articulation(work, control, blender, a.states, a.clay)
         print(f"receipt {rec['receipt']}")
@@ -1339,6 +1381,17 @@ def main(argv=None):
     j.add_argument("--lower", type=float, help="radians (revolute) or meters (prismatic), at most 0")
     j.add_argument("--upper", type=float, help="at least 0 and more than --lower")
     j.add_argument("--remove", action="store_true", help="remove the joint of --child")
+    m = sub.add_parser("move_faces", help="move faces from one part object to another, for a part that the split "
+                                          "got wrong (articulation mode)")
+    m.add_argument("--from", dest="source", required=True, help="the part object that holds the faces now")
+    m.add_argument("--to", dest="target", required=True, help="the part object that they belong to")
+    m.add_argument("--faces", metavar="FILE", help="a .npy file in /work with the polygon indices of --from to move "
+                                                   "(or one bool per polygon)")
+    m.add_argument("--plane", nargs=6, type=float, action="append", metavar=("PX", "PY", "PZ", "NX", "NY", "NZ"),
+                   help="a plane in W, by a point and a normal that points to the faces to move; they are on that "
+                        f"side of every plane; repeat up to {MAX_PLANES} times, with --seed")
+    m.add_argument("--seed", nargs=3, type=float, metavar=("X", "Y", "Z"),
+                   help="with --plane: a point on the faces to move, in W; the connected piece nearest it is taken")
     v = sub.add_parser("review_articulation", help="render the joints from lower to upper and check for penetration")
     v.add_argument("--states", type=int, default=STATES, help=f"poses from lower to upper, {MIN_STATES} to "
                                                                f"{MAX_STATES}")

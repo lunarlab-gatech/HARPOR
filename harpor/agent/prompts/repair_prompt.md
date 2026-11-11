@@ -8,8 +8,13 @@ what was measured and why it failed. Fix every finding, then review and finish a
 part_missing finding names a part that the split did not find and no round has created: create it
 with add_part under the name the finding gives, then set its joint ("Parts the split missed").{plan}
 
-The requirements cannot be changed. A smaller range does not meet a span target: the achieved span
-must reach the requirement's min_span. Run simulate before finish. It runs the host's check on your
+The requirements cannot be changed. A span target (min_span) is the part list's estimate of the
+part's full travel, made from one photo. Set each range to what the part can really do: it must be
+clear in the sweep and reachable in MuJoCo, so narrow a range that is blocked. A range that reaches
+less than its target still meets the requirement, and is recorded as reduced, while it keeps a
+fifth of the target and 10 degrees. Do not widen a range to reach a target through other parts. A range_blocked or
+tracking finding means the joint cannot move through the range it has: narrow it to what is clear and
+reachable. Run simulate before finish. It runs the host's check on your
 scene, so it shows whether the findings are gone.
 
 {best}

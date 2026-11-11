@@ -21,6 +21,27 @@ def topology(vertices, faces):
     return mesh
 
 
+def pieces(mesh, label, n_labels):
+    """[(pieces, largest)] per label 0 to n_labels - 1 of the faces of mesh (topology): how many connected pieces
+    the label's faces form, by shared edges, and the share of its area in the largest one. A part of two or more
+    sizeable pieces often holds the surface of two things. A label without faces has (0, 0.0)."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    label = np.asarray(label, int)
+    adj, area, F = np.asarray(mesh.face_adjacency).reshape(-1, 2), np.asarray(mesh.area_faces, float), len(label)
+    same = label[adj[:, 0]] == label[adj[:, 1]]
+    g = coo_matrix((np.ones(int(same.sum())), (adj[same, 0], adj[same, 1])), shape=(F, F))
+    n, comp = connected_components(g, directed=False)
+    comp_area = np.bincount(comp, weights=area, minlength=n)
+    out = []
+    for k in range(n_labels):
+        ids = np.unique(comp[label == k])
+        total = float(comp_area[ids].sum())
+        out.append((len(ids), float(comp_area[ids].max() / total) if len(ids) and total > 0 else 0.0))
+    return out
+
+
 def aabb(points):
     p = np.asarray(points, dtype=float).reshape(-1, 3)
     lo, hi = p.min(0), p.max(0)

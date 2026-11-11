@@ -1224,7 +1224,8 @@ def test_part_list_review_confirms_or_edits_the_list(client, tmp_path):
         job["files"])  # but LiDAR and the videos
     a = job["agent_result"]
     assert (a["mode"], a["verdict"], a["joints_delivered"]) == ("articulation", "articulated", 1)
-    assert set(a["counts"]) == {"exports", "reviews", "checkpoints", "joints", "parts_added", "articulation_reviews"}
+    assert set(a["counts"]) == {"exports", "reviews", "checkpoints", "joints", "parts_added", "faces_moved",
+                               "articulation_reviews"}
     # The VLM's lid has a requirement, so the fake agent's result has the keys of a session in rounds, and its evidence.
     assert ([x["outcome"] for x in a["rounds"]], a["requirements"]["pass"], a["candidate"]["round"], a["simulations"]) == (
         ["pass"], 1, 1, 0)
@@ -4924,6 +4925,21 @@ def test_app_js_names_a_part_that_was_not_split_off():
     assert out == ["lid, revolute: pass", "flap_3 (cut out by the agent), revolute: pass, clear from 0° to 86°",
                    "flap (not split off), revolute: fail", "flap_3 (cut out by the agent), revolute: fail",
                    "flap (not split off), revolute: unassessed", "knob (not split off), revolute: unassessed"]
+
+
+def test_app_js_shows_a_reduced_range():
+    """The part list's range is graded: a joint that reaches less of it still passes, and the row says how much
+    it reaches of what the part list estimated. A record without the grade, or with one of the wrong kind, reads
+    as before."""
+    ev = {"requirements": [{"id": "r1", "prompt": "lid", "status": "found"}]}
+    rec = lambda measured: {"requirement": "r1", "target": ["lid"], "joint": "revolute", "outcome": "pass",  # noqa: E731
+                            "measured": measured}
+    records = [rec({"achieved": [-1.3, 2.3], "reduced": {"span": 3.6, "target": 4.712, "share": 0.764}}),
+               rec({"achieved": [0, 1.5]}), rec({"achieved": [0, 1.5], "reduced": "yes"})]
+    out = run_dom_js("console.log(JSON.stringify(" + json.dumps(records) + ".map((r) => requirementText(r, "
+                     + json.dumps(ev) + "))))", {})
+    assert out == ["lid, revolute: pass, clear from -74° to 132°, reduced: 206° of the 270° that the part list estimated",
+                   "lid, revolute: pass, clear from 0° to 86°", "lid, revolute: pass, clear from 0° to 86°"]
 
 
 def test_app_js_results_of_a_session_in_rounds():

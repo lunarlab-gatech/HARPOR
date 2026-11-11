@@ -91,6 +91,35 @@ def test_judge_uses_reference_and_simulation_and_redacts_answer(tmp_path, monkey
     assert result["outcome"] == "pass" and key not in json.dumps(result)
     assert "[redacted API key]" in result["reason"]
     assert calls[0][0] == key and "Measurements:" in calls[0][1] and len(calls[0][2]) > 1000
+    assert json.loads(calls[0][1].split("Measurements:\n")[1])["requirements"] == []
+    # the span targets reach the judge with the measurements, so it can tell a real stop from a range cut short
+    goals = [{"link": "lid", "does": "opens upward", "target_span": 4.712, "range": [0.0, 2.0], "unit": "rad"}]
+    P.judge(tmp_path, tmp_path, sim, {"agent": "astra", "key_file": str(tmp_path / "key.env")}, goals)
+    assert json.loads(calls[1][1].split("Measurements:\n")[1])["requirements"] == goals
+    assert "A range under its target is acceptable" in calls[1][1]
+
+
+def test_the_judge_gets_each_requirements_target_and_the_range_that_ran(tmp_path):
+    """targets: one entry per hinge or slide with a requirement, with the part list's text and span target and the
+    range that the sweep found clear, also for a part that the agent created under its reserve.
+    A requirement whose link has no clear range has none."""
+    def req(rid, part, **more):
+        return {"id": rid, "part": part, "status": "found", "text": f"{part} moves", "test": {}, **more}
+    reqs = [req("r1", "lid", test={"min_span": 4.712}), req("r2", "drawer"),
+            req("r3", None, status="not_found", reserve="flap", text="folds", test={"min_span": 1.0}),
+            req("r4", "knob"), req("r5", None, status="not_found")]
+    (tmp_path / "control").mkdir()
+    write_json(tmp_path / "control/parts.json", {"requirements": reqs})
+    clear = lambda kind, limits, achieved: {"type": kind, "limits": limits, "achieved": achieved}  # noqa: E731
+    report = {"clearance": {"lid": clear("revolute", [0.0, 1.0], [0.0, 1.0]),
+                            "drawer": clear("prismatic", [0.0, 0.3], [0.0, 0.3]),
+                            "flap": clear("revolute", [-1.0, 1.0], [-1.0, 1.0]),
+                            "knob": clear("revolute", [0.0, 1.0], None)}}
+    assert P.targets(tmp_path / "control", report) == [
+        {"link": "lid", "does": "lid moves", "target_span": 4.712, "range": [0.0, 1.0], "unit": "rad"},
+        {"link": "drawer", "does": "drawer moves", "target_span": None, "range": [0.0, 0.3], "unit": "m"},
+        {"link": "flap", "does": "folds", "target_span": 1.0, "range": [-1.0, 1.0], "unit": "rad"}]
+    assert P.targets(tmp_path / "control", {}) == []
 
 
 def test_session_preparation_uses_placed_mass_and_preserves_predictions(tmp_path, monkeypatch):

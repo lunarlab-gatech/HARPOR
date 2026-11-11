@@ -121,12 +121,14 @@ def test_a_door_blocked_at_its_end_passes_after_one_reduction(tmp_path):
     f = V.clearance_finding("door", rec)
     assert (f["code"], f["measured"], f["expected"]) == ("range_blocked", [0.0, 1.0], [0.0, 1.5])
     assert "blocked at q = 1.5 rad" in f["why"] and "after 1 reduction by 2/3" in f["why"]
-    # The reference stays the first interval across repairs: a door narrowed to [0, 1] is swept over [0, 1.5].
+    # The repair is to narrow the range: a door narrowed to [0, 1] is swept over its own limits, which are clear.
+    # The wider interval of an earlier round sets only the floor.
     narrow = door_scene(tmp_path / "narrow", STOP, hinge(upper=1.0))[0]
     assert search(narrow)["door"]["reductions"] == 0
     rec = search(narrow, {"door|revolute": [0.0, 1.5]})["door"]
-    assert (rec["limits"], rec["reference"], rec["achieved"]) == ([0.0, 1.0], [0.0, 1.5], [0.0, 1.0])
-    assert search(narrow, {"door|prismatic": [0.0, 1.5]})["door"]["reference"] == [0.0, 1.0]  # a type of its own
+    assert (rec["limits"], rec["reference"], rec["achieved"], rec["reductions"]) == ([0.0, 1.0], [0.0, 1.0], [0.0, 1.0], 0)
+    assert (rec["widest"], V.clearance_finding("door", rec)) == (1.5, None) and np.isclose(rec["floor"], 0.2 * 1.5)
+    assert search(narrow, {"door|prismatic": [0.0, 1.5]})["door"]["widest"] == 1.0  # a type of its own
 
 
 def test_a_door_against_a_wall_is_axis_blocked(tmp_path):
@@ -197,8 +199,9 @@ def mujoco_env(monkeypatch):
 
 
 def test_mujoco_runs_each_joint_over_the_interval_its_clearance_achieved(tmp_path, mujoco_env):
-    """The door passes after one reduction, so MuJoCo runs it over [0, 1] rad, and a requirement to turn 1.5 rad is
-    short of it by more than 5 degrees. The joints in model.glb are marked S with W's numbers."""
+    """The door passes after one reduction, so MuJoCo runs it over [0, 1] rad. A requirement to turn 1.5 rad is
+    short of that by more than 5 degrees, which is recorded as reduced and is no finding: the span target is
+    graded. The blocked range is the finding. The joints in model.glb are marked S with W's numbers."""
     glb, original, control = door_scene(tmp_path, STOP)
     with_requirements(control, requirement(test={"min_span": 1.5}), requirement("r2", None, status="not_found"))
     r = V.check(glb, control, original)
@@ -208,11 +211,10 @@ def test_mujoco_runs_each_joint_over_the_interval_its_clearance_achieved(tmp_pat
     assert model == {**hinge(), "frame": "S"} and r["carriers"] == {"frame": "frame", "door": "door"}
     (door,) = r["sim"]["joints"]
     assert door["interval"] == [0.0, 1.0] and r["sim"]["asset_sha256"] == r["sha256"] != T.sha256(folder / "model.glb")
-    assert [(f["code"], f["requirement"]) for f in r["findings"]] == [("range_blocked", "r1"), ("range_short", "r1")]
-    short = r["findings"][1]
-    assert (short["measured"], short["expected"]) == (1.0, 1.5)
+    assert [(f["code"], f["requirement"]) for f in r["findings"]] == [("range_blocked", "r1")]
     r1, r2 = r["records"]
     assert (r1["outcome"], r1["measured"]["achieved"], r1["measured"]["states"]) == ("fail", [0.0, 1.0], 16)
+    assert r1["measured"]["reduced"] == {"span": 1.0, "target": 1.5, "share": pytest.approx(2 / 3)}
     assert (r2["outcome"], r2["target"], r2["findings"]) == ("unassessed", [], [])
     assert (r["scope"], r["outcome"], r["cached"]) == ("local", "fail", False)
     # Within 5 degrees of the target the span is met.
@@ -220,6 +222,7 @@ def test_mujoco_runs_each_joint_over_the_interval_its_clearance_achieved(tmp_pat
     (control / "validate").rename(tmp_path / "old")
     r = V.check(glb, control, original)
     assert r["records"][0]["findings"] == [r["findings"][0]] and r["findings"][0]["code"] == "range_blocked"
+    assert "reduced" not in r["records"][0]["measured"]
 
 
 def test_check_reads_the_glb_once_and_works_on_its_copy(tmp_path, mujoco_env, monkeypatch):
@@ -294,30 +297,27 @@ def test_references_pin_at_the_round_end_and_change_the_cache(tmp_path, mujoco_e
     assert not (control / "ranges.json").exists()  # simulate's check does not pin
     r = V.check(glb, control, original, pin_ranges=True)
     assert r["cached"] and json.loads((control / "ranges.json").read_text()) == {"door|revolute": [0.0, 1.5]}
-    # A wider entry since makes the cached report stale: the door is swept over it, and the entry stays.
+    # A wider entry since makes the cached report stale, because the floor rests on it. The door is still swept
+    # over its own limits, and the wider entry stays.
     (control / "ranges.json").write_text(json.dumps({"door|revolute": [0.0, 2.0]}))
     r = V.check(glb, control, original, pin_ranges=True)
-    assert not r["cached"] and r["clearance"]["door"]["reference"] == [0.0, 2.0]
-    assert [(f["code"], f["measured"]) for f in r["findings"]] == [("range_blocked", [0.0, pytest.approx(8 / 9)])]
+    door = r["clearance"]["door"]
+    assert not r["cached"] and (door["reference"], door["widest"]) == ([0.0, 1.5], 2.0) and np.isclose(door["floor"], 0.4)
+    assert [(f["code"], f["measured"]) for f in r["findings"]] == [("range_blocked", [0.0, 1.0])]
     assert json.loads((control / "ranges.json").read_text()) == {"door|revolute": [0.0, 2.0]}
-    # An entry narrower than the limits is widened to them, and the round's end writes the reference it used.
+    # An entry narrower than the limits is widened to them: the round's end keeps the widest interval.
     (control / "ranges.json").write_text(json.dumps({"door|revolute": [0.0, 1.0], "lid|revolute": [0.0, 1.0]}))
     r = V.check(glb, control, original, pin_ranges=True)
-    assert not r["cached"] and r["clearance"]["door"]["reference"] == [0.0, 1.5]
+    assert not r["cached"] and (r["clearance"]["door"]["reference"], r["clearance"]["door"]["widest"]) == ([0.0, 1.5], 1.5)
     assert json.loads((control / "ranges.json").read_text()) == {"door|revolute": [0.0, 1.5], "lid|revolute": [0.0, 1.0]}
     assert V.check(glb, control, original)["cached"]
 
 
-def test_a_repair_can_widen_or_turn_a_range_but_not_narrow_it(tmp_path):
-    """The original interval stays the reference across repairs (paper A.5), so a narrower range does not pass. Yet
-    a repair that widens a range, or turns it around after it opened into a wall, must be checked as it is now: on
-    each side the reference is the wider of the pinned end and the joint's limit, and a side whose limit is 0 has
-    none. A narrowed joint is swept over the reference, and when that is clear its limits are range_short."""
-    assert V.reference(None, -0.2, 1.0) == [-0.2, 1.0]
-    assert V.reference([0.0, 1.5], 0.0, 1.0) == [0.0, 1.5]
-    assert V.reference([0.0, 0.8], 0.0, 1.6) == [0.0, 1.6]
-    assert V.reference([0.0, 1.5], -1.5, 0.0) == [-1.5, 0.0]
-    assert V.reference([0.0, 1.5], -0.5, 1.0) == [-0.5, 1.5]  # a side added does not let the other narrow
+def test_a_repair_can_narrow_widen_or_turn_a_range(tmp_path):
+    """A joint is swept over its own limits, so a repair is checked as it is now: widened, turned around after it
+    opened into a wall, or narrowed to what is clear. The widest interval of an earlier round (control/ranges.json)
+    sets only the floor: a range narrowed under MIN_SHARE of it is range_short, so no range shrinks to nothing."""
+    assert (V.span(None), V.span([0.0, 1.5]), V.span([-0.5, 1.0])) == (0.0, 1.5, 1.5)
     # Widened where nothing is in the way: swept to its new end, it meets a span that [0, 0.8] did not.
     wide = door_scene(tmp_path / "wide", FAR, hinge(upper=1.6))[0]
     rec = search(wide, {"door|revolute": [0.0, 0.8]})["door"]
@@ -333,30 +333,63 @@ def test_a_repair_can_widen_or_turn_a_range_but_not_narrow_it(tmp_path):
     into = door_scene(tmp_path / "into", STOP)[0]
     rec = search(into, {"door|revolute": [0.0, 1.0]})["door"]
     assert (rec["reference"], V.clearance_finding("door", rec)["code"]) == ([0.0, 1.5], "range_blocked")
-    # Narrowed where nothing is in the way: the reference is clear, but the joint's limits stop short of it.
+    # Narrowed: the range is clear and above the floor, so it has no finding, and a span target that it does not
+    # reach is met as reduced.
     narrow = door_scene(tmp_path / "narrow", FAR, hinge(upper=1.0))[0]
     rec = search(narrow, {"door|revolute": [0.0, 1.5]})["door"]
-    assert (rec["reference"], rec["achieved"], V.executed(rec)) == ([0.0, 1.5], [0.0, 1.5], [0.0, 1.0])
+    assert (rec["reference"], rec["achieved"], rec["widest"]) == ([0.0, 1.0], [0.0, 1.0], 1.5)
+    assert V.clearance_finding("door", rec) is None
+    rep = report(clearance={"door": rec}, joints={"door": hinge(upper=1.0)})
+    assert V.requirement_findings(requirement(test={"min_span": 1.5}), rep) == []
+    assert V.reduced(requirement(test={"min_span": 1.5}), rep) == {"span": 1.0, "target": 1.5,
+                                                                   "share": pytest.approx(2 / 3),
+                                                                   "floor": pytest.approx(0.3)}
+    # Narrowed under a fifth of the widest range it has had: too little is left.
+    tiny = door_scene(tmp_path / "tiny", FAR, hinge(upper=0.25))[0]
+    rec = search(tiny, {"door|revolute": [0.0, 1.5]})["door"]
     f = V.clearance_finding("door", rec)
-    assert (f["code"], f["measured"], f["expected"]) == ("range_short", [0.0, 1.0], [0.0, 1.5])
-    assert "a smaller range does not meet it" in f["why"]
-    found = V.requirement_findings(requirement(test={"min_span": 1.5}),
-                                   report(clearance={"door": rec}, joints={"door": hinge(upper=1.0)}))
-    assert [(x["code"], x["measured"]) for x in found] == [("range_short", 1.0)]  # the span it can run
+    assert (f["code"], f["measured"], f["expected"]) == ("range_short", 0.25, pytest.approx(0.3))
+    assert "0.2 of the widest range that this joint has had (1.5 rad)" in f["why"]
+    assert V.clearance_finding("door", search(tiny)["door"]) is None  # without an earlier round it is its own widest
+
+
+def test_a_span_target_is_graded():
+    """The part list's range is its estimate of a part's full travel, so the test min_span is graded. Within SPAN_TOL
+    of it the requirement is met. Under it but at least MIN_SHARE of it (and MIN_HINGE) it is met as reduced, which
+    the record keeps with the share reached. Under that floor it is range_short. A slide and a soft part have no
+    span target."""
+    rep = report()  # the door ran [0, 1.5] rad
+    grade = lambda span: (outcomes([requirement(test={"min_span": span})], rep),  # noqa: E731
+                          V.assess([requirement(test={"min_span": span})], rep)["records"][0]["measured"].get("reduced"))
+    assert grade(1.5) == ((["pass"], [], "none", "pass"), None)
+    assert grade(1.5 + math.radians(4.9)) == ((["pass"], [], "none", "pass"), None)
+    assert grade(3.0) == ((["pass"], [], "none", "pass"), {"span": 1.5, "target": 3.0, "share": 0.5})
+    assert grade(7.5)[0] == (["pass"], [], "none", "pass") and grade(7.5)[1]["share"] == pytest.approx(0.2)
+    (out, found, scope, outcome), short = grade(8.0)
+    assert (out, found, scope, outcome) == (["fail"], [("range_short", "r1")], "local", "fail") and short["share"] < 0.2
+    f = V.assess([requirement(test={"min_span": 8.0})], rep)["findings"][0]
+    assert (f["measured"], f["expected"]) == (1.5, pytest.approx(1.6)) and "0.2 of the requirement's target" in f["why"]
+    # a small target keeps the hinge's own floor of 10 degrees
+    low = report(clearance={"door": {**rep["clearance"]["door"], "limits": [0.0, 0.1], "achieved": [0.0, 0.1],
+                                     "floor": 0.05}})
+    assert outcomes([requirement(test={"min_span": 0.5})], low)[1] == [("range_short", "r1")]
+    assert V.assess([requirement(test={"min_span": 0.5})], low)["findings"][0]["expected"] == pytest.approx(V.MIN_HINGE)
+    # no span target, no grade
+    assert V.reduced(requirement(), rep) is None and V.reduced(requirement(test={"min_span": 3.0}),
+                                                               report(clearance={})) is None
 
 
 def test_mujoco_runs_a_narrowed_joint_within_its_limits(tmp_path, mujoco_env):
-    """A door narrowed below its pinned reference is swept over the reference, but MuJoCo runs it only within its
-    limits, so the finding is its range, not a tracking error at a limit it cannot pass."""
+    """A door narrowed below the widest range of an earlier round is swept and run over its own limits. Its range
+    is clear and above the floor, so the requirement passes."""
     glb, original, control = door_scene(tmp_path, FAR, hinge(upper=1.0))
     (control / "ranges.json").write_text(json.dumps({"door|revolute": [0.0, 1.5]}))
     with_requirements(control, requirement())
     r = V.check(glb, control, original)
     folder = control / "validate" / r["sha256"][:16]
     assert json.loads((folder / "intervals.json").read_text()) == {"door": [0.0, 1.0]}
-    assert r["sim"]["joints"][0]["interval"] == [0.0, 1.0]
-    assert [(f["code"], f["requirement"]) for f in r["findings"]] == [("range_short", "r1")]
-    assert (r["records"][0]["outcome"], r["scope"], r["outcome"]) == ("fail", "local", "fail")
+    assert r["sim"]["joints"][0]["interval"] == [0.0, 1.0] and r["clearance"]["door"]["reference"] == [0.0, 1.0]
+    assert (r["findings"], r["records"][0]["outcome"], r["scope"], r["outcome"]) == ([], "pass", "none", "pass")
 
 
 def test_one_deep_sample_among_many_blocks_a_state():
@@ -481,7 +514,7 @@ def test_requirement_outcomes():
     # A span target is met within 5 degrees: +-3.14 rad meets a full turn.
     swivel = report(clearance={"door": {**rep["clearance"]["door"], "limits": [-3.14, 3.14], "achieved": [-3.14, 3.14]}})
     assert outcomes([requirement(test={"min_span": 6.283})], swivel)[0] == ["pass"]
-    assert outcomes([requirement(test={"min_span": 6.283 + 0.1})], swivel)[1] == [("range_short", "r1")]
+    assert outcomes([requirement(test={"min_span": 6.283 + 0.1})], swivel)[:2] == (["pass"], [])  # reduced, not failed
     # A part not found is unassessed, and so is a fragment that is not required once it is joined to another part.
     assert outcomes([requirement("r1", None, status="not_found")], report({}))[:2] == (["unassessed"], [])
     extra = requirement("r2", "door_2", required=False)
@@ -532,7 +565,8 @@ def test_a_missing_part_fails_until_its_reserved_link_exists():
     assert V.assess([missing()], done)["records"][0]["measured"]["type"] == "revolute"
     # its own findings are its requirement's, as a found link's are
     assert outcomes([missing(joint="prismatic")], done)[1:] == ([("joint_type_mismatch", "r2")], "structural", "fail")
-    assert outcomes([missing(test={"min_span": 3.0})], done)[1] == [("range_short", "r2")]
+    assert outcomes([missing(test={"min_span": 8.0})], done)[1] == [("range_short", "r2")]
+    assert V.assess([missing(test={"min_span": 3.0})], done)["records"][0]["measured"]["reduced"]["share"] == 0.5
     assert outcomes([missing(parent="gone_part")], done)[1] == []
     slide = {"version": 1, "frame": "W", "parent": "frame", "type": "prismatic", "origin": [0.0, 0.0, 0.0],
              "axis": [1.0, 0.0, 0.0], "lower": 0.0, "upper": 0.2}
