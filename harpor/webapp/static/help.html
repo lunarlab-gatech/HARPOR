@@ -310,6 +310,9 @@
   <li><b>VLM, then I check</b>: the build stops after the VLM lists the parts, so you can check the list.</li>
   <li><b>I type them</b>: you type the list in the Settings tab.</li>
 </ul>
+<p><b>Skip the split</b> is a separate choice. Usually SAM 3 masks split the mesh into the parts of the list before
+  the agent runs. With this box ticked, the agent gets the mesh as one piece and cuts every part out of it itself.
+  It needs an agent, and it is new: use it to compare with the split on the same object.</p>
 <p>Write one part per line, as name &gt; parent : joint. For example:</p>
 <pre>cabinet body
 door &gt; cabinet body : revolute

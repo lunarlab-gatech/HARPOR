@@ -26,6 +26,9 @@ and it exits with code 3:
     replaces it. F is a JSON list of parts ([{name, parent, joint, count}], harpor.parts.propose) or an object with a
     "parts" list, such as a copy of run/proposal.json.
 
+--no-split, for an articulated job with an agent, skips the split of the mesh into parts by SAM 3 part masks: the
+agent gets the mesh as one part object and cuts every part of the list itself.
+
 --resume ID takes the next step for the job's state. A job whose build has not started takes the settings of its
 resume, and the printed command repeats them. A job that failed or was cancelled goes on from the first stage not done,
 as the page's Retry does. After the build has started the settings stay as they are, except --calibration, which
@@ -74,7 +77,7 @@ DONE, FAILED, BAD, WAITS = 0, 1, 2, 3  # exit codes
 ALWAYS = ("runs", "key_file")  # the flags that every next command repeats
 # The flags that reach job.json at the Start route, so a next command repeats them until then (Run.again).
 SETTINGS = ("prompt", "camera_topic", "lidar_topic", "calibration", "no_lidar", "n_views", "picks", "view0", "review",
-            "articulated", "parts", "edit_parts", "turntable", "agent")
+            "articulated", "parts", "edit_parts", "no_split", "turntable", "agent")
 LATE_SETTINGS = ("calibration", "parts", "view0")  # those that a job whose build has started still takes
 LEFT_OUT = {"available": "usable, not picked", "excluded": "excluded", "no_mask": "no mask of the object",
             "small": "the mask is under 1% of the image", "inconsistent": "the mask disagrees with the other views"}
@@ -204,6 +207,9 @@ def check_settings(a, kind):
             (a.lock or a.exclude or a.instance, "--lock, --exclude and --instance answer a view review, on a resume"),
             ((a.parts or a.edit_parts) and not a.articulated, "--parts and --edit-parts need --articulated"),
             (a.parts and a.edit_parts, "--parts gives the list and --edit-parts asks the VLM for it: choose one"),
+            (a.no_split and not a.articulated, "--no-split needs --articulated: only such a job has a split to skip"),
+            (a.no_split and agent == "none",
+             "--no-split needs --agent astra, opus or fable: it is the agent that cuts the parts"),
             (a.edit_parts and agent == "none", "--edit-parts needs --agent astra, opus or fable: there is no VLM without one"),
             (a.articulated and agent == "none" and not a.parts,
              "without an agent there is no VLM to list the parts: give --parts, or --agent astra, opus or fable"),
@@ -485,6 +491,8 @@ class Run:
         body = {"mode": "manual" if a.picks else "auto", "prompt": a.prompt, "agent": a.agent or "none",
                 "api_key": self.key, "auto_continue": not a.review, "turntable": a.turntable,
                 "articulated": a.articulated, "picks": [int(x) for x in a.picks.split(",")] if a.picks else []}
+        if a.no_split:
+            body["split"] = False
         if a.n_views is not None:
             body["n_views"] = a.n_views
         if a.view0 is not None:
@@ -592,6 +600,8 @@ def parser():
     ap.add_argument("--articulated", action="store_true", help="build an object with moving parts")
     ap.add_argument("--parts", metavar="F", help="the part list as a JSON file; on a resume, replace the VLM's list")
     ap.add_argument("--edit-parts", action="store_true", help="stop after the VLM's part list")
+    ap.add_argument("--no-split", action="store_true",
+                    help="skip the split of the mesh into parts: the agent cuts every part of the list itself")
     ap.add_argument("--turntable", action="store_true", help="render a 360 video of the object")
     ap.add_argument("--agent", choices=steps.AGENTS, help="the agent that refines the object (default none)")
     ap.add_argument("--key-file", metavar="F",

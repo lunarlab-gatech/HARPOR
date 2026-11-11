@@ -17,9 +17,9 @@ the upper end of its interval, to the lower end and back to rest, each leg over 
 because a step target shakes a soft part on the joint. A state {t, ctrl, q} is recorded every 0.25 s. The ctrl
 stays within the joint's limits, so an interval past a limit is not reached. D is the asset's diagonal, and the
 tolerance is 5 degrees for a hinge and 0.005 D for a slide. tracking: the end of a leg further than that from its
-target. unstable: a state that is not finite, a MuJoCo warning, or q past a limit by more than that. MuJoCo 3.16
-reports a flex's M+K solve that ran out of iterations as a singular inertia, which two flexes on different bodies
-of a moving object raise while the motion stays sound, so in a model with a flex INERTIA is not a warning here;
+target. unstable: a state that is not finite, a MuJoCo warning, or q past a limit by more than that. MuJoCo 4.0,
+like 3.16, reports a flex's M+K solve that ran out of iterations as a singular inertia, which two flexes on different
+bodies of a moving object raise while the motion stays sound, so in a model with a flex INERTIA is not a warning here;
 the state checks and the recovery still catch a part that fails.
 
 Press, for each soft link, on its binding soft/<link>.npz: settle for 0.25 s and take the nodes there as P0, which

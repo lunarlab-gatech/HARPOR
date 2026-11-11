@@ -79,12 +79,16 @@ def up_hint(run_dir, seed=0):
     from harpor.stage_a.place import resize_mask
     from harpor.stage_a.sam3d import load_mask
 
+    from harpor.stage_a.mvsam3d import natural
+
     run_dir = Path(run_dir)
     with np.load(run_dir / "da3_output.npz") as da:
-        i = [Path(str(f)).stem for f in da["image_files"]].index("0")
+        stems = [Path(str(f)).stem for f in da["image_files"]]
+        view0 = natural(stems)[0]  # "0" in a web-app job; a run made by hand names its photos itself (img1, ...)
+        i = stems.index(view0)
         P, conf, ref = da["pointmaps"][i], da["conf"][i], cameras_up(da["extrinsics"], i)
     h, w = P.shape[:2]
-    mask = resize_mask(load_mask(run_dir / "masks" / "0.png"), (w, h))
+    mask = resize_mask(load_mask(run_dir / "masks" / f"{view0}.png"), (w, h))
     ref_info = {"reference_up": np.round(ref, 5).tolist()}
 
     def fallback(reason, **kw):

@@ -184,6 +184,36 @@ def test_stages_run_from_the_config_code(tmp_path):
         assert cwd == "/my repo" and "\nC='/my repo'\n" in argv[2] and "gator_clone" not in argv[2], s
 
 
+def test_a_job_can_skip_the_split():
+    """job.json parts "split" false: the parts stage runs no SAM 3 part masks and no vote; whole makes the mesh one
+    part object, and the agent cuts the parts. The setting needs an articulated job with an agent, and a job that
+    splits stores no such key, so older jobs read as they did."""
+    parts = lambda job: steps.command("parts", job, ICE)[0][2]  # noqa: E731
+    assert steps.split(ART) and steps.split({}) and steps.split({"parts": {"split": True}})
+    usual = parts(ART)
+    assert "harpor.stage_a.part_masks" in usual and "harpor.parts.stage vote" in usual and " whole " not in usual
+    skipped = {**ART, "parts": {**ART["parts"], "split": False}}
+    assert not steps.split(skipped)
+    script = parts(skipped)
+    assert "part_masks" not in script and "stage vote" not in script and "sam3seg" not in script
+    assert script.index("harpor.parts.stage whole") < script.index("harpor.parts.stage split") < script.index(
+        "harpor.parts.stage finish")
+    base = {"prompt": "box", "agent": "opus", "articulated": True}
+    assert jobs.parts_settings({**base, "parts": {"mode": "vlm"}})["parts"] == {"mode": "vlm", "list": [],
+                                                                               "confirmed": False}
+    assert jobs.parts_settings({**base, "parts": {"mode": "vlm", "split": True}})["parts"] == {
+        "mode": "vlm", "list": [], "confirmed": False}
+    assert jobs.parts_settings({**base, "parts": {"mode": "vlm", "split": False}})["parts"] == {
+        "mode": "vlm", "list": [], "confirmed": False, "split": False}
+    typed = [{"name": "box body"}, {"name": "lid", "parent": "box body", "joint": "revolute"}]
+    for job, why in [({**base, "parts": {"split": "no"}}, "split is true or false"),
+                     ({**base, "articulated": False, "parts": {"split": False}}, "only an articulated job has a split"),
+                     ({**base, "agent": "none", "parts": {"mode": "user", "list": typed, "split": False}},
+                      "skipping the split needs an agent")]:
+        with pytest.raises(ValueError, match=why):
+            jobs.parts_settings(job)
+
+
 def test_physics_commands_name_the_object():
     pytest.importorskip("harpor.webapp.physics_auto")
     mjcf, usd = (steps.command(s, JOB, ICE)[0][2] for s in ("mjcf", "usd"))

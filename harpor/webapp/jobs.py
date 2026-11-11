@@ -197,7 +197,9 @@ def _clear(job_dir, stages):
 
 def parts_settings(job):
     """{"articulated", "parts"} of a job.json dict in the form the build runs with: parts {"mode", "list",
-    "confirmed": False}, the mode as steps.parts_mode gives it (agent "none" means "user"). Only an
+    "confirmed": False}, the mode as steps.parts_mode gives it (agent "none" means "user"). parts "split"
+    false is kept too: it skips the split of the mesh, and the agent cuts every part (steps.split), which
+    needs an articulated job with an agent; a job that splits has no such key. Only an
     articulated job in mode "user" keeps its list, in harpor.parts.propose.validate's form; the VLM
     modes start without one. ValueError (with propose's reason for a bad list) when articulated is not
     a bool, the mode is unknown, or the mode is "user" and the list is empty or breaks a rule."""
@@ -215,7 +217,15 @@ def parts_settings(job):
             raise ValueError("type the parts of the object" + (": without an agent there is no VLM to list them"
                                                                if steps.agent(job) == "none" else ""))
         items = propose.validate(parts["list"], job["prompt"])
-    return {"articulated": art, "parts": {"mode": mode, "list": items, "confirmed": False}}
+    split = parts.get("split", True)
+    if not isinstance(split, bool):
+        raise ValueError("split is true or false")
+    if not split and not art:
+        raise ValueError("only an articulated job has a split to skip")
+    if not split and steps.agent(job) == "none":
+        raise ValueError("skipping the split needs an agent: it is the agent that cuts the parts")
+    return {"articulated": art, "parts": {"mode": mode, "list": items, "confirmed": False,
+                                          **({} if split else {"split": False})}}
 
 
 def lidar_settings(job_dir, job, value, read_bag=True):

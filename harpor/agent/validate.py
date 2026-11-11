@@ -41,7 +41,7 @@ assess gives each requirement a record {requirement, target, kind, joint, text, 
 measured, findings, outcome}. A finding is {code, requirement, link, measured, expected, why}: a link's finding is
 the requirement's of that link, and a requirement adds link_missing, joint_missing, joint_type_mismatch (joint
 unknown takes either moving joint), parent_mismatch (the joint's parent does not move with the requirement's
-parent, report carriers), range_short (an achieved span under MIN_SHARE of its test min_span; a span between that
+parent, or with any of its parents when its parent part has several links, report carriers), range_short (an achieved span under MIN_SHARE of its test min_span; a span between that
 floor and the target meets the requirement as reduced, see reduced: the target is the part list's estimate) and
 surface_assignment (its link keeps under KEPT of its own native area). These stay in the record of a
 requirement that is not required, so an agent that joins a fragment to its part is not asked for it. A part that
@@ -425,11 +425,14 @@ def requirement_findings(r, report):
     if j.get("type") not in (("revolute", "prismatic") if want == "unknown" else (want,)):
         return [finding("joint_type_mismatch", link, j.get("type"), want,
                         "the joint's type is not the requirement's, which cannot change", rid)]
-    out, parent, carrier = [], r.get("parent"), report.get("carriers") or {}
-    if parent in report["links"] and carrier.get(j.get("parent"), j.get("parent")) != carrier.get(parent, parent):
-        out.append(finding("parent_mismatch", link, j.get("parent"), parent,
-                           "the part hangs on a part that does not move with the requirement's parent; give it that "
-                           "parent, or a part fixed to it", rid))
+    out, carrier = [], report.get("carriers") or {}
+    # The requirement's parent, or any of its parents: the links of a parent part with several copies (parts.json).
+    allowed = [p for p in (r.get("parents") or [r.get("parent")]) if p in report["links"]]
+    if allowed and carrier.get(j.get("parent"), j.get("parent")) not in {carrier.get(p, p) for p in allowed}:
+        out.append(finding("parent_mismatch", link, j.get("parent"), allowed if len(allowed) > 1 else allowed[0],
+                           "the part hangs on a part that does not move with the requirement's parent"
+                           + (" or with any of its parents" if len(allowed) > 1 else "")
+                           + "; give it that parent, or a part fixed to it", rid))
     short = reduced(r, report)
     if short and short["span"] < short["floor"]:
         out.append(finding("range_short", link, short["span"], short["floor"],

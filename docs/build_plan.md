@@ -187,6 +187,10 @@ without one when `TORCH_CUDA_ARCH_LIST` is set, as the docker build does.
 1. **Copy the code.** From the repo root on the laptop, on the GT network or VPN:
    `rsync -a --exclude .git --filter=':- .gitignore' ./ <user>@<login node>:scratch/gator/gator_clone/`
    (the filter skips what `.gitignore` names: caches, `results/`, `site/` and the media files).
+   A later sync of a changed tree (2026-11-11) adds `--delete --exclude .claude --exclude paper
+   --exclude docs/figures` and `--backup --backup-dir=<a folder outside gator_clone>`. The excludes keep
+   the worktrees off ICE and keep two folders that exist only there, and the backup keeps every file that
+   `--delete` removes or the copy replaces.
 2. **Environment** (about 1 h). The recipe builds for both L40S (8.9) and H100/H200 (9.0):
 
    ```bash
@@ -618,7 +622,7 @@ The photo-match scores were removed. `harpor/eval/photo_match.py` is in commit 9
 | `envs/web` (micromamba) | Python 3.12, fastapi 0.143.2, uvicorn 0.54.0, av 19.0.1, rosbags 0.11.8, anthropic 1.15.0 (note 10) | The web app's server; every stage runs in its own env. Built by `setup/web.sh` |
 | `envs/sam3seg` (micromamba) | Python 3.12, torch 2.14.1+cu130, transformers 5.20.0 (note 3) | SAM 3 masks; transformers 5.20 needs torch 2.6 or newer, so it cannot go into `envs/sam3d`. Built by `setup/sam3seg.sh` |
 | `sif/harpor-agent.sif` (Apptainer) | Node.js 24.21.0, Codex CLI 0.162.1, Blender 5.2.2 | Built from `containers/harpor-agent.def` with `--fakeroot` by `setup/agent.sh` (note 5); run with `--nv` for Cycles OptiX. The docker image has these tools inside instead |
-| `envs/mujoco` (micromamba) | Python 3.11, mujoco 3.16.0, coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF export, the host's MuJoCo check of the agent's rounds and the soft-part press (note 11); no pytest. Built by `setup/mujoco.sh` (first run as a recipe on 2026-11-08) |
+| `envs/mujoco` (micromamba) | Python 3.11, mujoco 4.0.0 (3.16.0 until 2026-11-11), coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF export, the host's MuJoCo check of the agent's rounds and the soft-part press (note 11); no pytest. Built by `setup/mujoco.sh` (first run as a recipe on 2026-11-08) |
 | `envs/vomp11` (micromamba) | VoMP v1.1 (641a22d) in `VoMP/`, Python 3.11, torch 2.4.0+cu121, bpy 4.2.0, kaolin 0.18.0, spconv-cu121 2.3.8 (note 9) | Built by `setup/vomp11.sh` |
 
 `bash setup/install.sh` builds all of them in order and then the weights: `setup/web.sh`, `setup/sam3d.sh`,
@@ -691,7 +695,7 @@ real-world mass or stiffness. Linux headless rendering uses `MUJOCO_GL=egl` by d
 
 The commands below also remain available for standalone prediction and export workflows.
 
-The agent's GLB is not ready for a simulator. MuJoCo 3.16.0 loads only STL, OBJ and MSH meshes and
+The agent's GLB is not ready for a simulator. MuJoCo 4.0.0, like 3.16.0, loads only STL, OBJ and MSH meshes and
 PNG textures, and it needs one mass and inertia per body. VoMP v1.1 takes the GLB directly and
 predicts Young's modulus E (Pa), Poisson's ratio nu and density rho (kg/m^3) per voxel of a 64^3
 grid. VoMP does not predict friction. Sources and the v1.1 changes are in `research.md` section 4.6.
@@ -1191,7 +1195,13 @@ and its *Tested so far* says what ran where.
 - `job.json`: `articulated` (true or false) and
   `parts: {"mode": "vlm"|"vlm_edit"|"user", "list": [...], "confirmed": true|false}`. `confirmed` is
   false for a new job, turns true when the user confirms the list, and turns false again when
-  `propose` runs.
+  `propose` runs. `parts` can also hold `"split": false` (2026-11-10; `--no-split`, or "Skip the
+  split" on the page), for an articulated job with an agent. The parts stage then runs no SAM 3 part
+  masks and no vote: `parts.stage whole` (`vote.whole`) puts every face in the base, the split and
+  `finish` run as they are, and `parts.json` has one part object and a requirement with a `reserve`
+  for every other part of the list. The agent cuts each one out with `add_part`, as PhysAg3D's agent
+  selects the parts itself. The option exists to compare the two paths on real objects, and no job
+  has run with it yet. A job that splits has no `split` key.
 - `run/proposal.json` (stage `propose`): `{source: vlm|user, agent, model, noun, base, parts: [{name,
   parent, joint, count, axis_hint}], requirements, warnings, seconds, mode}`. A VLM's proposal adds
   `attempts` and `answer`, and a list that the user confirmed adds `confirmed` and `edited`.
@@ -1261,8 +1271,12 @@ and its *Tested so far* says what ran where.
    `POST /v1/responses` with urllib, because no openai SDK is installed. An answer that does not parse
    or validate is asked again once, with the reason. The prompt asks for whole rigid pieces (an office
    chair's seat, backrest and armrests are one part, "seat and backrest"), for a base name that SAM 3
-   can find apart from the parts ("chair base"), for one joint per part (its main motion), and to
-   leave out small parts (casters, levers, small buttons) unless nothing larger moves. It also asks
+   can find apart from the parts ("chair base"), for one joint per part, and to include small moving
+   parts such as casters, levers and buttons (2026-11-11; until then it left them out unless nothing
+   larger moved, so an office chair's casters were never articulated). A part that moves about two
+   axes is two parts, the second on the first: a caster is a "caster fork" that turns on the base and a
+   "caster wheel" that spins in the fork. A part that turns and slides along one axis gets its main
+   motion. It also asks
    for each soft part as a part of its own with joint soft, even when the soft part is fixed to a
    moving part. The parent of a soft part is the part it sits on: an office chair's seat cushion hangs
    from "seat and backrest". For each part the VLM also gives `motion` (a few words), `range` and
@@ -1501,7 +1515,13 @@ and its *Tested so far* says what ran where.
     is no usable mesh. Each voxel splits into 5 tetrahedra. The pins are the nodes within 1 pitch of the
     parent's surface and on the parent's side of it. A link with no pin, with over 70% of its nodes
     pinned, or with a voxel island that has no pin has no usable support. The flex has radius 0.002,
-    edge damping 0.01 and no self-collision. The link's own mesh is one `<skin>` per visual on the
+    Rayleigh damping 0.002 on its elasticity and no self-collision. (It had edge damping 0.01 until
+    2026-11-11. MuJoCo 4.0 refuses edge damping with the discrete integrator, so a model with a soft
+    part did not open there; MuJoCo's modeling guide suggests Rayleigh damping of 0.002 to 0.05 instead.
+    MuJoCo 4.0 also corrected the elastic constants of flexes with full dofs. With the same Young's
+    modulus and Poisson's ratio, a pinned foam block (E 3e4 Pa, nu 0.3) sags 2.93 mm in 4.0 and 2.58 mm
+    in 3.16, about 14% more. HARPOR keeps the material table's values, which 4.0 now applies as
+    given. The press needs no change, because it stops at a displacement and its force cap scales with E.) The link's own mesh is one `<skin>` per visual on the
     nodes, and the flex stays in group 3, so a viewer shows the textured surface.
     `soft/<link>.npz` holds the binding (each visible vertex's tetrahedron and weights, PhysAg3D's Eq. 4),
     and `check_binding` tests it.
@@ -1552,9 +1572,13 @@ missing link. The first `count` records are required. A found link beyond the co
 so an agent that joins a fragment to its part does not miss a required link. A cluster that was not
 found makes no record. A `not_found` record also has a `reserve`: the name of the link that the agent
 may create for it with `add_part`, in the vote's style (`<slug>`, or `<slug>_3` after two found) and
-free among the links and the other reserves. Its `parent` is a link too: the first found link of its
-proposal parent, else that parent's own reserve (a missing part on a missing part), else up to the
-base. The fields follow PhysAg3D's Eq. 2: `part` and `parent` are U, `action` is a,
+free among the links and the other reserves. Every record's `parent` is a link of its proposal parent:
+the found links first, then that parent's reserves (a missing part on a missing part), else up to the
+base. A found part keeps the parent link it shares the longest seam with. A part that was not found,
+with as many copies as its parent part (five caster wheels on five caster forks), takes the parent link
+of its own index. When the parent part has more than one link, `parents` lists them all, and the
+host's check accepts a joint on any of them (2026-11-11; before, all five wheels named the first fork,
+so wheels 2 to 5 failed with `parent_mismatch`). The fields follow PhysAg3D's Eq. 2: `part` and `parent` are U, `action` is a,
 `observe` is O, `test` is psi and `scope` is D. A revolute part's range becomes its test `min_span`,
 in radians. That target is graded (2026-11-10): it is the VLM's estimate of the part's full travel,
 from one photo. A range within 5 degrees of it meets the requirement. One that reaches less but keeps
@@ -1765,8 +1789,15 @@ before this stage gets its record as skipped, "older than this stage" (`Runner._
 - A worst-case job takes about 95 minutes in the agent stage: 2100 s of agent time, up to 600 s off
   the clock in each build or repair, and up to 600 s of host check after each of them. Reserve at least two hours in the Slurm allocation before starting such a build.
 
-*Tested so far.* On the Mac, the tests pass in a venv with Python 3.12, numpy 2.5.4, MuJoCo 3.16.0
-and CoACD.
+*Tested so far.* On the Mac, the tests pass in a venv with Python 3.12, numpy 2.5.4, MuJoCo 4.0.0
+and CoACD (2026-11-11: 1092 passed, and the one test that needs torch skipped). They passed on MuJoCo
+3.16.0 before that. ICE's `envs/mujoco` moved to 4.0.0 on 2026-11-11 (`setup/mujoco.sh`, after the
+code sync). There, with pytest from a separate folder, on an L40S node with `MUJOCO_GL=egl`, the MuJoCo
+test files gave 123 passed, 13 skipped for packages that the env does not have, and 4 failed in code
+that does not use MuJoCo: `networkx` is missing for `test_a_thin_or_flat_part_has_no_usable_mesh`, the
+tall-glass up axis and the pin count under a thin parent come out different with numpy 2.4.6 and
+scipy 1.17.1, and `test_restart_fails_interrupted_jobs` read 29 s for 30 s. The login node has no
+OpenGL, so the rendering tests abort there.
 - Real code on synthetic test objects: the soft mesh, the flex export, the skin and binding checks,
   `sim_check`'s execution and press, `validate.check` with the clearance sweep and a real
   `sim_check` run, the surface check, and the soft-part video's press.

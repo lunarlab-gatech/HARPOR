@@ -641,8 +641,7 @@ FLEX_SCENE = """<mujoco model="pad scene">
         <flexcomp name="cushion" type="direct" dim="3" mass="0.5" radius="0.002" dof="full"
                   point="0 0 0.1  0.2 0 0.1  0 0.2 0.1  0 0 0.3  0.2 0.2 0.3" element="0 1 2 3  1 2 3 4">
           <contact selfcollide="none"/>
-          <edge damping="0.01"/>
-          <elasticity young="30000" poisson="0.3"/>
+          <elasticity young="30000" poisson="0.3" damping="0.002"/>
           <pin id="0 1 2"/>
         </flexcomp>
       </body>
@@ -814,6 +813,7 @@ def test_a_soft_link_is_a_flex_in_its_parent_body(tmp_path):
     import hashlib
 
     mujoco = pytest.importorskip("mujoco")
+    from harpor.physics import mjcf
     from harpor.physics.mjcf import build, check, node_bodies
 
     report, m = soft_model(tmp_path)
@@ -821,6 +821,9 @@ def test_a_soft_link_is_a_flex_in_its_parent_body(tmp_path):
     assert (soft["file"], soft["material"], soft["young"], soft["poisson"], soft["density"]) == \
         ("soft/cushion.npz", "foam", 3e4, 0.3, 120.0)
     assert m.opt.integrator == mujoco.mjtIntegrator.mjINT_DISCRETE and m.opt.solver == mujoco.mjtSolver.mjSOL_CG
+    # Its damping is Rayleigh damping on the elasticity: MuJoCo 4.0 refuses edge damping with the discrete integrator.
+    assert m.flex_damping[0] == mjcf.RAYLEIGH and m.flex_edgedamping[0] == 0 and m.flex_edgestiffness[0] == 0
+    assert "<edge" not in (tmp_path / "mjcf" / "chest.xml").read_text()
     assert (m.nflex, m.nskin, m.flex_vertnum[0], m.flex_group[0]) == (1, 1, soft["nodes"], 3)
     assert mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_FLEX, 0) == "chest_cushion_flex"
     # The free nodes hang from the lid, and so do the pinned ones, which ride on its hinge.

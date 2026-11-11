@@ -556,3 +556,31 @@ def run(run_dir, max_side=render.MAX_SIDE):
             "warnings": warnings, "seconds": round(time.time() - t0, 1)}
     write_json(R / "parts" / "vote.json", vote)
     return vote
+
+
+def whole(run_dir):
+    """The vote of a job that skips the split (job.json parts.split false): every face of posed.glb is the base,
+    and every other part of the proposal is not found, so that harpor.parts.stage finish gives each one a
+    requirement with a reserve and the agent cuts it out itself (tools.add_part). No SAM 3 part mask is read.
+    Writes run/parts/faces.npz and vote.json in the forms of run, and returns the vote.json record."""
+    R = Path(run_dir)
+    t0 = time.time()
+    proposal = json.loads((R / "proposal.json").read_text())
+    base_slug = slug(proposal["base"])
+    if base_slug == joints.WORLD:
+        raise SystemExit(f'the base cannot be called "{joints.WORLD}"; run propose again')
+    x_w, faces = load_mesh(R / "posed.glb")
+    F = len(faces)
+    why = "the split was skipped: the agent cuts the parts"
+    out = [{"name": base_slug, "role": "base", "prompt": proposal["base"], "slug": base_slug, "status": "found",
+            "faces": F, "area_share": 1.0, "confidence": 1.0, "visibility": {}, "views": [], "support_share": 1.0}]
+    out += [{"name": None, "role": "part", "prompt": p["name"], "slug": slug(p["name"]), "status": "not_found",
+             "why": why, "faces": 0} for p in proposal["parts"] if p["name"] != proposal["base"]]
+    (R / "parts").mkdir(exist_ok=True)
+    replace(R / "parts" / "faces.npz", np.savez, part=np.zeros(F, np.int32), names=np.array([base_slug]),
+            centroids=x_w[faces].mean(1), score=np.ones(F, np.float32))
+    vote = {"base": base_slug, "names": [base_slug], "clusters": out, "dropped_instances": [], "views": [],
+            "counts": {"faces": F, "instances": 0, "unseen": 0, "propagated": 0, "relabelled": 0, "absorbed": 0},
+            "settings": {"split": False}, "warnings": [why], "seconds": round(time.time() - t0, 1)}
+    write_json(R / "parts" / "vote.json", vote)
+    return vote

@@ -3,6 +3,7 @@ SAM 3, vote, split with the fake Blender of harpor.agent.fake_agent, and finish.
 
 import json
 import shlex
+import shutil
 import sys
 
 import numpy as np
@@ -79,6 +80,36 @@ def job(tmp_path):
     S.main(["propose", "--job", str(J)])
     part_masks.run(run / "input" / "images", ["lid"], run / "parts" / "sam3", segmenter=LidSegmenter(maps, lid))
     return J, lid
+
+
+def test_whole_makes_one_part_and_reserves_the_others(job, capsys):
+    """A job that skips the split: whole puts every face in the base and reads no part mask, the split and finish
+    run as they are, and parts.json has one part object and, for every other part of the list, a requirement with
+    a reserve, which the agent cuts out. No seam, since nothing was cut."""
+    J, _ = job
+    run = J / "run"
+    shutil.rmtree(run / "parts" / "sam3")  # whole needs no part masks
+    S.main(["whole", "--job", str(J)])
+    S.main(["split", "--job", str(J), "--blender", shlex.join(FAKE_BLENDER)])
+    S.main(["finish", "--job", str(J)])
+    out = capsys.readouterr().out
+    assert "whole: 768 faces, all in box_body; the split is skipped, and the agent cuts lid" in out
+    vote = json.loads((run / "parts" / "vote.json").read_text())
+    assert (vote["names"], vote["settings"], vote["counts"]["instances"]) == (["box_body"], {"split": False}, 0)
+    with np.load(run / "parts" / "faces.npz") as data:
+        assert not data["part"].any() and len(data["part"]) == 768 and list(data["names"]) == ["box_body"]
+    doc = json.loads((run / "parts.json").read_text())
+    body, lost = doc["parts"]
+    assert (body["name"], body["role"], body["faces"], body["status"], body["pieces"]) == ("box_body", "base", 768,
+                                                                                         "found", 1)
+    assert (lost["name"], lost["prompt"], lost["status"], lost["why"]) == (
+        None, "lid", "not_found", "the split was skipped: the agent cuts the parts")
+    (r,) = doc["requirements"]
+    assert (r["part"], r["status"], r["reserve"], r["parent"], r["required"], r["joint"]) == (
+        None, "not_found", "lid", "box_body", True, "revolute")
+    assert doc["seams"] == [] and doc["warnings"][0] == "the split was skipped: the agent cuts the parts"
+    nodes, _ = read_glb(run / "parts.glb")
+    assert [n["name"] for n in nodes["nodes"] if "mesh" in n] == ["box_body"]
 
 
 def test_vote_split_finish(job, capsys):
@@ -226,7 +257,10 @@ def test_requirements_make_max_count_found_records():
                    "observe": {"type": "node_and_visible_residual", "after": "rigid alignment"},
                    "test": {"min_response_diag": sim_check.RESPONSE, "recovery": True},
                    "scope": {"start": "mesh pose", "base": "fixed", "support": "parent", "gravity": False},
-                   "source": "vlm", "status": "found", "required": True}
+                   "source": "vlm", "status": "found", "required": True, "parents": ["door_1", "door_2"]}
+    # The knob hangs on a door too, and the door part has two links: either carries it.
+    assert (knob["parent"], knob["parents"]) == ("door_1", ["door_1", "door_2"])
+    assert all("parents" not in r for r in reqs if r["prompt"] in ("drawer", "door"))  # their parent is the base
     assert S.MIN_RESPONSE == sim_check.RESPONSE
 
 
@@ -276,6 +310,29 @@ def test_reserves_are_free_names_with_link_parents():
     assert [(r["part"], r.get("reserve")) for r in reqs] == [("drawer", None), (None, "drawer_2_2"), ("drawer_2", None)]
     reserves = [r["reserve"] for r in reqs if "reserve" in r]
     assert not set(reserves) & set(clusters) and len(set(reserves)) == len(reserves)
+
+
+def test_copies_of_a_part_pair_with_copies_of_their_parent():
+    """Five caster wheels on five caster forks. Missing wheels take the fork of their own index, so wheel 3's reserve
+    hangs on fork 3, and parents lists all five forks, any of which the host's check accepts. A found wheel whose
+    fork was not found hangs on a fork's reserve, not on the base. A part with fewer copies than its parent part
+    takes the first link."""
+    proposal = _proposal([("chair base", None, "fixed", 1), ("caster fork", "chair base", "revolute", 5),
+                          ("caster wheel", "caster fork", "revolute", 5), ("lever", "caster fork", "revolute", 1)])
+    clusters = {"chair_base": {"prompt": "chair base"}}
+    reqs = S.requirements(proposal, clusters, ["chair_base"], {"chair_base": None})
+    forks = [f"caster_fork_{k}" for k in range(1, 6)]
+    assert [(r.get("reserve"), r["parent"], r.get("parents")) for r in reqs[:5]] == [(f, "chair_base", None) for f in forks]
+    wheels = reqs[5:10]
+    assert [(r["reserve"], r["parent"]) for r in wheels] == [(f"caster_wheel_{k}", forks[k - 1]) for k in range(1, 6)]
+    assert all(r["parents"] == forks for r in wheels)
+    assert (reqs[10]["reserve"], reqs[10]["parent"], reqs[10]["parents"]) == ("lever", "caster_fork_1", forks)
+    # one wheel found, its forks not: it hangs on a fork's reserve, and the other four wheels are reserves
+    clusters = {"chair_base": {"prompt": "chair base"}, "caster_wheel": {"prompt": "caster wheel"}}
+    reqs = S.requirements(proposal, clusters, ["chair_base", "caster_wheel"],
+                          {"chair_base": None, "caster_wheel": "chair_base"})
+    found = next(r for r in reqs if r["part"] == "caster_wheel")
+    assert (found["parent"], found["parents"]) == ("caster_fork_1", forks)
 
 
 def test_a_split_that_found_every_part_reserves_nothing():

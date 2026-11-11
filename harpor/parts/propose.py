@@ -72,7 +72,7 @@ TIMEOUT_S = 300
 
 PROMPT = """The photo shows a {noun}. We are building a simulation model of this {noun} in which its moving parts can move and its soft parts can dent.
 
-List the parts of the {noun} that move relative to its main body, such as doors, drawers, lids, flaps, turning knobs or wheels, and its soft parts. Use what you can see in the photo. A rigid part is the whole rigid piece that moves as one, with every rigid piece fixed to it: handles, hinges, feet and trim move with their part and are not parts of their own, and the seat, backrest and armrests of an office chair turn together as one part, "seat and backrest". A soft part dents under a press and springs back, such as a cushion or a pad. List it as its own part with joint soft, even when it is fixed to a moving part, and give as its parent the part it sits on: the seat cushion of an office chair is a soft part whose parent is "seat and backrest". Leave out parts that look small in the photo (casters, levers, small buttons) unless the {noun} has no larger moving part. If nothing moves and nothing is soft, give an empty list.
+List the parts of the {noun} that move relative to its main body, such as doors, drawers, lids, flaps, turning knobs or wheels, and its soft parts. Use what you can see in the photo. A rigid part is the whole rigid piece that moves as one, with every rigid piece fixed to it: handles, hinges, feet and trim move with their part and are not parts of their own, and the seat, backrest and armrests of an office chair turn together as one part, "seat and backrest". A soft part dents under a press and springs back, such as a cushion or a pad. List it as its own part with joint soft, even when it is fixed to a moving part, and give as its parent the part it sits on: the seat cushion of an office chair is a soft part whose parent is "seat and backrest". Include small moving parts too, such as casters, levers and buttons. If nothing moves and nothing is soft, give an empty list.
 
 Answer with one JSON object and nothing else:
 {{"base": "<the main body, which does not move, as a short noun phrase>",
@@ -88,7 +88,7 @@ Rules:
 - Name the base the same way, as what stays still when the parts move, so that the model can find it apart from them: "chair base" for an office chair whose seat turns.
 - Identical parts get one entry with a count ("drawer", count 3). Give parts separate names only when they differ ("top drawer" and "bottom door").
 - revolute: the part turns about a hinge or axle (door, lid, flap, knob, a turning seat). prismatic: the part slides (drawer, sliding door). soft: the part dents under a press and springs back (seat cushion, ear pad). unknown: you cannot tell.
-- A part has one joint. When it both turns and slides, give its main motion.
+- A part has one joint. A part that moves about two different axes is two parts, the second attached to the first: a caster is a "caster fork" that turns on the base and a "caster wheel" that spins in the fork. When a part both turns and slides along one axis, give its main motion.
 - range is a number without units: 90 for a door that opens a quarter turn, 360 for a seat that turns all the way round, 40 for a drawer that pulls out 40 cm. Give null for a soft or fixed part, and when you cannot tell.
 - material: foam for a cushion or pad, gel for a gel pad, rubber for a rubber grip or bumper.
 - At most {most} parts."""

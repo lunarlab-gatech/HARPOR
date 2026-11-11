@@ -586,6 +586,26 @@ def test_a_missing_part_fails_until_its_reserved_link_exists():
     assert outcomes([requirement(), old], rep) == (["pass", "unassessed"], [], "none", "pass")
 
 
+def test_a_part_may_hang_on_any_copy_of_its_parent():
+    """A requirement whose parent part has several links lists them as parents: a wheel on any caster fork passes,
+    a wheel on the base fails with every fork as the expected value. Forks that do not exist yet are left out."""
+    fork = lambda k: {"version": 1, "frame": "W", "parent": "frame", "type": "revolute", "origin": [0.0, 0.0, 0.0],  # noqa: E731
+                      "axis": [0.0, 0.0, 1.0], "lower": -3.14, "upper": 3.14}
+    joints = {"fork_1": fork(1), "fork_2": fork(2), "wheel_2": {**hinge(), "parent": "fork_2"}}
+    links = ("frame", "fork_1", "fork_2", "wheel_2")
+    carriers = {"frame": "frame", "fork_1": "fork_1", "fork_2": "fork_2", "wheel_2": "wheel_2"}
+    rep = report(joints, links=links, carriers=carriers)
+    wheel = requirement("r1", "wheel_2", parent="fork_1", parents=["fork_1", "fork_2", "fork_3"])
+    assert V.requirement_findings(wheel, rep) == []
+    on_base = report({**joints, "wheel_2": {**hinge(), "parent": "frame"}}, links=links, carriers=carriers)
+    (f,) = [x for x in V.requirement_findings(wheel, on_base) if x["code"] == "parent_mismatch"]
+    assert (f["measured"], f["expected"]) == ("frame", ["fork_1", "fork_2"]) and "any of its parents" in f["why"]
+    # without parents the single parent decides, as before
+    single = requirement("r1", "wheel_2", parent="fork_1")
+    (f,) = [x for x in V.requirement_findings(single, rep) if x["code"] == "parent_mismatch"]
+    assert (f["measured"], f["expected"]) == ("fork_2", "fork_1") and "any of its parents" not in f["why"]
+
+
 def test_findings_decide_scope_and_outcome():
     rep, req = report(), requirement()
     tracking = {"code": "tracking", "link": "door", "measured": 0.1, "expected": 0.087, "why": "q ends at 1.4"}

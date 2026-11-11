@@ -209,8 +209,8 @@ def test_the_press_stops_rising_at_the_target_or_at_the_cap(tmp_path, hulls):
 
 
 def test_inertia_is_no_warning_in_a_model_with_a_flex(tmp_path, hulls):
-    # MuJoCo 3.16 reports a flex's M+K solve that ran out of iterations as INERTIA, as a cushion on a hinged lid and a
-    # foot pad on the body raise it while both press and the hinge track. A rigid model keeps it.
+    # MuJoCo 4.0, like 3.16, reports a flex's M+K solve that ran out of iterations as INERTIA, as a cushion on a hinged
+    # lid and a foot pad on the body raise it while both press and the hinge track. A rigid model keeps it.
     flex, _, _ = built_pad(tmp_path)
     rigid = mujoco.MjModel.from_xml_string('<mujoco><worldbody><body><joint/><geom size="0.1"/></body></worldbody></mujoco>')
     for m, want in ((flex, ["BADQACC"]), (rigid, ["INERTIA", "BADQACC"])):

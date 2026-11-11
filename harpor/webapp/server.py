@@ -77,7 +77,7 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       is analyzing, queued or running, and while a job with LiDAR waits for
                                       its part list); a lidar stage that ran with it is stale, as after a PUT
   POST   /api/jobs/{id}/start         {mode, prompt, n_views, picks, view0, auto_continue, agent, api_key,
-                                      articulated?, parts_mode?, parts?, lidar?, turntable?} (agent astra: an
+                                      articulated?, parts_mode?, parts?, split?, lidar?, turntable?} (agent astra: an
                                       OpenAI key; opus, fable: an Anthropic key; none: no key, physics uses the Stage A
                                       mesh). articulated (default false) builds an object with moving parts;
                                       parts_mode (steps.PARTS_MODES, default vlm) says who lists them, and parts is the
@@ -709,6 +709,8 @@ def make_app(cfg, token, key_dir=None):
         articulated, parts = b.get("articulated", False), {"mode": b.get("parts_mode"), "list": b.get("parts") or []}
         if not isinstance(parts["list"], list):
             raise Bad(400, "parts is a list of parts")
+        if "split" in b:  # false: the agent cuts the parts, and the split of the mesh is skipped
+            parts["split"] = b["split"]
         try:  # the settings the build would store; the typed list must pass harpor.parts.propose.validate
             jobs.parts_settings({**job, "prompt": prompt.strip(), "agent": agent, "articulated": articulated,
                                  "parts": parts})

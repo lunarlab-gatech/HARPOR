@@ -45,11 +45,13 @@ def plane_view(up=UP, height=0.6):
     return P.astype(np.float32), mask
 
 
-def write_run(run, P, mask, view1=np.eye(3)):
-    """A run of views 0 and 1; view1 is view 1's camera-to-W rotation (view 0's is the identity)."""
+def write_run(run, P, mask, view1=np.eye(3), names=("0", "1")):
+    """A run of views 0 and 1; view1 is view 1's camera-to-W rotation (view 0's is the identity). names: what the
+    two views are called (a run made by hand names its photos itself)."""
     (run / "masks").mkdir(parents=True)
-    Image.fromarray((mask * 255).astype(np.uint8)).resize((2 * W, 2 * H), Image.NEAREST).save(run / "masks" / "0.png")
-    files = [str(run / "input" / "images" / f"{i}.png") for i in (1, 0)]  # view 0 second in DA3's order
+    Image.fromarray((mask * 255).astype(np.uint8)).resize((2 * W, 2 * H), Image.NEAREST).save(
+        run / "masks" / f"{names[0]}.png")
+    files = [str(run / "input" / "images" / f"{n}.png") for n in names[::-1]]  # view 0 second in DA3's order
     cams = ((view1, np.array([1.0, 0, 3])), (np.eye(3), np.zeros(3)))  # camera-to-W rotation and center
     E = [np.hstack([C.T @ DA3_WORLD, -C.T @ c[:, None]]) for C, c in cams]
     np.savez(run / "da3_output.npz", pointmaps=np.stack([P * 2, P]), conf=np.ones((2, H, W), np.float32),
@@ -70,6 +72,9 @@ def test_up_hint_finds_a_tilted_plane(tmp_path):
     write_run(tmp_path / "run", *plane_view())
     up, info = A.up_hint(tmp_path / "run")
     assert info["source"] == "plane" and info["inlier_share"] > 0.9 and info["object_above_share"] > 0.9
+    # View 0 is the first view by name, whatever the views are called: a run made by hand has img1, img2, ...
+    write_run(tmp_path / "named", *plane_view(), names=("img1", "img2"))
+    assert np.allclose(A.up_hint(tmp_path / "named")[0], up)
     assert np.degrees(np.arccos(up @ UP)) < 0.5 and up[1] < 0
     assert np.allclose(info["reference_up"], [0, -1, 0], atol=1e-5)
     assert info["angle_to_reference_deg"] == pytest.approx(np.degrees(np.arccos(-UP[1])), abs=0.5)

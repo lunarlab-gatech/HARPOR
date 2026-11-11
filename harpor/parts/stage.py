@@ -4,6 +4,7 @@ Runs in envs/sam3d from the repo root; J is the job folder:
 
     python -m harpor.parts.stage propose --job J [--key-file F] [--agent astra|opus|fable]
     python -m harpor.parts.stage vote --job J
+    python -m harpor.parts.stage whole --job J
     python -m harpor.parts.stage split --job J --sif SIF [--blender CMD]
     python -m harpor.parts.stage finish --job J
 
@@ -11,6 +12,9 @@ Runs in envs/sam3d from the repo root; J is the job folder:
            is needed only when the VLM lists the parts. harpor.stage_a.part_masks then runs in
            envs/sam3seg and writes run/parts/sam3.
   vote     harpor.parts.vote: run/parts/faces.npz and run/parts/vote.json.
+  whole    harpor.parts.vote.whole, in the place of the part masks and the vote for a job that skips the
+           split (job.json parts.split false): every face is the base, so parts.glb is one object and each
+           other part of the list gets a reserve, which the agent cuts out with add_part.
   split    blender/split_parts.py in the agent's SIF: run/parts.glb and run/parts/split_report.json, log
            run/parts/split.log, at most 600 s. The container sees only J/run and the Blender scripts
            (as controller.blender_command sees only the session's work folder and two folders of
@@ -41,8 +45,11 @@ record holds id, part, prompt, parent (a link), kind (joint or soft), joint (unk
 joint), material (soft), text, action, observe, test (empty without a span target), scope, source, status
 (found or not_found) and required. A not_found record also holds reserve: the name of the link that the
 agent may create for it (tools.add_part), in the vote's style (<slug>, or <slug>_3 after two found), and
-free among the links and the other reserves. Its parent is the first found link of its proposal parent,
-else that parent's own reserve, else up to the base. A revolute part's range becomes its test min_span,
+free among the links and the other reserves. A record's parent is a link of its proposal parent: the found
+links first, then that parent's reserves, else up to the base. A found part keeps the link it shares the
+longest seam with (parents). A part that was not found, with as many copies as its parent part (five caster
+wheels on five caster forks), takes the parent link of its own index, else the first. When the parent part has
+more than one link, parents lists them all, and validate accepts a joint on any of them. A revolute part's range becomes its test min_span,
 in radians. A prismatic part's goes only into text, since a length depends on the scale, which is an
 estimate without LiDAR.
 """
@@ -89,6 +96,16 @@ def vote(job):
         print(f"  {prompt!r}: " + ", ".join(f"{statuses.count(s)} {s}" for s in dict.fromkeys(statuses)))
     for w in rec["warnings"]:
         print(f"  warning: {w}")
+    return rec
+
+
+def whole(job):
+    from harpor.parts import vote as V
+
+    rec = V.whole(_run_dir(job))
+    lost = [c["prompt"] for c in rec["clusters"] if c["status"] != "found"]
+    print(f"whole: {rec['counts']['faces']} faces, all in {rec['base']}; the split is skipped, and the agent cuts "
+          f"{', '.join(lost) or 'no part'}")
     return rec
 
 
@@ -217,9 +234,18 @@ def requirements(proposal, clusters, names, parent):
                 rec["reserve"] = _free(slug(r["part"]) if total == 1 else f"{slug(r['part'])}_{k + 1}", taken)
                 reserves.setdefault(r["part"], []).append(rec["reserve"])
             out.append(rec)
+    index, total = {}, {}
     for rec in out:
-        if rec["status"] == "not_found":
-            rec["parent"] = _missing_parent(rec["prompt"], proposal, by_prompt, clusters, names, reserves)
+        total[rec["prompt"]] = total.get(rec["prompt"], 0) + 1
+    for rec in out:
+        k = index[rec["prompt"]] = index.get(rec["prompt"], -1) + 1
+        links = _parent_links(rec["prompt"], proposal, by_prompt, clusters, names, reserves)
+        if rec["status"] == "not_found":  # the k-th of five caster wheels goes on the k-th of five caster forks
+            rec["parent"] = links[k] if len(links) == total[rec["prompt"]] else links[0]
+        elif rec["parent"] not in links:  # found, but its parent part was not: it will hang on a reserve
+            rec["parent"] = links[0]
+        if len(links) > 1:  # any of them carries the part (validate's parent check)
+            rec["parents"] = links
     return out
 
 
@@ -233,20 +259,19 @@ def _free(name, taken):
     return out
 
 
-def _missing_parent(prompt, proposal, by_prompt, clusters, names, reserves):
-    """The parent link of a part that was not found: the first found link of its proposal parent, else that
-    parent's first reserve (a missing part on a missing part), else its parent's, up to the base."""
+def _parent_links(prompt, proposal, by_prompt, clusters, names, reserves):
+    """The links that can carry a part of prompt: the found links of its proposal parent in the vote's order, then
+    that parent's reserves (a missing part on a missing part); a parent with neither (a fixed part that was not
+    found) gives its own parent's, up to the base, [base]."""
     from harpor.stage_a.sam3_masks import slug
 
     p = by_prompt.get(prompt, {}).get("parent")
     while p is not None and p != proposal["base"] and slug(p) != names[0]:
-        found = [n for n in names[1:] if clusters[n]["prompt"] == p]
-        if found:
-            return found[0]
-        if reserves.get(p):
-            return reserves[p][0]
+        links = [n for n in names[1:] if clusters[n]["prompt"] == p] + reserves.get(p, [])
+        if links:
+            return links
         p = by_prompt.get(p, {}).get("parent")
-    return names[0]
+    return [names[0]]
 
 
 def finish(job):
@@ -336,6 +361,8 @@ def main(argv=None):
     p.add_argument("--agent", choices=("astra", "opus", "fable", "none"), help="default: the job's agent")
     v = sub.add_parser("vote")
     v.add_argument("--job", required=True)
+    w = sub.add_parser("whole")
+    w.add_argument("--job", required=True)
     s = sub.add_parser("split")
     s.add_argument("--job", required=True)
     s.add_argument("--sif", help="the agent's SIF, with Blender")
@@ -347,6 +374,8 @@ def main(argv=None):
         propose(a.job, a.key_file, a.agent)
     elif a.step == "vote":
         vote(a.job)
+    elif a.step == "whole":
+        whole(a.job)
     elif a.step == "split":
         from harpor.agent import tools
 

@@ -146,6 +146,8 @@ def test_help_prints():
     (["{video}", "--edit-parts"], "--parts and --edit-parts need --articulated"),
     (["{video}", "--articulated", "--agent", "opus", "--edit-parts", "--parts", "{parts}"], "choose one"),
     (["{video}", "--articulated", "--edit-parts"], "--edit-parts needs --agent astra, opus or fable"),
+    (["{video}", "--no-split", "--agent", "opus"], "--no-split needs --articulated"),
+    (["{video}", "--articulated", "--no-split", "--parts", "{parts}"], "--no-split needs --agent astra, opus or fable"),
     (["{video}", "--articulated"], "without an agent there is no VLM"),
     (["{video}", "--key-file", "{tmp}/k.env"], "--key-file needs --agent astra, opus or fable"),
     (["{video}", "--articulated", "--parts", "{tmp}/nope.json"], "cannot read the part list"),

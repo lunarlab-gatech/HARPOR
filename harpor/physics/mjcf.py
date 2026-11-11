@@ -58,10 +58,11 @@ is smaller because pinned nodes drop their share (check gives soft_mass). The ob
 per visual, on a bone per free node and one bone for all the pinned nodes, bound at the rest origin of the
 body they hang from, and the flex stays in group 3 so that a viewer shows the textured surface.
 soft/<link>.npz holds the binding, and check_binding tests it. With a soft link the model sets
-integrator="discrete" and solver="CG", which a scene that includes the model must keep. <exclude> has no
-effect on a flex, so contact bits do the work: the collision class is contype 3 and conaffinity 2, the flex
-contype 1 and conaffinity 0. Link and link collide (2), link and flex do not (0), and links and the flex
-collide with anything else in a scene (1). Then the proud hex cannot press on a neighbour at rest, and a
+integrator="discrete" and solver="CG", which a scene that includes the model must keep. The flex's damping is
+Rayleigh damping on its elasticity (RAYLEIGH), not edge damping, which MuJoCo 4.0 refuses with that integrator.
+<exclude> has no effect on a flex, so contact bits do the work: the collision class is contype 3 and conaffinity
+2, the flex contype 1 and conaffinity 0. Link and link collide (2), link and flex do not (0), and links and the
+flex collide with anything else in a scene (1). Then the proud hex cannot press on a neighbour at rest, and a
 neighbour can pass through the soft part under load, which is accepted because the hex is a proxy.
 A soft link with no usable mesh (harpor.physics.soft.SoftError) stays a rigid link fixed to its parent, with a
 warning. mjcf.json adds soft {link: {file, nodes, tets, pinned, pitch, material, young, poisson, density,
@@ -84,6 +85,11 @@ from harpor.physics import soft as soft_mesh
 from harpor.physics.mass import combine
 
 OMEGA = 2 * np.pi * 5  # rad/s, the natural frequency of a joint on its position actuator
+# A soft link's damping: Rayleigh damping on its <elasticity>, in units of time, at the low end of the 0.002 to 0.05
+# that MuJoCo's modeling guide gives for the discrete integrator. MuJoCo 4.0 refuses <edge damping> with that
+# integrator, since edge forces are integrated explicitly (the 0.01 used before). 0.01 here made MuJoCo 3.16 report
+# the office chair's M+K solve as an ill-conditioned inertia; 0.002 steps it without a warning in 3.16 and in 4.0.
+RAYLEIGH = 0.002
 
 
 def shared_visual(visual):
@@ -235,8 +241,7 @@ def flexcomp_xml(flex, rec, j, friction, ind):
     return [f'{ind}<flexcomp name={quoteattr(rec["flex"])} type="direct" dim="3" dof="full" group="3" radius="0.002" '
             f'mass="{rec["inertial"]["mass"]:.6g}" point="{_fine(flex["nodes"])}" element="{_ints(flex["tets"])}">',
             f'{ind}  <contact contype="1" conaffinity="0" selfcollide="none" friction="{friction:g} 0.005 0.0001"/>',
-            f'{ind}  <edge damping="0.01"/>',
-            f'{ind}  <elasticity young="{j["young"]:.6g}" poisson="{j["poisson"]:.6g}"/>',
+            f'{ind}  <elasticity young="{j["young"]:.6g}" poisson="{j["poisson"]:.6g}" damping="{RAYLEIGH:g}"/>',
             f'{ind}  <pin id="{_ints(flex["pinned"])}"/>',
             f'{ind}</flexcomp>']
 

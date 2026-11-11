@@ -809,6 +809,7 @@ async function loadFrames() {
     }
     $("#articulated").checked = job.articulated === true;
     partsPick = job.parts.mode;
+    $("#nosplit").checked = job.parts.split === false;
     $("#partlist").value = formatParts(job.parts.list);
     agentToggle();
     lidarSetup(job);
@@ -1108,7 +1109,8 @@ $("#startform").onsubmit = async (e) => {
   try {
     await post(`/api/jobs/${V.id}/start`, { mode: mode(), prompt: $("#prompt").value, n_views: +$("#nviews").value,
       picks: manual ? V.picks : [], view0: manual ? V.view0 : null, auto_continue: !$("#pause").checked,
-      agent, api_key: typed ? $("#key").value : null, articulated, ...(articulated ? { parts_mode: pm, parts } : {}), lidar,
+      agent, api_key: typed ? $("#key").value : null, articulated,
+      ...(articulated ? { parts_mode: pm, parts, ...($("#nosplit").checked === true && keyed ? { split: false } : {}) } : {}), lidar,
       turntable: $("#turntable").checked === true });
     $("#key").value = "";
     say($("#startmsg"), "", true);

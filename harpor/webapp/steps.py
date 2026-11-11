@@ -145,6 +145,12 @@ def parts_mode(job):
     return "user" if agent(job) == "none" else mode
 
 
+def split(job):
+    """False when the job skips the split of the mesh into parts (job.json "parts" "split" false): the parts
+    stage then makes one part object of the whole mesh, and the agent cuts every part of the list itself."""
+    return (job.get("parts") or {}).get("split", True) is not False
+
+
 def turntable(job):
     """True when the job asks for the 360 video (job.json "turntable")."""
     return job["turntable"] is True
@@ -219,11 +225,14 @@ def command(stage, job, cfg, key_file=None):
     elif stage == "parts":
         # One script in two envs: SAM 3 part masks in envs/sam3seg, then the vote, the split (Blender in the
         # agent's SIF) and parts.json, the done marker, in envs/sam3d. The old marker is removed first.
+        # A job that skips the split (split) runs no part masks and no vote: whole makes the mesh one part.
         stage_cmd = run + '$G/envs/sam3d/bin/python -m harpor.parts.stage {} --job "$J"'
-        lines += ['rm -f "$J/run/parts.json" "$J/run/parts.glb"', f"export {SAM3_ENV}",
-                  run + '$G/envs/sam3seg/bin/python -m harpor.stage_a.part_masks --run "$J/run" '
-                        '--proposal "$J/run/proposal.json" --out "$J/run/parts/sam3"',
-                  f"export {STAGE_A_ENV}", stage_cmd.format("vote"),
+        lines.append('rm -f "$J/run/parts.json" "$J/run/parts.glb"')
+        if split(job):
+            lines += [f"export {SAM3_ENV}",
+                      run + '$G/envs/sam3seg/bin/python -m harpor.stage_a.part_masks --run "$J/run" '
+                            '--proposal "$J/run/proposal.json" --out "$J/run/parts/sam3"']
+        lines += [f"export {STAGE_A_ENV}", stage_cmd.format("vote" if split(job) else "whole"),
                   stage_cmd.format("split") + sif, stage_cmd.format("finish")]
     else:
         lines.append(f"export {STAGE_A_ENV}")

@@ -364,7 +364,8 @@ def propose(J, key_file=None, which="astra"):
 
 
 def parts(J):
-    """The base of the proposal and its next part, cut from the box at CUT_Y (see the module docstring)."""
+    """The base of the proposal and its next part, cut from the box at CUT_Y (see the module docstring). A job
+    that skips the split (steps.split) gets the base alone, and every other part is not found."""
     import trimesh
     from PIL import Image
 
@@ -374,6 +375,7 @@ def parts(J):
     from harpor.parts.vote import load_mesh
     from harpor.stage_a.part_masks import COLORS, overlay_parts
     from harpor.stage_a.sam3_masks import slug
+    from harpor.webapp import steps
 
     R = J / "run"
     for f in (R / "parts.json", R / "parts.glb"):
@@ -385,7 +387,8 @@ def parts(J):
     Rw, tw = view0_pose(R, cams[0]["name"])
     base = next(p for p in proposal["parts"] if p["name"] == proposal["base"])
     others = [p for p in proposal["parts"] if p is not base]
-    found, lost = [base, *others[:1]], others[1:]
+    whole = not steps.split(json.loads((J / "job.json").read_text()))  # the job skips the split: only the base
+    found, lost = ([base], others) if whole else ([base, *others[:1]], others[1:])
     names = [slug(p["name"]) for p in found]
     for d in ("check", *names):
         (out / d).mkdir(parents=True)
@@ -464,7 +467,7 @@ def parts(J):
     above = (cen - (Rw @ [0.0, CUT_Y, 0.0] + tw)) @ (Rw @ [0.0, -1.0, 0.0]) > 0
     label = above.astype(np.int64) if len(found) == 2 else np.zeros(len(faces), np.int64)
     np.savez(R / "parts" / "faces.npz", part=label, names=np.array(names), centroids=cen, score=np.ones(len(faces)))
-    why = f"fake: only {names[-1]} is cut from the box"
+    why = "the split was skipped: the agent cuts the parts" if whole else f"fake: only {names[-1]} is cut from the box"
     share = [round(float(area[Pc == k].sum() / area.sum()), 5) for k in range(len(found))]
     views = [[n for n, x in vis.items() if x > 0] for vis in visibility]
     clusters = [{"name": n, "prompt": p["name"], "role": "base" if k == 0 else "part", "status": "found",

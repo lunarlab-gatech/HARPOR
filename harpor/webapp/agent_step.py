@@ -127,13 +127,16 @@ def print_rounds(r):
           "  delivered no stored candidate")
 
 
-def source(prompt, n, kind, parts=False):
-    """The manifest's source line. kind: the job's input (steps.source). parts: the mesh was split into parts."""
+def source(prompt, n, kind, parts=False, split=True):
+    """The manifest's source line. kind: the job's input (steps.source). parts: the job has a part list
+    (input/parts.json); split: SAM 3 part masks split the mesh into those parts, else the mesh is one part object
+    and the agent cuts the parts (steps.split)."""
     from harpor.webapp.jobs import INPUTS
 
     return (f"MV-SAM3D from {n} frames from {INPUTS[kind]} of the {prompt}, with Depth Anything 3 cameras; "
             f"pose (scale, shift, small rotation) fitted to the {n} SAM 3 masks"
-            + ("; split into parts by SAM 3 part masks (input/parts.json)" if parts else ""))
+            + ("" if not parts else "; split into parts by SAM 3 part masks (input/parts.json)" if split else
+               "; not split: one part object, and input/parts.json lists the parts to cut out of it"))
 
 
 def mode(job_dir, job):
@@ -166,7 +169,8 @@ def run(job_dir, sif, key_file, agent="astra"):
             raise SystemExit(f"no {parts}; the parts stage did not finish")
     views = mvsam3d.session_views(J / "run")
     controller.prepare_session(root, kind, None, views,
-                               source=source(job["prompt"], len(views), steps.source(job)["kind"], parts is not None),
+                               source=source(job["prompt"], len(views), steps.source(job)["kind"], parts is not None,
+                                             steps.split(job)),
                                metric=True, original=original, parts=parts, agent=AGENTS[agent],
                                effort=EFFORT.get(agent), model=MODEL.get(agent))
     physics_review.prepare(root, J, key_file, agent)

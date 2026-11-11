@@ -89,7 +89,7 @@ def test_no_doc_names_the_old_run_folders():
      ["641a22d958054b8f4644aaddd4b1cba2a0d45491", "python=3.11", "cuda-nvcc=12.1.105", "torch==2.4.0",
       "spconv-cu121==2.3.8", "kaolin==0.18.0"]),
     ("mujoco", "envs/mujoco", [],
-     ["python=3.11", "mujoco==3.16.0", "coacd==1.0.14", "trimesh==5.1.1", "usd-core==26.8", "numpy==2.4.6",
+     ["python=3.11", "mujoco==4.0.0", "coacd==1.0.14", "trimesh==5.1.1", "usd-core==26.8", "numpy==2.4.6",
       "scipy==1.17.1", "pillow==12.3.0"]),
 ])
 def test_script_builds_under_harpor_root_without_a_module_command(run, tmp_path, script, env, made, pins):
@@ -101,6 +101,14 @@ def test_script_builds_under_harpor_root_without_a_module_command(run, tmp_path,
     pips = [c for c in calls if "/pip " in c]
     assert pips and all(c.startswith(f"{root / env}/bin/pip ") for c in pips)
     assert all("conf=/dev/null" in c and f"hf={root}/.cache/huggingface" in c for c in pips)
+
+
+def test_mujoco_removes_a_3x_mujoco_before_it_installs_4(run):
+    # The stub python succeeds at every -c, so the version check takes the env's mujoco for a 3.x one.
+    p, calls = run("mujoco")
+    assert p.returncode == 0, p.stderr
+    pips = [c.split(" | ")[0] for c in calls if "/envs/mujoco/bin/pip " in c]
+    assert pips[0].endswith("/envs/mujoco/bin/pip uninstall -y mujoco") and "mujoco==4.0.0" in pips[1]
 
 
 def test_the_default_root_is_the_one_the_app_reads(run, tmp_path, monkeypatch):

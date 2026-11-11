@@ -107,9 +107,13 @@ elsewhere.
 The split can miss a part of the part list, or find fewer of a part than the list counts. Such a part
 has no object. Its requirement in input/parts.json has part null and status not_found, and two fields
 that say what to make: reserve, the name that the part's object must get, and parent, the part it is
-attached to. The part's surface is still inside another object, most often the parent. The host's
+attached to. When the parent part has several copies (the forks of five casters), parents lists them
+all; the part may hang on any of them, so give each copy the one it touches. The part's surface is
+still inside another object, most often the parent. The host's
 check fails the requirement (part_missing) until a mesh object with the reserve name exists, and then
-checks its joint as any other part's. Create every such part before you set the joints:
+checks its joint as any other part's. A job can also skip the split: candidate.blend then holds one
+part object, the base, and every other part of the list has a reserve. Create every such part
+before you set the joints:
 
 1. Find the part. Look at the photos and at original/previews/, and find where it is on the mesh, in
    W. input/manifest.json has K and w2c of each view, so a point in W can be projected into a photo
@@ -137,8 +141,10 @@ checks its joint as any other part's. Create every such part before you set the 
    it with the photos.
 5. A wrong cut is taken back by copying the file that add_part names (add_part/NNN_before.blend) over
    candidate.blend. Then cut again.
-6. Give the new part its joint with set_joint, as for every part. When a missing part is attached to
-   another missing part, create the parent first and cut the child from the right source.
+6. Give the new part its joint with set_joint, as for every part. A part you created has no seam in
+   input/parts.json: its hinge line lies on the cut, so fit a line to the edge where the part meets
+   its source. When a missing part is attached to another missing part, create the parent first and
+   cut the child from the right source.
 
 When the photos show that the object does not have the part at all, cut nothing for it, and name it in
 a limitation. The check will still report it as missing.
@@ -184,7 +190,8 @@ drawer without a cavity. Review again after the fix.
 
 input/parts.json may also hold requirements, which say what the parts must do: one per moving or soft
 part, with an id, the part (its object's name; null when the split did not find it, and reserve is
-then the name of the object to create for it), the joint it
+then the name of the object to create for it), its parent (and parents, when the parent part has
+several copies, any of which may carry it), the joint it
 needs (revolute, prismatic, soft, or unknown for either moving type), a short text, and a test, such
 as min_span, the span in radians that the part list expects of the range. The host checks the GLB you hand off
 against them: the joints, the surface against original/original.glb, each hinge and slide swept
