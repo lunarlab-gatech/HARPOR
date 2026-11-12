@@ -1,5 +1,5 @@
 """Agent stage of a web-app job: GPT-6-Astra, Claude Opus 5.5 or Claude Fable 5.2 refines the Stage A mesh
-(build_plan.md note 5), or gives the parts of an articulated job their joints (note 11).
+(build_plan.md note 5).
 
 Runs in envs/sam3d from the repo root, with apptainer on the PATH:
 
@@ -7,9 +7,7 @@ Runs in envs/sam3d from the repo root, with apptainer on the PATH:
 
 It prepares a fresh session in J/agent/s from J/run, runs it with controller.run_container_session and
 writes a copy of J/agent/s/result.json, without the key, to J/agent/result.json. The session is a
-refinement of posed.glb (600 s) or, for an articulated job (job.json "articulated": true) whose parts
-stage made run/parts.glb, an articulation of parts.glb with run/parts.json as input/parts.json (900 s).
-Both use every view of cameras.json. --agent astra (the default) runs GPT-6-Astra through the Codex
+refinement of posed.glb (600 s for the build round) with every view of cameras.json. --agent astra (the default) runs GPT-6-Astra through the Codex
 CLI in Apptainer, and F holds OPENAI_API_KEY; --agent opus runs Claude Opus 5.5 through
 harpor.agent.claude_agent at xhigh effort, and --agent fable runs Claude Fable 5.2 through it at high
 effort (EFFORT; envs/sam3d needs anthropic==1.15.0), and F holds ANTHROPIC_API_KEY. The web app writes
@@ -23,11 +21,12 @@ the agent's links, are printed as one line without control characters (tools.pri
 replaced again after that cleaning: a key split by a control character that it drops is whole only
 then. The helpers already store the agent's text that way; this also cleans an older result.
 
-An articulation whose parts.json has a found requirement runs in rounds (controller.run_rounds), and the host
-checks each round's candidate with MuJoCo, the python of envs/mujoco that GATOR_MUJOCO names (steps.command
-exports it). Without that python every round would be sim_unavailable, so the step stops before the session runs.
-The session's evidence, root/control/evidence.json (harpor.agent.evidence), holds the agent's reason, limitations and
-link names, so it goes to J/agent/evidence.json, which the web app serves, only scrubbed as the result is, and as
+The session runs in rounds (controller.run_rounds) with physics supervision (harpor.agent.physics_review): the host
+settles each round's candidate in MuJoCo, the python of envs/mujoco that GATOR_MUJOCO names (steps.command exports
+it), and the job's VLM judges the frames. Without that python every round would be inconclusive, so the step stops
+before the session runs. The session's evidence, root/control/evidence.json (harpor.agent.evidence), holds the
+agent's reason and limitations, so it goes to J/agent/evidence.json, which the web app serves, only scrubbed as the
+result is, and as
 strict JSON (finite: browsers' JSON.parse takes no NaN or Infinity, which MuJoCo's states can give). It is written
 whether the session ends or stops, since the controller keeps it after every round; agent/result.json is finite too.
 
@@ -57,7 +56,7 @@ AGENTS = {"astra": "codex", "opus": "claude", "fable": "claude"}  # the web app'
 # Anthropic's advice for Fable 5.2: its xhigh turns run longer and use many more tokens, for uneven gains.
 EFFORT = {"opus": "xhigh", "fable": "high"}
 MODEL = {a: MODELS[a] for a, c in AGENTS.items() if c == "claude"}  # the claude agent's model (Codex has its own)
-BUDGET_S = {"refinement": 600.0, "articulation": 900.0}
+BUDGET_S = 600.0  # the build round's; a repair or replan has controller.ROUND_BUDGET_S
 
 
 def scrub(x, key):
@@ -103,13 +102,12 @@ def check_mujoco():
     except ValueError:
         python = []
     if not python or shutil.which(python[0]) is None:
-        raise SystemExit(f"GATOR_MUJOCO is {value!r}, not the python of envs/mujoco: the host checks this "
-                         "articulation's requirements with MuJoCo there. Make it with setup/mujoco.sh")
+        raise SystemExit(f"GATOR_MUJOCO is {value!r}, not the python of envs/mujoco: the host checks each "
+                         "candidate's physics with MuJoCo there. Make it with setup/mujoco.sh")
 
 
 def print_rounds(r):
-    """Print the rounds of a result r in rounds, the outcome counts of its requirements and the stored candidate
-    that it delivered."""
+    """Print the rounds of a result r in rounds and the stored candidate that it delivered."""
     for x in r["rounds"]:
         c = x["candidate"] or {}
         got = f"{x['outcome']}, scope {x['scope']}" if x["outcome"] else "no check"
@@ -117,32 +115,17 @@ def print_rounds(r):
             got += f", candidate v{c['version']:02d} ({c['verdict']})"
         found = list(dict.fromkeys(f["code"] for f in x["findings"]))
         print(f"  round {x['round']} {x['kind']}: {got}" + (f"; findings: {', '.join(found)}" if found else ""))
-    n = r.get("requirements") or {}
-    print("  requirements: " + ", ".join(f"{n.get(k, 0)} {k}" for k in ("pass", "fail", "inconclusive", "unassessed")))
-    for x in r.get("reduced") or []:  # met with less than the part list's range (validate.reduced)
-        print(f"  {x['requirement']} {printable(x['link'])}: reduced, {x['span']:.3g} of the {x['target']:.3g} rad that "
-              f"the part list estimated ({x['share']:.0%})")
     c = r.get("candidate")
     print(f"  delivered candidate v{c['version']:02d} of round {c['round']}: {c['why']}" if c else
           "  delivered no stored candidate")
 
 
-def source(prompt, n, kind, parts=False, split=True):
-    """The manifest's source line. kind: the job's input (steps.source). parts: the job has a part list
-    (input/parts.json); split: SAM 3 part masks split the mesh into those parts, else the mesh is one part object
-    and the agent cuts the parts (steps.split)."""
+def source(prompt, n, kind):
+    """The manifest's source line. kind: the job's input (steps.source)."""
     from harpor.webapp.jobs import INPUTS
 
     return (f"MV-SAM3D from {n} frames from {INPUTS[kind]} of the {prompt}, with Depth Anything 3 cameras; "
-            f"pose (scale, shift, small rotation) fitted to the {n} SAM 3 masks"
-            + ("" if not parts else "; split into parts by SAM 3 part masks (input/parts.json)" if split else
-               "; not split: one part object, and input/parts.json lists the parts to cut out of it"))
-
-
-def mode(job_dir, job):
-    """articulation for an articulated job whose parts stage made run/parts.glb, else refinement."""
-    return "articulation" if steps.articulated(job) and (Path(job_dir) / "run" / "parts.glb").is_file() \
-        else "refinement"
+            f"pose (scale, shift, small rotation) fitted to the {n} SAM 3 masks")
 
 
 def run(job_dir, sif, key_file, agent="astra"):
@@ -161,23 +144,15 @@ def run(job_dir, sif, key_file, agent="astra"):
         shutil.rmtree(root)
     out.unlink(missing_ok=True)
     evidence.unlink(missing_ok=True)
-    kind = mode(J, job)
-    original, parts = J / "run" / "posed.glb", None
-    if kind == "articulation":
-        original, parts = J / "run" / "parts.glb", J / "run" / "parts.json"
-        if not parts.is_file():
-            raise SystemExit(f"no {parts}; the parts stage did not finish")
     views = mvsam3d.session_views(J / "run")
-    controller.prepare_session(root, kind, None, views,
-                               source=source(job["prompt"], len(views), steps.source(job)["kind"], parts is not None,
-                                             steps.split(job)),
-                               metric=True, original=original, parts=parts, agent=AGENTS[agent],
+    controller.prepare_session(root, None, views, source=source(job["prompt"], len(views), steps.source(job)["kind"]),
+                               metric=True, original=J / "run" / "posed.glb", agent=AGENTS[agent],
                                effort=EFFORT.get(agent), model=MODEL.get(agent))
     physics_review.prepare(root, J, key_file, agent)
-    if controller.has_rounds(root, kind):
+    if controller.has_rounds(root):
         check_mujoco()
     try:
-        controller.run_container_session(root, sif, key_file, budget_s=BUDGET_S[kind])
+        controller.run_container_session(root, sif, key_file, budget_s=BUDGET_S)
     finally:
         publish_evidence(root, evidence, keys)
     r = finite(scrub(json.loads((root / "result.json").read_text()), keys))
@@ -188,10 +163,6 @@ def run(job_dir, sif, key_file, agent="astra"):
         print(f"  model: {r['model']}" + (f", effort {r['effort']}" if r.get("effort") else ""))
     if r.get("tokens"):
         print(f"  {r.get('turns')} turns, tokens {r['tokens']}, about ${r.get('cost_usd') or 0:.2f}")
-    if kind == "articulation":
-        c = r.get("counts") or {}
-        print(f"  articulation: {r.get('joints_delivered')} joints delivered, {c.get('joints', 0)} set_joint changes, "
-              f"{c.get('articulation_reviews', 0)} articulation reviews")
     if r.get("rounds"):
         print_rounds(r)
     print(f"  reason: {scrub(printable(r.get('reason')), keys)}")

@@ -22,19 +22,6 @@ friction (MJCF_DIR/mjcf.json), so the two models agree, except that omni.physx r
 The stage is z up, 1 m and 1 kg per unit, the frame S of harpor.physics.align and summary.json, so
 Isaac Sim's Metrics Assembler has nothing to convert. PhysX averages two materials' friction by
 default, so the ground carries the same value. VoMP gives no friction or restitution; F is an assumption.
-
-When the MJCF has links (a GLB with joints, build_plan.md note 11), /NAME carries ArticulationRootAPI
-instead, and each link is an Xform /NAME/links/<link> with RigidBodyAPI and MassAPI (the MJCF's per-link
-inertial) that holds that link's visuals/ and collisions/. All links share frame S (identity transforms).
-/NAME/joints/<child> is a PhysicsRevoluteJoint (limits in degrees), PhysicsPrismaticJoint (meters) or
-PhysicsFixedJoint from the parent link to the child, with localPos0 = localPos1 = the joint's origin and
-localRot0 = localRot1 turning the joint's x axis onto its axis (harpor.parts.joints.axis_rotation); a link
-without a joint gets a fixed joint to the link the MJCF welds it to (mjcf.json welded, else the root). A
-soft part gets a PhysicsFixedJoint too; its link prim holds customData harpor:soft_as_rigid, and usd.json
-soft_as_rigid names it. A fixed base is /NAME/joints/world, a PhysicsFixedJoint from the world to the root
-link at the MJCF's start height, where scene.usda places the asset. A joint's two links never collide
-(collisionEnabled is false by default); every pair in mjcf.json excluded_pairs also gets FilteredPairsAPI,
-as the MJCF's <exclude>, and so does every pair in soft_excluded_pairs, because a soft link collides here.
 """
 
 import argparse
@@ -45,7 +32,6 @@ from pathlib import Path
 
 import numpy as np
 
-from harpor.parts.joints import SOFT_AS_RIGID, STATIC, axis_rotation
 from harpor.physics.mjcf import load_s
 
 
@@ -180,8 +166,6 @@ def build(glb, summary, mjcf_dir, out, name, friction=None):
     (out / "textures").mkdir(parents=True, exist_ok=True)
     mj = json.loads((mjcf_dir / "mjcf.json").read_text())
     friction = mj["friction"] if friction is None else friction
-    if "links" in mj:
-        return build_links(glb, summary, mjcf_dir, out, name, mj, friction)
     rb = json.loads(Path(summary).read_text())["rigid_body"]
     hulls = [read_obj(mjcf_dir / "assets" / f"collision_{j}.obj") for j in range(mj["collision_hulls"])]
 
@@ -208,97 +192,6 @@ def build(glb, summary, mjcf_dir, out, name, friction=None):
               "name": name, "friction": friction, "start_z": mj["start_z"], "visuals": visuals,
               "collision_hulls": len(hulls), "inertial": {k: rb[k] for k in ("mass", "com", "fullinertia")},
               "diagonal_inertia": d.tolist(), "principal_axes_wxyz": list(q)}
-    (out / "usd.json").write_text(json.dumps(report, indent=1))
-    return report
-
-
-def _prim_names(links):
-    """{link: a USD prim name}, unique (Tf.MakeValidIdentifier, then a suffix on a clash)."""
-    from pxr import Tf
-
-    out, used = {}, set()
-    for i, link in enumerate(links):
-        p = Tf.MakeValidIdentifier(link)
-        p = f"{p}_{i}" if p in used else p
-        out[link] = p
-        used.add(p)
-    return out
-
-
-def build_links(glb, summary, mjcf_dir, out, name, mj, friction):
-    """build() for an MJCF with links: an articulation (see the module docstring)."""
-    from pxr import Gf, UsdGeom, UsdPhysics
-
-    stage = _stage(out / f"{name}.usd")
-    root = UsdGeom.Xform.Define(stage, f"/{name}")
-    stage.SetDefaultPrim(root.GetPrim())
-    UsdPhysics.ArticulationRootAPI.Apply(root.GetPrim())
-    UsdGeom.Scope.Define(stage, f"/{name}/materials")
-    prims = _prim_names(mj["links"])
-    path = {k: f"/{name}/links/{p}" for k, p in prims.items()}
-    links = {}
-    for link, rec in mj["links"].items():
-        x = UsdGeom.Xform.Define(stage, path[link])
-        UsdPhysics.RigidBodyAPI.Apply(x.GetPrim())
-        d, q = _mass(x.GetPrim(), rec["inertial"])
-        links[link] = {"prim": path[link], "inertial": rec["inertial"], "source": rec["source"],
-                       "diagonal_inertia": d.tolist(), "principal_axes_wxyz": list(q)}
-
-    visuals = []
-    for k, (link, label, m) in enumerate(load_s(glb, by_link=True)):
-        v = _visual(stage, out, name, k, label, m, f"{path[link]}/visuals/visual_{k}")
-        if v:
-            visuals.append({**v, "link": link})
-    phys = _physics_material(stage, f"/{name}/materials/physics", friction)
-    for link, rec in mj["links"].items():
-        for j in range(rec["collision_hulls"]):
-            v, f = read_obj(Path(mjcf_dir) / "assets" / f"collision_{link}_{j}.obj")
-            _collider(stage, f"{path[link]}/collisions/collision_{j}", v, f, phys)
-
-    filtered = mj.get("excluded_pairs", []) + mj.get("soft_excluded_pairs", [])  # a soft link is rigid here
-    for a, b in filtered:
-        UsdPhysics.FilteredPairsAPI.Apply(stage.GetPrimAtPath(path[a])).CreateFilteredPairsRel().AddTarget(path[b])
-
-    UsdGeom.Scope.Define(stage, f"/{name}/joints")
-    kinds = {"revolute": UsdPhysics.RevoluteJoint, "prismatic": UsdPhysics.PrismaticJoint, "fixed": UsdPhysics.FixedJoint,
-             "soft": UsdPhysics.FixedJoint}
-    holder = mj.get("welded", {})
-    welded = [{"child": k, "parent": holder.get(k, mj["root"]), "type": "fixed", "pos": [0.0, 0.0, 0.0],
-               "axis": [1.0, 0.0, 0.0], "range": [0.0, 0.0]} for k in mj["loose"]]
-    joints = []
-    for j in mj["joints"] + welded:
-        jp = f"/{name}/joints/{prims[j['child']]}"
-        J = kinds[j["type"]].Define(stage, jp)
-        J.CreateBody0Rel().SetTargets([path[j["parent"]]])
-        J.CreateBody1Rel().SetTargets([path[j["child"]]])
-        rot = Gf.Quatf(*axis_rotation(j["axis"]))
-        J.CreateLocalPos0Attr(Gf.Vec3f(*map(float, j["pos"])))
-        J.CreateLocalRot0Attr(rot)
-        J.CreateLocalPos1Attr(Gf.Vec3f(*map(float, j["pos"])))
-        J.CreateLocalRot1Attr(rot)
-        lower, upper = j["range"]
-        if j["type"] == "soft":
-            stage.GetPrimAtPath(path[j["child"]]).SetCustomDataByKey("harpor:soft_as_rigid", True)
-        if j["type"] not in STATIC:
-            J.CreateAxisAttr(UsdPhysics.Tokens.x)
-            scale = 180 / np.pi if j["type"] == "revolute" else 1.0  # USD revolute limits are in degrees
-            J.CreateLowerLimitAttr(float(lower * scale))
-            J.CreateUpperLimitAttr(float(upper * scale))
-        joints.append({"prim": jp, **j})
-    if mj["fixed_base"]:
-        J = UsdPhysics.FixedJoint.Define(stage, f"/{name}/joints/world")  # no body0: the world
-        J.CreateBody1Rel().SetTargets([path[mj["root"]]])
-        J.CreateLocalPos0Attr(Gf.Vec3f(0, 0, float(mj["start_z"])))
-        J.CreateLocalPos1Attr(Gf.Vec3f(0, 0, 0))
-    stage.GetRootLayer().Save()
-    _scene(out, name, friction, mj["start_z"])
-
-    report = {"glb": str(Path(glb).resolve()), "summary": str(Path(summary).resolve()),
-              "mjcf": str(Path(mjcf_dir).resolve()), "name": name, "friction": friction, "start_z": mj["start_z"],
-              "visuals": visuals, "collision_hulls": mj["collision_hulls"], "root": mj["root"],
-              "fixed_base": mj["fixed_base"], "links": links, "joints": joints,
-              "filtered_pairs": filtered,
-              "soft_as_rigid": {j["child"]: SOFT_AS_RIGID for j in joints if j["type"] == "soft"}}
     (out / "usd.json").write_text(json.dumps(report, indent=1))
     return report
 
@@ -401,14 +294,11 @@ def _read_mass(prim):
 
 
 def check(out, name):
-    """Reopen both stages and compare the body's mass, COM and full inertia with what was written. For an
-    articulation: each link's, and each joint's bodies, axis (x turned by localRot0) and limits."""
+    """Reopen both stages and compare the body's mass, COM and full inertia with what was written."""
     from pxr import Usd, UsdGeom, UsdPhysics, UsdShade
 
     stage = Usd.Stage.Open(str(Path(out) / f"{name}.usd"))
     root = stage.GetDefaultPrim()
-    if root.HasAPI(UsdPhysics.ArticulationRootAPI):
-        return _check_links(stage, Path(out), name)
     mass, com, full = _read_mass(root)
     coll = [p for p in stage.Traverse() if p.HasAPI(UsdPhysics.CollisionAPI)]
     textures = []
@@ -423,42 +313,6 @@ def check(out, name):
             "kilograms_per_unit": UsdPhysics.GetStageKilogramsPerUnit(stage),
             "textures_resolved": all(textures), "textures": len(textures),
             "scene_reference_is_rigid_body": placed.HasAPI(UsdPhysics.RigidBodyAPI)}
-
-
-def _check_links(stage, out, name):
-    from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade
-
-    links, joints, textures = {}, [], []
-    for p in stage.Traverse():
-        if p.HasAPI(UsdPhysics.RigidBodyAPI):
-            m, com, full = _read_mass(p)
-            links[p.GetName()] = {"mass": m, "com": com, "fullinertia": full, "filtered": [
-                str(t) for t in UsdPhysics.FilteredPairsAPI(p).GetFilteredPairsRel().GetTargets()]
-                if p.HasAPI(UsdPhysics.FilteredPairsAPI) else []}
-        elif p.IsA(UsdPhysics.Joint):
-            j = UsdPhysics.Joint(p)
-            rec = {"name": p.GetName(), "type": p.GetTypeName(),
-                   "body0": [str(t) for t in j.GetBody0Rel().GetTargets()],
-                   "body1": [str(t) for t in j.GetBody1Rel().GetTargets()],
-                   "pos0": list(j.GetLocalPos0Attr().Get())}
-            api = {"PhysicsRevoluteJoint": UsdPhysics.RevoluteJoint, "PhysicsPrismaticJoint": UsdPhysics.PrismaticJoint}
-            if rec["type"] in api:
-                k = api[rec["type"]](p)
-                rot = Gf.Rotation(Gf.Quatd(j.GetLocalRot0Attr().Get()))
-                rec.update(axis=list(rot.TransformDir(Gf.Vec3d(1, 0, 0))), lower=k.GetLowerLimitAttr().Get(),
-                           upper=k.GetUpperLimitAttr().Get())
-            joints.append(rec)
-        if p.IsA(UsdShade.Shader) and UsdShade.Shader(p).GetIdAttr().Get() == "UsdUVTexture":
-            textures.append(str(UsdShade.Shader(p).GetInput("file").Get().resolvedPath))
-    coll = [p for p in stage.Traverse() if p.HasAPI(UsdPhysics.CollisionAPI)]
-    scene = Usd.Stage.Open(str(out / "scene.usda"))
-    placed = scene.GetPrimAtPath(f"/World/{name}")
-    return {"usd": Usd.GetVersion(), "articulation_root": True, "links": links, "joints": joints,
-            "mass": sum(v["mass"] for v in links.values()), "colliders": len(coll),
-            "up_axis": UsdGeom.GetStageUpAxis(stage), "meters_per_unit": UsdGeom.GetStageMetersPerUnit(stage),
-            "kilograms_per_unit": UsdPhysics.GetStageKilogramsPerUnit(stage),
-            "textures_resolved": all(textures), "textures": len(textures),
-            "scene_reference_is_articulation_root": placed.HasAPI(UsdPhysics.ArticulationRootAPI)}
 
 
 def main():

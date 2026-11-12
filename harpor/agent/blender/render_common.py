@@ -1,4 +1,4 @@
-"""Render code shared by review.py and review_articulation.py (build_plan.md notes 5 and 11).
+"""Render code of review.py (build_plan.md note 5), kept apart so that its tests can import it.
 
 The scripts import it after putting their own folder first on sys.path, as they import crop.py. The
 stock glTF importer maps glTF to W, so Blender world coordinates are W and the input cameras apply as

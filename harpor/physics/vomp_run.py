@@ -1,7 +1,7 @@
 """Run VoMP v1.1 on one GLB: per-voxel materials and rigid-body mass properties (build_plan.md note 9).
 
 Run it in the VoMP env from the VoMP clone, because inference.json names its weights by relative path:
-    cd $VOMP && python <repo>/harpor/physics/vomp_run.py --glb aligned.glb --out RUN_DIR [--links LINKS_DIR]
+    cd $VOMP && python <repo>/harpor/physics/vomp_run.py --glb canonical.glb --out RUN_DIR [--opaque-input]
 Writes into RUN_DIR:
   work/          VoMP's renders, render geometry, voxels and DINO features
   materials.npz  VoMP's save_materials format (voxel_data: x, y, z, youngs_modulus, poissons_ratio,
@@ -12,16 +12,8 @@ Writes into RUN_DIR:
 Coordinates are in Blender's world frame after the stock glTF import (z up), in the GLB's units.
 VoMP's prediction does not depend on size (it rescales every mesh to a unit box), but mass does.
 
-With --links (the per-link GLBs of harpor.physics.align --links-out, build_plan.md note 11) the model is
-loaded once and runs on every LINKS_DIR/<link>.glb instead of the whole GLB, each on its own 64^3 grid,
-into RUN_DIR/vomp/<link>/ with the files above. RUN_DIR/summary.json then describes the whole object:
-rigid_body is the sum of the links (mass.combine) and rigid_body_covers names them; median and p05_p95
-are over all the links' voxels, each weighted by its volume h^3, since every link has its own grid and a
-small handle gives about as many voxels as the body; links holds each link's median, p05_p95, rigid_body,
-voxels_occupied, voxel_edge_m and seconds. A link that VoMP cannot voxelize (a thin lid can give no
-occupied voxel) goes to links_skipped with the reason and is missing from rigid_body;
-harpor.physics.mjcf gives it a hull inertial, so mjcf.json's inertial is then the whole object's mass.
-Each link costs about one VoMP predict.
+--opaque-input predicts on an opaque copy (harpor.physics.align.make_opaque), since VoMP rejects transmissive or
+partly transparent materials; the source GLB stays as it is.
 """
 
 import argparse
@@ -33,7 +25,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from harpor.physics.mass import combine, mass_properties  # noqa: E402
+from harpor.physics.mass import mass_properties  # noqa: E402
 
 FIELDS = (("youngs_modulus_pa", "youngs_modulus"), ("poisson_ratio", "poisson_ratio"), ("density_kg_m3", "density"))
 
@@ -84,97 +76,30 @@ def run_glb(model, glb, out, config, load_s=None):
     return summary
 
 
-def weighted_percentile(values, weights, q):
-    """Percentiles q (0 to 100) of values that count with these weights: for each q, the smallest value whose
-    cumulative weight share reaches q / 100 (numpy's inverted_cdf method when the weights are equal)."""
-    order = np.argsort(values, kind="stable")
-    v, cw = np.asarray(values, float)[order], np.cumsum(np.asarray(weights, float)[order])
-    i = np.searchsorted(cw / cw[-1], np.asarray(q, float) / 100 - 1e-12)
-    return v[np.minimum(i, len(v) - 1)]
-
-
-def combine_links(out, names, glb, config, load_s, skipped=None, gpu_peak_gb=None):
-    """Write and return the whole object's summary.json from out/vomp/<name>/summary.json and voxels.npz
-    of each link in names (see the module docstring)."""
-    out = Path(out)
-    links, sums, values, volume = {}, [], {k: [] for _, k in FIELDS}, []
-    for name in names:
-        d = out / "vomp" / name
-        s = json.loads((d / "summary.json").read_text())
-        with np.load(d / "voxels.npz") as v:
-            for _, k in FIELDS:
-                values[k].append(np.asarray(v[k], float).reshape(-1))
-            volume.append(np.full(len(values["density"][-1]), float(np.prod(np.broadcast_to(v["h"], (3,))))))
-        links[name] = {k: s[k] for k in ("median", "p05_p95", "rigid_body", "voxels_occupied", "voxel_edge_m", "seconds")}
-        sums.append(s)
-    values = {k: np.concatenate(v) for k, v in values.items()}
-    volume = np.concatenate(volume)  # each voxel weighs its own volume, whatever its link's grid
-    summary = {
-        "glb": str(Path(glb).resolve()),
-        "config": config,
-        "voxels_occupied": sum(s["voxels_occupied"] for s in sums),
-        "voxels_predicted": sum(s["voxels_predicted"] for s in sums),
-        "nearest_prediction_max_dist_voxels": max(s["nearest_prediction_max_dist_voxels"] for s in sums),
-        "voxel_edge_m": max(s["voxel_edge_m"] for s in sums),  # the coarsest link grid
-        "median": {f: float(weighted_percentile(values[k], volume, 50)) for f, k in FIELDS},
-        "p05_p95": {f: weighted_percentile(values[k], volume, [5, 95]).tolist() for f, k in FIELDS},
-        "rigid_body": combine([s["rigid_body"] for s in sums]),
-        "rigid_body_covers": list(names),
-        "seconds": {"load": load_s, "predict": sum(s["seconds"]["predict"] for s in sums)},
-        "gpu_peak_gb": gpu_peak_gb,
-        "links": links,
-        "links_skipped": dict(skipped or {}),
-    }
-    (out / "summary.json").write_text(json.dumps(summary, indent=1))
-    return summary
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--glb", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--config", default="weights/vomp_1_1/inference.json")
-    ap.add_argument("--links", help="folder of per-link GLBs: run on each instead of --glb")
     ap.add_argument("--opaque-input", action="store_true", help="predict on an opaque copy; keep the source GLB intact")
     a = ap.parse_args()
-    glbs = sorted(Path(a.links).glob("*.glb")) if a.links else []
-    if a.links and not glbs:
-        ap.error(f"{a.links} holds no .glb")
 
-    import torch
     from vomp.inference import Vomp
 
     out = Path(a.out)
     t0 = time.time()
     model = Vomp.from_checkpoint(config_path=a.config)
     t1 = time.time()
-    if not a.links:
-        glb = a.glb
-        if a.opaque_input:
-            from harpor.physics.align import make_opaque, read_glb, write_glb
+    glb = a.glb
+    if a.opaque_input:
+        from harpor.physics.align import make_opaque, read_glb, write_glb
 
-            out.mkdir(parents=True, exist_ok=True)
-            doc, binary = read_glb(glb)
-            glb = out / "input.glb"
-            write_glb(glb, make_opaque(doc), binary)
-        summary = run_glb(model, glb, out, a.config, load_s=t1 - t0)
-        print(json.dumps(summary, indent=1))
-        return
-    done, skipped = [], {}
-    for g in glbs:
-        try:
-            s = run_glb(model, g, out / "vomp" / g.stem, a.config)
-            done.append(g.stem)
-            print(f"link {g.stem}: {s['voxels_occupied']} voxels, {s['rigid_body']['mass']:.3f} kg, "
-                  f"{s['seconds']['predict']:.0f} s", flush=True)
-        except Exception as e:  # noqa: BLE001 - the link gets a hull inertial in harpor.physics.mjcf
-            skipped[g.stem] = f"{type(e).__name__}: {e}"
-            print(f"link {g.stem}: skipped ({skipped[g.stem]})", flush=True)
-    if not done:
-        raise SystemExit(f"VoMP gave no link a result: {json.dumps(skipped)}")
-    gpu = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else None
-    summary = combine_links(out, done, a.glb, a.config, t1 - t0, skipped, gpu)
-    print(json.dumps({k: summary[k] for k in ("voxels_occupied", "median", "rigid_body", "links_skipped")}, indent=1))
+        out.mkdir(parents=True, exist_ok=True)
+        doc, binary = read_glb(glb)
+        glb = out / "input.glb"
+        write_glb(glb, make_opaque(doc), binary)
+    summary = run_glb(model, glb, out, a.config, load_s=t1 - t0)
+    print(json.dumps(summary, indent=1))
 
 
 if __name__ == "__main__":

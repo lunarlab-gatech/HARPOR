@@ -6,12 +6,13 @@ agent, unless it was skipped):
     python -m harpor.webapp.physics_auto align --job J
 
 align takes the GLB for physics (steps.next_glb: the agent's delivery, or run/posed.glb when the
-agent was skipped or delivered nothing usable, run/parts.glb for an articulated job; pick_glb also
-refuses a delivery whose size is not that of the GLB the agent started from) and runs
-harpor.physics.align on it with --up-near at the up hint and --x footprint, plus --opaque when the GLB
-has transparent or transmissive materials, which VoMP rejects. It writes J/physics/up.json {hint,
-info, glb, glb_rule, opaque} and J/physics/aligned.glb with aligned.json. For an articulated job
-(job.json "articulated") it adds --links-out J/physics/links: one GLB per link, for VoMP.
+agent was skipped or delivered nothing usable; pick_glb also refuses a delivery whose size is not
+that of posed.glb, which the agent started from) and runs harpor.physics.align on it with --up-near
+at the up hint and --x footprint, plus --opaque when the GLB has transparent or transmissive
+materials, which VoMP rejects. It writes J/physics/up.json {hint, info, glb, glb_rule, opaque} and
+J/physics/aligned.glb with aligned.json. Then it moves the materials that VoMP predicted on the
+canonical mesh onto the aligned GLB (harpor.physics.material_transfer.transfer_job), which writes
+J/physics/summary.json with the mass and inertia of the final geometry.
 
 The up hint (up_hint()) is the normal of the support plane under the object in view 0's DA3
 pointmap: a RANSAC plane fit to the confident points in a band around the mask and below its
@@ -147,11 +148,10 @@ def sim_name(prompt):
 
 
 def pick_glb(job_dir):
-    """(path, why) of the GLB for physics, by steps.next_glb: the agent's delivery, else run/parts.glb (an
-    articulated job) or run/posed.glb.
+    """(path, why) of the GLB for physics, by steps.next_glb: the agent's delivery, else run/posed.glb.
 
-    The agent started from that other GLB (agent_step.mode). Its delivery is used only when it keeps that
-    GLB's size (controller.check_size); else physics takes that GLB, and why gives the reason.
+    The agent started from posed.glb. Its delivery is used only when it keeps that GLB's size
+    (controller.check_size); else physics takes posed.glb, and why gives the reason.
     """
     from harpor.agent import controller
     from harpor.webapp import steps
@@ -161,9 +161,7 @@ def pick_glb(job_dir):
     f = job_dir / "agent" / "result.json"
     r = json.loads(f.read_text()) if f.is_file() else {}
     if glb == steps.agent_glb(job_dir):
-        jf, parts = job_dir / "job.json", job_dir / "run" / "parts.glb"
-        job = json.loads(jf.read_text()) if jf.is_file() else {}
-        start = parts if steps.articulated(job) and parts.is_file() else job_dir / "run" / "posed.glb"
+        start = job_dir / "run" / "posed.glb"
         bad = controller.check_size(glb, start)
         if bad:
             return start, f"the agent's {r.get('source')} GLB is not used: {bad}"
@@ -172,19 +170,16 @@ def pick_glb(job_dir):
                                                  if r else "no agent result")
 
 
-def align_job(job_dir, prepare_parts=False):
+def align_job(job_dir):
     from harpor.physics import align
-    from harpor.webapp import steps
 
     job_dir = Path(job_dir)
-    f = job_dir / "job.json"
-    links = steps.articulated(json.loads(f.read_text()) if f.is_file() else {})
-    glb, rule = (job_dir / "run/parts.glb", "Stage B split parts") if prepare_parts else pick_glb(job_dir)
+    glb, rule = pick_glb(job_dir)
     if not glb.exists():
         raise SystemExit(f"{glb} is missing; run the sam3d and place stages first")
     hint, info = up_hint(job_dir / "run")
     opaque = needs_opaque(glb)
-    out = job_dir / ("run/vomp_parts" if prepare_parts else "physics")
+    out = job_dir / "physics"
     out.mkdir(exist_ok=True, mode=0o700)
     up = {"hint": np.round(hint, 6).tolist(), "info": info, "glb": str(glb), "glb_rule": rule, "opaque": opaque}
     (out / "up.json").write_text(json.dumps(up, indent=1))
@@ -192,7 +187,7 @@ def align_job(job_dir, prepare_parts=False):
           + (f" ({info['reason']})" if "reason" in info else "") + ("; made opaque for VoMP" if opaque else ""))
     # --up-near=... in one argument: argparse takes "-0.1,..." after a space for an option.
     align.main(["--glb", str(glb), "--out", str(out / "aligned.glb"), "--up-near=" + ",".join(map(str, up["hint"])),
-                "--x", "footprint", *(["--opaque"] if opaque else []), *(["--links-out", str(out / "links")] if links else [])])
+                "--x", "footprint", *(["--opaque"] if opaque else [])])
 
 
 def main(argv=None):
@@ -201,11 +196,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="step", required=True)
     sub.add_parser("align").add_argument("--job", required=True, help="job folder")
-    sub.add_parser("prepare-parts").add_argument("--job", required=True, help="job folder")
     a = ap.parse_args(argv)
-    if a.step == "prepare-parts":
-        align_job(a.job, prepare_parts=True)
-        return
     (Path(a.job) / "physics/summary.json").unlink(missing_ok=True)
     align_job(a.job)
     transfer_job(a.job)

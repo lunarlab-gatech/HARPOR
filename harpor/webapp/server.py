@@ -35,15 +35,13 @@ Routes (JSON unless said otherwise; {id} is a job id):
   GET    /api/jobs/{id}               job.json with "kind" (video, rosbag or stray), the stages' progress,
                                       the agent's verdict, model and, for opus and fable, tokens and cost estimate
                                       ("agent_result"; "agent" is the job's choice: astra, opus, fable or none;
-                                      an articulation result adds mode, counts, joints_delivered and
-                                      simulations, one in rounds also rounds, requirements, candidate and
-                                      surface, and a refinement's surface, controller.run_session), the
+                                      it adds counts and surface, and a result in rounds also rounds and
+                                      candidate, controller.run_session), the
                                       output files that exist and then the LiDAR points of the run's views
                                       (run/lidar/<i>.glb, by i) and, while the scale has failed, of the
                                       pool's views (lidar/cloud/<view>.glb, pool_clouds) as "files", their
                                       sizes in bytes ("sizes", sizes_of),
-                                      "articulated", "parts_mode" and "parts_review" (the job waits for its
-                                      part list), "lidar" (steps.lidar), "calibration" (the uploaded
+                                      "lidar" (steps.lidar), "calibration" (the uploaded
                                       calibration's summary, calibration_summary, or null), "lidar_current"
                                       (steps.done("lidar") for a job with LiDAR whose lidar stage is done:
                                       false when the calibration was uploaded or deleted after the scale
@@ -62,9 +60,7 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       a rosbag job's LiDAR-camera calibration as the raw body: .yaml, .yml
                                       or .json (else 415), at most 64 KB (else 413); 409 for a video job, for
                                       a Stray Scanner capture (its depth is aligned with the color camera),
-                                      while the job is analyzing, queued or running, and while a job with
-                                      LiDAR waits for its part list (the new scale would drop the list:
-                                      Runner.resume); 400
+                                      and while the job is analyzing, queued or running; 400
                                       with the reason of lidar_scale.read_calibration. L (optional; empty
                                       for none) is the LiDAR topic that the file is for, one of
                                       frames/topics.json "lidar" (else 400); jobs.lidar_settings then
@@ -73,16 +69,12 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       answers calibration_summary. A lidar stage that ran with another
                                       calibration is then stale: the next Build or retry starts from
                                       lidar and stops in review (Runner.resume)
-  DELETE /api/jobs/{id}/calibration   the calibration (409 for a job that is not a rosbag's, while the job
-                                      is analyzing, queued or running, and while a job with LiDAR waits for
-                                      its part list); a lidar stage that ran with it is stale, as after a PUT
+  DELETE /api/jobs/{id}/calibration   the calibration (409 for a job that is not a rosbag's, and while the job
+                                      is analyzing, queued or running); a lidar stage that ran with it is
+                                      stale, as after a PUT
   POST   /api/jobs/{id}/start         {mode, prompt, n_views, picks, view0, auto_continue, agent, api_key,
-                                      articulated?, parts_mode?, parts?, split?, lidar?, turntable?} (agent astra: an
-                                      OpenAI key; opus, fable: an Anthropic key; none: no key, physics uses the Stage A
-                                      mesh). articulated (default false) builds an object with moving parts;
-                                      parts_mode (steps.PARTS_MODES, default vlm) says who lists them, and parts is the
-                                      typed list of mode user ([{name, parent, joint, count}], checked with
-                                      harpor.parts.propose); agent none means mode user. lidar is null,
+                                      lidar?, turntable?} (agent astra: an OpenAI key; opus, fable: an
+                                      Anthropic key; none: no key, physics uses the Stage A mesh). lidar is null,
                                       {"topic": T}, a LiDAR topic of a rosbag job, or {"kind": "stray"}, the
                                       depth of a Stray Scanner capture, for the metric scale;
                                       jobs.lidar_settings checks it (400 with the reason). Without it a
@@ -99,19 +91,10 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       run that includes the lidar stage (from masks, or from lidar when the
                                       scale is stale) answers 400 when the job's LiDAR would fail that
                                       stage's checks, as for continue
-  GET    /api/jobs/{id}/parts         run/proposal.json ("proposal"), the job's parts settings, "waiting"
-                                      (the job waits for its part list), "photo" (view 0's SAM 3 check
-                                      image) and "checks" (the part masks' check images)
-  POST   /api/jobs/{id}/parts         {parts, api_key?}: only while the job waits for its part list (else
-                                      409); the list (400 with the reason when it breaks a rule) becomes
-                                      the confirmed list, and the build goes on from the parts stage
   POST   /api/jobs/{id}/continue      {agent?, api_key?, from?}: build on from sam3d, or retry from a
                                       stage ("frames": analyze the input again); another agent than the
-                                      job's reruns the agent stage and the stages after it. While the job
-                                      waits for its part list, a continue without "from" confirms the
-                                      VLM's list as it is; a retry of a job that was cancelled at its
-                                      part list stops at the list again (it answers "from": "propose"). A
-                                      run that starts at or before select (or from lidar, when the scale
+                                      job's reruns the agent stage and the stages after it. A run that
+                                      starts at or before select (or from lidar, when the scale
                                       is stale: another calibration or estimator) needs the API key when
                                       the agent stage is done, since a done job has dropped it, and answers
                                       400 when the job's LiDAR would fail the lidar stage's checks
@@ -121,7 +104,7 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       lines of the running stage's log; id <stage>:<byte offset>, so a
                                       reconnect resumes with Last-Event-ID), "end" when the job stops
   GET    /api/jobs/{id}/file/{path}   only the paths that ALLOW matches; refined.glb is the agent's GLB
-                                      (steps.agent_glb), never the Stage A or split parts' GLB, and
+                                      (steps.agent_glb), never the Stage A GLB, and
                                       agent/evidence.json not when its source held the key (resolve). A Range
                                       request (a video's seek) gets 206 with Content-Range, and 416
                                       when it starts past the end (Starlette's FileResponse). HEAD gets the
@@ -132,13 +115,12 @@ to the sharpest frame within 0.25 s (frames/pool.json "picks"). The overrides na
 ("f00012").
 
 The API key of the job's agent (OpenAI for astra, Anthropic for opus and fable) arrives in the start,
-overrides, parts and continue bodies. It is checked with jobs.check_key before anything runs and
-then lives only in the runner's memory (jobs.py). The VLM that lists the parts is the agent's model,
-so it takes the same key. A job with "agent": "none" takes no key. With "key_later": true and no
-api_key, start, parts and continue go on without the key: the job asks for it when it reaches a stage
-that needs it (jobs.NO_KEY_LATER), and the answer's "key" says KEY_LATER. Bodies are parsed by hand, and
-FastAPI's telemetry is off. Only the reason for a bad part list quotes the body: it names the parts,
-and it is cut to PART_REASON characters.
+overrides and continue bodies. It is checked with jobs.check_key before anything runs and then lives
+only in the runner's memory (jobs.py). The VLM that judges the physics is the agent's model, so it
+takes the same key. A job with "agent": "none" takes no key. With "key_later": true and no api_key,
+start and continue go on without the key: the job asks for it when it reaches a stage that needs it
+(jobs.NO_KEY_LATER), and the answer's "key" says KEY_LATER. Bodies are parsed by hand, and FastAPI's
+telemetry is off.
 """
 
 import argparse
@@ -168,19 +150,17 @@ ALLOW = re.compile(r"frames/thumbs/\d+\.jpg|frames/topic_previews/\d+\.jpg|frame
                    r"|pool/lidar\.json|lidar/check/f\d{5,9}\.jpg|lidar/cloud/f\d{5,9}\.glb"
                    r"|scene/sam3_\w+/check/[\w-]+\.jpg"
                    r"|run/input/images/\d{1,3}\.png|run/lidar/\d{1,3}\.glb|run/overlay_\d+\.png|run/posed\.glb"
-                   r"|run/parts\.glb|run/parts\.json|run/parts/sam3/check/\d+\.jpg"
-                   r"|refined\.glb|physics/aligned\.glb|turntable/turntable\.mp4|softvideo/softvideo\.mp4"
+                   r"|refined\.glb|physics/aligned\.glb|turntable/turntable\.mp4"
                    r"|physics/summary\.json|physics/mjcf/mjcf\.json|physics/urdf/model\.urdf|run/placement\.json"
                    r"|selection\.json|results\.zip|agent/evidence\.json|logs/\w+\.log")
 TYPES = {".glb": "model/gltf-binary", ".jpg": "image/jpeg", ".png": "image/png", ".json": "application/json",
          ".zip": "application/zip", ".log": "text/plain; charset=utf-8", ".urdf": "application/xml",
          ".mp4": "video/mp4"}
-# run/parts.* exist only for an articulated job; mjcf.json and model.urdf for every job that got that far.
-# pool/lidar.json only for a job with LiDAR. turntable/turntable.mp4 only when the job asked for the 360 video and
-# its render worked; softvideo/softvideo.mp4 only when the MuJoCo model has a soft part and its video worked.
-# agent/evidence.json only for an articulation whose requirements ran in rounds.
-OUTPUTS = ("run/posed.glb", "run/parts.glb", "run/parts.json", "refined.glb", "physics/aligned.glb",
-           "turntable/turntable.mp4", "softvideo/softvideo.mp4", "physics/summary.json", "physics/mjcf/mjcf.json",
+# mjcf.json and model.urdf exist for every job that got that far. pool/lidar.json only for a job with LiDAR.
+# turntable/turntable.mp4 only when the job asked for the 360 video and its render worked. agent/evidence.json only
+# for an agent session that ran in rounds.
+OUTPUTS = ("run/posed.glb", "refined.glb", "physics/aligned.glb",
+           "turntable/turntable.mp4", "physics/summary.json", "physics/mjcf/mjcf.json",
            "physics/urdf/model.urdf", "run/placement.json", "selection.json", "pool/lidar.json", "agent/evidence.json",
            "results.zip")
 INSTANCE = re.compile(r"none|\d{1,3}(,\d{1,3})*")
@@ -188,7 +168,6 @@ MAX_CALIBRATION = 64 << 10  # bytes of a calibration file
 CALIBRATION_SUFFIXES = (".yaml", ".yml", ".json")
 LIDAR_COUNTS = ("views", "views_with_points", "views_used", "outliers", "scattered", "few_points", "no_mask",
                 "no_samples")
-PART_REASON = 200  # the longest reason for a bad part list (part_reason)
 KEY_LATER = "no key yet: the job asks for it when it needs it"  # the answer to a body with key_later
 NO_TELEMETRY = {"tracing": False, "metrics": False, "logs": False, "operation_spans": False, "auto_configure": False}
 
@@ -209,7 +188,7 @@ def agent_of(b, job=None):
 
 
 def key_later(b):
-    """True when a start, continue or parts body says "key_later": true and holds no API key: the build
+    """True when a start or continue body says "key_later": true and holds no API key: the build
     goes on without the key, and the job asks for it when a stage needs it (jobs.NO_KEY_LATER). A key in
     the body wins. 400 when key_later is not true or false."""
     later = b.get("key_later", False)
@@ -217,13 +196,6 @@ def key_later(b):
         raise Bad(400, "key_later is true or false")
     return later and not b.get("api_key")
 
-
-
-def part_reason(e):
-    """The reason harpor.parts.propose gives for a bad part list. It quotes the parts, so every long quoted
-    value is shortened first (the rule after it stays), then the whole text is cut."""
-    text = re.sub(r"""(?:^|(?<=[\s(\[,:]))(['"])([^'"]{37})[^'"]{4,}\1(?=[\s,.;:)\]]|$)""", r"\1\2...\1", str(e))
-    return text if len(text) <= PART_REASON else text[:PART_REASON - 3] + "..."
 
 
 def content_length(request):
@@ -402,8 +374,7 @@ def sse(event, data, id=None):
 def state(J, job):
     stages = [{k: v for k, v in s.items() if k != "seconds"} for s in jobs.progress(J)]
     return {"status": job["status"], "current": job["current"], "error": job["error"], "warnings": job["warnings"],
-            "key_ok": job["key_ok"], "agent": steps.agent(job), "articulated": steps.articulated(job),
-            "parts_mode": steps.parts_mode(job), "parts_review": steps.waits_for_parts(J, job), "stages": stages}
+            "key_ok": job["key_ok"], "agent": steps.agent(job), "stages": stages}
 
 
 def tick(J, cursor, last):
@@ -610,10 +581,7 @@ def make_app(cfg, token, key_dir=None):
     def get_job(job_id: str):
         J = job_dir(job_id)
         job = jobs.load(J)
-        # parts_review: the job waits for its part list.
-        job.update(kind=steps.source(job)["kind"], parts_mode=steps.parts_mode(job),
-                   parts_review=steps.waits_for_parts(J, job),
-                   calibration=calibration_summary(job.get("calibration")), preview=preview_of(J))
+        job.update(kind=steps.source(job)["kind"], calibration=calibration_summary(job.get("calibration")), preview=preview_of(J))
         # The scale was found with the job's calibration as it is now (steps.done compares their sha256), and by
         # this estimator (lidar_scale.VERSIONS, by source); lidar_stale says which of the two changed.
         ran = job["stages"]["lidar"]["status"] == "done"
@@ -629,11 +597,9 @@ def make_app(cfg, token, key_dir=None):
         if r and "result.json" in (r.get("key_found_in") or []):  # the agent's own text held the key
             r = {**r, "reason": "left out: the agent's result held the API key", "limitations": []}
         keys = ("source", "verdict", "reason", "limitations", "exit")
-        # turns, tokens and cost_usd are only in Claude's result, joints_delivered and simulations only in an
-        # articulation's, rounds, requirements and candidate only in one that ran in rounds, and surface only in that
-        # one's and a refinement's (controller.run_session). An older result has none of the last five.
-        extra = ("agent", "model", "turns", "tokens", "cost_usd", "mode", "counts", "joints_delivered", "simulations",
-                 "rounds", "requirements", "candidate", "surface")
+        # turns, tokens and cost_usd are only in Claude's result, rounds and candidate only in one that ran in rounds
+        # (controller.run_session). An older result may lack the last three.
+        extra = ("agent", "model", "turns", "tokens", "cost_usd", "counts", "rounds", "candidate", "surface")
         job["agent_result"] = {**{k: r.get(k) for k in keys}, **{k: r[k] for k in extra if k in r}} if r else None
         return job
 
@@ -706,16 +672,6 @@ def make_app(cfg, token, key_dir=None):
         if type(turntable) is not bool:
             raise Bad(400, "turntable is true or false")
         agent, later = agent_of(b), key_later(b)  # astra when the body names none
-        articulated, parts = b.get("articulated", False), {"mode": b.get("parts_mode"), "list": b.get("parts") or []}
-        if not isinstance(parts["list"], list):
-            raise Bad(400, "parts is a list of parts")
-        if "split" in b:  # false: the agent cuts the parts, and the split of the mesh is skipped
-            parts["split"] = b["split"]
-        try:  # the settings the build would store; the typed list must pass harpor.parts.propose.validate
-            jobs.parts_settings({**job, "prompt": prompt.strip(), "agent": agent, "articulated": articulated,
-                                 "parts": parts})
-        except ValueError as e:
-            raise Bad(400, part_reason(e)) from None
         # A Stray job keeps its own setting (on when it was made) unless the body says otherwise.
         value = b.get("lidar") if "lidar" in b or steps.source(job)["kind"] != "stray" else steps.lidar(job)
         try:  # the LiDAR topic, its TF link (or the calibration) and the intrinsics
@@ -732,7 +688,7 @@ def make_app(cfg, token, key_dir=None):
         runner_call(runner.submit_build, job_id, key, checked_calibration=checked, mode=mode,
                     prompt=prompt.strip(), n_views=n_views, picks=picks if mode == "manual" else [], view0=view0,
                     auto_continue=auto_continue, agent=agent, overrides={"locked": [], "excluded": [], "instance": {}},
-                    articulated=articulated, parts=parts, lidar=lidar, turntable=turntable)
+                    lidar=lidar, turntable=turntable)
         return {"status": "queued", "key": msg}
 
     @app.post("/api/jobs/{job_id}/start")
@@ -757,9 +713,8 @@ def make_app(cfg, token, key_dir=None):
 
     def calibration_job(J, job_id):
         """The job.json of a rosbag job that may change its calibration now; 409 for another kind of input,
-        while its upload runs, while it is analyzing, queued or running, and while a job with LiDAR waits for
-        its part list: the stale scale would then block the list's confirmation (Runner.resume). The change
-        calls it again under runner.locked(), so that no Start comes between the check and the change."""
+        while its upload runs, and while it is analyzing, queued or running. The change calls it again under
+        runner.locked(), so that no Start comes between the check and the change."""
         if runner.uploading(job_id):
             raise Bad(409, "the job is still uploading")
         job = idle(J)
@@ -768,9 +723,6 @@ def make_app(cfg, token, key_dir=None):
             raise Bad(409, "a Stray Scanner capture needs no calibration: its depth is aligned with the color camera")
         if kind != "rosbag":
             raise Bad(409, "a calibration is for the LiDAR of a rosbag job; this job's input is a video")
-        if steps.lidar(job) is not None and steps.waits_for_parts(J, job):
-            raise Bad(409, "the job waits for its part list; confirm the list or cancel the job first, then change "
-                           "the calibration")
         return job
 
     def set_calibration(job_id, name, data, lidar_topic=None):
@@ -874,19 +826,6 @@ def make_app(cfg, token, key_dir=None):
     async def overrides(job_id: str, request: Request):
         return await run_in_threadpool(set_overrides, job_id, await body(request))
 
-    @app.get("/api/jobs/{job_id}/parts")
-    def get_parts(job_id: str):
-        J = job_dir(job_id)
-        job = jobs.load(J)
-        anchor = (read_json(J / "selection.json") or {}).get("anchor")  # run view 0, the photo the VLM sees
-        photo = f"scene/sam3_{job['slug']}/check/{anchor}.jpg" if job.get("slug") and isinstance(anchor, str) else None
-        checks = sorted((J / "run" / "parts" / "sam3" / "check").glob("*.jpg"), key=lambda p: (len(p.stem), p.stem))
-        return {"articulated": steps.articulated(job), "noun": job["prompt"],
-                "parts": {**job["parts"], "mode": steps.parts_mode(job)},
-                "waiting": steps.waits_for_parts(J, job), "proposal": read_json(J / "run" / "proposal.json"),
-                "photo": photo if photo and resolve(J, photo) else None,
-                "checks": [rel for rel in (p.relative_to(J).as_posix() for p in checks) if resolve(J, rel)]}
-
     def held_key(job_id, b, agent, later=False):
         """The body's API key for agent (checked), else None; 400 when the server holds none for the job,
         unless later (key_later: the job asks for the key when it needs it)."""
@@ -902,28 +841,6 @@ def make_app(cfg, token, key_dir=None):
         """{"key": KEY_LATER} when a build went on with key_later and the runner holds no key for the
         job's agent, else {}."""
         return {"key": KEY_LATER} if later and agent != "none" and not runner.has_key(job_id, agent) else {}
-
-    def set_parts(job_id, b):
-        from harpor.parts import propose
-
-        J = job_dir(job_id)
-        job = idle(J)
-        if not steps.waits_for_parts(J, job):
-            raise Bad(409, "the job does not wait for its part list")
-        if not isinstance(b.get("parts"), list):
-            raise Bad(400, "parts is a list of parts")
-        try:
-            parts = propose.validate(b["parts"], job["prompt"])
-        except ValueError as e:
-            raise Bad(400, part_reason(e)) from None
-        agent, later = steps.agent(job), key_later(b)
-        key = held_key(job_id, b, agent, later)  # the agent stage runs after the parts
-        first = runner_call(runner.resume, job_id, "parts", key, confirm_parts=True, parts_list=parts, key_later=later)
-        return {"status": "queued", "from": first, **asks(job_id, agent, later)}
-
-    @app.post("/api/jobs/{job_id}/parts")
-    async def parts(job_id: str, request: Request):
-        return await run_in_threadpool(set_parts, job_id, await body(request))
 
     def continue_job(job_id, b):
         J = job_dir(job_id)
@@ -951,11 +868,9 @@ def make_app(cfg, token, key_dir=None):
             check_key(key, agent)
         else:
             later = False  # the agent stage is done: no stage needs a key
-        # Build while the job waits for its part list confirms the VLM's list as it is.
-        confirm = steps.waits_for_parts(J, job) and not b.get("from")
-        first = runner_call(runner.resume, job_id, first, key, confirm_parts=confirm, agent=agent, key_later=later,
+        first = runner_call(runner.resume, job_id, first, key, agent=agent, key_later=later,
                             checked_calibration=checked)
-        # from: the agent stage when the agent changed, parts when confirmed
+        # from: the agent stage when the agent changed
         return {"status": "queued", "from": first, **asks(job_id, agent, later)}
 
     @app.post("/api/jobs/{job_id}/continue")

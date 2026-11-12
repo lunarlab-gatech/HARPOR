@@ -3,24 +3,20 @@
 blender -b --factory-startup --python-exit-code 1 --python review.py -- ARGS.json
 
 ARGS.json comes from tools.review: root, out, clay, views (from the manifest), candidate, original,
-detail (close-up cameras: center x y z, radius, view direction x y z, all in W) and tint (names of
-the candidate's mesh objects, each rendered in one flat color, so that a part shows against the
-rest; the importer names a second object of the same name NAME.001, which counts as NAME). The
-controller also uses this script for the original's previews, with candidate None.
+and detail (close-up cameras: center x y z, radius, view direction x y z, all in W). The controller
+also uses this script for the original's previews, with candidate None.
 The stock glTF importer maps glTF to W, so Blender world coordinates are W and the input cameras
 apply as they are. Input views are cropped to the object (the mask's box and the projected assets)
 and rendered at INPUT_LONG pixels on the long side. Writes one PNG per view and asset, sheet.png (one
 row per view: photo, original, candidate, overlay) and review.json with the anchor evidence and the
-crop windows. The render code is shared with review_articulation.py (render_common.py).
+crop windows. The render code is in render_common.py.
 """
 # Untested: needs Blender 5.2, which the test environment does not have.
 
 import json
-import re
 import sys
 from pathlib import Path
 
-import bpy
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -34,17 +30,6 @@ scene, cam = setup(A["clay"])
 assets = {n: import_glb(A[n]) for n in ("original", "candidate") if A.get(n)}
 names = list(assets)
 main = "candidate" if "candidate" in assets else "original"
-TINTS = [(1.0, 0.3, 0.0, 1.0), (0.0, 0.45, 1.0, 1.0), (0.1, 0.75, 0.2, 1.0), (0.9, 0.1, 0.7, 1.0)]
-for k, link in enumerate(A.get("tint") or []):
-    mat = bpy.data.materials.new(f"__gator_tint_{k}")
-    mat.use_nodes = True
-    mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = TINTS[k % len(TINTS)]
-    for o in assets.get("candidate", []):
-        if o.type == "MESH" and re.sub(r"\.\d{3}$", "", o.name) == link:
-            if o.data.users > 1:
-                o.data = o.data.copy()
-            o.data.materials.clear()
-            o.data.materials.append(mat)
 pts = {n: points(assets[n]) for n in names}
 allp = np.concatenate(list(pts.values()))
 center, diag = (allp.min(0) + allp.max(0)) / 2, float(np.linalg.norm(allp.max(0) - allp.min(0)))
@@ -73,7 +58,7 @@ for v in views:
     rows.append((row, photo is not None))
     records.append(rec)
 write_sheet(rows, OUT / "sheet.png")
-review = {"clay": A["clay"], "tint": A.get("tint") or [], "views": records,
+review = {"clay": A["clay"], "views": records,
           "bbox": {n: box(p) for n, p in pts.items()}}
 if len(names) == 2:
     o, c = review["bbox"]["original"], review["bbox"]["candidate"]

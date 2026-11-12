@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>HARPOR</title>
-<meta name="description" content="HARPOR: High-fidelity Articulated sim-Ready Object Reconstruction">
+<meta name="description" content="HARPOR turns a video of one object into a simulation-ready rigid model with estimated mass and materials">
 <link rel="stylesheet" href="/static/style.css">
 <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.4.0/model-viewer.min.js"></script>
 </head>
@@ -96,29 +96,6 @@
     </div>
   </div>
 
-  <div id="partsreview" class="panel" hidden>
-    <h3>Part list</h3>
-    <div class="revtop">
-      <figure id="partsfig" class="photobox">
-        <img id="partsphoto" alt="View 0 of the object">
-        <figcaption class="hint">View 0</figcaption>
-      </figure>
-      <div>
-        <p id="partssum"></p>
-        <ul id="partswarn" class="warnings"></ul>
-        <label for="partsedit">Parts, one per line</label>
-        <textarea id="partsedit" rows="6" spellcheck="false" autocomplete="off" aria-describedby="partsedithelp"></textarea>
-        <p id="partsedithelp" class="hint">name &gt; parent : joint (revolute, prismatic, fixed, soft, unknown). First line is the base.</p>
-        <ul id="partshints" class="parthints"></ul>
-      </div>
-    </div>
-    <div id="partsbar" class="stickybar">
-      <button id="partsbuild" type="button">Build</button>
-      <button id="partsreset" class="secondary" type="button" hidden>Undo edits</button>
-      <span id="partsmsg" class="msg" role="status"></span>
-    </div>
-  </div>
-
   <div id="tabs" class="tabs" role="tablist" aria-label="Job sections" hidden>
     <button type="button" role="tab" id="tab-results" data-tab="results" aria-controls="results" aria-selected="false" tabindex="-1">Results</button>
     <button type="button" role="tab" id="tab-downloads" data-tab="downloads" aria-controls="downloads" aria-selected="false" tabindex="-1">Downloads</button>
@@ -133,7 +110,6 @@
       <div id="spin"></div>
       <div id="viewers" class="viewers"></div>
       <div id="facts2"></div>
-      <div id="partchecks"></div>
     </div>
   </div>
 
@@ -196,27 +172,10 @@
           <label><input type="radio" name="agent" value="none"> None</label>
         </fieldset>
         <label id="keylabel"><span id="keyname">OpenAI API key</span> <input id="key" type="password" autocomplete="off" required spellcheck="false" placeholder="sk-..."></label>
-        <label class="check"><input type="checkbox" id="articulated" aria-controls="partsbox"> Articulated (has moving parts)</label>
-        <div id="partsbox" class="partsbox" hidden>
-          <fieldset id="partsmodes" class="chips">
-            <legend>Part list</legend>
-            <label><input type="radio" name="partsmode" value="vlm" checked> VLM</label>
-            <label><input type="radio" name="partsmode" value="vlm_edit"> VLM, then I check</label>
-            <label><input type="radio" name="partsmode" value="user"> I type them</label>
-          </fieldset>
-          <label class="check"><input type="checkbox" id="nosplit"> Skip the split (the agent cuts the parts)</label>
-          <p id="partsnoagent" class="hint" hidden>No agent: parts get no joints.</p>
-          <div id="partlistbox" hidden>
-            <label for="partlist">Parts, one per line</label>
-            <textarea id="partlist" rows="5" spellcheck="false" autocomplete="off" aria-describedby="partlisthint"
-              placeholder="cabinet body&#10;door > cabinet body : revolute&#10;drawer x3 > cabinet body : prismatic"></textarea>
-            <p id="partlisthint" class="hint">name &gt; parent : joint (revolute, prismatic, fixed, soft, unknown). First line is the base.</p>
-          </div>
-        </div>
         <div id="lidarbox" class="lidarbox" hidden>
           <label class="check"><input type="checkbox" id="uselidar" aria-controls="lidaropts" aria-describedby="lidarhint"> Use LiDAR for metric scale</label>
           <p id="lidarhint" class="hint"></p>
-          <div id="lidaropts" class="partsbox" hidden>
+          <div id="lidaropts" class="subbox" hidden>
             <label for="lidartopic">LiDAR topic</label>
             <select id="lidartopic" aria-describedby="lidarlink"></select>
             <p id="lidarlink" class="hint" role="status"></p>

@@ -44,30 +44,18 @@ def test_final_geometry_recomputes_mass_and_inertia(tmp_path):
     assert np.array(b["inertia"]) == pytest.approx(np.array(a["inertia"]) * 32)
 
 
-def test_touching_links_keep_their_own_materials(tmp_path):
-    body = box(tmp_path / "body.glb", center=(0, 0, 0))
-    lid = box(tmp_path / "lid.glb", center=(1, 0, 0))
-    # Deliberately put both predictions at the same location: link identity wins.
-    predictions = {"body": prediction(density=600), "lid": prediction(density=7800)}
-    summary = M.transfer(body, tmp_path / "out", {"config": "test"}, predictions, np.eye(4), [body, lid])
-    assert summary["links"]["lid"]["median"]["density_kg_m3"] == 7800
-    assert summary["links"]["body"]["median"]["density_kg_m3"] == 600
-    assert summary["links"]["lid"]["rigid_body"]["mass"] / summary["links"]["body"]["rigid_body"]["mass"] == pytest.approx(13)
-
-
-def test_material_stage_branch_and_retry_preservation(tmp_path):
+def test_material_stage_order_and_retry_preservation(tmp_path):
+    """VoMP runs on the canonical mesh right after sam3d, for every job, and before the agent. A retry from the
+    agent keeps its predictions and clears the physics made from them; a retry from vomp clears the predictions."""
     assert steps.NAMES.index("vomp") == steps.NAMES.index("sam3d") + 1
-    assert steps.NAMES.index("vomp_parts") == steps.NAMES.index("parts") + 1
-    assert steps.NAMES.index("vomp_parts") < steps.NAMES.index("agent")
-    for articulated in (False, True):
-        (tmp_path / "job.json").write_text(json.dumps({"articulated": articulated}))
-        assert bool(steps.skip("vomp", tmp_path)) is articulated
-        assert bool(steps.skip("vomp_parts", tmp_path)) is not articulated
-    for folder in ("run/vomp", "run/vomp_parts", "physics"):
+    assert steps.NAMES.index("vomp") < steps.NAMES.index("agent") < steps.NAMES.index("align")
+    (tmp_path / "job.json").write_text(json.dumps({}))
+    assert steps.skip("vomp", tmp_path) is None
+    for folder in ("run/vomp", "physics"):
         (tmp_path / folder).mkdir(parents=True)
         (tmp_path / folder / "summary.json").write_text("{}")
     jobs._clear(tmp_path, steps.NAMES[steps.NAMES.index("agent"):])
-    assert steps.done("vomp", tmp_path) and steps.done("vomp_parts", tmp_path)
+    assert steps.done("vomp", tmp_path)
     assert not (tmp_path / "physics").exists()
-    jobs._clear(tmp_path, steps.NAMES[steps.NAMES.index("parts"):])
-    assert steps.done("vomp", tmp_path) and not steps.done("vomp_parts", tmp_path)
+    jobs._clear(tmp_path, steps.NAMES[steps.NAMES.index("vomp"):])
+    assert not steps.done("vomp", tmp_path) and not (tmp_path / "run/vomp").exists()

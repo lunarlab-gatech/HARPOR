@@ -7,17 +7,17 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from harpor.agent import controller, tools
-from harpor.parts import geometry, vote
-from harpor.stage_a import lidar_scale, part_masks
-from harpor.webapp import agent_step, jobs, site, softvideo, steps, turntable, video, views
+from harpor.physics import mjcf
+from harpor.stage_a import lidar_scale
+from harpor.webapp import agent_step, jobs, site, steps, turntable, video, views
 from harpor.webapp import lidar as lidar_stage
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "harpor" / "webapp" / "static"
 HELP = STATIC / "help.html"
 # The sections in order. The ids are stable: the app's Help links point to them, and the public page keeps them.
-SECTIONS = ("about", "capture", "add-job", "status", "topics", "settings", "review", "parts", "agent", "lidar",
-            "inputs", "results", "joints", "physics", "downloads", "demos", "retry", "troubleshooting")
+SECTIONS = ("about", "capture", "add-job", "status", "topics", "settings", "review", "agent", "lidar",
+            "inputs", "results", "physics", "downloads", "demos", "retry", "troubleshooting")
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
 
@@ -89,9 +89,8 @@ def test_help_page_holds_the_method_numbers():
     text = sections(page)
     num = lambda x: f"{x:g}"  # noqa: E731
     usd = lambda x: f"${x:.2f}".removesuffix(".00")  # noqa: E731  4.0 -> $4, 0.2 -> $0.20
-    iou, small = num(steps.MIN_IOU), f"{vote.MIN_AREA:.1%}"
-    score = num(inspect.signature(part_masks.run).parameters["threshold"].default)
-    seam_lines = inspect.signature(geometry.seams).parameters["max_lines"].default
+    iou = num(steps.MIN_IOU)
+    friction = num(inspect.signature(mjcf.build).parameters["friction"].default)
     snap_s = num(inspect.signature(video.snap).parameters["window_s"].default)
     nviews = re.search(r'<input type="range" id="nviews" min="(\d+)" max="(\d+)"', (STATIC / "index.html").read_text())
     upload = re.search(r"^MAX_UPLOAD = (\d+) << 30$", (ROOT / "harpor" / "webapp" / "server.py").read_text(), re.M)
@@ -115,18 +114,14 @@ def test_help_page_holds_the_method_numbers():
                           f"{turntable.FRAMES / turntable.FPS:g} s", f"{turntable.ELEVATION_DEG}°"],
              "review": [f"under {views.MIN_AREA:.0%} of the image", f"below {num(views.MIN_CONSISTENCY)}",
                         f"closer than {num(views.MIN_SPACING_DEG)}°", "over a third"],
-             "parts": [f"at least {score}", f"less than {small}", "not found", "still have a part",
-                       "outside the object", "union", "welds them into one body"],
-             "agent": [f"{num(agent_step.BUDGET_S['refinement'])} s to edit",
-                       f"{num(agent_step.BUDGET_S['articulation'])} s to set", f"up to {num(tools.MAX_EXCLUDED_S)} s",
+             "agent": [f"{num(agent_step.BUDGET_S)} s to edit", f"up to {num(tools.MAX_EXCLUDED_S)} s",
                        f"{num(controller.ROUND_BUDGET_S['repair'])} s for a repair",
                        f"{num(controller.ROUND_BUDGET_S['replan'])} s to plan", f"up to {controller.MAX_BUILDS - 1} repairs",
-                       "Rounds", "Requirement r1", "inconclusive", "unassessed", "not required", "Surface retained",
-                       "report only", "blocks articulated",
+                       "Rounds", "Physics check", "settle", "MuJoCo", "photo", "inconclusive", "needs review",
+                       "Surface retained", "report only", "blocks delivery",
                        f"{controller.CLAUDE_EFFORT} effort", f"{agent_step.EFFORT['fable']} effort", "Claude Fable 5.2",
                        "30 days", f"below {iou}", "skipped", *prices, "A ? means",
-                       "refusal fallback", f"at most {tools.MAX_LIMITATIONS}", *tools.VERDICTS["refinement"],
-                       *tools.VERDICTS["articulation"], "fallback_original", "checkpoint", "export", "API key",
+                       "refusal fallback", f"at most {tools.MAX_LIMITATIONS}", *tools.VERDICTS, "fallback_original", "checkpoint", "export", "API key",
                        "can reach the network", "no network access", "sk-ant-", "forgets the key", "key field",
                        "letters, digits, - and _"],
              "lidar": ["median", "before MV-SAM3D", "Without LiDAR", f"under {L.MIN_POINTS} points",
@@ -143,27 +138,22 @@ def test_help_page_holds_the_method_numbers():
                         "Turn the box off to see the whole scan", "read the object's dots and the median",
                         "outside the mask"],
              "results": [f"Below {iou}", "view 0's camera frame", "aligned.glb", "larger than", "mean over the views",
-                         "360 video", "reduced motion", "Soft-part video", f"a dent of {1000 * softvideo.DENT_M:g} mm",
-                         "true scale", "springs back"],
-             "joints": ["A ? means", "With 0", "nearest part above it", "fixed to the world", "one rigid body",
-                        "URDF and USD", "Soft part", "kPa", "rigid in MuJoCo too"],
-             "physics": ["64³", mass_err, "collision hulls", "left out", "median density", "Pa", "kg/m³",
-                         "by its volume", "bottom of the object", "MuJoCo, USD and URDF", "VoMP v1.1"],
+                         "360 video", "reduced motion"],
+             "physics": ["64³", mass_err, "nearest predicted voxel", "one rigid body", "Pa", "kg/m³",
+                         "bottom of the object", "MuJoCo, USD and URDF", "VoMP v1.1", "Friction",
+                         f"{friction} by default", "settles under gravity"],
              "downloads": ["(package)", "API key", "the agent's result when the key was found in it",
-                           "cameras' mean up", "fixed one to the link that physics welds it to",
-                           "each joint that the agent set", "a part without one has none", "view 0's camera frame",
-                           "mask IoU", "5th to 95th percentile", "could not voxelize", "ok is false",
+                           "cameras' mean up", "one link", "view 0's camera frame",
+                           "mask IoU", "5th to 95th percentile", "physics judgment", "ok is false",
                            "uploaded calibration", "Stray capture", "aligned with the color camera", "view 0 first",
                            "null without LiDAR",
-                           "excluded", f"up to {seam_lines} fitted lines", "not split off", "only in results.zip",
+                           "excluded", "only in results.zip",
                            "urdf/meshes", *zipped, "H.264", f"{turntable.SIDE} x {turntable.SIDE} px",
-                           f"{turntable.FPS} fps", f"{turntable.FRAMES / turntable.FPS:g} s",
-                           f"{softvideo.FPS} fps, {softvideo.FRAMES / softvideo.FPS:g} s"],
+                           f"{turntable.FPS} fps", f"{turntable.FRAMES / turntable.FPS:g} s"],
              "demos": ["gallery", "All demos", "Back button", "Coming soon", "360 video", "muted and looping", "3D view",
                        "aligned.glb", "<demo>_<name>"],
-             "retry": ["first stage that is not done", "replaces the results", "Retry from softvideo"],
-             "troubleshooting": ["360 video: …", "Retry from turntable", f"{steps.OPTIONAL['softvideo']}: …",
-                                 "Retry from softvideo"]}
+             "retry": ["first stage that is not done", "replaces the results", "Retry from turntable"],
+             "troubleshooting": [f"{steps.OPTIONAL['turntable']}: …", "Retry from turntable"]}
     assert set(facts) <= set(text), set(facts) - set(text)
     for sid, want in facts.items():
         assert all(f in text[sid] for f in want), (sid, [f for f in want if f not in text[sid]])
@@ -182,15 +172,14 @@ def test_help_page_gives_the_rank_and_the_time_off_the_clock():
     """The agent section names what the job's pick of the stored GLBs compares, in controller.RANK's order, and the
     helpers whose time does not count (tools.OFF_CLOCK), with the cap that holds in each round."""
     text = sections(HELP.read_text())["agent"]
-    words = {"round outcome pass": "a GLB whose check passed wins",
+    words = {"round outcome pass": "a mesh whose check passed wins",
              "surface not blocking": "surface findings do not block",
-             "required requirements passing": "meets the most requirements",
              "source not an export": "did not come from an export", "version": "then the later one"}
     assert tuple(words) == controller.RANK
     at = [text.index(w) for w in words.values()]
     assert at == sorted(at), at
     clock = re.search(r"Time spent [^.]*\.", text)[0]
-    assert set(tools.OFF_CLOCK) == {"export", "simulate"} and "exporting GLBs" in clock and "simulate helper" in clock
+    assert set(tools.OFF_CLOCK) == {"export"} and "exporting GLBs" in clock
     assert clock.endswith(f"up to {tools.MAX_EXCLUDED_S:g} s in each round.")
 
 

@@ -282,8 +282,12 @@ def test_model(root):
 def test_system_prompt_is_the_work_folder_manual():
     s = A.SYSTEM_FILE.read_text(encoding="utf-8")
     for fact in ("no network", "300 s", "run_budget.json", "view_image", "export_glb", "review", "checkpoint",
-                 "finish", "--python-exit-code", "articulated", "str_replace_based_edit_tool"):
+                 "finish", "--python-exit-code", "str_replace_based_edit_tool"):
         assert fact in s
+    from harpor.agent import tools
+
+    for verdict in tools.VERDICTS:  # every verdict that finish takes is named for the model
+        assert f"`{verdict}`" in s, verdict
     assert len(s) > 3000  # above the 512-token minimum for a cache entry
     assert "An image larger than 2576 px on its long side is shown downscaled." in s and "1568" not in s
     # The deadline facts are those of Codex's AGENTS.md, without time pressure on top.

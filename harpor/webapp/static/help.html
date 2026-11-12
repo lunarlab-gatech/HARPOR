@@ -26,12 +26,10 @@
     <li><a href="#topics">Camera topics of a rosbag</a></li>
     <li><a href="#settings">Build settings</a></li>
     <li><a href="#review">Review the views</a></li>
-    <li><a href="#parts">Parts of an articulated object</a></li>
     <li><a href="#agent">The agent and API keys</a></li>
     <li><a href="#lidar">Metric scale and LiDAR</a></li>
     <li><a href="#inputs">Inputs tab</a></li>
     <li><a href="#results">Results</a></li>
-    <li><a href="#joints">Joints and links</a></li>
     <li><a href="#physics">Mass and materials</a></li>
     <li><a href="#downloads">Downloads</a></li>
     <li><a href="#demos">Demos</a></li>
@@ -42,18 +40,18 @@
 
 <section id="about">
 <h2>About HARPOR</h2>
-<p>HARPOR stands for High-fidelity Articulated sim-Ready Object Reconstruction. It turns a phone video, a rosbag or a
-  Stray Scanner capture of one object into models for simulation:</p>
+<p>HARPOR turns a phone video, a rosbag or a Stray Scanner capture of one object into models for simulation. The
+  object is one rigid body. You get:</p>
 <ul>
   <li>meshes of the object, as it stood in the capture and turned upright;</li>
-  <li>its parts and joints, when it has moving parts;</li>
   <li>its mass and materials;</li>
   <li>MuJoCo, USD and URDF models.</li>
 </ul>
 <p>Each job builds one object from one capture. The build picks sharp frames, masks the object with SAM 3, estimates
   depth with Depth Anything 3 (DA3), chooses the views, makes a mesh with MV-SAM3D and fits it to the masks. An agent
-  then refines the mesh or sets the joints. VoMP predicts materials before refinement: immediately after mesh generation for a rigid object, or after the split for an object with parts. <a href="#status">Job status and the
-  log</a> lists every stage.</p>
+  then refines the mesh's geometry and appearance, and a check in MuJoCo tests whether the result stands like the real
+  object. VoMP predicts the materials right after the mesh is made, before the agent edits it. <a href="#status">Job
+  status and the log</a> lists every stage.</p>
 </section>
 
 
@@ -104,8 +102,8 @@
     <tr><td><span class="badge running">running</span></td><td>The build runs, and the badge names the stage. You can
       close the page.</td><td>Log</td></tr>
     <tr><td><span class="badge review">needs review</span></td><td>The build stopped for you: after the view
-      selection, after the part list, or because it needs the API key again. Check the views or the part list, then
-      press Build: see <a href="#review">Review the views</a> and <a href="#parts">Parts</a>.</td><td>Inputs</td></tr>
+      selection, or because it needs the API key again. Check the views, then press Build: see
+      <a href="#review">Review the views</a>.</td><td>Inputs</td></tr>
     <tr><td><span class="badge done">done</span></td><td>The build made all its results.</td><td>Results</td></tr>
     <tr><td><span class="badge failed">failed</span></td><td>A stage failed, and the error box gives the reason. Check
       the log, then Retry: see <a href="#troubleshooting">Troubleshooting</a>.</td><td>Log</td></tr>
@@ -113,12 +111,12 @@
       see <a href="#retry">Retry, cancel and build again</a>.</td><td>Log</td></tr>
   </tbody>
 </table>
-<p>The waiting panels (camera topic, review, part list, LiDAR failure) show above the tabs.</p>
+<p>The waiting panels (camera topic, review, LiDAR failure) show above the tabs.</p>
 
 <h3>The Log tab</h3>
 <p>The first line counts the build stages that are done or failed, and names the one that runs. Under it, each stage
   shows its name, what it does, GPU when it runs on the GPU, its status and its time. A stage that does not apply is
-  skipped, and its note says why, such as turned off: rigid object. When the job finishes, Total under the stages gives
+  skipped, and its note says why, such as turned off. When the job finishes, Total under the stages gives
   the sum of their times. Time in the queue or waiting for a review is not counted.</p>
 <p>While the job runs, the live log of the running stage shows next to the stages. After the job stops, click a
   stage's name to see its log. Full log opens the whole log file in a new tab.</p>
@@ -135,19 +133,14 @@
     <tr><td><code>lidar</code></td><td>Finds the metric scale from LiDAR.</td><td></td></tr>
     <tr><td><code>select</code></td><td>Chooses the views.</td><td></td></tr>
     <tr><td><code>sam3d</code></td><td>Makes the mesh with MV-SAM3D.</td><td>GPU</td></tr>
-    <tr><td><code>vomp</code></td><td>Predicts whole-object materials with VoMP (rigid objects).</td><td>GPU</td></tr>
+    <tr><td><code>vomp</code></td><td>Predicts the object's materials with VoMP.</td><td>GPU</td></tr>
     <tr><td><code>place</code></td><td>Fits the mesh's pose and scale to the masks.</td><td></td></tr>
-    <tr><td><code>propose</code></td><td>Lists the parts of an articulated object.</td><td></td></tr>
-    <tr><td><code>parts</code></td><td>Splits the mesh into parts.</td><td>GPU</td></tr>
-    <tr><td><code>vomp_parts</code></td><td>Predicts materials for each split part with VoMP.</td><td>GPU</td></tr>
-    <tr><td><code>agent</code></td><td>The agent refines the mesh or sets the joints.</td><td>GPU</td></tr>
+    <tr><td><code>agent</code></td><td>The agent refines the mesh, and MuJoCo checks each result.</td><td>GPU</td></tr>
     <tr><td><code>align</code></td><td>Turns the mesh upright and transfers materials to recompute mass and inertia.</td><td></td></tr>
     <tr><td><code>mjcf</code></td><td>Builds the MuJoCo model.</td><td></td></tr>
     <tr><td><code>usd</code></td><td>Builds the USD model.</td><td></td></tr>
     <tr><td><code>urdf</code></td><td>Builds the URDF model.</td><td></td></tr>
     <tr><td><code>turntable</code></td><td>Makes the 360 video, when you ask for one.</td><td>GPU</td></tr>
-    <tr><td><code>softvideo</code></td><td>Makes the soft-part video, when the MuJoCo model has a soft
-      part.</td><td>GPU</td></tr>
     <tr><td><code>package</code></td><td>Writes results.zip.</td><td></td></tr>
   </tbody>
 </table>
@@ -192,9 +185,7 @@
     mode, the app takes the best view whose mask stays off the image border. View 0 sets the frame of every mesh, and
     it is the photo that the VLM sees. You can change it in the review.</dd>
   <dt>Agent</dt>
-  <dd>The model that refines the mesh or sets the joints. See <a href="#agent">The agent and API keys</a>.</dd>
-  <dt>Articulated</dt>
-  <dd>For an object with moving parts. See <a href="#parts">Parts of an articulated object</a>.</dd>
+  <dd>The model that refines the mesh and judges the physics check. See <a href="#agent">The agent and API keys</a>.</dd>
   <dt>Use LiDAR for metric scale</dt>
   <dd>See <a href="#lidar">Metric scale and LiDAR</a>.</dd>
   <dt>Make a 360 video</dt>
@@ -296,61 +287,10 @@
   <a href="#lidar">Metric scale and LiDAR</a>.</p>
 </section>
 
-<section id="parts">
-<h2>Parts of an articulated object</h2>
-<p>An articulated object has parts that move, such as doors, drawers or a lid. Turn on Articulated in the Settings tab
-  for such an object. The build then lists its parts, splits the mesh into them, and the agent sets the joints. For a
-  rigid object, the parts stages are skipped.</p>
-<p>When the agent is off or skipped, the parts are split but get no joints, so physics welds them into one body.</p>
-
-<h3>The part list</h3>
-<p>Part list says who lists the moving parts. The VLM is the agent's model, and it looks at view 0.</p>
-<ul>
-  <li><b>VLM</b>: the VLM lists the parts, and the build goes on.</li>
-  <li><b>VLM, then I check</b>: the build stops after the VLM lists the parts, so you can check the list.</li>
-  <li><b>I type them</b>: you type the list in the Settings tab.</li>
-</ul>
-<p><b>Skip the split</b> is a separate choice. Usually SAM 3 masks split the mesh into the parts of the list before
-  the agent runs. With this box ticked, the agent gets the mesh as one piece and cuts every part out of it itself.
-  It needs an agent, and it is new: use it to compare with the split on the same object.</p>
-<p>Write one part per line, as name &gt; parent : joint. For example:</p>
-<pre>cabinet body
-door &gt; cabinet body : revolute
-drawer x3 &gt; cabinet body : prismatic</pre>
-<ul>
-  <li>The first line is the base. It has no parent, and it does not move.</li>
-  <li><code>revolute</code>: the part turns about a hinge or an axle, like a door or a lid.</li>
-  <li><code>prismatic</code>: the part slides, like a drawer.</li>
-  <li><code>fixed</code>: the part does not move on its parent.</li>
-  <li><code>soft</code>: the part dents under a press and springs back, like a seat cushion. It stays on its parent,
-    and no part can hang from it.</li>
-  <li><code>unknown</code>: you cannot tell.</li>
-  <li><code>drawer x3</code> means three identical drawers.</li>
-</ul>
-<p>The joint in the list is a guess. The agent sets the joints.</p>
-
-<h3>Check the part list</h3>
-<p>With VLM, then I check, the job stops at the Part list panel. It shows view 0 with the object's SAM 3 mask, the
-  VLM's list, and its axis hints: a few words on where each hinge or slide is and which way the part moves. Edit the
-  list if it is wrong, then press Build. Undo edits brings back the VLM's list. A part that keeps its name and joint
-  keeps its axis hint.</p>
-
-<h3>How the parts are split</h3>
-<p>SAM 3 masks each part's name in every view used, the base included. The masks vote on every face of the posed
-  mesh, and Blender cuts the mesh and fills the holes. The vote starts from every mask with a score of at least 0.4.
-  It drops the masks that lie outside the object, cover the whole object, are the union of two or more others, or
-  repeat a mask with a higher score. Part masks, in the Results tab, shows these masks, one color per part.</p>
-<p>Parts not split off, in the Results tab, lists each group of masks of a listed name that did not become a part.
-  So a name can show there and still have a part. <b>not found</b> means that no mask of the name was left in any view:
-  SAM 3 found none with a score of at least 0.4, or the vote dropped them all. Otherwise the vote gives the reason:
-  the group covers less than 0.3% of the surface, or fewer than half of the views that see it well and found the name
-  hold it.</p>
-</section>
-
 <section id="agent">
 <h2>The agent and API keys</h2>
-<p>The agent works on the posed mesh. For a rigid object it edits the mesh in Blender. For an articulated object it
-  sets the joints of the split parts. You choose it in the Settings tab:</p>
+<p>The agent works on the posed mesh. It edits the mesh's geometry and appearance in Blender, and compares its renders
+  with the photos. You choose it in the Settings tab:</p>
 <ul>
   <li>GPT-6-Astra runs through the Codex CLI. It needs an OpenAI key, which starts with sk-.</li>
   <li>Claude Opus 5.5 runs through the Anthropic API. It needs an Anthropic key, which starts with sk-ant-.</li>
@@ -362,22 +302,23 @@ drawer x3 &gt; cabinet body : prismatic</pre>
 
 </ul>
 <p>GPT-6-Astra and Claude Opus 5.5 run at xhigh effort. Claude Fable 5.2 runs at high effort, because at xhigh its
-  turns run longer and use many more tokens. The agent has 600 s to edit the mesh, or 900 s to set the joints. Time spent
-  exporting GLBs or checking them with the simulate helper does not count, up to 600 s in each round. The agent is
-  skipped when it is turned off, or when the mean mask IoU is below 0.5 (see <a href="#results">Results</a>).
-  Physics then uses the posed mesh, or the split parts without joints.</p>
+  turns run longer and use many more tokens. The agent has 600 s to edit the mesh. Time spent exporting GLBs does not
+  count, up to 600 s in each round. The agent is skipped when it is turned off, or when the mean mask IoU is below 0.5
+  (see <a href="#results">Results</a>). Physics then uses the posed mesh.</p>
 
-<h3>Requirements and rounds</h3>
-<p>Each part of the part list that moves or is soft gets a requirement: what the model must do, such as turn on its
-  hinge, or dent under a press and spring back. When the split finds such a part, the app checks the agent's GLB
-  against the requirements: it sweeps each hinge and slide for parts that pass through each other, and moves and
-  presses the parts in MuJoCo. The agent then works in rounds, each with a new agent that gets the last check's
-  findings. The first round builds, in the 900 s above. When the check finds a flaw that the agent can fix, a repair
-  round follows, with 450 s for a repair, up to 2 repairs. When the flaw is in the plan, such as the wrong kind of
-  joint, a planning round with 300 s to plan comes before the next repair. It writes a plan and builds nothing. The
-  job delivers the best GLB of the rounds: a GLB whose check passed wins, then one whose surface findings do not
-  block, then the one that meets the most requirements, then one that did not come from an export, then the later
-  one. Its verdict is articulated only when its check passed.</p>
+<h3>The physics check and rounds</h3>
+<p>After the agent hands off a mesh, the app checks it. It turns the mesh upright, gives it the materials that VoMP
+  predicted, and lets it settle on a floor under gravity in MuJoCo for 3 s. The agent's model then looks at the
+  simulation frames next to the photo, with the mass and the motion, and judges whether the object rests the way the
+  real one would. It does not tip over, roll away, sink into the floor or drift. The app also compares the mesh's
+  surface with the original's.</p>
+<p>The agent works in rounds, each with a new agent that gets the last check's findings. The first round builds, in
+  the 600 s above. When the check fails and the agent can fix the flaw, a repair round follows, with 450 s for a
+  repair, up to 2 repairs. When the flaw needs a new plan, a planning round with 300 s to plan comes before the next
+  repair. It writes a plan and builds nothing. When the check cannot run, for example when MuJoCo or the VLM is not available, the result is
+  inconclusive and no repair follows. The job delivers the best mesh of the rounds: a mesh whose check passed wins,
+  then one whose surface findings do not block, then one that did not come from an export, then the later one. A mesh
+  whose check did not pass is delivered as needs review.</p>
 
 <h3>GPT-6-Astra and the network</h3>
 <p>GPT-6-Astra runs the Codex CLI in a container that can reach the network. Text in your video or images, such as a
@@ -399,8 +340,8 @@ drawer x3 &gt; cabinet body : prismatic</pre>
   <dt>Agent</dt>
   <dd>The model that ran, or off when the agent was turned off, or skipped with the reason.</dd>
   <dt>Agent verdict</dt>
-  <dd>The agent's verdict when it called finish. For a refined mesh it is complete, unchanged or needs_review. For
-    joints it is articulated, unchanged (no joints) or needs review. In brackets is where the result came from: finish,
+  <dd>The agent's verdict when it called finish: complete, unchanged or needs_review. In brackets is where the result
+    came from: finish,
     checkpoint, export or fallback_original. A checkpoint or an export means that the session ended without a valid
     finish, so the verdict is needs review. <code>fallback_original</code> means that the agent left no valid result,
     so its input was kept.</dd>
@@ -411,32 +352,19 @@ drawer x3 &gt; cabinet body : prismatic</pre>
   <dt>Limitation</dt>
   <dd>A flaw that the agent says is still in its result, written when it called finish. The agent can list at most
     3.</dd>
-  <dt>Joint changes</dt>
-  <dd>The set_joint calls that set or removed a joint, which the app accepted during the session. A change that added
-    a problem to the joint tree was refused and undone, and it does not count.</dd>
   <dt>Rounds</dt>
   <dd>For a session in rounds: how many ran, each with its kind (build, repair or replan) and the outcome of its
     check, pass or fail, and the round whose GLB the job delivered. A replan round has no check. <b>no candidate
     delivered</b> means that no round left a GLB that the app could deliver.</dd>
-  <dt>Requirements</dt>
-  <dd>How many requirements the delivered GLB meets, of all of them. A part that was not split off counts too: the
-    agent is asked to cut it out of the mesh itself, and the requirement fails until it has.</dd>
-  <dt>Requirement r1, r2, …</dt>
-  <dd>Each requirement with its part, its joint and the outcome of the check of the delivered GLB: <b>pass</b>;
-    <b>fail</b>, when the check found a flaw; <b>inconclusive</b>, when the check could not be done, for example when
-    MuJoCo did not run; <b>unassessed</b>, when the part was not checked. <b>not split off</b> marks a part of the
-    list that the split did not find and the agent did not create, which fails the check; <b>cut out by the
-    agent</b> marks one that the agent created. <b>reduced</b> marks a joint that passes with less
-    range than the part list estimated, with the angle it reaches: the estimate is the part's full travel, guessed
-    from one photo, and the joint stops where it would hit another part. <b>clear from</b> gives
-    the range of a hinge or slide in which the part passes through no other part. <b>dents</b> gives how deep MuJoCo
-    pressed a soft part. <b>not required</b> marks a piece of a part found more often than its count.</dd>
+  <dt>Physics check</dt>
+  <dd>The physics check of the delivered mesh: pass, fail or inconclusive, with the VLM's reason. See
+    <a href="#agent">The physics check and rounds</a> above.</dd>
   <dt>Surface retained</dt>
-  <dd>How much of the original surface (the posed mesh, or the split parts) the agent's GLB keeps: the share still
+  <dd>How much of the original surface (the posed mesh) the agent's GLB keeps: the share still
     there, the share as it was (the same UVs, material and facing) and the share changed (cut, remeshed, or with
     other UVs or material). A face without UVs in the original cannot be checked for those. The names of any surface
     findings follow. <b>report only</b> means that they decide nothing, as long as the app's limits for them are not
-    set from real runs. <b>blocks articulated</b> means that they keep the GLB from the verdict articulated.</dd>
+    set from real runs. <b>blocks delivery</b> means that they rank the GLB below one whose surface does not block.</dd>
   <dt>Agent tokens</dt>
   <dd>For the Claude models: the tokens of the whole session, from its log: new input, output, cache reads and cache
     writes. A turn is one reply of the model.</dd>
@@ -532,10 +460,6 @@ time_offset_s: 0.0</pre>
   scale. The panel and the warning then say that the app now finds the scale in a new way. Run lidar and later stages again runs the lidar stage and every stage
   after it, GPU stages included, and replaces the results, so it asks first. With Review views before building on, it
   stops in review after the views are selected.</p>
-<p>While a job with LiDAR waits for its part list, the calibration cannot change. Confirm the list (Build) or cancel
-  the job first. When an update changed how the app finds the scale while the list waited, the Part list panel says
-  that Build cannot confirm the list. Cancel the job, then press Retry from lidar. The job finds the scale again, and
-  the VLM lists the parts again.</p>
 <p>Run lidar and later stages again, Retry from lidar, and Build and Select again when they run the lidar stage (after
   a calibration change, for example) first check the lidar stage's settings: the bag is still on the server, the LiDAR
   topic is one of the bag's (and the calibration's, when it names one), the bag's TF links the camera to the LiDAR or a
@@ -615,30 +539,19 @@ time_offset_s: 0.0</pre>
 
 <section id="results">
 <h2>Results</h2>
-<p>The Results tab shows the 360 video and the soft-part video, the meshes in 3D viewers, then a list of facts. Drag
+<p>The Results tab shows the 360 video, the meshes in 3D viewers, then a list of facts. Drag
   to turn a mesh, and scroll to zoom.</p>
 <dl>
   <dt>360 video</dt>
   <dd>Shows when you asked for one. It is the mesh that physics used, turned upright, with its own materials. It plays
     muted and loops, and its controls pause it. It stops when you leave the tab. When your system asks for reduced
     motion, it does not start by itself.</dd>
-  <dt>Soft-part video</dt>
-  <dd>Shows when the MuJoCo model has a soft part, beside the 360 video, and plays the same way. MuJoCo presses the
-    first soft part toward its parent and lets go: a dent of 12 mm, or a fifth of the part's depth when that is
-    less, at true scale, and the part springs back. The object stands still, and the camera frames the soft part.
-    No setting asks for it, and when it fails, the job still finishes, with a warning.</dd>
   <dt>Posed mesh</dt>
   <dd>MV-SAM3D's mesh from all the views used, with its size, position and a small turn fitted to the SAM 3
     masks. The log and the Agent row call it the Stage A mesh.</dd>
-  <dt>Split parts</dt>
-  <dd>For an articulated object: the posed mesh cut into parts, without joints. See
-    <a href="#parts">Parts</a>.</dd>
   <dt>Refined</dt>
   <dd>The agent's GLB: the posed mesh after the agent edited it in Blender, or as it was when the verdict is unchanged.
     Physics uses it.</dd>
-  <dt>Parts with joints</dt>
-  <dd>The split parts as the agent delivered them, in one GLB, with the joints that it set. The title says no joints
-    when it set none. Physics uses it.</dd>
 </dl>
 <p>The title of the agent's viewer names the model that made it. Every mesh is in view 0's camera frame, where the
   viewer's up is the camera's forward axis, so the object looks tipped over. aligned.glb, in the Downloads tab, is the
@@ -652,69 +565,28 @@ time_offset_s: 0.0</pre>
   <dt>Mask IoU</dt>
   <dd>For each view, the app draws the posed mesh from that view's camera and compares it with the SAM 3 mask: the
     shared area divided by the area of both together, from 0 to 1. The row gives the mean over the views used. Below
-    0.5, the agent is skipped, and physics uses the posed mesh or its split parts.</dd>
-  <dt>Parts</dt>
-  <dd>Parts not split off and Part masks: see <a href="#parts">Parts</a>.</dd>
+    0.5, the agent is skipped, and physics uses the posed mesh.</dd>
   <dt>Agent</dt>
   <dd>The agent's rows: see <a href="#agent">The agent and API keys</a>.</dd>
-  <dt>Joints</dt>
-  <dd>Joints, Links, Base and the joint of each part: see <a href="#joints">Joints and links</a>.</dd>
   <dt>Physics</dt>
-  <dd>Mass, center of mass and the materials: see <a href="#physics">Mass and materials</a>.</dd>
-</dl>
-</section>
-
-<section id="joints">
-<h2>Joints and links</h2>
-<p>Physics builds the MuJoCo, USD and URDF models from the GLB that the agent delivered. Each part becomes a link, and
-  each joint that the agent set becomes a joint. A part without a joint is welded to the nearest part above it in the
-  GLB's node tree, or else to the base. When the GLB has no joints, the models hold the whole object as one rigid
-  body. That happens when the agent is off or skipped, or when it delivered no joints.</p>
-<dl>
-  <dt>Joints</dt>
-  <dd>The number of joints in the GLB that the agent delivered, fixed joints included. With 0, physics welds the parts
-    into one body. A ? means that the app could not read the GLB's joints.</dd>
-  <dt>Links</dt>
-  <dd>The bodies of the MuJoCo model (mjcf.json), one for each part of the GLB that physics used. <b>1 (no joints,
-    one rigid body)</b> means that the GLB had no joints.</dd>
-  <dt>Base</dt>
-  <dd>The link that the other links hang from. It is fixed to the world when the agent gave it a fixed joint to the
-    world. Otherwise it can move freely.</dd>
-  <dt>Joint of a part</dt>
-  <dd>How the part moves on its parent, from the joint that the agent set: it turns about an axis (revolute, with its
-    range in degrees), slides along one (prismatic, in cm), is fixed or is soft. The range runs from the lower to the
-    upper limit, where 0 is the part's pose in the mesh. <b>soft on X</b> means a part that dents under a press and
-    springs back. It is a rigid link fixed to X in the URDF and USD models. <b>none (welded to X)</b> means that the
-    agent gave the part no joint, so physics welds it as above.</dd>
-  <dt>Soft part</dt>
-  <dd>A soft part of the MuJoCo model, with its material (foam, gel or rubber) and its Young's modulus in kPa (1 kPa
-    is 1,000 Pa). In MuJoCo it is a soft mesh held by its parent, which dents under a press. URDF and USD have no soft
-    bodies, so there it is a rigid link fixed to its parent. <b>rigid in MuJoCo too</b> means that the app could not
-    build its soft mesh, for the reason given.</dd>
+  <dd>Mass, center of mass, the materials and the friction: see <a href="#physics">Mass and materials</a>.</dd>
 </dl>
 </section>
 
 <section id="physics">
 <h2>Mass and materials</h2>
-<p>VoMP predicts materials on a 64³ grid before agent refinement. A rigid object runs immediately after
-  MV-SAM3D; an object with parts runs once per split part after stage B, each on its own grid.
-  Later mesh edits reuse these predictions: each final voxel inherits the nearest predicted material,
-  within its own part when that part still exists. Mass and inertia are recomputed from the final geometry.
-  New geometry inherits nearby materials; VoMP does not run again in stage D. A link with no VoMP result, such as a thin lid with no occupied voxel, gets its collision
-  hulls filled at the object's median density when the parts have joints. When they have none, it is left out.</p>
+<p>VoMP predicts materials on a 64³ grid right after MV-SAM3D makes the mesh, before the agent edits it. Later mesh
+  edits reuse these predictions: each voxel of the final mesh takes the material of the nearest predicted voxel, so
+  new geometry takes the materials near it. Mass and inertia are recomputed from the final geometry and scale. VoMP
+  does not run again after the agent. The physics models hold the object as one rigid body.</p>
 <dl>
   <dt>Mass</dt>
-  <dd>The sum of density times voxel volume over the voxels of all links. Mass grows with the size cubed, so a 5% size
-    error gives about a 16% mass error.</dd>
+  <dd>The sum of density times voxel volume over the voxels of the final mesh. The voxels fill the mesh, so a hollow
+    object such as an empty box counts as solid wherever its walls are thicker than a voxel. Mass grows with the size
+    cubed, so a 5% size error gives about a 16% mass error.</dd>
   <dt>Center of mass</dt>
-  <dd>The mass-weighted mean of the voxel centers, and of any link filled from its collision hulls, as x, y and z in
-    meters. The frame is that of the physics models: z up, x along the long side, and the origin at the center of the
+  <dd>The mass-weighted mean of the voxel centers, as x, y and z in meters. The frame is that of the physics models: z up, x along the long side, and the origin at the center of the
     footprint at the bottom of the object.</dd>
-  <dt>Link masses</dt>
-  <dd>Each link's mass. <b>(from hulls)</b> marks a link filled from its collision hulls.</dd>
-  <dt>Mass note</dt>
-  <dd>Names the links that VoMP gave no result for, when the parts have no joints. The mass and the center of mass
-    leave them out, and so do the MuJoCo, USD and URDF models, which still keep their shapes.</dd>
   <dt>Young's modulus (median)</dt>
   <dd>Stiffness, in pascals (Pa). 1 GPa is 1e9 Pa. In our tests VoMP v1.1 gave about 4 GPa to most objects, steel and
     glass included.</dd>
@@ -723,17 +595,19 @@ time_offset_s: 0.0</pre>
   <dt>Density (median)</dt>
   <dd>In kg/m³. The mass uses each voxel's own density, not this median. In our tests VoMP v1.1 gave about
     1,000 kg/m³ to most objects.</dd>
+  <dt>Friction</dt>
+  <dd>The sliding friction of every collision surface and of the floor in the MuJoCo, USD and URDF scenes. VoMP does
+    not predict friction, so it is an assumed value, 0.6 by default.</dd>
 </dl>
-<p>The three material rows are medians of VoMP's prediction over the object's voxels. For an articulated object, the
-  voxels of all links count, each by its volume.</p>
+<p>The three material rows are medians of VoMP's prediction over the object's voxels.</p>
 <h3>Physics review during refinement</h3>
-<p>Each candidate uses the earlier VoMP estimates in MuJoCo. The host records settling and stability under
-  gravity, joint motion, and soft-part deformation where applicable. The VLM compares simulation frames,
-  material and mass estimates, and the original photo. A failed judgment feeds a repair round; missing
-  evidence or an unavailable judge cannot pass. The best verified candidate is preferred.</p>
-<p>The host keeps simulation GIF clips and contact sheets with the session evidence. A visual judgment
-  checks plausibility; a photo cannot establish an exact mass or stiffness. Soft parts still use their
-  selected foam, gel or rubber simulation parameters, which the judge also sees.</p>
+<p>Each mesh that the agent hands off gets the earlier VoMP estimates and settles under gravity in MuJoCo. The VLM
+  compares the simulation frames, the material and mass estimates, and the original photo. A failed judgment feeds a
+  repair round. Missing evidence or an unavailable judge cannot pass. The best checked mesh is delivered. See
+  <a href="#agent">The physics check and rounds</a>.</p>
+<p>The app keeps the simulation GIF clips and contact sheets with the session evidence. A visual judgment checks
+  whether the motion looks plausible. A photo cannot give an exact mass or stiffness, and the object settles the same
+  way whatever its mass.</p>
 </section>
 
 <section id="downloads">
@@ -754,18 +628,14 @@ time_offset_s: 0.0</pre>
       made URDF models.</td></tr>
     <tr><td><code>posed.glb</code>, <code>aligned.glb</code></td><td>The meshes below.</td><td>Always.</td></tr>
     <tr><td><code>turntable.mp4</code></td><td>The 360 video below.</td><td>When you asked for one.</td></tr>
-    <tr><td><code>softvideo.mp4</code></td><td>The soft-part video below.</td><td>When the MuJoCo model has a soft
-      part.</td></tr>
     <tr><td><code>refined.glb</code></td><td>The agent's GLB.</td><td>When the agent ran.</td></tr>
-    <tr><td><code>parts.glb</code>, <code>parts.json</code></td><td>The split parts and their record.</td><td>An
-      articulated object.</td></tr>
     <tr><td><code>summary.json</code>, <code>placement.json</code>, <code>selection.json</code></td><td>The records
       below.</td><td>Always.</td></tr>
     <tr><td><code>lidar.json</code></td><td>The LiDAR record below.</td><td>With LiDAR.</td></tr>
     <tr><td><code>agent_result.json</code></td><td>The agent's result: its verdict, reason, limitations and
       counts.</td><td>When the agent ran.</td></tr>
-    <tr><td><code>evidence.json</code></td><td>The evidence of the agent's rounds below.</td><td>An articulated
-      object whose requirements were checked.</td></tr>
+    <tr><td><code>evidence.json</code></td><td>The evidence of the agent's rounds below.</td><td>When the agent ran
+      in rounds with the physics check.</td></tr>
   </tbody>
 </table>
 <p>The MJCF and USD models, the URDF's meshes and the agent's result come only in results.zip.</p>
@@ -775,11 +645,8 @@ time_offset_s: 0.0</pre>
   <dt><code>posed.glb</code></dt>
   <dd>The posed mesh in view 0's camera frame, in meters, with the scale from LiDAR when LiDAR is on, else from Depth
     Anything 3's estimate.</dd>
-  <dt><code>parts.glb</code></dt>
-  <dd>The split parts in one GLB, one node per part, without joints, in the same frame as posed.glb.</dd>
   <dt><code>refined.glb</code></dt>
-  <dd>The agent's GLB, in the same frame as posed.glb. For an articulated object, each joint that the agent set is in
-    its child part's node extras (gator_joint); a part without one has none.</dd>
+  <dd>The agent's GLB, in the same frame as posed.glb.</dd>
   <dt><code>aligned.glb</code></dt>
   <dd>The GLB that physics used, turned upright, with the bottom at 0, the footprint centered on the origin and the
     long side on x (z up in MuJoCo, y up in glTF). Up is the object's own axis closest to the up of the table or floor
@@ -791,18 +658,13 @@ time_offset_s: 0.0</pre>
 <dl>
   <dt><code>turntable.mp4</code></dt>
   <dd>The 360 video: H.264 in MP4, 720 x 720 px, 30 fps, 8 s. The object turns once, so the video loops.</dd>
-  <dt><code>softvideo.mp4</code></dt>
-  <dd>The soft-part video: H.264 in MP4, 720 x 720 px, 30 fps, 3 s. The soft part is pressed and springs back once, so
-    the video loops.</dd>
 </dl>
 
 <h3>Simulation</h3>
 <dl>
   <dt><code>model.urdf</code></dt>
-  <dd>A URDF of the object, built from the MuJoCo model's meshes and masses: one link when the GLB has no joints, else
-    one link per part. Each part but the base gets the agent's joint to its parent, or a fixed one to the link that
-    physics welds it to when the agent gave it none. A fixed base adds a world link. It needs urdf/meshes from
-    results.zip.</dd>
+  <dd>A URDF of the object, built from the MuJoCo model's meshes and mass: one link with the object's inertia, its
+    visual mesh and its collision hulls. It needs urdf/meshes from results.zip.</dd>
 </dl>
 
 <h3>Records</h3>
@@ -813,8 +675,7 @@ time_offset_s: 0.0</pre>
     points lie to the mesh.</dd>
   <dt><code>summary.json</code></dt>
   <dd>The final physics summary, using transferred VoMP predictions: the voxel counts, the median and the 5th to 95th percentile of Young's
-    modulus, Poisson ratio and density, and the mass, center of mass and inertia of the rigid body. For an articulated
-    object it adds each link's numbers and the links that VoMP could not voxelize.</dd>
+    modulus, Poisson ratio and density, and the mass, center of mass and inertia of the rigid body.</dd>
   <dt><code>lidar.json</code></dt>
   <dd>The record of the lidar stage: the metric scale, each view's scale, point count and status, how the views were
     combined, the LiDAR source, and the link to the camera (for a rosbag the TF chain or the uploaded calibration; a
@@ -824,20 +685,14 @@ time_offset_s: 0.0</pre>
   <dd>The view selection: every candidate frame with its quality and status, such as picked or excluded, the picks in
     run order with view 0 first, the cameras seen from above, the warnings and the metric scale that select applied
     (null without LiDAR). ok is false when the selection failed, and the warnings say why.</dd>
-  <dt><code>parts.json</code></dt>
-  <dd>The record of the parts stage: each part's name, parent, guessed joint, share of the surface and box, then the
-    parts that were not split off, with the reason. It also gives the seams between parts that touch, with up to 4
-    fitted lines that may be hinge axes.</dd>
   <dt><code>mjcf.json</code></dt>
-  <dd>The record of the MuJoCo model: its inputs, versions, counts and start height. For an object with joints it also
-    lists the links with their masses, the joints, the base, the welded parts and the pairs that do not collide. The
-    model itself comes only in results.zip.</dd>
+  <dd>The record of the MuJoCo model: its inputs, versions, counts, friction, start height and the mass and inertia
+    that MuJoCo compiled. The model itself comes only in results.zip.</dd>
   <dt><code>evidence.json</code></dt>
-  <dd>The evidence of the agent's rounds (see <a href="#agent">The agent and API keys</a>): the requirements, then
-    each GLB that a build or repair round handed off, with the agent's verdict, reason and limitations, its joints,
-    MuJoCo's settings, the surface check, and each requirement's outcome with what the check measured; then the
-    rounds, and which GLB the job delivered and why. It holds no motion of the parts over time. It is left out, here and
-    in results.zip, when your API key was found in it.</dd>
+  <dd>The evidence of the agent's rounds (see <a href="#agent">The agent and API keys</a>): each GLB that a build or
+    repair round handed off, with the agent's verdict, reason and limitations, the surface check, the physics
+    judgment and the findings of its round; then the rounds, and which GLB the job delivered and why. It is left out,
+    here and in results.zip, when your API key was found in it.</dd>
 </dl>
 </section>
 
@@ -848,8 +703,8 @@ time_offset_s: 0.0</pre>
   demo that is not ready yet, and it does not open.</p>
 <p>An open demo plays its 360 video, muted and looping; its controls pause it. When your system asks for reduced
   motion, the video does not start by itself. Open 3D view to turn the model with the mouse or a finger.</p>
-<p>The facts are those of the Results tab: see <a href="#results">Results</a>, <a href="#joints">Joints and links</a>
-  and <a href="#physics">Mass and materials</a>. The files are those of the Downloads tab, and each one downloads as
+<p>The facts are those of the Results tab: see <a href="#results">Results</a> and
+  <a href="#physics">Mass and materials</a>. The files are those of the Downloads tab, and each one downloads as
   <code>&lt;demo&gt;_&lt;name&gt;</code>: see <a href="#downloads">Downloads</a>. The 3D view shows aligned.glb, the
   mesh turned upright.</p>
 </section>
@@ -859,11 +714,9 @@ time_offset_s: 0.0</pre>
 <dl>
   <dt>Retry</dt>
   <dd>On a failed or cancelled job. It continues from the first stage that is not done, and its label names that
-    stage, such as Retry from sam3d. Read input again means that the input was not read yet. Back to part list means
-    that the job stopped before you confirmed its part list. After a change of the calibration, or an update that
+    stage, such as Retry from sam3d. Read input again means that the input was not read yet. After a change of the calibration, or an update that
     changes how the app finds the scale, Retry starts from lidar. A done job whose 360 video failed shows Retry from
-    turntable, and one whose soft-part video failed shows Retry from softvideo. It makes the video again and then
-    results.zip. A done job whose scale is out of date shows Run lidar
+    turntable. It makes the video again and then results.zip. A done job whose scale is out of date shows Run lidar
     and later stages again: see <a href="#lidar">Metric scale and LiDAR</a>.</dd>
   <dt>Cancel job</dt>
   <dd>Stops the running stage. For the API key, see <a href="#agent">The agent and API keys</a>.</dd>
@@ -889,9 +742,6 @@ time_offset_s: 0.0</pre>
   <dt>360 video: …</dt>
   <dd>The 360 video failed, and the rest of the job is done. The Log tab has the turntable stage's log. To try again,
     press Retry from turntable.</dd>
-  <dt>soft-part video: …</dt>
-  <dd>The soft-part video failed, and the rest of the job is done. The Log tab has the softvideo stage's log. To try
-    again, press Retry from softvideo.</dd>
   <dt>the server stopped while this job ran; resume it</dt>
   <dd>The server restarted during the build. Press Retry.</dd>
   <dt>The server no longer holds the … API key</dt>

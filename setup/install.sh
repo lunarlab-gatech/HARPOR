@@ -19,7 +19,7 @@ done
 if [ "$HARPOR_SKIP_AGENT" = 1 ]; then
   echo "==== agent: skipped (HARPOR_SKIP_AGENT=1)"
 elif ! command -v apptainer > /dev/null; then
-  echo "==== agent: skipped, no apptainer. The agent, part split, 360 video and soft-part video need setup/agent.sh." >&2
+  echo "==== agent: skipped, no apptainer. The agent and the 360 video need setup/agent.sh." >&2
 else
   echo "==== agent $(date +%T)"
   bash "$S/agent.sh"

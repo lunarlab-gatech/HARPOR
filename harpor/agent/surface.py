@@ -1,7 +1,7 @@
 """How much of the original's surface a candidate keeps: the source map rho of paper Sec. 3.2 and A.2 (build_plan.md
-note 11).
+note 5).
 
-compare(glb, original) reads both GLBs with harpor.physics.mjcf.load_s(by_link=True). The session's GLBs are all in
+compare(glb, original) reads both GLBs with harpor.physics.mjcf.load_s. The session's GLBs are all in
 W with glTF axes and in the same units, so their numbers compare one to one. It never raises: any failure gives
 {"error": ...}, which the caller reports as surface_error.
 
@@ -24,17 +24,16 @@ Categories, as shares of the native area:
 - deleted: the other unmatched faces. present is 1 - deleted.
 - unresolved: matched faces without UVs in the original and with no other change, since their UVs cannot be checked.
 - added: candidate faces that match no original face. It never blocks, whatever its material, because the prompts
-  ask for cavities and trays, and a tray can be its own link.
-Measured with this rule on the meshes of a split office chair: a plane through the seat crosses 0.2% to 12.5% of the
+  ask for cavities and trays.
+Measured with this rule on the meshes of an office chair: a plane through the seat crosses 0.2% to 12.5% of the
 native area, yet a 1.2% cut was judged fully present, and a deleted 2.97% patch reported 2.76%, in 0.07 s.
 On a synthetic sheet of 9,800 faces compare takes 0.02 to 0.06 s with 64-pixel images, and 0.4 s with three
-2048-pixel images, 1.0 s when the faces are in 4 links, because each pair of primitives compares its images.
+2048-pixel images, because each pair of primitives compares its images.
 
-Caps are not native. harpor.agent.blender.split_parts (mean_uv) gives every corner of a cap one UV, so the original's
-faces without UV area are caps, left out of every share and of the native area. That keeps a drawer's cavity legal,
-and a GLB without UVs has no caps. A primitive whose UVs are all one point has no UVs: Blender's join (split_parts)
-gives an object without UVs a UV of 0 at every corner, and its faces are native. A cap in such a primitive counts as
-native too.
+Faces without UV area are not native: a cap that closes a cut gets one UV at every corner, so such faces of the
+original are left out of every share and of the native area, and a GLB without UVs has none. A primitive whose UVs
+are all one point has no UVs: Blender's join gives an object without UVs a UV of 0 at every corner, and its faces
+are native.
 
 Materials: each pair of an original primitive and a candidate primitive among the faces and their counterparts
 compares the factors (within FACTOR_TOL) and the decoded base color, normal and metallic-roughness images at full
@@ -51,10 +50,9 @@ IDENTITY surface_identity. The limits come from reasoning, not from paired data.
 report-only (blocks is then always False) until a real run calibrates them.
 
 The report holds diagonal, native_area, caps_area, shares {retained, modified, uv_changed, material_changed,
-flipped, deleted, unresolved, added, present}, links {link: {native, kept}} of the original's links (kept: the native
-area that is still present in the candidate's link of that name), lost_regions [{min, max, share}] (up to REGIONS
-boxes in W around the largest connected sets of deleted faces), materials [{original, candidate, why, share}] of the
-pairs that differ, findings [{code, link, measured, expected, why}], blocks and seconds.
+flipped, deleted, unresolved, added, present}, lost_regions [{min, max, share}] (up to REGIONS boxes in W around the
+largest connected sets of deleted faces), materials [{original, candidate, why, share}] of the pairs that differ,
+findings [{code, measured, expected, why}], blocks and seconds.
 
 It runs on the host in envs/sam3d, with numpy, scipy and trimesh, which it imports only when it runs.
 """
@@ -92,13 +90,12 @@ ENFORCE = False
 @dataclass
 class Surface:
     """Every face of a GLB as one mesh: uv is NaN for a primitive without UVs, prim the primitive of each face, and
-    links and materials those of each primitive."""
+    materials that of each primitive."""
 
     vertices: np.ndarray
     faces: np.ndarray
     uv: np.ndarray
     prim: np.ndarray
-    links: list
     materials: list
 
 
@@ -127,16 +124,16 @@ def read_surface(glb):
     image too large to decode (large_image)."""
     from harpor.physics.mjcf import load_s
 
-    meshes = [(str(link), m) for link, _, m in load_s(glb, by_link=True) if len(getattr(m, "faces", ()))]
-    why = large_image(m for _, m in meshes)
+    meshes = [m for _, m in load_s(glb) if len(getattr(m, "faces", ()))]
+    why = large_image(meshes)
     if why:
         raise ValueError(f"{Path(glb).name}: {why}")
-    offsets = np.cumsum([0] + [len(m.vertices) for _, m in meshes])
-    return Surface(np.concatenate([np.zeros((0, 3))] + [m.vertices for _, m in meshes]),
-                   np.concatenate([np.zeros((0, 3), int)] + [m.faces + o for (_, m), o in zip(meshes, offsets)]),
-                   np.concatenate([np.zeros((0, 2))] + [_uv(m) for _, m in meshes]),
-                   np.repeat(np.arange(len(meshes)), [len(m.faces) for _, m in meshes]),
-                   [link for link, _ in meshes], [getattr(m.visual, "material", None) for _, m in meshes])
+    offsets = np.cumsum([0] + [len(m.vertices) for m in meshes])
+    return Surface(np.concatenate([np.zeros((0, 3))] + [m.vertices for m in meshes]),
+                   np.concatenate([np.zeros((0, 3), int)] + [m.faces + o for m, o in zip(meshes, offsets)]),
+                   np.concatenate([np.zeros((0, 2))] + [_uv(m) for m in meshes]),
+                   np.repeat(np.arange(len(meshes)), [len(m.faces) for m in meshes]),
+                   [getattr(m.visual, "material", None) for m in meshes])
 
 
 def normals(points, faces):
@@ -275,19 +272,6 @@ def near_surface(probe, normal, cand, tol):
     return near, np.where(near, face[np.arange(len(face)), facing.argmax(1)], -1)
 
 
-def link_areas(orig, cand, area, native, other):
-    """{link: {native, kept}} of the original's links. A native face is kept when its counterpart in the candidate
-    (other: the matched face, or for a modified face on the candidate's surface the face nearest it; -1 for a deleted
-    face) is in the link of the same name."""
-    names = sorted(set(orig.links) | set(cand.links))
-    own = np.array([names.index(k) for k in orig.links], int)[orig.prim]
-    theirs = np.array([names.index(k) for k in cand.links], int)[cand.prim] if len(cand.faces) else np.zeros(1, int)
-    kept = native & (other >= 0) & (own == theirs[np.maximum(other, 0)])
-    return {k: {"native": float(f"{area[native & (own == n)].sum():.6g}"),
-                "kept": float(f"{area[kept & (own == n)].sum():.6g}")}
-            for n, k in enumerate(names) if k in orig.links}
-
-
 def lost_regions(points, ids, lost, area, total):
     """Up to REGIONS boxes {min, max, share} in W around the largest sets of lost faces that share vertices, largest
     first."""
@@ -311,7 +295,7 @@ def lost_regions(points, ids, lost, area, total):
 
 
 def finding(code, measured, expected, why):
-    return {"code": code, "link": None, "measured": measured, "expected": expected, "why": why}
+    return {"code": code, "measured": measured, "expected": expected, "why": why}
 
 
 def findings(shares):
@@ -358,7 +342,7 @@ def _compare(glb, original):
     shares = {k: round(v, 5) for k, v in shares.items()}
     found = findings(shares)
     return {"diagonal": diag, "native_area": float(f"{total:.6g}"), "caps_area": float(f"{area[~native].sum():.6g}"),
-            "shares": shares, "links": link_areas(orig, cand, area, native, other),
+            "shares": shares,
             "lost_regions": lost_regions(points, ids, deleted, area, total), "materials": materials,
             "findings": found, "blocks": ENFORCE and bool(found), "seconds": round(time.time() - t0, 2)}
 

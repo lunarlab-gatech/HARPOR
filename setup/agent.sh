@@ -1,7 +1,7 @@
 #!/bin/bash
 # The agent's Apptainer image, sif/harpor-agent.sif (build_plan.md note 5), under $HARPOR_ROOT (by default ~/harpor):
 # Node.js, the Codex CLI and Blender, from containers/harpor-agent.def. A machine that runs HARPOR without the docker
-# image needs it for the agent, the part split, the 360 video and the soft-part video. The docker image has these
+# image needs it for the agent and the 360 video. The docker image has these
 # tools inside and runs them in sibling containers instead, so it skips this script.
 set -eo pipefail
 CODE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

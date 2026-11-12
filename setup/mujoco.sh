@@ -16,16 +16,15 @@ fi
 "$G/envs/mujoco/bin/pip" install mujoco==4.0.0 coacd==1.0.14 trimesh==5.1.1 usd-core==26.8 numpy==2.4.6 scipy==1.17.1 pillow==12.3.0
 "$G/envs/mujoco/bin/python" -c "import coacd, mujoco, numpy, PIL, pxr, scipy, trimesh
 print('mujoco', mujoco.__version__, 'trimesh', trimesh.__version__, 'numpy', numpy.__version__, 'scipy', scipy.__version__)"
-# A small soft part with the options of a model with one (harpor.physics.mjcf), which another MuJoCo version can
-# change: it compiles, keeps the discrete integrator and the CG solver, and steps without a warning.
+# A free box on a floor, as the physics check settles a candidate (harpor.physics.supervise): it compiles and comes to
+# rest on the floor without a warning.
 "$G/envs/mujoco/bin/python" -c "import mujoco
-m = mujoco.MjModel.from_xml_string('''<mujoco><option integrator=\"discrete\" solver=\"CG\"/><worldbody><body name=\"base\">
-<flexcomp name=\"pad\" type=\"grid\" count=\"3 3 3\" spacing=\"0.05 0.05 0.05\" dim=\"3\" dof=\"full\" radius=\"0.002\"
-mass=\"0.1\"><elasticity young=\"3e4\" poisson=\"0.3\" damping=\"0.002\"/><pin id=\"0 1 2\"/></flexcomp>
-</body></worldbody></mujoco>''')
+m = mujoco.MjModel.from_xml_string('''<mujoco><worldbody><geom type=\"plane\" size=\"1 1 0.05\"/>
+<body pos=\"0 0 0.2\"><freejoint/><geom type=\"box\" size=\"0.05 0.05 0.05\" mass=\"0.5\"/></body>
+</worldbody></mujoco>''')
 d = mujoco.MjData(m)
-mujoco.mj_step(m, d, 100)
-assert (m.opt.integrator, m.opt.solver) == (mujoco.mjtIntegrator.mjINT_DISCRETE, mujoco.mjtSolver.mjSOL_CG)
-assert not any(w.number for w in d.warning), 'the soft part warns'
-print('flexcomp: discrete integrator, CG solver')"
+mujoco.mj_step(m, d, 1500)
+assert not any(w.number for w in d.warning), 'the settling box warns'
+assert abs(d.qpos[2] - 0.05) < 2e-3, f'the box rests at z = {d.qpos[2]:.4f}, not on the floor'
+print('free body: settles on the floor')"
 echo SETUP_OK

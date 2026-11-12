@@ -1,4 +1,4 @@
-/* HARPOR (High-fidelity Articulated sim-Ready Object Reconstruction) web app. A plain document look: hairline rules,
+/* HARPOR web app. A plain document look: hairline rules,
    no cards, one ink accent for links, focus and the primary action. Tokens first; dark mode swaps the colors only. */
 :root {
   color-scheme: light dark;
@@ -167,9 +167,9 @@ legend { padding: 0; margin-bottom: var(--s1); font-size: var(--t-ui); font-weig
 .chips label:has(input:disabled) { color: var(--muted); cursor: default; }
 textarea { display: block; width: 100%; max-width: 560px; margin-top: var(--s1); padding: 8px 10px; border: 1px solid var(--field);
   border-radius: var(--r); background: var(--surface); font: var(--t-s)/1.5 var(--mono); resize: vertical; }
-.partsbox { margin: var(--s1) 0 var(--s3); padding-left: var(--s4); border-left: 1px solid var(--rule); }
-.partsbox fieldset { margin-top: var(--s2); }
-.partsbox label[for], #partsreview label[for] { font-size: var(--t-ui); font-weight: 600; margin-bottom: 0; }
+.subbox { margin: var(--s1) 0 var(--s3); padding-left: var(--s4); border-left: 1px solid var(--rule); }
+.subbox fieldset { margin-top: var(--s2); }
+.subbox label[for] { font-size: var(--t-ui); font-weight: 600; margin-bottom: 0; }
 .lidarbox > label.check { font-weight: 500; }
 .lidarbox > .hint { margin-top: 0; }
 #lidarhint:empty { display: none; }  /* it says only why the box is off */
@@ -354,15 +354,6 @@ th { padding-block: 6px; font-size: var(--t-s); font-weight: 500; color: var(--m
 .checks figcaption { margin-top: var(--s1); font: var(--t-xs) var(--mono); color: var(--muted); font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere; }
 
-/* the part list */
-.photobox { margin: 0; }
-.photobox img { width: 100%; max-width: 300px; display: block; border: 1px solid var(--line); background: var(--surface-2); }
-.photobox figcaption { margin-top: 6px; }
-#partssum { margin-top: 0; }
-.parthints { margin: var(--s2) 0 0; padding-left: 18px; font-size: var(--t-s); color: var(--muted); }
-.parthints:empty { display: none; }
-.parthints b { color: var(--fg); font-weight: 500; }
-
 /* results */
 .viewers { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s5); margin: var(--s4) 0; }
 .viewers.single { grid-template-columns: minmax(0, 760px); }
@@ -372,7 +363,6 @@ th { padding-block: 6px; font-size: var(--t-s); font-weight: 500; color: var(--m
 @media (min-width: 1100px) {
   #resultsbody.onefig { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); grid-template-rows: auto 1fr;
     gap: 0 var(--s6); align-items: start; }
-  #resultsbody.onefig > #partchecks { grid-column: 1 / -1; }
   #resultsbody.onefig > .viewers.single { grid-template-columns: minmax(0, 1fr); grid-column: 1; grid-row: 1 / span 2;
     margin-top: 0; }
   #resultsbody.onefig > #spin { grid-column: 2; grid-row: 1; }
@@ -382,9 +372,8 @@ th { padding-block: 6px; font-size: var(--t-s); font-weight: 500; color: var(--m
 }
 .viewers figure { margin: 0; min-width: 0; }
 .viewers figcaption, .spinfig figcaption { padding: 0 0 6px; font-size: var(--t-ui); font-weight: 600; }
-/* The 360 video (app.js renderSpin): square, as tall as a viewer, with the viewers' hairline. The soft-part video sits
-   beside it, or below it on a narrow panel. A flex item's margins do not collapse, so a figure keeps only its top
-   margin, and the gap above the viewers stays one margin. */
+/* The 360 video (app.js renderSpin): square, as tall as a viewer, with the viewers' hairline. A flex item's margins do
+   not collapse, so the figure keeps only its top margin, and the gap above the viewers stays one margin. */
 #spin { display: flex; flex-wrap: wrap; column-gap: var(--s5); }
 #spin > .spinfig { flex: 0 1 clamp(260px, 45vh, 420px); min-width: 0; margin-bottom: 0; }
 .spinfig { margin: var(--s4) 0; }
@@ -401,7 +390,6 @@ dt, dd { padding: 7px 0; border-bottom: 1px solid var(--line); }
 .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--s2); margin: var(--s2) 0; }
 .checks a { display: block; }
 .checks img { width: 100%; display: block; border: 1px solid var(--line); }
-#partchecks:empty { display: none; }
 dt { color: var(--muted); font-size: var(--t-ui); }
 dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 

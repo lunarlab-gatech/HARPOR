@@ -1,27 +1,14 @@
-"""Write a URDF for one aligned GLB from its MJCF folder (build_plan.md notes 9 and 11).
+"""Write a URDF for one aligned GLB from its MJCF folder (build_plan.md note 9).
 
     python -m harpor.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME
 
-It reuses the MJCF's visual OBJs and textures, convex collision hulls and per-link inertials
-(MJCF_DIR/assets and mjcf.json), so the two models agree. Writes into DIR:
-  model.urdf   robot NAME. A rigid object is one link NAME with the inertial of summary.json. An
-               articulated one has a link per part (the GLB's node names) and a joint per jointed part,
-               <child>_joint: revolute, prismatic or fixed, with <axis> and
-               <limit lower upper effort="100" velocity="1"/>; a soft part gets a fixed joint with an XML
-               comment before it, because URDF has no soft body, and urdf.json soft_as_rigid names it; a
-               part without a joint gets a fixed joint to the link the MJCF welds it to (mjcf.json
-               welded, else the root). A fixed base adds a link world and the fixed joint world_joint at
-               the MJCF's start height, as MJCF and USD.
-  meshes/      link_<k>.obj per link k (one object and material per visual, the MJCF's visual_<j>.obj
-               merged) with link_<k>.mtl and texture_<j>.png, and the collision OBJs copied
-  urdf.json    inputs, links, joints and the check below (checked)
-Link frames: every link's geometry is in S, so the root's frame is S and a child's frame sits at its
-joint's origin with S's axes. A joint's <origin xyz> is its child's frame minus its parent's, and every
-visual, collision and inertial <origin xyz> is minus its link's frame (the COM minus it for the inertial).
-The axis, the inertia and the limits stay as they are (radians, meters). URDF names the links by part,
-MJCF by body (<name> for the root, <name>_<part> for the rest). URDF has no contact filter, so the MJCF's
-excluded_pairs and soft_excluded_pairs are only listed in urdf.json; importers usually turn self-collision
-off (Isaac Sim does).
+It reuses the MJCF's visual OBJs and textures and convex collision hulls (MJCF_DIR/assets and mjcf.json),
+so the two models agree. Writes into DIR:
+  model.urdf   robot NAME: one link NAME with the inertial of summary.json, its visual mesh and its
+               collision hulls. The link's frame is S.
+  meshes/      link_0.obj (one object and material per visual, the MJCF's visual_<j>.obj merged) with
+               link_0.mtl and texture_<j>.png, and the collision OBJs copied
+  urdf.json    inputs, the link and the check below (checked)
 """
 
 import argparse
@@ -32,9 +19,6 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
-import numpy as np
-
-from harpor.parts.joints import SOFT_AS_RIGID
 
 
 def _shift(token, ov, ot, on):
@@ -71,42 +55,25 @@ def _xyz(x):
     return " ".join(f"{c:.6g}" for c in x)
 
 
-def urdf_xml(name, links, joints, fixed_base, soft=()):
-    """links: [{name, frame, inertial, mesh, collisions}]; joints: [{name, type, parent, child, xyz, axis, range}];
-    soft: the links that get a comment."""
+def urdf_xml(name, link):
+    """link: {name, inertial, mesh, collisions}, in frame S."""
     a = quoteattr
-    lines = [f"<robot name={a(name)}>"]
-    if fixed_base:
-        lines.append('  <link name="world"/>')
-    for link in links:
-        off = -np.asarray(link["frame"], float)
-        i = link["inertial"]
-        xx, yy, zz, xy, xz, yz = i["fullinertia"]
-        lines += [f'  <link name={a(link["name"])}>',
-                  '    <inertial>',
-                  f'      <origin xyz="{_xyz(np.asarray(i["com"], float) + off)}" rpy="0 0 0"/>',
-                  f'      <mass value="{i["mass"]:.6g}"/>',
-                  f'      <inertia ixx="{xx:.6g}" ixy="{xy:.6g}" ixz="{xz:.6g}" iyy="{yy:.6g}" iyz="{yz:.6g}" izz="{zz:.6g}"/>',
-                  '    </inertial>']
-        if link["mesh"]:
-            lines += ['    <visual>', f'      <origin xyz="{_xyz(off)}" rpy="0 0 0"/>',
-                      f'      <geometry><mesh filename={a(link["mesh"])}/></geometry>', '    </visual>']
-        for c in link["collisions"]:
-            lines += ['    <collision>', f'      <origin xyz="{_xyz(off)}" rpy="0 0 0"/>',
-                      f'      <geometry><mesh filename={a(c)}/></geometry>', '    </collision>']
-        lines.append("  </link>")
-    for j in joints:
-        if j["child"] in soft:  # an XML comment cannot hold --
-            lines.append(f'  <!-- {re.sub(r"-(?=-)", "- ", j["child"])}: {SOFT_AS_RIGID} -->')
-        lines += [f'  <joint name={a(j["name"])} type="{j["type"]}">',
-                  f'    <parent link={a(j["parent"])}/>',
-                  f'    <child link={a(j["child"])}/>',
-                  f'    <origin xyz="{_xyz(j["xyz"])}" rpy="0 0 0"/>']
-        if j["type"] != "fixed":
-            lines += [f'    <axis xyz="{_xyz(j["axis"])}"/>',
-                      f'    <limit lower="{j["range"][0]:.6g}" upper="{j["range"][1]:.6g}" effort="100" velocity="1"/>']
-        lines.append("  </joint>")
-    return "\n".join(lines + ["</robot>"]) + "\n"
+    i = link["inertial"]
+    xx, yy, zz, xy, xz, yz = i["fullinertia"]
+    lines = [f"<robot name={a(name)}>",
+             f'  <link name={a(link["name"])}>',
+             '    <inertial>',
+             f'      <origin xyz="{_xyz(i["com"])}" rpy="0 0 0"/>',
+             f'      <mass value="{i["mass"]:.6g}"/>',
+             f'      <inertia ixx="{xx:.6g}" ixy="{xy:.6g}" ixz="{xz:.6g}" iyy="{yy:.6g}" iyz="{yz:.6g}" izz="{zz:.6g}"/>',
+             '    </inertial>']
+    if link["mesh"]:
+        lines += ['    <visual>', '      <origin xyz="0 0 0" rpy="0 0 0"/>',
+                  f'      <geometry><mesh filename={a(link["mesh"])}/></geometry>', '    </visual>']
+    for c in link["collisions"]:
+        lines += ['    <collision>', '      <origin xyz="0 0 0" rpy="0 0 0"/>',
+                  f'      <geometry><mesh filename={a(c)}/></geometry>', '    </collision>']
+    return "\n".join(lines + ["  </link>", "</robot>"]) + "\n"
 
 
 def build(glb, summary, mjcf_dir, out, name):
@@ -115,49 +82,25 @@ def build(glb, summary, mjcf_dir, out, name):
     meshes.mkdir(parents=True, exist_ok=True)
     mj = json.loads((mjcf_dir / "mjcf.json").read_text())
     assets = mjcf_dir / "assets"
-    if "links" in mj:  # articulated (harpor.physics.mjcf with joints)
-        root, fixed_base = mj["root"], mj["fixed_base"]
-        recs = {k: {"inertial": r["inertial"], "hulls": [f"collision_{k}_{j}.obj" for j in range(r["collision_hulls"])],
-                    "visuals": [v for v in mj["visuals"] if v["link"] == k]} for k, r in mj["links"].items()}
-        holder = mj.get("welded", {})
-        spec = mj["joints"] + [{"child": k, "parent": holder.get(k, root), "type": "fixed", "pos": [0.0, 0.0, 0.0],
-                                "axis": [1.0, 0.0, 0.0], "range": [0.0, 0.0]} for k in mj["loose"]]
-    else:
-        rb = json.loads(Path(summary).read_text())["rigid_body"]
-        root, fixed_base, spec = name, False, []
-        recs = {name: {"inertial": {k: rb[k] for k in ("mass", "com", "fullinertia")},
-                       "hulls": [f"collision_{j}.obj" for j in range(mj["collision_hulls"])], "visuals": mj["visuals"]}}
-    frame = {k: [0.0, 0.0, 0.0] for k in recs}
-    for j in spec:
-        frame[j["child"]] = list(map(float, j["pos"]))
-    links = []
-    for i, (k, r) in enumerate(recs.items()):
-        mesh = None
-        if r["visuals"]:
-            link_obj(meshes / f"link_{i}.obj", assets, r["visuals"])
-            mesh = f"meshes/link_{i}.obj"
-        for h in r["hulls"]:
-            shutil.copyfile(assets / h, meshes / h)
-        links.append({"name": k, "frame": frame[k], "inertial": r["inertial"], "mesh": mesh,
-                      "collisions": [f"meshes/{h}" for h in r["hulls"]]})
-    soft = {j["child"]: SOFT_AS_RIGID for j in spec if j["type"] == "soft"}
-    joints = [{"name": f"{j['child']}_joint", "type": "fixed" if j["type"] == "soft" else j["type"],
-               "parent": j["parent"], "child": j["child"],
-               "xyz": (np.asarray(frame[j["child"]]) - frame[j["parent"]]).tolist(), "axis": j["axis"],
-               "range": j["range"]} for j in spec]
-    if fixed_base:
-        joints.insert(0, {"name": "world_joint", "type": "fixed", "parent": "world", "child": root,
-                          "xyz": [0.0, 0.0, float(mj["start_z"])], "axis": [1.0, 0.0, 0.0], "range": [0.0, 0.0]})
-    (out / "model.urdf").write_text(urdf_xml(name, links, joints, fixed_base, soft))
+    rb = json.loads(Path(summary).read_text())["rigid_body"]
+    hulls = [f"collision_{j}.obj" for j in range(mj["collision_hulls"])]
+    mesh = None
+    if mj["visuals"]:
+        link_obj(meshes / "link_0.obj", assets, mj["visuals"])
+        mesh = "meshes/link_0.obj"
+    for h in hulls:
+        shutil.copyfile(assets / h, meshes / h)
+    link = {"name": name, "inertial": {k: rb[k] for k in ("mass", "com", "fullinertia")}, "mesh": mesh,
+            "collisions": [f"meshes/{h}" for h in hulls]}
+    (out / "model.urdf").write_text(urdf_xml(name, link))
     report = {"glb": str(Path(glb).resolve()), "summary": str(Path(summary).resolve()), "mjcf": str(mjcf_dir.resolve()),
-              "name": name, "root": root, "fixed_base": fixed_base, "links": links, "joints": joints,
-              "excluded_pairs": mj.get("excluded_pairs", []) + mj.get("soft_excluded_pairs", []), "soft_as_rigid": soft}
+              "name": name, "links": [link]}
     (out / "urdf.json").write_text(json.dumps(report, indent=1))
     return report
 
 
 def check(out):
-    """Parse model.urdf: link and joint counts, joint types, and every mesh, material and texture file there.
+    """Parse model.urdf: link and joint counts, and every mesh, material and texture file there.
     Loads it with yourdfpy too when that is installed."""
     out = Path(out)
     robot = ET.parse(out / "model.urdf").getroot()

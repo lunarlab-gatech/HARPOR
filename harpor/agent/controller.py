@@ -1,14 +1,13 @@
 """Agent-stage controller (build_plan.md note 5).
 
-Prepares the session folder, runs the agent under a watchdog with a 600 s budget (the caller passes
-900 s for the articulation mode, build_plan.md note 11), serves the helper commands from the host,
-checks GLBs as paper A.4 describes and against the original's size, and picks the deliverable with the
-fallback order. An articulation whose parts.json has a found requirement runs in rounds, as
-PhysAg3D's repair loop does (paper A.3, A.4; run_rounds): a build, then repairs or one planning round
-(replan) while the host's check (harpor.agent.validate) finds something an agent can fix, each round
-with a new agent. Each build or repair keeps its pick as a candidate in control/candidates, and the
-session delivers the best of them (select_candidate, paper A.6). The agent is one of two, chosen per
-session in prepare_session and recorded in control/agent.json:
+Prepares the session folder, runs the agent under a watchdog with a 600 s budget, serves the helper
+commands from the host, checks GLBs as paper A.4 describes and against the original's size, and picks the
+deliverable with the fallback order. A session with physics supervision (harpor.agent.physics_review) runs in
+rounds, as PhysAg3D's repair loop does (paper A.3, A.4; run_rounds): a build, then repairs or one planning
+round (replan) while the host's check (harpor.agent.validate and the physics review) finds something an agent
+can fix, each round with a new agent. Each build or repair keeps its pick as a candidate in
+control/candidates, and the session delivers the best of them (select_candidate, paper A.6). The agent is one
+of two, chosen per session in prepare_session and recorded in control/agent.json:
 
   codex    GPT-6-Astra through the Codex CLI, as in the paper. The CLI runs in an Apptainer
            container that holds the API key (apptainer_command).
@@ -19,22 +18,19 @@ session in prepare_session and recorded in control/agent.json:
 
 Session layout:
 
-  root/original.glb   the controller's own copy of the generator output (refinement), or of the split
-                      parts.glb (articulation)
+  root/original.glb   the controller's own copy of the generator output
   root/result.json    the result record
   root/control/       host only: events.jsonl (what the helpers did, with GLB hashes; the deliverable
                       and the deadline come from it, and from a round's own events in rounds),
                       budget.json, manifest.json, agent.json, candidate.log, previews.log, exports/
                       (the host's copy of each export and its report) and staging/ (where Blender
-                      writes them first, tools.export_glb); in
-                      articulation also parts.json, and validate/ and ranges.json of the host's checks
-                      (harpor.agent.validate); in rounds also candidates/vNN/ (store_candidate) and
-                      evidence.json (harpor.agent.evidence)
+                      writes them first, tools.export_glb); physics/ (harpor.agent.physics_review); in
+                      rounds also validate/ and physics_checks/ of the host's checks, candidates/vNN/
+                      (store_candidate) and evidence.json (harpor.agent.evidence)
   root/work/          mounted as /work: AGENTS.md (codex only), input/, original/, candidate.blend,
-                      exports/, reviews/, checkpoints/, run_budget.json, finish.json; in articulation
-                      also input/parts.json, set_joint/, joints.json, reviews_articulation/ and
-                      simulate/; in rounds also evidence/round_NN.json (the check of each build) and
-                      the plan.md of a planning round
+                      exports/, reviews/, checkpoints/, run_budget.json, finish.json; in rounds also
+                      evidence/round_NN.json (the check of each build) and the plan.md of a planning
+                      round
   root/session/       prompt.txt and stderr.log; for codex the CLI's event log codex.jsonl and
                       codex_home/ for CODEX_HOME, mounted as /session in its container; for claude
                       the agent's log claude.jsonl, its stdout claude_stdout.log and system.md, a copy
@@ -72,19 +68,16 @@ from harpor import frames as F
 from harpor.fileio import read_json, write_json, write_text
 from harpor.agent import evidence, prompts, surface, tools, validate
 from harpor.agent.server import ToolServer
-from harpor.parts import joints as joint_spec
 
 BUDGET_S = 600.0
 MAX_BUILDS = 3  # paper A.4: the build and at most 2 repairs; a planning round (replan) is not a build
 ROUND_BUDGET_S = {"repair": 450.0, "replan": 300.0}  # a build takes the budget_s of the caller
 # What a round leaves in root/session, moved to session/rounds/NN/ when the next round starts (start_round).
 ROUND_FILES = ("codex.jsonl", "claude.jsonl", "stderr.log", "claude_stdout.log", "last_message.txt", "prompt.txt")
-# Of result.json's rounds: no why, a finding's text. link and measured can still name links of the agent's GLB.
-FINDING_KEYS = ("code", "requirement", "link", "measured", "expected")
-OUTCOMES = ("pass", "fail", "inconclusive", "unassessed")  # of a requirement (paper A.3)
+# Of result.json's rounds: no why, a finding's text.
+FINDING_KEYS = ("code", "measured", "expected")
 # What a stored candidate's rank compares, in order (rank): physics comes first, ahead of paper A.6's order.
-RANK = ("round outcome pass", "surface not blocking", "required requirements passing", "source not an export",
-        "version")
+RANK = ("round outcome pass", "surface not blocking", "source not an export", "version")
 AGENT_DIR = Path(__file__).resolve().parent
 REPO = AGENT_DIR.parents[1]  # claude_agent runs from here, as `python -m harpor.agent.claude_agent`
 CODEX_ENV = {"CODEX_HOME": "/session/codex_home"}
@@ -292,24 +285,16 @@ def agent_record(agent, effort=None, model=None):
     return {"agent": "claude", "model": model, "effort": effort}
 
 
-def prepare_session(root, mode, prompt, views, *, source, metric, original=None, agent="codex", effort=None,
-                    model=None, parts=None):
-    """Write the session folder for mode 'refinement' or 'articulation'.
+def prepare_session(root, prompt, views, *, source, metric, original=None, agent="codex", effort=None, model=None):
+    """Write the session folder of a refinement of original.
 
-    Articulation (build_plan.md note 11) works like refinement on the split parts.glb as the original,
-    and parts (run/parts.json of the parts stage) goes to work/input/parts.json, which the manifest names,
-    and to control/parts.json, the copy that the host's checks read (harpor.agent.validate).
-    prompt: None for the mode's prompt (harpor.agent.prompts). views: dicts with K, w2c
+    prompt: None for the refinement prompt (harpor.agent.prompts). views: dicts with K, w2c
     (OpenCV world-to-camera in W), width, height, and image and mask files. agent: "codex" (GPT-6-Astra
     through the Codex CLI, at the xhigh effort of codex/config.toml) or "claude" (model through
     claude_agent at effort: by default Claude Opus 5.5 at xhigh; model can also be Claude Fable 5.2).
     """
-    if mode not in tools.VERDICTS:
-        raise ValueError(f"mode is one of {', '.join(tools.VERDICTS)}, not {mode!r}")
-    if (parts is not None) != (mode == "articulation"):
-        raise ValueError("parts (run/parts.json) goes with the articulation mode, and only with it")
     record = agent_record(agent, effort, model)
-    prompt = prompts.load(mode) if prompt is None else prompt
+    prompt = prompts.load() if prompt is None else prompt
     root, work = Path(root), Path(root) / "work"
     for d in ("input", "exports", "reviews", "checkpoints"):
         (work / d).mkdir(parents=True, exist_ok=True)
@@ -336,7 +321,6 @@ def prepare_session(root, mode, prompt, views, *, source, metric, original=None,
             e[key] = str(dst.relative_to(work))
         entries.append(e)
     m = {
-        "mode": mode,
         "frame": "W, the OpenCV frame of input view 0: x right, y down, z forward",
         "glb_axes": "glTF; (x, y, z)_W = (x, -z, y)_glTF, which Blender's stock glTF importer applies",
         "w_from_gltf": F.W_FROM_GLTF.tolist(),
@@ -345,10 +329,6 @@ def prepare_session(root, mode, prompt, views, *, source, metric, original=None,
         "units": "meters" if metric else "relative: one unknown scale shared by all views",
         "views": entries,
     }
-    if parts is not None:
-        shutil.copyfile(parts, work / "input" / "parts.json")
-        shutil.copyfile(parts, root / "control" / "parts.json")
-        m["parts"] = "input/parts.json"
     write_json(work / "input" / "manifest.json", m)
     write_json(root / "control" / "manifest.json", m)
     shutil.copyfile(original, root / "original.glb")
@@ -368,8 +348,7 @@ def _capped(s, cap):
 
 def deadline(t0, budget_s, events, now):
     """The controller's own deadline: t0 + budget + the time of the helpers that run off the clock
-    (tools.OFF_CLOCK: export_glb, and simulate's check after its export), each run capped at its kind's
-    timeout and the total at tools.MAX_EXCLUDED_S.
+    (tools.OFF_CLOCK: export_glb), each run capped at its kind's timeout and the total at tools.MAX_EXCLUDED_S.
 
     The tool server runs one request at a time, so only the newest run without its _done event can be
     running; it counts up to now, so the clock pauses during it. events: this round's (tools.round_events).
@@ -418,7 +397,7 @@ def run_agent(root, cmd, env=None, budget_s=BUDGET_S, poll_s=0.5, kill_after_s=5
     SIGINT goes to the group at the deadline, or finish_wait_s after the finish helper ran, and SIGKILL
     follows kill_after_s later. Under Apptainer the container has its own PID namespace, so the group
     signal also ends processes the agent started in a new session. The deadline moves by the export
-    and simulate time that the helpers record in root/control (deadline). Both read only this round's
+    time that the helpers record in root/control (deadline). Both read only this round's
     events (tools.round_events), so an earlier round's finish does not end this one. The group is
     always killed on the way out, also when the watchdog itself fails.
     """
@@ -459,10 +438,9 @@ def check_glb(path):
     """Validity per paper A.4: parses, re-imports, finite vertices, materials. No quality filter.
 
     Vertices must be finite after the node transforms too, because the pose is baked into the asset.
-    Its nodes must form trees, as glTF requires (harpor.parts.joints.parents), and no image may be too large to
-    decode (harpor.agent.surface.large_image). A GLB with joints (harpor.parts.joints) must also hold a valid
-    joint tree; one without is not checked for them. The file is read once, without following a symlink.
-    Returns None for a valid GLB, else the reason.
+    Its nodes must form trees, as glTF requires (node_parents), and no image may be too large to decode
+    (harpor.agent.surface.large_image). The file is read once, without following a symlink. Returns None for a
+    valid GLB, else the reason.
     """
     try:
         data = tools.read_file(path)
@@ -491,17 +469,28 @@ def check_glb(path):
     if why:
         return f"image too large: {why}"
     try:
-        joint_spec.parents(gltf)
+        node_parents(gltf)
     except Exception as e:
         return f"bad nodes: {e}"
-    try:
-        joints = joint_spec.read_joints(gltf)
-        problems = joint_spec.validate(joints, joint_spec.mesh_nodes(gltf)) if joints else []
-    except Exception as e:
-        return f"bad joints: {e}"
-    if problems:
-        return "bad joints: " + "; ".join(problems[:3])
     return None
+
+
+def node_parents(gltf):
+    """{node index: its parent's index} of a glTF dict. Raises ValueError when nodes form a cycle, which glTF forbids
+    and which would loop every walk up the tree."""
+    nodes = gltf.get("nodes", [])
+    parent = {c: i for i, n in enumerate(nodes) for c in n.get("children", [])}
+    done = set()  # nodes whose walk up ends at a root
+    for i in range(len(nodes)):
+        path, k = {}, i  # the walk up from node i, in order
+        while k is not None and k not in done:
+            if k in path:
+                loop = list(path)[list(path).index(k):] + [k]
+                raise ValueError(f"the glTF nodes form a cycle: {' -> '.join(map(str, loop))}")
+            path[k] = None
+            k = parent.get(k)
+        done.update(path)
+    return parent
 
 
 def box_extents(path):
@@ -516,8 +505,7 @@ def check_size(path, original):
     is more than SIZE_RATIO's upper bound times the original's side, or every side is less than the lower
     bound times it (see SIZE_RATIO: a repair leaves at least one side as it was).
 
-    original is the GLB the agent started from (root/original.glb, a copy of posed.glb or of the split
-    parts.glb). Both are in frame W with glTF axes and in the same units, so their sides compare one to one.
+    original is the GLB the agent started from (root/original.glb, a copy of posed.glb). Both are in frame W with glTF axes and in the same units, so their sides compare one to one.
     A side under 1% of the original's longest is left out: a flat original's thin side says nothing.
     """
     try:
@@ -536,21 +524,13 @@ def check_size(path, original):
     return None
 
 
-def joint_count(glb):
-    """Number of joints in a GLB (harpor.parts.joints); None without a GLB or when they cannot be read."""
-    try:
-        return len(joint_spec.load(glb)[0]) if glb else None
-    except Exception:  # an unreadable GLB; check_glb names the reason
-        return None
-
-
 def original_pick(root):
     """The last of the fallback order: the unchanged original, root/original.glb."""
     return dict(source="fallback_original", glb=Path(root) / "original.glb", verdict="fallback_original",
                 reason="no valid agent output; the unchanged original is returned", limitations=[])
 
 
-def select_deliverable(root, mode):
+def select_deliverable(root):
     """Fallback order: finish GLB, newest valid checkpoint, newest valid export, then the unchanged
     original. Returns (pick, rejected).
 
@@ -583,8 +563,8 @@ def select_deliverable(root, mode):
         fin = finishes[-1]
         pick = dict(source="finish", verdict=fin.get("verdict"), reason=fin.get("reason"),
                     limitations=fin.get("limitations", []))
-        if pick["verdict"] not in tools.VERDICTS[mode]:
-            rejected.append({"from": "finish", "glb": None, "why": f"unknown verdict {pick['verdict']!r} for {mode}"})
+        if pick["verdict"] not in tools.VERDICTS:
+            rejected.append({"from": "finish", "glb": None, "why": f"unknown verdict {pick['verdict']!r}"})
         elif pick["verdict"] == "unchanged":
             return dict(pick, glb=root / "original.glb"), rejected
         elif valid(fin, "finish"):
@@ -704,13 +684,11 @@ def build_candidate(root, blender, timeout=300):
     return ok and (work / "candidate.blend").is_file()
 
 
-def has_rounds(root, mode):
-    """Rounds for sessions with physics supervision, or an articulation with a requirement that has a link: a
-    found part, or the reserve of a part that the split did not find (validate.link_of)."""
+def has_rounds(root):
+    """Rounds for a session with physics supervision (physics_review.enabled)."""
     from harpor.agent.physics_review import enabled
 
-    return enabled(Path(root) / "control") or (mode == "articulation" and any(
-        validate.link_of(r) for r in validate.requirements(Path(root) / "control")))
+    return enabled(Path(root) / "control")
 
 
 def next_round(rounds):
@@ -767,7 +745,7 @@ def run_round(root, cmd, env, blender, sock_dir, n, kind, prompt, watchdog):
 
 def _host_step(errors, fn, *args, **kw):
     """fn(*args, **kw), or None after its failure went to errors. A step after a round reads files that the
-    agent made, so a string SystemExit (tools.real_dir, tools.glb_joints) and any Exception are caught; an
+    agent made, so a string SystemExit (tools.real_dir) and any Exception are caught; an
     integer SystemExit, such as Cancel's sys.exit(143) (tools._on_sigterm), goes on."""
     try:
         return fn(*args, **kw)
@@ -786,11 +764,10 @@ def store_candidate(root, n, kind, pick):
     read-only copy, and vNN/report.json, the record {version, round, kind, glb, from (where the round left it),
     sha256, source, agent_verdict, reason, limitations, report}, whose report (the round's) check_round adds. The
     GLB is read once, and every later step reads the copy. Each round gets its own version, also with the bytes of
-    an earlier one, so that each keeps its own verdict. Returns the record, or None for fallback_original and
-    unchanged, which are no agent's GLB."""
+    an earlier one, so that each keeps its own verdict. Returns the record, or None for fallback_original, which is
+    no agent's GLB. An unchanged pick is stored: its GLB is root/original.glb, which the physics check may pass."""
     root = Path(root)
-    mode = (read_json(root / "control/manifest.json") or {}).get("mode", "articulation")
-    if pick["source"] == "fallback_original" or (pick["verdict"] == "unchanged" and mode != "refinement"):
+    if pick["source"] == "fallback_original":
         return None
     data = tools.read_file(pick["glb"])
     folder = root / "control" / "candidates"
@@ -818,26 +795,22 @@ def _written(errors, path, data):
 
 def check_round(root, n, kind):
     """The end of build or repair round n: the round's pick (select_deliverable on its events), stored as a
-    candidate (store_candidate), the host's check of the stored copy (validate.check, which pins the references of
-    control/ranges.json) and validate.round_report of them. An unchanged pick is not stored, and its check is of
-    root/original.glb, whose joint_missing tells the next agent what is open. A copy of the report goes to
-    work/evidence/round_NN.json for the next round's agent, and then into the candidate's record. A step that fails
-    is a validation_error of the round (_host_step). Returns {pick, rejected, version, sha256, report}; pick is None
-    when select_deliverable failed, and version when nothing was stored."""
+    candidate (store_candidate), the host's check of the stored copy (validate.check, then physics_review.check) and
+    validate.round_report of them. A copy of the report goes to work/evidence/round_NN.json for the next round's
+    agent, and then into the candidate's record. A step that fails is a validation_error of the round (_host_step).
+    Returns {pick, rejected, version, sha256, report}; pick is None when select_deliverable failed, and version when
+    nothing was stored."""
     root = Path(root)
     control, errors, report = root / "control", [], None
-    mode = (read_json(control / "manifest.json") or {}).get("mode", "articulation")
-    pick, rejected = _host_step(errors, select_deliverable, root, mode) or (None, [])
+    pick, rejected = _host_step(errors, select_deliverable, root) or (None, [])
     cand = pick and _host_step(errors, store_candidate, root, n, kind, pick)
     glb = root / cand["glb"] if cand else None
-    if pick and pick["verdict"] == "unchanged":  # root/original.glb, the host's own copy
-        glb = pick["glb"]
     if glb:
-        report = _host_step(errors, validate.check, glb, control, root / "original.glb", pin_ranges=True)
+        report = _host_step(errors, validate.check, glb, control, root / "original.glb")
         from harpor.agent import physics_review
 
         if report is not None and physics_review.enabled(control):
-            judgment = _host_step(errors, physics_review.check, root, glb, report)
+            judgment = _host_step(errors, physics_review.check, root, glb)
             if judgment is not None:
                 report = physics_review.apply(report, judgment)
     folder = _host_step(errors, tools.real_dir, root / "work", "evidence")
@@ -873,28 +846,17 @@ def stored_candidates(root):
     return [r for r in recs if isinstance(r, dict)]
 
 
-def _records(root, cand):
-    """The records of a stored candidate's report; every requirement unassessed when its check did not end."""
-    return ((cand.get("report") or {}).get("records") or
-            [validate.record(r) for r in validate.requirements(Path(root) / "control")])
-
-
-def passing(cand):
-    """The required found requirements that pass in a stored candidate's report with a trajectory of at least
-    validate.MIN_STATES states (paper A.6), none when the report is of other bytes than the candidate's."""
+def passed(cand):
+    """Whether a stored candidate's round passed the host's check, with a report of the candidate's own bytes."""
     report = cand.get("report") or {}
-    if report.get("sha256") != cand["sha256"]:
-        return 0
-    return sum(r["required"] and bool(r["target"]) and r["outcome"] == "pass"
-               and r["measured"].get("states", 0) >= validate.MIN_STATES for r in report["records"])
+    return report.get("sha256") == cand["sha256"] and report.get("outcome") == "pass"
 
 
 def rank(cand):
     """A stored candidate's rank, highest first (RANK). A passing round always wins, which puts physics ahead of
     paper A.6's order on purpose: that order would let a reviewed failure beat a later pass."""
     report = cand.get("report") or {}
-    return (report.get("sha256") == cand["sha256"] and report.get("outcome") == "pass",
-            not (report.get("surface") or {}).get("blocks"), passing(cand), cand["source"] != "export", cand["version"])
+    return (passed(cand), not (report.get("surface") or {}).get("blocks"), cand["source"] != "export", cand["version"])
 
 
 def eligibility(root, cand):
@@ -931,14 +893,16 @@ def ranking(root):
 
 def best_candidate(root):
     """The best stored candidate so far (ranking) where the agent can reach it, for prompts.round_prompt: {glb (where
-    its round left it, relative to work/), round, passing, required}, or None."""
+    its round left it, relative to work/), round, passed}, or None. An unchanged pick was left at root/original.glb,
+    which the agent's container does not see, so its glb is the agent's copy of the same bytes,
+    work/original/original.glb."""
     root = Path(root)
     ranked, _ = ranking(root)
     if not ranked:
         return None
     best = ranked[0]
-    return {"glb": os.path.relpath(root / best["from"], root / "work"), "round": best["round"],
-            "passing": passing(best), "required": sum(r["required"] and bool(r["target"]) for r in _records(root, best))}
+    glb = "original/original.glb" if best["from"] == "original.glb" else os.path.relpath(root / best["from"], root / "work")
+    return {"glb": glb, "round": best["round"], "passed": passed(best)}
 
 
 def why_first(ranked):
@@ -950,31 +914,22 @@ def why_first(ranked):
     return f"first of {len(ranked)} eligible candidates; it beats v{ranked[1]['version']:02d} on {RANK[i]}"
 
 
-def _finding_line(f):
-    where = ", ".join(f"{k} {f[k]}" for k in ("requirement", "link") if f.get(k))
-    return f"{f['code']}: {where}" if where else f["code"]
-
-
-def review_note(root, cand):
+def review_note(cand):
     """The reason and limitations of a stored candidate delivered as needs_review, written by the host: the reason
-    names the required requirements that do not pass, with their outcome, and the codes of the findings that count;
-    the limitations are the first of those findings (validate.ranked, at most tools.MAX_LIMITATIONS), by code,
-    requirement and link. Neither holds the agent's text."""
+    names the codes of the findings that count; the limitations are the first of those findings (validate.ranked, at
+    most tools.MAX_LIMITATIONS), by code. Neither holds the agent's text."""
     report = cand.get("report") or {}
-    unmet = [f"{r['requirement']} {r['outcome']}" for r in _records(root, cand)
-             if r["required"] and r["target"] and r["outcome"] != "pass"]
     found = [f for f in validate.ranked(report.get("findings") or []) if validate.counts(f)]
     codes = list(dict.fromkeys(f["code"] for f in found))
-    reason = (f"the host's check of candidate v{cand['version']:02d} (round {cand['round']}) did not pass: "
-              + (f"requirements not met: {', '.join(unmet)}" if unmet else "every required requirement passes")
+    reason = (f"the host's check of candidate v{cand['version']:02d} (round {cand['round']}) did not pass"
               + (f"; open: {', '.join(codes)}" if codes else ""))
-    return {"reason": reason, "limitations": list(dict.fromkeys(map(_finding_line, found)))[:tools.MAX_LIMITATIONS]}
+    return {"reason": reason, "limitations": codes[:tools.MAX_LIMITATIONS]}
 
 
 def select_candidate(root, last=None):
-    """The deliverable of a session with rounds (paper A.6): the best eligible stored candidate (ranking). Its
-    verdict is articulated only when its round passed, which needs the agent's articulated too, and it keeps the
-    agent's reason and limitations; else it is needs_review with the host's (review_note). source keeps the
+    """The deliverable of a session with rounds (paper A.6): the best eligible stored candidate (ranking). When its
+    round passed, which needs the agent's complete or unchanged too, it keeps the agent's verdict, reason and
+    limitations; else it is needs_review with the host's (review_note). source keeps the
     candidate's value and glb is its copy in control/candidates, so harpor.webapp.steps.agent_glb finds it in the
     session folder as before. Without an eligible candidate it is the unchanged original as fallback_original, the
     paper's static fallback, unless last, the pick of the last build or repair, has the verdict unchanged, which is
@@ -982,27 +937,23 @@ def select_candidate(root, last=None):
 
     Returns (pick, chosen, selected): pick as select_deliverable's, chosen the stored candidate's record or None,
     and selected the choice for control/evidence.json: {version, verdict, why, rank [{version, rank}] best first,
-    ineligible (ranking's others), unresolved (the requirements that do not pass)}."""
+    ineligible (ranking's others)}."""
     root = Path(root)
     ranked, others = ranking(root)
     order = [{"version": c["version"], "rank": list(rank(c))} for c in ranked]
     if not ranked:
         pick = dict(last) if last and last["verdict"] == "unchanged" else original_pick(root)
         selected = {"version": None, "verdict": pick["verdict"], "rank": order, "ineligible": others,
-                    "why": "no stored candidate is eligible" if others else "no build or repair handed off a GLB",
-                    "unresolved": [r["id"] for r in validate.requirements(root / "control")]}
+                    "why": "no stored candidate is eligible" if others else "no build or repair handed off a GLB"}
         return pick, None, selected
     best = ranked[0]
     pick = dict(source=best["source"], glb=root / best["glb"])
-    if rank(best)[0]:
-        mode = (read_json(root / "control/manifest.json") or {}).get("mode", "articulation")
-        verdict = "articulated" if mode == "articulation" else best["agent_verdict"]
-        pick.update(verdict=verdict, reason=best["reason"], limitations=best["limitations"])
+    if passed(best):
+        pick.update(verdict=best["agent_verdict"], reason=best["reason"], limitations=best["limitations"])
     else:
-        pick.update(verdict="needs_review", **review_note(root, best))
+        pick.update(verdict="needs_review", **review_note(best))
     selected = {"version": best["version"], "verdict": pick["verdict"], "why": why_first(ranked), "rank": order,
-                "ineligible": others, "unresolved": [r["requirement"] for r in _records(root, best)
-                                                     if r["outcome"] != "pass"]}
+                "ineligible": others}
     return pick, best, selected
 
 
@@ -1016,11 +967,11 @@ def candidate_summary(chosen, selected):
 
 
 def run_rounds(root, cmd, env, blender, sock_dir, watchdog):
-    """The rounds of a session with a found requirement (has_rounds; paper A.3, A.4): the build, then while
-    next_round says so a repair or a replan, each a new agent with a prompt (prompts.round_prompt) that carries
-    the feedback of the last check and the best stored candidate (best_candidate); only the repair right after a
-    replan is told to follow its /work/plan.md, which a later one would take for a plan of its own check. Each
-    build or repair ends with check_round, and every round with control/evidence.json (harpor.agent.evidence), so a
+    """The rounds of a session with physics supervision (has_rounds; paper A.3, A.4): the build, then while
+    next_round says so a repair or a replan, each a new agent with a prompt (prompts.round_prompt, then
+    physics_review.GUIDANCE) that carries the feedback of the last check and the best stored candidate
+    (best_candidate); only the repair right after a replan is told to follow its /work/plan.md, which a later one
+    would take for a plan of its own check. Each build or repair ends with check_round, and every round with control/evidence.json (harpor.agent.evidence), so a
     session that stops keeps the evidence of the rounds that ran.
 
     A failure of the loop itself ends the loop but keeps the rounds that ran, since root/result.json is written
@@ -1028,8 +979,9 @@ def run_rounds(root, cmd, env, blender, sock_dir, watchdog):
     SystemExit such as Cancel's always is. Returns (runs, rounds, ends): run_agent's records, result.json's
     rounds and check_round's {n: end}."""
     root = Path(root)
+    from harpor.agent.physics_review import GUIDANCE
+
     runs, rounds, ends, kind, prompt, last = [], [], {}, "build", None, None
-    mode = (read_json(root / "control/manifest.json") or {}).get("mode", "articulation")
     try:
         while kind:
             n = len(runs) + 1
@@ -1042,11 +994,7 @@ def run_rounds(root, cmd, env, blender, sock_dir, watchdog):
             if kind:
                 prompt = prompts.round_prompt(kind, ROUND_BUDGET_S[kind], validate.feedback(ends[last]["report"]),
                                               best_candidate(root), f"evidence/round_{last:02d}.json",
-                                              planned=rounds[-1]["kind"] == "replan", mode=mode)
-                from harpor.agent.physics_review import GUIDANCE, enabled
-
-                if enabled(root / "control"):
-                    prompt += GUIDANCE
+                                              planned=rounds[-1]["kind"] == "replan") + GUIDANCE
     except SystemExit as e:
         if not isinstance(e.code, str) or not runs:
             raise
@@ -1072,51 +1020,32 @@ def round_logs(root, agent):
     return [*sorted(session.glob(f"rounds/[0-9][0-9]/{name}")), session / name]
 
 
-def requirement_counts(root, report):
-    """{pass, fail, inconclusive, unassessed}: the outcomes of the requirements in a round's report; without one
-    every requirement of control/parts.json is unassessed."""
-    outcomes = ([r["outcome"] for r in report["records"]] if report else
-                ["unassessed"] * len(validate.requirements(Path(root) / "control")))
-    return {k: outcomes.count(k) for k in OUTCOMES}
-
-
-def reduced_requirements(report):
-    """[{requirement, link, span, target, share}] of the requirements that a round's report met with less than
-    their span target (validate.reduced): the part list's range is graded, and these are shown with the result."""
-    return [{"requirement": r["requirement"], "link": r["target"][0], **r["measured"]["reduced"]}
-            for r in (report or {}).get("records", []) if r["outcome"] == "pass" and r["measured"].get("reduced")]
-
-
 def run_session(root, cmd, env=None, *, blender, sock_dir, **watchdog):
     """Run one prepared session and write root/result.json.
 
     The tool server listens on sock_dir/tools.sock while the agent runs and is stopped, with any
     running helper, before the deliverable is picked. blender: the argv prefix that runs Blender for
-    the helpers. watchdog: keyword arguments of run_agent. A refinement result adds surface, the
-    deliverable's harpor.agent.surface report against root/original.glb, which only reports: it never
-    blocks, and a comparison that fails is recorded as {"error": ...}.
+    the helpers. watchdog: keyword arguments of run_agent. The result adds surface, the deliverable's
+    harpor.agent.surface report against root/original.glb, which only reports: it never blocks, and a
+    comparison that fails is recorded as {"error": ...}.
 
     A session with rounds (has_rounds, run_rounds) delivers the best of its stored candidates
-    (select_candidate), whose choice goes to control/evidence.json too. Its result adds rounds, candidate
-    (candidate_summary), requirements (the outcome counts of that candidate's check, or without one of the
-    last round's) and surface (that check's). rejected holds what each round's select_deliverable rejected and
-    the stored candidates that are not eligible. exit, returncode and cli_exit are the last round's; timings,
-    the usage of a claude agent and network_commands cover every round. An articulation result adds
-    simulations, the simulate runs that gave a report.
+    (select_candidate), whose choice goes to control/evidence.json too. Its result adds rounds and candidate
+    (candidate_summary). rejected holds what each round's select_deliverable rejected and the stored candidates
+    that are not eligible. exit, returncode and cli_exit are the last round's; timings, the usage of a claude
+    agent and network_commands cover every round.
     """
     root = Path(root)
     work = root / "work"
-    mode = json.loads((root / "control" / "manifest.json").read_text())["mode"]
     info = agent_info(root)
     candidate = build_candidate(root, blender)
     previews = make_previews(root, blender)
-    rounds, report = None, None
-    if has_rounds(root, mode):
+    rounds = None
+    if has_rounds(root):
         runs, rounds, ends = run_rounds(root, cmd, env, blender, sock_dir, watchdog)
         end = ends[max(ends)] if ends else None
         pick, chosen, selected = select_candidate(root, end and end["pick"])
         evidence.write(root, rounds, stored_candidates(root), selected)
-        report = chosen["report"] if chosen else end and end["report"]
         rejected = [*(x for n in sorted(ends) for x in ends[n]["rejected"]), *selected["ineligible"]]
     else:
         server = ToolServer(Path(sock_dir) / "tools.sock", work, root / "control", blender).start()
@@ -1124,33 +1053,25 @@ def run_session(root, cmd, env=None, *, blender, sock_dir, **watchdog):
             runs = [run_agent(root, cmd, env, **watchdog)]
         finally:
             server.stop()
-        pick, rejected = select_deliverable(root, mode)
+        pick, rejected = select_deliverable(root)
     glb, last = pick.pop("glb"), runs[-1]
     logs, events = round_logs(root, info["agent"]), tools.read_events(root / "control")
     result = {
-        "mode": mode, "agent": info["agent"], "model": info["model"], "effort": info["effort"], **pick,
+        "agent": info["agent"], "model": info["model"], "effort": info["effort"], **pick,
         "glb": os.path.relpath(glb, root) if glb else None,
         "sha256": tools.sha256(glb) if glb else None,
         "exit": last["exit"], "returncode": last["returncode"], "cli_exit": cli_exit(last["returncode"], info["agent"]),
         "timings": total_timings(runs),
         "counts": {k: sum(e.get("event") == ev and e.get("ok", True) for e in events)
-                   for k, ev in (("exports", "export_done"), ("reviews", "review"), ("checkpoints", "checkpoint"),
-                                 ("joints", "joint"), ("parts_added", "part"), ("faces_moved", "faces_moved"),
-                                 ("articulation_reviews", "review_articulation"))},
+                   for k, ev in (("exports", "export_done"), ("reviews", "review"), ("checkpoints", "checkpoint"))},
         "rejected": rejected,
         "candidate_built": candidate,
         "previews_built": previews,
         "network_commands": network_commands(*logs),
     }
-    if mode == "articulation":  # counts.joints counts set_joint changes; this is what the deliverable holds
-        result["joints_delivered"] = joint_count(glb)
-        result["simulations"] = sum(e.get("event") == "simulate_done" and bool(e.get("ok")) for e in events)
     if rounds is not None:
-        result.update(rounds=rounds, candidate=candidate_summary(chosen, selected),
-                      requirements=requirement_counts(root, report), reduced=reduced_requirements(report),
-                      surface=(report or {}).get("surface") or surface.compare(glb, root / "original.glb"))
-    if mode == "refinement":
-        result["surface"] = surface.compare(glb, root / "original.glb")
+        result.update(rounds=rounds, candidate=candidate_summary(chosen, selected))
+    result["surface"] = surface.compare(glb, root / "original.glb")
     if info["agent"] == "claude":
         result.update(claude_usage(*logs))
     write_json(root / "result.json", result)

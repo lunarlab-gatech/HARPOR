@@ -4,8 +4,8 @@
     python -m harpor.webapp.turntable encode --job J                               (envs/web)
 
 render runs blender/turntable.py (build_plan.md note 5) on the GLB that physics used (physics/up.json "glb":
-the agent's GLB, else run/parts.glb or run/posed.glb), turned upright with physics/aligned.json "T_s_from_w".
-So the video shows the object and pose of aligned.glb, with every part, but with the GLB's own materials, since
+the agent's GLB, else run/posed.glb), turned upright with physics/aligned.json "T_s_from_w".
+So the video shows the object and pose of aligned.glb, but with the GLB's own materials, since
 align may make aligned.glb opaque for VoMP. Blender runs in the agent's SIF, in a container that sees only
 J/turntable, the GLB (read-only) and the Blender scripts (read-only), for at most RENDER_TIMEOUT_S. It writes
 FRAMES PNG frames of SIDE px into J/turntable/frames: one turn, seen from ELEVATION_DEG above, with the long side
@@ -18,9 +18,6 @@ yuv420p, crf CRF, preset veryfast, a keyframe every 2 s) in MP4 with the index f
 FRAMES / FPS s long and loops. It deletes the frames, then writes J/turntable/turntable.json, the stage's done
 marker, last: render.json with the file's codec, pixel format, size, frames, length (seconds), bytes and
 encode_s. envs/web has no trimesh, so encode must not import harpor.agent.controller.
-
-The soft-part video (harpor.webapp.softvideo) takes the same GLB, matrix, Blender script (run_blender), container
-(blender_command with its own folder, since the container sees only that one) and encode, in J/softvideo.
 """
 
 import argparse
@@ -65,8 +62,8 @@ def source(job_dir):
 
 
 def blender_command(job_dir, glb, sif, folder="turntable"):
-    """Blender in the agent's SIF, in a container that sees only J/<folder> (read-write; the soft-part video's is
-    J/softvideo), the GLB and the Blender scripts (read-only), each at its host path (controller.sif_blender)."""
+    """Blender in the agent's SIF, in a container that sees only J/<folder> (read-write), the GLB and the Blender
+    scripts (read-only), each at its host path (controller.sif_blender)."""
     from harpor.agent import controller
 
     return controller.sif_blender(sif, rw=[(Path(job_dir) / folder).resolve()], ro=[glb])
@@ -150,8 +147,7 @@ def probe(mp4):
 
 
 def encode(job_dir, folder="turntable"):
-    """<folder>.mp4 from the frames in J/<folder>, then <folder>.json last (see the module docstring); the soft-part
-    video's folder is softvideo (harpor.webapp.softvideo)."""
+    """<folder>.mp4 from the frames in J/<folder>, then <folder>.json last (see the module docstring)."""
     from fractions import Fraction
 
     import av

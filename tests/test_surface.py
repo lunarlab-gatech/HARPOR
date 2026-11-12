@@ -1,6 +1,6 @@
 """harpor.agent.surface on synthetic GLBs, and the refinement session's surface report.
 
-The original is a flat sheet in two links, body (40 x 40 cells) and lid (40 x 10 cells beyond it), so every face
+The original is a flat sheet in two nodes, body (40 x 40 cells) and lid (40 x 10 cells beyond it), so every face
 holds 1/4000 of the native area. Candidates are copies with some faces deleted, moved, re-cut, flipped, given other
 UVs or another material.
 """
@@ -115,7 +115,8 @@ def test_a_copy_retains_everything(tmp_path):
     assert r["shares"] == {"retained": 1.0, "modified": 0.0, "uv_changed": 0.0, "material_changed": 0.0,
                            "flipped": 0.0, "deleted": 0.0, "unresolved": 0.0, "added": 0.0, "present": 1.0}
     assert r["native_area"] == pytest.approx(1.25) and r["caps_area"] == 0.0 and r["diagonal"] == pytest.approx(D)
-    assert r["links"] == {"body": {"native": 1.0, "kept": 1.0}, "lid": {"native": 0.25, "kept": 0.25}}
+    assert set(r) == {"diagonal", "native_area", "caps_area", "shares", "lost_regions", "materials", "findings",
+                      "blocks", "seconds"}  # one rigid surface: no per-link areas
     assert (r["findings"], r["lost_regions"], r["materials"], r["blocks"]) == ([], [], [], False)
 
 
@@ -134,7 +135,7 @@ def test_deleted_faces_and_their_regions_in_w(tmp_path):
     w = frames.W_FROM_GLTF  # x stays, glTF z is -y in W
     assert np.allclose(big["min"], w @ [0, 0, 1 / N], atol=1e-4) and np.allclose(big["max"], w @ [1, 0, 0], atol=1e-4)
     assert np.allclose(small["min"], w @ [0.5, 0, 1.25], atol=1e-4)
-    assert r["links"]["body"]["kept"] == pytest.approx(1 - 80 / 3200, abs=8 / 3200)
+    assert big["share"] == pytest.approx(80 * FACE, abs=8 * FACE) and small["share"] == pytest.approx(40 * FACE)
 
 
 def test_faces_cut_on_the_same_surface_are_modified_not_deleted(tmp_path):
@@ -146,7 +147,7 @@ def test_faces_cut_on_the_same_surface_are_modified_not_deleted(tmp_path):
     assert r["shares"]["modified"] == pytest.approx(400 * FACE) and r["shares"]["deleted"] == 0.0
     assert r["shares"]["added"] == pytest.approx(400 * FACE)
     assert r["shares"]["retained"] == pytest.approx(1 - 400 * FACE)
-    assert codes(r) == [] and r["links"]["body"]["kept"] == pytest.approx(1.0)
+    assert codes(r) == [] and r["lost_regions"] == []
     for lift, kind in ((0.002, "modified"), (0.05, "deleted")):
         cand = original()
         cand["body"] = detach(cand["body"], first(cand["body"], 400), move=(0.0, lift * D, 0.0))
@@ -158,7 +159,7 @@ def test_faces_cut_on_the_same_surface_are_modified_not_deleted(tmp_path):
     ({"uv": None}, "surface_uv", "uv_changed"),
     ({"material": paint(metallicFactor=1.0)}, "surface_material", "material_changed")])
 def test_re_cut_faces_without_uvs_or_with_another_material_have_changed(tmp_path, changes, code, share):
-    """The re-cut faces of body's first 400 as their own link, without UVs or with a metallic copy of the paint."""
+    """The re-cut faces of body's first 400 as their own node, without UVs or with a metallic copy of the paint."""
     cand = original()
     body = split(cand["body"], first(cand["body"], 400))
     cand["body"], cand["cut"] = {**body, "f": body["f"][:-1200]}, {**body, "f": body["f"][-1200:], **changes}
@@ -212,7 +213,7 @@ def test_flipped_faces(tmp_path):
 
 
 def test_another_material_on_matched_faces(tmp_path):
-    """The first row of body as its own link with a metallic copy of the paint."""
+    """The first row of body as its own node with a metallic copy of the paint: moved, not deleted."""
     cand = original()
     body = cand["body"]
     mask = first(body, 80)
@@ -223,7 +224,7 @@ def test_another_material_on_matched_faces(tmp_path):
     assert codes(r) == ["surface_material"]
     assert r["materials"] == [{"original": "paint", "candidate": "paint", "why": ["metallicFactor [0.0] to [1.0]"],
                                "share": pytest.approx(80 * FACE)}]
-    assert r["links"]["body"]["kept"] == pytest.approx(1 - 80 / 3200)  # its first row went to the link row
+    assert r["shares"]["deleted"] == 0.0 and r["shares"]["retained"] == pytest.approx(1 - 80 * FACE)
 
 
 def patched(image):
@@ -281,8 +282,8 @@ def test_a_renamed_or_reencoded_texture_is_the_same_image(tmp_path, fmt, save):
 
 
 def caps(part, k=4):
-    """The part with a fan of k faces at its x = 1 edge, standing up, every corner at one UV (as split_parts
-    gives its caps), two corners off by float noise."""
+    """The part with a fan of k faces at its x = 1 edge, standing up, every corner at one UV (as a cap that
+    closes a cut gets), two corners off by float noise."""
     c = len(part["v"])
     fan = np.array([[1.0, 0.0, 0.5], [1.0, 0.0, 0.6], [1.0, 0.1, 0.6], [1.0, 0.1, 0.5], [1.0, 0.05, 0.55]])
     f = np.array([[c + i, c + (i + 1) % 4, c + 4] for i in range(k)])
@@ -297,7 +298,7 @@ def test_caps_are_not_native(tmp_path):
     orig["body"] = caps(orig["body"])
     r = compare(tmp_path, orig, orig)
     assert r["caps_area"] == pytest.approx(0.01) and r["native_area"] == pytest.approx(1.25)
-    assert r["shares"]["retained"] == 1.0 and r["links"]["body"]["native"] == pytest.approx(1.0)
+    assert r["shares"]["retained"] == 1.0 and r["shares"]["added"] == 0.0
     cand = copy.deepcopy(orig)
     cand["body"]["f"] = cand["body"]["f"][:-4]  # the caps go
     assert compare(tmp_path, cand, orig)["shares"] == compare(tmp_path, orig, orig)["shares"]
@@ -339,16 +340,19 @@ def test_a_primitive_whose_uvs_are_one_point_has_no_uvs(tmp_path):
     assert r["shares"]["deleted"] == pytest.approx(0.2) and codes(r) == ["surface_deleted"]
 
 
-def test_a_tray_added_as_its_own_link_does_not_count(tmp_path):
+def test_a_tray_added_as_its_own_node_does_not_count(tmp_path):
+    """A green tray below the sheet is added area only: it changes no share of the native surface and finds
+    nothing, though its material is new."""
     tray = sheet(4, 0.4, paint("tray", baseColorFactor=[10, 200, 10, 255]))
     tray["v"] = tray["v"] + [0.0, -0.05, 0.0]
     r = compare(tmp_path, {**original(), "tray": tray})
     assert r["shares"]["added"] == pytest.approx(0.1 / 1.25) and r["shares"]["retained"] == 1.0
-    assert codes(r) == [] and set(r["links"]) == {"body", "lid"}
-    assert all(a["native"] == a["kept"] for a in r["links"].values())
+    assert codes(r) == [] and r["materials"] == [] and r["shares"]["modified"] == 0.0
 
 
-def test_faces_moved_into_another_link_are_not_kept_there(tmp_path):
+def test_faces_moved_into_another_node_are_retained(tmp_path):
+    """Half of lid's faces, with their vertices, UVs and material, moved into body's node: the surface is the same
+    faces, so all of it is retained and nothing is added."""
     cand = original()
     lid = cand["lid"]
     cand["body"] = {**cand["body"], "v": np.r_[cand["body"]["v"], lid["v"]], "uv": np.r_[cand["body"]["uv"], lid["uv"]],
@@ -356,8 +360,7 @@ def test_faces_moved_into_another_link_are_not_kept_there(tmp_path):
     lid["f"] = lid["f"][400:]
     r = compare(tmp_path, cand)
     assert r["shares"]["retained"] == 1.0 and codes(r) == []
-    assert r["links"]["lid"] == {"native": 0.25, "kept": pytest.approx(0.125)}
-    assert r["links"]["body"] == {"native": 1.0, "kept": 1.0}
+    assert r["shares"]["added"] == 0.0 and r["shares"]["modified"] == 0.0 and r["materials"] == []
 
 
 def delete(cand, k):
@@ -415,8 +418,8 @@ def test_primitives_keep_their_images_undecoded_and_a_large_one_is_refused(tmp_p
     doc["nodes"].append({"name": "again", "mesh": body["mesh"], "translation": [0.0, 0.0, 5.0]})
     doc["scenes"][doc.get("scene", 0)]["nodes"].append(len(doc["nodes"]) - 1)
     write_doc(tmp_path / "twice.glb", doc, binary)
-    loaded = {link: m.visual.material for link, _, m in load_s(tmp_path / "twice.glb", by_link=True)}
-    assert sorted(loaded) == ["again", "body", "lid"] and loaded["again"] is loaded["body"]
+    loaded = {name: m.visual.material for name, m in load_s(tmp_path / "twice.glb")}
+    assert sorted(loaded) == ["again/body", "body", "lid"] and loaded["again/body"] is loaded["body"]
     images = [getattr(mat, k) for mat in loaded.values() for k in S.IMAGES]
     assert all(im is not None and im.tile for im in images)  # PIL's tiles are still to decode
     assert C.check_glb(o) is None and S.large_image([]) is None
@@ -426,17 +429,12 @@ def test_primitives_keep_their_images_undecoded_and_a_large_one_is_refused(tmp_p
     assert C.check_glb(o) == f"image too large: {why}"
 
 
-def run_session(tmp_path, mode):
-    """A session whose agent does nothing, so the original is delivered."""
+def run_session(tmp_path):
+    """A refinement session whose agent does nothing, so the original is delivered."""
     original = tmp_path / "in" / "original.glb"
     original.parent.mkdir(parents=True)
-    write_glb(original, "parts" if mode == "articulation" else "good", 1.0)
-    parts = None
-    if mode == "articulation":
-        parts = tmp_path / "in" / "parts.json"
-        parts.write_text(json.dumps({"version": 1, "frame": "W", "glb": "parts.glb", "base": "body", "seams": [],
-                                     "parts": []}))
-    C.prepare_session(tmp_path / "s", mode, "p", [], source="s", metric=True, original=original, parts=parts)
+    write_glb(original, "good", 1.0)
+    C.prepare_session(tmp_path / "s", "p", [], source="s", metric=True, original=original)
     with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
         r = C.run_session(tmp_path / "s", [sys.executable, "-c", "pass"], blender=FAKE_BLENDER, sock_dir=sock_dir,
                           budget_s=20.0, poll_s=0.02, kill_after_s=0.5, finish_wait_s=0.5)
@@ -445,16 +443,15 @@ def run_session(tmp_path, mode):
 
 
 def test_a_refinement_session_reports_the_surface(tmp_path, monkeypatch):
-    """The fake original is a box without UVs, delivered unchanged; articulation has no surface key yet."""
+    """The fake original is a box without UVs, delivered unchanged: all of it is unresolved, and nothing is found."""
     monkeypatch.setenv("PYTHONPATH", str(REPO))
-    r = run_session(tmp_path / "a", "refinement")
+    r = run_session(tmp_path)
     assert r["source"] == "fallback_original" and r["surface"]["shares"]["unresolved"] == 1.0
     assert r["surface"]["findings"] == [] and r["surface"]["blocks"] is False
-    assert "surface" not in run_session(tmp_path / "b", "articulation")
 
 
 def test_a_failed_comparison_does_not_stop_the_session(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str(REPO))
     monkeypatch.setattr(S, "read_surface", lambda glb: 1 / 0)
-    r = run_session(tmp_path, "refinement")
+    r = run_session(tmp_path)
     assert r["surface"] == {"error": "ZeroDivisionError: division by zero"} and r["glb"] == "original.glb"

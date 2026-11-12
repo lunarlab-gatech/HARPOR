@@ -1,7 +1,12 @@
 """MuJoCo visual evidence for physics supervision, using pre-refinement materials.
 
-Runs in envs/mujoco. Writes actual simulation frames as GIF clips and a contact
-sheet, plus numerical settling, joint and soft-part evidence. No VLM runs here.
+    python -m harpor.physics.supervise --glb candidate.glb --materials DIR --out DIR --asset-sha SHA
+
+Runs in envs/mujoco. The candidate is turned upright (harpor.physics.align), gets the materials that VoMP
+predicted before refinement (harpor.physics.material_transfer) and becomes a MuJoCo model
+(harpor.physics.mjcf). It then settles for three seconds under gravity on the exported floor. Writes the
+frames as a GIF clip and a contact sheet, plus the settling states and MuJoCo's warnings, to report.json.
+No VLM runs here (harpor.agent.physics_review judges the frames).
 """
 
 import argparse
@@ -11,7 +16,19 @@ from pathlib import Path
 import numpy as np
 
 from harpor.fileio import write_json
-from harpor.physics import align, material_transfer, mjcf, sim_check
+from harpor.physics import align, material_transfer, mjcf
+
+
+def steps(m, seconds):
+    """The number of MuJoCo steps in seconds."""
+    return int(round(seconds / m.opt.timestep))
+
+
+def mujoco_warnings(m, d):
+    """Names of the MuJoCo warnings raised since the last reset."""
+    import mujoco
+
+    return [mujoco.mjtWarning(i).name.removeprefix("mjWARN_") for i, w in enumerate(d.warning) if w.number]
 
 
 class Capture:
@@ -67,17 +84,17 @@ def settle(m, d, observe):
     states = []
     for k in range(13):
         if k:
-            mujoco.mj_step(m, d, sim_check.steps(m, 0.25))
+            mujoco.mj_step(m, d, steps(m, 0.25))
         if not np.isfinite(d.qpos).all() or not np.isfinite(d.qvel).all():
             raise ValueError("The settling simulation became non-finite")
         states.append({"t": float(d.time), "speed": float(np.linalg.norm(d.qvel)),
                        "com": d.subtree_com[0].tolist()})
         observe(m, d, "settling")
-    warnings = sim_check.warnings(m, d)
+    warnings = mujoco_warnings(m, d)
     return {"seconds": 3.0, "gravity": m.opt.gravity.tolist(), "states": states, "warnings": warnings}
 
 
-def run(glb, materials, out, sha, intervals=None):
+def run(glb, materials, out, sha):
     import mujoco
 
     materials, out = Path(materials), Path(out)
@@ -90,35 +107,29 @@ def run(glb, materials, out, sha, intervals=None):
             predictions[name] = {k: z[k] for k in z.files}
     aligned = out / "aligned.glb"
     align.main(["--glb", str(glb), "--out", str(aligned), "--up-near=" + ",".join(map(str, config["up"])),
-                "--x", "footprint", *(["--links-out", str(out / "links")] if config["articulated"] else [])])
+                "--x", "footprint"])
     transform = json.loads((out / "aligned.json").read_text())["T_s_from_w"]
-    links = sorted((out / "links").glob("*.glb")) if config["articulated"] else None
-    summary = material_transfer.transfer(aligned, out, original, predictions, transform, links)
+    summary = material_transfer.transfer(aligned, out, original, predictions, transform)
     capture = Capture(out)
     try:
-        dynamics = sim_check.run(aligned, out / "motion", sha, intervals, summary=out / "summary.json", observe=capture)
-        # A second model retains gravity, the floor and the object's actual fixed/free base.
-        model = mjcf.build(aligned, out / "summary.json", out / "settling", "object", textures=False)
+        mjcf.build(aligned, out / "summary.json", out / "settling", "object", textures=False)
         m = mujoco.MjModel.from_xml_path(str(out / "settling/scene.xml"))
         settling = settle(m, mujoco.MjData(m), capture)
         images = capture.save()
     finally:
         capture.close()
-    return {"asset_sha256": sha, "materials": summary, "dynamics": dynamics, "settling": settling,
-            "soft_materials": model.get("soft", {}), "fixed_base": model.get("fixed_base", False), **images}
+    return {"asset_sha256": sha, "materials": summary, "settling": settling, **images}
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ("glb", "materials", "out", "asset-sha"):
         parser.add_argument("--" + key, required=True)
-    parser.add_argument("--intervals")
     args = parser.parse_args(argv)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     try:
-        intervals = json.loads(Path(args.intervals).read_text()) if args.intervals else None
-        report = run(args.glb, args.materials, out, args.asset_sha, intervals)
+        report = run(args.glb, args.materials, out, args.asset_sha)
     except Exception as e:  # the host treats missing evidence as inconclusive
         report = {"asset_sha256": args.asset_sha, "error": f"{type(e).__name__}: {e}"}
     write_json(out / "report.json", report)

@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 import pytest
-from test_physics import fix_to_world, hull_parts, inflated_hull, two_box_hinge, two_lid_chest
+from test_physics import body_and_lid, hull_parts
 
 from harpor import frames
 
@@ -12,43 +12,46 @@ def xyz(element):
     return [float(c) for c in element.find("origin").get("xyz").split()]
 
 
-def test_urdf_of_a_hinged_box(tmp_path):
+def test_urdf_of_a_textured_two_part_object(tmp_path):
+    """The body and lid of one rigid GLB become one link in frame S: the summary's inertial, one OBJ with an object
+    and material per MJCF visual (S coordinates, the lid's texture kept), and the MJCF's collision hulls."""
     trimesh = pytest.importorskip("trimesh")
     from harpor.physics.mjcf import build as build_mjcf
     from harpor.physics.urdf import build, check
 
-    glb, summary, hinge, _ = two_box_hinge(tmp_path)
-    s = json.loads(summary.read_text())
-    build_mjcf(glb, summary, tmp_path / "mjcf", "chest", decompose=hull_parts)
+    glb, summary = body_and_lid(tmp_path)
+    rb = json.loads(summary.read_text())["rigid_body"]
+    mj = build_mjcf(glb, summary, tmp_path / "mjcf", "chest", decompose=hull_parts)
     report = build(glb, summary, tmp_path / "mjcf", tmp_path / "urdf", "chest")
     c = check(tmp_path / "urdf")
-    assert (c["links"], c["joints"], c["joint_types"], c["missing"]) == (2, 1, {"lid_joint": "revolute"}, [])
-    assert report["root"] == "body" and not report["fixed_base"]
+    assert (c["links"], c["joints"], c["joint_types"], c["meshes"], c["missing"]) == (1, 0, {}, 2, [])
+    (link,) = report["links"]
+    assert (report["name"], link["name"], link["mesh"], link["collisions"]) == (
+        "chest", "chest", "meshes/link_0.obj", ["meshes/collision_0.obj"])
+    assert link["inertial"] == {k: rb[k] for k in ("mass", "com", "fullinertia")}
+    assert json.loads((tmp_path / "urdf" / "urdf.json").read_text()) == report
 
     robot = ET.parse(tmp_path / "urdf" / "model.urdf").getroot()
-    lid = robot.find("link[@name='lid']")
-    origin = np.array(hinge["origin"])
-    assert np.allclose([float(c) for c in lid.find("visual/origin").get("xyz").split()], -origin)
-    assert np.allclose([float(c) for c in lid.find("collision/origin").get("xyz").split()], -origin)
-    com = np.array(s["links"]["lid"]["rigid_body"]["com"])
-    assert np.allclose([float(c) for c in lid.find("inertial/origin").get("xyz").split()], com - origin, atol=1e-6)
-    assert np.isclose(float(lid.find("inertial/mass").get("value")), s["links"]["lid"]["rigid_body"]["mass"])
-    joint = robot.find("joint[@name='lid_joint']")
-    assert (joint.find("parent").get("link"), joint.find("child").get("link")) == ("body", "lid")
-    assert np.allclose([float(c) for c in joint.find("origin").get("xyz").split()], origin)
-    assert np.allclose([float(c) for c in joint.find("axis").get("xyz").split()], hinge["axis"])
-    assert (joint.find("limit").get("lower"), joint.find("limit").get("upper")) == ("0", "1.5")
+    chest = robot.find("link[@name='chest']")
+    assert xyz(chest.find("visual")) == [0, 0, 0] and xyz(chest.find("collision")) == [0, 0, 0]
+    assert np.allclose(xyz(chest.find("inertial")), rb["com"], atol=1e-6)
+    assert np.isclose(float(chest.find("inertial/mass").get("value")), rb["mass"])
+    inertia = chest.find("inertial/inertia")
+    assert np.allclose([float(inertia.get(k)) for k in ("ixx", "iyy", "izz")], rb["fullinertia"][:3], rtol=1e-5)
 
-    # The lid's OBJ holds S coordinates (its visual origin and its link frame cancel), and its material
-    # keeps the texture.
-    mesh = lid.find("visual/geometry/mesh").get("filename")
-    m = trimesh.load(tmp_path / "urdf" / mesh, force="mesh")
-    assert np.allclose(m.bounds, [[-0.3, -0.2, 0.3], [0.3, 0.2, 0.34]], atol=1e-6)
-    mtl = (tmp_path / "urdf" / mesh).with_suffix(".mtl").read_text()
-    assert "map_Kd texture_" in mtl and m.visual.material.image is not None
+    # One object per visual, in S coordinates; only the lid's material maps its texture.
+    lid = next(v["mesh"] for v in mj["visuals"] if v["name"] == "lid")
+    scene = trimesh.load(tmp_path / "urdf" / "meshes" / "link_0.obj", force="scene")
+    assert sorted(scene.geometry) == sorted(v["mesh"] for v in mj["visuals"])
+    assert np.allclose(scene.bounds, [[-0.3, -0.2, 0], [0.3, 0.2, 0.34]], atol=1e-6)
+    assert np.allclose(scene.geometry[lid].bounds, [[-0.3, -0.2, 0.3], [0.3, 0.2, 0.34]], atol=1e-6)
+    assert scene.geometry[lid].visual.material.image.size == (16, 16)
+    mtl = (tmp_path / "urdf" / "meshes" / "link_0.mtl").read_text()
+    tex = next(v["texture"] for v in mj["visuals"] if v["name"] == "lid")
+    assert mtl.count("map_Kd ") == 1 and f"map_Kd {tex}.png" in mtl and (tmp_path / "urdf" / "meshes" / f"{tex}.png").is_file()
 
 
-def test_urdf_of_a_rigid_box_and_of_a_fixed_base(tmp_path):
+def test_urdf_of_a_rigid_box(tmp_path):
     trimesh = pytest.importorskip("trimesh")
     from harpor.physics.mjcf import build as build_mjcf
     from harpor.physics.urdf import build, check
@@ -65,45 +68,3 @@ def test_urdf_of_a_rigid_box_and_of_a_fixed_base(tmp_path):
     link = ET.parse(tmp_path / "urdf" / "model.urdf").getroot().find("link[@name='box']")
     assert link.find("inertial/inertia").get("ixy") == "0.05" and link.find("inertial/origin").get("xyz") == "0.01 -0.02 0.25"
     assert link.find("collision/geometry/mesh").get("filename") == "meshes/collision_0.obj"
-
-    glb, summary, _, _ = two_box_hinge(tmp_path / "chest")
-    fix_to_world(glb)
-    mj = build_mjcf(glb, summary, tmp_path / "chest" / "mjcf", "chest", decompose=hull_parts)
-    report = build(glb, summary, tmp_path / "chest" / "mjcf", tmp_path / "chest" / "urdf", "chest")
-    c = check(tmp_path / "chest" / "urdf")
-    assert report["fixed_base"] and c["links"] == 3 and c["joint_types"] == {"world_joint": "fixed", "lid_joint": "revolute"}
-    # The base stands at the MJCF's start height, as in MJCF and USD.
-    world = ET.parse(tmp_path / "chest" / "urdf" / "model.urdf").getroot().find("joint[@name='world_joint']")
-    assert np.allclose(xyz(world), [0, 0, mj["start_z"]]) and mj["start_z"] > 0
-
-
-def test_urdf_of_a_base_fixed_by_the_mjcf_flag(tmp_path):
-    """--fixed-base leaves the GLB without a world joint, so the URDF has only mjcf.json to go by."""
-    pytest.importorskip("trimesh")
-    from harpor.physics.mjcf import build as build_mjcf
-    from harpor.physics.urdf import build, check
-
-    glb, summary, _, _ = two_box_hinge(tmp_path)
-    mj = build_mjcf(glb, summary, tmp_path / "mjcf", "chest", decompose=hull_parts, fixed_base=True)
-    report = build(glb, summary, tmp_path / "mjcf", tmp_path / "urdf", "chest")
-    c = check(tmp_path / "urdf")
-    assert report["fixed_base"] and c["links"] == 3 and c["joint_types"] == {"world_joint": "fixed", "lid_joint": "revolute"}
-    world = ET.parse(tmp_path / "urdf" / "model.urdf").getroot().find("joint[@name='world_joint']")
-    assert np.allclose(xyz(world), [0, 0, mj["start_z"]])
-
-
-def test_urdf_welds_a_loose_part_to_its_parent_node(tmp_path):
-    pytest.importorskip("trimesh")
-    from harpor.physics.mjcf import build as build_mjcf
-    from harpor.physics.urdf import build, check
-
-    glb, summary = two_lid_chest(tmp_path)
-    mj = build_mjcf(glb, summary, tmp_path / "mjcf", "chest", decompose=inflated_hull)
-    report = build(glb, summary, tmp_path / "mjcf", tmp_path / "urdf", "chest")
-    c = check(tmp_path / "urdf")
-    assert c["joint_types"] == {"world_joint": "fixed", "lid_left_joint": "revolute", "lid_right_joint": "revolute",
-                                "knob_joint": "fixed"} and c["links"] == 5 and c["missing"] == []
-    knob = ET.parse(tmp_path / "urdf" / "model.urdf").getroot().find("joint[@name='knob_joint']")
-    assert knob.find("parent").get("link") == "lid_left"
-    assert np.allclose(xyz(knob), [0.15, -0.2, -0.3])  # the knob's frame (S's origin) seen from lid_left's hinge
-    assert report["excluded_pairs"] == mj["excluded_pairs"]

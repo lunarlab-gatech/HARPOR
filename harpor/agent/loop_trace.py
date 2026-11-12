@@ -4,7 +4,7 @@
 
 Prints the loop in order: the agent's messages and tool calls from its log (Codex: codex.jsonl;
 claude: claude.jsonl, as control/agent.json says), merged with the host's records of exports,
-reviews, joints, articulation reviews, simulate runs, checkpoints and finish (with seconds since the
+reviews, checkpoints and finish (with seconds since the
 clock started), and the review numbers. A session with rounds (controller.run_rounds) shows its last
 round: the clock and the agent's log are that round's, and earlier rounds' logs are in
 session/rounds/NN/. Text that the agent wrote is printed as harpor.agent.tools.printable cleans it, one line
@@ -105,17 +105,10 @@ def main(argv=None):
         what = {"export_started": "export %s started" % e.get("export"),
                 "export_done": "export %s done in %.1f s, ok=%s" % (e.get("export"), e.get("seconds", 0), e.get("ok")),
                 "review": "review %s of %s" % (e.get("receipt"), e.get("glb")),
-                "joint": "joint of %s %s%s" % (e.get("child"), e.get("action"), "" if e.get("ok") else ", refused: %s"
-                                                % e.get("why")),
-                "review_articulation": "articulation review %s of %s, %s joints" % (e.get("receipt"), e.get("glb"),
-                                                                                    e.get("joints")),
-                "simulate_started": "simulate %s of %s started" % (e.get("simulate"), e.get("glb")),
-                "simulate_done": "simulate %s done in %.1f s, ok=%s, outcome %s, scope %s" % (
-                    e.get("simulate"), e.get("seconds", 0), e.get("ok"), e.get("outcome"), e.get("scope")),
                 "checkpoint": "checkpoint %s: %s" % (e.get("glb"), e.get("defect")),
                 "finish": "finish %s: %s" % (e.get("verdict"), e.get("reason"))}.get(e["event"], e["event"])
-        print("  %6.0f s  %s" % (t, printable(what)))  # a defect, a reason and a joint's child are the agent's
-        # review.json and report.json are in work/, which the agent can write: one of another shape is skipped
+        print("  %6.0f s  %s" % (t, printable(what)))  # a defect and a reason are the agent's
+        # review.json is in work/, which the agent can write: one of another shape is skipped
         with contextlib.suppress(OSError, ValueError, KeyError, TypeError, AttributeError):
             if e["event"] == "review":
                 rv = work_json(s, "reviews", e["receipt"], "review.json")
@@ -123,12 +116,6 @@ def main(argv=None):
                                  if "iou_candidate" in v)
                 print("           mask IoU %s; center shift %.4f; extent ratio %s" % (
                     ious, rv.get("center_shift", 0), " ".join("%.3f" % x for x in rv.get("extent_ratio", []))))
-            if e["event"] == "review_articulation":
-                rp = work_json(s, "reviews_articulation", e["receipt"], "report.json")
-                for child, j in rp["joints"].items():
-                    print("           %s: penetration share %s, deepest %s" % (
-                        printable(child), " ".join("%.3f" % x["inside_share"] for x in j["states"]),
-                        " ".join("%.3g" % x["max_depth"] for x in j["states"])))
     r = json.load(open(os.path.join(s, "result.json")))
     print("== result: %s from %s (%s), %.0f s on the clock" % (r["verdict"], r["source"], r["glb"], r["timings"]["wall_s"]))
     for x in r.get("rounds") or []:

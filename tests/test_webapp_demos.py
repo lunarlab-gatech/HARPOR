@@ -18,13 +18,12 @@ pytest.importorskip("fastapi")
 pytest.importorskip("av")
 pytest.importorskip("PIL")
 from fastapi.testclient import TestClient  # noqa: E402
-from test_webapp_server import ARTICULATED, TOKEN, login, run_app_js, uploaded, wait, write_video  # noqa: E402
+from test_webapp_server import TOKEN, login, run_app_js, uploaded, wait, write_video  # noqa: E402
 
 from harpor.webapp import demos, server, steps  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 OPUS = "sk-ant-test-" + secrets.token_hex(16)
-PARTS = [{"name": "chair base"}, {"name": "seat", "parent": "chair base", "joint": "revolute"}]
 SRC = (server.STATIC / "demos.html").read_text()
 
 
@@ -70,22 +69,21 @@ def hand_demo(folder, name="office-chair", title="Office chair", order=0, **spec
 
 @pytest.fixture(scope="module")
 def job(tmp_path_factory, fake_stages_module):
-    """A finished fake job: an articulated office chair with the agent opus (so it has links and a joint) and the 360
-    video. (job folder, the job as GET /api/jobs/{id} gives it, replies for app.js: its JSON files by URL)."""
+    """A finished fake job: an office chair with the agent opus and the 360 video. (job folder, the job as
+    GET /api/jobs/{id} gives it, replies for app.js: its JSON files by URL)."""
     tmp = tmp_path_factory.mktemp("demojob")
     cfg = steps.Config(G=tmp / "G", runs=tmp / "runs")
     with TestClient(server.make_app(cfg, TOKEN, key_dir=tmp / "keys")) as c:
         login(c)
         job_id = uploaded(c, tmp)
-        r = c.post(f"/api/jobs/{job_id}/start", json={**ARTICULATED, "prompt": "office chair", "agent": "opus",
-                                                      "api_key": OPUS, "parts_mode": "user", "parts": PARTS,
+        r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "office chair", "n_views": 4,
+                                                      "auto_continue": True, "agent": "opus", "api_key": OPUS,
                                                       "turntable": True})
         assert r.status_code == 200, r.text
         view = wait(c, job_id, "done", "failed", timeout=180)
         assert view["status"] == "done", view["error"]
         replies = {f"/api/jobs/{job_id}/file/{p}": c.get(f"/api/jobs/{job_id}/file/{p}").json()
                    for p in view["files"] if p.endswith(".json")}
-        replies[f"/api/jobs/{job_id}/parts"] = c.get(f"/api/jobs/{job_id}/parts").json()
     return cfg.runs / job_id, view, replies
 
 
@@ -109,10 +107,8 @@ def test_add_from_a_finished_job(job, made, tmp_path):
     assert spec["downloads"] == ["results.zip", "aligned.glb", "turntable.mp4"]
     n = len(json.loads((J / "selection.json").read_text())["picks"])
     assert spec["facts"] == [["Input", f"video, {n} views"], ["Size", spec["facts"][1][1]], ["Mass", spec["facts"][2][1]],
-                             ["Links", "2: chair_base, seat"], ["Joint of seat", spec["facts"][4][1]],
                              ["Agent", "Claude Opus 5.5"]]
     assert re.fullmatch(r"\d+ x \d+ x \d+ cm", spec["facts"][1][1]) and spec["facts"][2][1].endswith(" kg")
-    assert spec["facts"][4][1].startswith("turns on chair_base, ")
     assert (d / "turntable.mp4").read_bytes() == (J / "turntable" / "turntable.mp4").read_bytes()
     assert (d / "aligned.glb").read_bytes() == (J / "physics" / "aligned.glb").read_bytes()
     assert (d / "poster.jpg").read_bytes()[:3] == b"\xff\xd8\xff"
@@ -137,8 +133,8 @@ def test_add_from_a_finished_job(job, made, tmp_path):
 
 
 def test_demo_facts_are_rows_of_the_results_tab(job):
-    """app.js renderResults on the same job: each Mass, Links and Joint fact is one of its rows, and the Agent row
-    starts with the Agent fact (it adds the model)."""
+    """app.js renderResults on the same job: the Mass fact is one of its rows, and the Agent row starts with the
+    Agent fact (it adds the model)."""
     J, view, replies = job
     out = run_app_js(replies, """
         (async () => {
@@ -149,18 +145,8 @@ def test_demo_facts_are_rows_of_the_results_tab(job):
         """)
     rows = {out[i + 1]: out[i + 3] for i in range(len(out) - 3) if out[i] == "dt" and out[i + 2] == "dd"}
     facts = dict(demos.facts_of(J, json.loads((J / "job.json").read_text())))
-    for label in ("Mass", "Links", "Joint of seat"):
-        assert rows[label] == facts[label], label
+    assert rows["Mass"] == facts["Mass"]
     assert rows["Agent"].startswith(facts["Agent"] + " (")
-
-
-def test_demo_facts_name_a_soft_joint(tmp_path):
-    (tmp_path / "run").mkdir()
-    (tmp_path / "run" / "parts.glb").write_bytes(b"glTF")
-    (tmp_path / "physics" / "mjcf").mkdir(parents=True)
-    joint = {"child": "pad", "parent": "seat", "type": "soft", "pos": [0, 0, 0], "axis": [1, 0, 0], "range": [0, 0]}
-    (tmp_path / "physics" / "mjcf" / "mjcf.json").write_text(json.dumps({"links": {"seat": {}, "pad": {}}, "joints": [joint]}))
-    assert ["Joint of pad", "soft on seat"] in demos.facts_of(tmp_path)
 
 
 def test_add_refuses_private_data(job, tmp_path):

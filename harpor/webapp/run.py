@@ -22,12 +22,6 @@ and it exits with code 3:
   - With --review, the job stops after select, and also when the automatic selection fails. --resume ID goes on.
     --resume ID with --lock, --exclude, --view0 or --instance selects again and stops again (masks first when an
     instance changed). These flags add to the choices made earlier.
-  - With --edit-parts, the job stops after the VLM's part list. --resume ID accepts the list, and --resume ID --parts F
-    replaces it. F is a JSON list of parts ([{name, parent, joint, count}], harpor.parts.propose) or an object with a
-    "parts" list, such as a copy of run/proposal.json.
-
---no-split, for an articulated job with an agent, skips the split of the mesh into parts by SAM 3 part masks: the
-agent gets the mesh as one part object and cuts every part of the list itself.
 
 --resume ID takes the next step for the job's state. A job whose build has not started takes the settings of its
 resume, and the printed command repeats them. A job that failed or was cancelled goes on from the first stage not done,
@@ -53,7 +47,6 @@ the same runs folder refuses to start, and this command refuses while they run.
 import argparse
 import contextlib
 import hashlib
-import json
 import os
 import re
 import secrets
@@ -77,8 +70,8 @@ DONE, FAILED, BAD, WAITS = 0, 1, 2, 3  # exit codes
 ALWAYS = ("runs", "key_file")  # the flags that every next command repeats
 # The flags that reach job.json at the Start route, so a next command repeats them until then (Run.again).
 SETTINGS = ("prompt", "camera_topic", "lidar_topic", "calibration", "no_lidar", "n_views", "picks", "view0", "review",
-            "articulated", "parts", "edit_parts", "no_split", "turntable", "agent")
-LATE_SETTINGS = ("calibration", "parts", "view0")  # those that a job whose build has started still takes
+            "turntable", "agent")
+LATE_SETTINGS = ("calibration", "view0")  # those that a job whose build has started still takes
 LEFT_OUT = {"available": "usable, not picked", "excluded": "excluded", "no_mask": "no mask of the object",
             "small": "the mask is under 1% of the image", "inconsistent": "the mask disagrees with the other views"}
 
@@ -103,10 +96,10 @@ def local_key(agent, path=None):
             return key
     raise ValueError(f"{path} has no {var}= line")
 
-def first_not_done(state, parts_confirmed=False):
+
+def first_not_done(state):
     """app.js retryFrom without its stale-scale rule: "frames" while the input is not analyzed, else the first
-    build stage not done or skipped (None before any build, and when all are). A job stopped at an unconfirmed
-    part list goes back to propose."""
+    build stage not done or skipped (None before any build, and when all are)."""
     stage = {s["name"]: s for s in state["stages"]}
     if stage["frames"]["status"] != "done":
         return "frames"
@@ -115,9 +108,7 @@ def first_not_done(state, parts_confirmed=False):
         return None
     if stage["extract"]["status"] == "pending":
         return None
-    unconfirmed = state.get("articulated") is True and state.get("parts_mode") == "vlm_edit" \
-        and stage.get("propose", {}).get("status") == "done" and not parts_confirmed
-    return "propose" if x["name"] == "parts" and unconfirmed else x["name"]
+    return x["name"]
 
 
 class Stop(Exception):
@@ -142,18 +133,6 @@ def given(a, names):
 def started(job):
     """True when the job's build has started, so job.json holds its settings."""
     return job["stages"]["extract"]["status"] != "pending"
-
-
-def part_list(path):
-    """The parts of a --parts file; see the module docstring."""
-    try:
-        data = json.loads(Path(path).read_text())
-    except (OSError, ValueError) as e:
-        raise Stop(BAD, f"cannot read the part list: {e}") from None
-    parts = data.get("parts") if isinstance(data, dict) else data
-    if not isinstance(parts, list):
-        raise Stop(BAD, f'{path} is not a JSON list of parts or an object with a "parts" list')
-    return parts
 
 
 def names(values):
@@ -205,23 +184,9 @@ def check_settings(a, kind):
             (a.picks and not re.fullmatch(r"\d+(,\d+)*", a.picks or ""), "--picks takes frames such as 12,80,150"),
             (a.view0 is not None and not re.fullmatch(r"f?\d+", a.view0 or ""), "--view0 takes a frame such as 12"),
             (a.lock or a.exclude or a.instance, "--lock, --exclude and --instance answer a view review, on a resume"),
-            ((a.parts or a.edit_parts) and not a.articulated, "--parts and --edit-parts need --articulated"),
-            (a.parts and a.edit_parts, "--parts gives the list and --edit-parts asks the VLM for it: choose one"),
-            (a.no_split and not a.articulated, "--no-split needs --articulated: only such a job has a split to skip"),
-            (a.no_split and agent == "none",
-             "--no-split needs --agent astra, opus or fable: it is the agent that cuts the parts"),
-            (a.edit_parts and agent == "none", "--edit-parts needs --agent astra, opus or fable: there is no VLM without one"),
-            (a.articulated and agent == "none" and not a.parts,
-             "without an agent there is no VLM to list the parts: give --parts, or --agent astra, opus or fable"),
             (a.key_file and agent == "none", "--key-file needs --agent astra, opus or fable")):
         if bad:
             raise Stop(BAD, why)
-    if a.parts:
-        try:  # the Start route's check
-            jobs.parts_settings({"prompt": a.prompt, "agent": agent, "articulated": True,
-                                 "parts": {"mode": "user", "list": part_list(a.parts)}})
-        except ValueError as e:
-            raise Stop(BAD, f"{a.parts}: {server.part_reason(e)}") from None
 
 
 def place(src, path):
@@ -355,7 +320,7 @@ class Run:
         for w in job["warnings"]:
             say(f"warning: {w}")
         if job["status"] == "review":
-            return self.part_review() if steps.waits_for_parts(self.J, job) else self.view_review(job)
+            return self.view_review(job)
         if job["status"] == "done":
             return self.finished()
         if job["status"] == "failed":
@@ -399,21 +364,6 @@ class Run:
         else:
             say(f"the automatic selection needs help. Add {change} to this command: {self.again()}")
             say("or start a new job with --picks")
-        return WAITS
-
-    def part_review(self):
-        """Prints the VLM's part list and the next commands."""
-        parts, J = self.call("GET", "/parts"), self.J
-        for p in parts["proposal"]["parts"]:
-            count = f", {p['count']} of them" if p["count"] > 1 else ""
-            hint = f", {p['axis_hint']}" if p.get("axis_hint") else ""
-            role = f"{p['joint']} on {p['parent']}" if p["parent"] else "the base"
-            say(f"part: {p['name']}: {role}{count}{hint}")
-        if parts["photo"]:
-            say(f"the VLM saw this photo: {J / parts['photo']}")
-        say(f"to accept the list: {self.again()}")
-        proposal, replacing = J / steps.MARKERS["propose"], self.again("--parts", "EDITED.json")
-        say(f"to change it, edit a copy of {proposal} and run: {replacing}")
         return WAITS
 
     def analyzed(self):
@@ -490,17 +440,11 @@ class Run:
             self.calibration(a.lidar_topic)
         body = {"mode": "manual" if a.picks else "auto", "prompt": a.prompt, "agent": a.agent or "none",
                 "api_key": self.key, "auto_continue": not a.review, "turntable": a.turntable,
-                "articulated": a.articulated, "picks": [int(x) for x in a.picks.split(",")] if a.picks else []}
-        if a.no_split:
-            body["split"] = False
+                "picks": [int(x) for x in a.picks.split(",")] if a.picks else []}
         if a.n_views is not None:
             body["n_views"] = a.n_views
         if a.view0 is not None:
             body["view0"] = views.frame_of(views.pool_name(a.view0))
-        if a.parts:
-            body.update(parts_mode="user", parts=part_list(a.parts))
-        elif a.edit_parts:
-            body["parts_mode"] = "vlm_edit"
         if a.lidar_topic:
             body["lidar"] = {"topic": a.lidar_topic}
         elif a.no_lidar:
@@ -529,7 +473,7 @@ class Run:
             raise Stop(BAD, f"the build of job {self.job_id} has started, so it keeps its settings. Start a new job to "
                             f"use {' '.join(late)}")
         viewed = a.lock or a.exclude or a.instance or a.view0 is not None
-        if job["status"] == "done" and (viewed or a.calibration or a.parts):
+        if job["status"] == "done" and (viewed or a.calibration):
             raise Stop(BAD, f"job {self.job_id} is done. Start a new job to change it")
         lidar = steps.lidar(job)
         if a.calibration and not (lidar or {}).get("topic"):
@@ -541,16 +485,12 @@ class Run:
             self.calibration(lidar["topic"])
         if viewed:
             return self.overrides()
-        if a.parts:
-            self.call("POST", "/parts", json={"parts": part_list(a.parts), "api_key": self.key})
-            return self.follow()
         if job["status"] == "review":
             if job["stages"][steps.REVIEW_AFTER]["status"] != "done":
                 return self.ended(job)  # the automatic selection failed, so the build cannot go on yet
-            self.call("POST", "/continue", json={"api_key": self.key})  # also accepts a waiting part list
+            self.call("POST", "/continue", json={"api_key": self.key})
             return self.follow()
-        first = first_not_done({"stages": jobs.progress(J), "articulated": steps.articulated(job),
-                                      "parts_mode": steps.parts_mode(job)}, job["parts"]["confirmed"] is True)
+        first = first_not_done({"stages": jobs.progress(J)})
         if first is None:
             return self.ended({**job, "status": "done"})
         self.call("POST", "/continue", json={"from": first, "api_key": self.key})
@@ -597,11 +537,6 @@ def parser():
     ap.add_argument("--picks", metavar="FRAMES", help="choose the views yourself: 2 to 12 frames, such as 12,80,150")
     ap.add_argument("--view0", metavar="F", help="the frame of view 0; in a review, a pool frame such as f00012")
     ap.add_argument("--review", action="store_true", help="stop after the views are selected")
-    ap.add_argument("--articulated", action="store_true", help="build an object with moving parts")
-    ap.add_argument("--parts", metavar="F", help="the part list as a JSON file; on a resume, replace the VLM's list")
-    ap.add_argument("--edit-parts", action="store_true", help="stop after the VLM's part list")
-    ap.add_argument("--no-split", action="store_true",
-                    help="skip the split of the mesh into parts: the agent cuts every part of the list itself")
     ap.add_argument("--turntable", action="store_true", help="render a 360 video of the object")
     ap.add_argument("--agent", choices=steps.AGENTS, help="the agent that refines the object (default none)")
     ap.add_argument("--key-file", metavar="F",

@@ -45,7 +45,6 @@ import argparse
 import io
 import html
 import json
-import math
 import os
 import re
 import shutil
@@ -435,9 +434,8 @@ def page(src, shown, soon=()):
 
 def facts_of(J, job=None):
     """[[label, value]] of the Results tab's rows (app.js renderResults) that a demo shows, from the records in folder
-    J: Input (the source's kind and the views used; job.json, when there is one), Size (the upright extent), Mass,
-    Links and each joint (an articulated job), and the Agent. Never the input's name, a topic, a path or a LiDAR
-    value."""
+    J: Input (the source's kind and the views used; job.json, when there is one), Size (the upright extent), Mass and
+    the Agent. Never the input's name, a topic, a path or a LiDAR value."""
     J, out = Path(J), []
     sel = read_json(J / "selection.json") or {}
     n = len(sel.get("picks") or [])
@@ -447,24 +445,9 @@ def facts_of(J, job=None):
     ext = (read_json(J / "physics" / "aligned.json") or {}).get("extent_s")
     if isinstance(ext, list) and len(ext) == 3:
         out.append(["Size", " x ".join(fixed(100 * v, 0) for v in ext) + " cm"])
-    art = steps.articulated(job) if job else (J / "run" / "parts.glb").is_file()
-    mj, phys = read_json(J / "physics" / "mjcf" / "mjcf.json") if art else None, read_json(J / "physics" / "summary.json")
-    links = mj.get("links") if isinstance(mj, dict) else None
+    phys = read_json(J / "physics" / "summary.json")
     if phys:
-        rb = (mj.get("inertial") if links else None) or phys.get("rigid_body") or {}
-        out.append(["Mass", num(rb.get("mass")) + " kg"])
-    deg, cm = (lambda x: fixed(x * 180 / math.pi, 0)), (lambda x: fixed(100 * x, 1))
-    if links:
-        out.append(["Links", f"{len(links)}: {', '.join(links)}"])
-        for j in mj.get("joints") or []:
-            r = j.get("range") or [0, 0]
-            out.append([f"Joint of {j['child']}", f"turns on {j['parent']}, {deg(r[0])}° to {deg(r[1])}°"
-                        if j.get("type") == "revolute" else f"slides on {j['parent']}, {cm(r[0])} to {cm(r[1])} cm"
-                        if j.get("type") == "prismatic" else f"soft on {j['parent']}"
-                        if j.get("type") == "soft" else f"fixed to {j['parent']}"])
-        out += [[f"Joint of {k}", f"none (welded to {to})"] for k, to in (mj.get("welded") or {}).items()]
-    elif mj and art:
-        out.append(["Links", "1 (no joints, one rigid body)"])
+        out.append(["Mass", num((phys.get("rigid_body") or {}).get("mass")) + " kg"])
     r = read_json(J / "agent" / "result.json")
     if job and steps.agent(job) == "none":
         out.append(["Agent", "off"])

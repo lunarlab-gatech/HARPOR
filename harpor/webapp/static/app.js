@@ -1,5 +1,5 @@
 // HARPOR web app UI: jobs list and upload; a job page with the panels that wait for the user (camera topic, review of
-// the views and of the part list, a LiDAR failure) above five tabs: Results (the videos, the viewers and the facts),
+// the views, a LiDAR failure) above five tabs: Results (the videos, the viewers and the facts),
 // Downloads (the files, by group), Inputs (the input's facts, its preview video, the views the build used and their LiDAR points),
 // Settings (the build settings, with LiDAR for the metric scale) and Log. The header's Help link opens help.html at the screen's section.
 // Plain DOM code, no build step. The API key is only read from the password fields and sent once.
@@ -7,9 +7,9 @@
 
 const $ = (sel) => document.querySelector(sel);
 const ACTIVE = ["analyzing", "queued", "running"];
-const BUILD = ["extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "vomp", "place", "propose", "parts", "vomp_parts", "agent", "align",
-  "mjcf", "usd", "urdf", "turntable", "softvideo", "package"];
-const OPTIONAL = ["turntable", "softvideo"];  // steps.OPTIONAL: when it fails, the job still ends done
+const BUILD = ["extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "vomp", "place", "agent", "align",
+  "mjcf", "usd", "urdf", "turntable", "package"];
+const OPTIONAL = ["turntable"];  // steps.OPTIONAL: when it fails, the job still ends done
 // job.json "agent" (steps.AGENTS): the key it takes and the placeholder of the key field.
 const AGENTS = { astra: { key: "OpenAI API key", placeholder: "sk-..." },
   opus: { key: "Anthropic API key", placeholder: "sk-ant-..." }, fable: { key: "Anthropic API key", placeholder: "sk-ant-..." },
@@ -17,26 +17,19 @@ const AGENTS = { astra: { key: "OpenAI API key", placeholder: "sk-..." },
 const RAN = { codex: "GPT-6-Astra", claude: "Claude Opus 5.5" };  // agent_result.agent, the controller's name
 const MODEL_NAME = { "claude-fable-5-2": "Claude Fable 5.2" };  // agent_result.model, when it is not the agent's default
 const ranBy = (a) => MODEL_NAME[a.model] || RAN[a.agent];  // the model that ran the agent stage
-const VLM = { astra: RAN.codex, opus: RAN.claude, fable: MODEL_NAME["claude-fable-5-2"] };  // proposal.json "agent": the model that listed the parts
 // What each stage does, shown muted next to its name.
 const STAGE_LABEL = { topics: "camera topics", frames: "frame analysis", extract: "extract frames", masks: "SAM 3 masks",
   prep: "prepare views", da3: "depth (Depth Anything 3)", lidar: "metric scale (LiDAR)", select: "view selection",
-  sam3d: "mesh (MV-SAM3D)", place: "pose and scale", propose: "part list", parts: "split into parts", vomp_parts: "part materials (VoMP)", agent: "agent refinement", align: "align upright", vomp: "materials (VoMP)",
-  mjcf: "MuJoCo model", usd: "USD", urdf: "URDF", turntable: "360 video", softvideo: "soft-part video",
-  package: "results.zip" };
-// A stage's label; the agent's names its task.
-const stageLabel = (name, articulated) => name !== "agent" ? STAGE_LABEL[name] || ""
-  : articulated ? "agent sets the joints" : STAGE_LABEL.agent;
-const JOINTS = ["revolute", "prismatic", "fixed", "soft", "unknown"];  // harpor.parts.propose.JOINTS
-// agent_result.verdict of an articulation (the agent sets joints); a refinement's verdicts show as they are.
-const VERDICT = { unchanged: "unchanged (no joints)", needs_review: "needs review" };
+  sam3d: "mesh (MV-SAM3D)", place: "pose and scale", agent: "agent refinement", align: "align upright", vomp: "materials (VoMP)",
+  mjcf: "MuJoCo model", usd: "USD", urdf: "URDF", turntable: "360 video", package: "results.zip" };
+// A stage's label; a stage of an older job that this version no longer has gets none.
+const stageLabel = (name) => STAGE_LABEL[name] || "";
+const VERDICT = { needs_review: "needs review" };  // agent_result.verdict as the page shows it; the others as they are
 const LIST_STATUS = { review: "needs review" };  // badge text in the jobs list; the others are the status
 const NEEDS_YOU = ["review", "ready", "choose_topic", "failed"];  // the list marks these rows
 // The next step under the status; a status without one has none.
 const NEXT = { ready: "Name the object, then Start.", queued: "You can close this page.", running: "You can close this page.",
   review: "Check the picked views, then Build.", failed: "Check the log, then Retry.",
-  parts: "Check the part list, then Build.",  // a review of the part list
-  parts_stale: "The scale is out of date: cancel the job, then Retry from lidar.",  // ... that the server cannot confirm
   // The lidar stage failed (a rosbag); ... that has a calibration.
   lidar: "In Settings, upload a calibration and Retry, or turn LiDAR off and build again.",
   lidar_cal: "In Settings, replace the calibration and Retry, or turn LiDAR off and build again.",
@@ -45,25 +38,18 @@ const NEXT = { ready: "Name the object, then Start.", queued: "You can close thi
   // A done job whose scale is stale (V.scaleStale: another calibration or an older estimator): Retry runs again from lidar.
   stale: "Run lidar and later stages again to update them. It runs the lidar stage and every stage after it, GPU stages " +
     "included." };
-// The part list's review with a stale scale: the server refuses to confirm the list (jobs.Runner.resume), and a cancelled
-// job's Retry starts from lidar (retryFrom).
-const STALE_PARTS = " so Build cannot confirm this list. Cancel the job, then press Retry from lidar. The job finds the " +
-  "scale again, and the VLM lists the parts again.";
 // Why a scale is stale, by its cause (staleBy): the warning of a done job (V.scaleStale), the line when the server
-// starts from lidar, the line in the review, and the line in the part list's review.
+// starts from lidar, and the line in the review.
 const SCALE_STALE = {
   calibration: { done: "The calibration changed after this build, so the scale and the masses are out of date.",
     start: "Starting from lidar (calibration changed).",
-    review: "Calibration changed. Build finds the scale again, then stops here.",
-    parts: "The calibration changed after the scale was found," + STALE_PARTS },
+    review: "Calibration changed. Build finds the scale again, then stops here." },
   estimator: { done: "The app now finds the LiDAR scale in a new way, so this build's scale and masses are out of date.",
     start: "Starting from lidar (the app now finds the scale in a new way).",
-    review: "The app now finds the scale in a new way. Build finds the scale again, then stops here.",
-    parts: "The app now finds the scale in a new way," + STALE_PARTS },
+    review: "The app now finds the scale in a new way. Build finds the scale again, then stops here." },
   unknown: { done: "The scale and the masses of this build are out of date.",
     start: "Starting from lidar (the scale is out of date).",
-    review: "The scale is out of date. Build finds the scale again, then stops here.",
-    parts: "The scale is out of date," + STALE_PARTS } };
+    review: "The scale is out of date. Build finds the scale again, then stops here." } };
 // The cause the server gives (job.lidar_stale): "calibration", or "estimator" when an older version of the app found
 // the scale. A Stray capture has no calibration. A page that does not know the cause (the server was updated while a
 // stopped job's page was open) names none.
@@ -118,7 +104,7 @@ const NO_VIEWS = "No views selected yet.";
 // tab shown), pick (the tab the user picked), tabPhase (the phase of the status that the tab follows) and hashTab (the
 // hash's tab when the page opened); logAtEnd and logTop (where the log was left); and input, inputKey, videoKey, video,
 // selected, inputPlaced, inputAsked, placeAsked and overlay (the Inputs tab: renderInput); spin, spinKey, spinFig and
-// spinOn (the 360 video), and soft, softKey, softFig and softOn (the soft-part video: renderSpin).
+// spinOn (the 360 video: renderSpin).
 let V = {};
 let listKey = null, upXhr = null;  // the jobs list as last drawn; the running upload
 
@@ -159,30 +145,6 @@ function say(el, text, info) {  // a message line: red for a problem, muted for 
   el.className = info ? "msg info" : "msg";
 }
 
-// A part list as the user types it, one part per line: "name > parent : joint", or "name x3 > parent : joint"
-// for three identical parts. The base is the line without a parent; blank lines are skipped. Returns
-// [{name, parent, joint, count}] (parent and joint null when not given). harpor.parts.propose.validate checks
-// the rest on the server (one base, parents in the list, names). Throws an Error that names the line.
-function parseParts(text) {
-  const out = [];
-  String(text || "").split(/\r?\n/).forEach((line, i) => {
-    if (!line.trim()) return;
-    const m = /^([^>:]*)(?:>([^>:]*))?(?::(.*))?$/.exec(line);
-    if (!m) throw new Error(`line ${i + 1}: write the part as name > parent : joint`);
-    const c = /^(.*?)\s+[x×]\s*(\d+)$/i.exec(m[1].trim());
-    const name = (c ? c[1] : m[1]).trim(), parent = m[2] == null ? null : m[2].trim();
-    const joint = m[3] == null ? null : m[3].trim().toLowerCase();
-    if (!name) throw new Error(`line ${i + 1}: the part needs a name`);
-    if (parent === "") throw new Error(`line ${i + 1}: write the parent's name after >`);
-    if (joint !== null && !JOINTS.includes(joint)) throw new Error(`line ${i + 1}: the joint is one of ${JOINTS.join(", ")}`);
-    out.push({ name, parent, joint, count: c ? Number(c[2]) : 1 });
-  });
-  return out;
-}
-// The text of a part list (proposal.json "parts") in parseParts' form; the base comes without a joint.
-const formatParts = (parts) => (parts || []).map((p) => p.name + (p.count > 1 ? " x" + p.count : "") +
-  (p.parent ? ` > ${p.parent} : ${p.joint || "unknown"}` : "")).join("\n");
-
 async function api(path, opts) {
   let r;
   try { r = await T.fetch(path, opts); } catch (e) { online(false); throw new Error(OFFLINE); }
@@ -222,10 +184,10 @@ function show(id) {
 }
 // The section of help.html that the header's Help link opens: the jobs list's, a waiting panel's (the first one shown,
 // in page order), else the shown tab's. Before app.js routes, the link stays help.html.
-const HELP_AT = { list: "add-job", lidarfail: "lidar", topics: "topics", review: "review", partsreview: "parts",
+const HELP_AT = { list: "add-job", lidarfail: "lidar", topics: "topics", review: "review",
   results: "results", downloads: "downloads", inputs: "inputs", settings: "settings", log: "status" };
 function helpAt() {
-  const panel = ["lidarfail", "topics", "review", "partsreview"].find((x) => $("#" + x).hidden === false);
+  const panel = ["lidarfail", "topics", "review"].find((x) => $("#" + x).hidden === false);
   const at = $("#list").hidden === false ? "list" : $("#job").hidden === false ? panel || V.tab : null;
   $("#helplink").setAttribute("href", "help.html" + (HELP_AT[at] ? "#" + HELP_AT[at] : ""));
 }
@@ -358,7 +320,7 @@ async function openJob(id, tab) {
   V = { id, picks: [], view0: null, hashTab: tab || null };
   // The last job's, until refresh draws this one's: the waiting panels, the tabs and what the tabs show. They hide
   // before show(), so the Help link does not keep the last job's section when this one does not load.
-  for (const x of ["review", "partsreview", "lidarfail", "topics", "tabs", ...Object.values(TABS), "resultsnone", "resultsbody",
+  for (const x of ["review", "lidarfail", "topics", "tabs", ...Object.values(TABS), "resultsnone", "resultsbody",
     "downloadsnone", "downloadsbody", "inputnone", "inputbody", "framesnone", "framesbody"]) $("#" + x).hidden = true;
   show("job");
   clearInput();
@@ -377,8 +339,7 @@ async function refresh() {
   // done job.
   V.scaleStale = ["failed", "cancelled", "done"].includes(job.status) && scaleStale(job);
   renderState({ status: job.status, current: job.current, error: job.error, warnings: job.warnings, key_ok: job.key_ok,
-    agent: job.agent, articulated: job.articulated, parts_mode: job.parts_mode, parts_review: job.parts_review,
-    stages: job.progress }, false);
+    agent: job.agent, stages: job.progress }, false);
   // The tab follows the status at the end, once its panel is drawn; also when a panel could not be drawn. The Help
   // link follows the waiting panel that shows.
   try { await drawJob(job); } finally { if (V.job === job) { followStatus(job.status); helpAt(); } }
@@ -406,13 +367,11 @@ async function drawJob(job) {  // refresh's panels: the waiting panels and what 
   $("#framesbody").hidden = !form;
   $("#framesnone").hidden = form;
   $("#framesnone").textContent = analyzed ? SETTINGS_BUSY : SETTINGS_LATER;
-  // A job in review waits for the views, or (parts_review) for its part list after the VLM listed the parts.
-  const views = job.status === "review" && job.parts_review !== true, partList = job.status === "review" && job.parts_review === true;
+  // A job in review waits for the views.
+  const views = job.status === "review";
   $("#review").hidden = !views;
-  $("#partsreview").hidden = !partList;
   $("#manualstart").hidden = !!V.manual;
   if (views) await loadReview().catch((e) => { $("#selsum").textContent = e.message; });
-  if (partList) await loadParts().catch((e) => { say($("#partsmsg"), e.message); });
   // The files, by group, once the job stops. They come first, so a result file that does not parse (renderResults)
   // does not hide them.
   renderDownloads(job);
@@ -421,7 +380,6 @@ async function drawJob(job) {  // refresh's panels: the waiting panels and what 
   const results = !ACTIVE.includes(job.status) && job.files.includes("run/posed.glb");
   if (results) await renderResults(job).catch((e) => {
     fill($("#facts2"), h("p", { class: "msg" }, RESULTS_UNREAD + e.message));
-    fill($("#partchecks"));  // the check images of an earlier draw
   });
   if (!results) clearSpin();  // a new build replaces the video
   $("#resultsbody").hidden = !results;
@@ -573,12 +531,11 @@ function renderState(st, follow) {
   V.state = st;
   const build = st.stages.filter((x) => BUILD.includes(x.name));
   const nDone = build.filter((x) => ["done", "skipped"].includes(x.status)).length;
-  const art = st.articulated === true, partList = st.status === "review" && st.parts_review === true;
   // "Running: mesh (MV-SAM3D)": the stage's label, or its name when it has none.
   const cur = st.current;
   const sum = { analyzing: cur === "topics" ? "Listing topics" : "Reading input", choose_topic: "Choose topic", ready: "Ready",
-    queued: "Waiting for GPU", running: cur ? "Running: " + (stageLabel(cur, art) || cur) : "Running",
-    review: partList ? "Part list waiting" : "Needs review",
+    queued: "Waiting for GPU", running: cur ? "Running: " + (stageLabel(cur) || cur) : "Running",
+    review: "Needs review",
     done: "Done", failed: "Failed", cancelled: "Cancelled", uploaded: "Uploaded" }[st.status] || st.status;
   const overall = ["queued", "running"].includes(st.status) ? h("div", { class: "overall" },
     h("progress", { max: build.length, value: nDone, "aria-label": "build progress" }),
@@ -592,14 +549,12 @@ function renderState(st, follow) {
   const rerun = st.status === "done" && from === "lidar";
   let next = ["failed", "cancelled"].includes(st.status) && from === null ? "Build again from the Settings tab."
     : rerun ? NEXT.stale + (V.job && V.job.auto_continue === false ? " It pauses for your review." : "")
-    : partList ? NEXT[V.job && scaleStale(V.job) ? "parts_stale" : "parts"] : lidarFailed(st.status, st.stages)
+    : lidarFailed(st.status, st.stages)
       ? NEXT[!V.job ? "lidar" : V.job.kind === "stray" ? "lidar_stray" : V.job.calibration ? "lidar_cal" : "lidar"]
       : NEXT[st.status] || "";
   const ran = (name) => build.some((x) => x.name === name && x.status === "done");
   if (["queued", "running"].includes(st.status) && V.job && V.job.auto_continue === false && !ran("select"))
     next += " It pauses for your review.";
-  if (["queued", "running"].includes(st.status) && art && st.parts_mode === "vlm_edit" && !ran("propose"))
-    next += " It pauses for the part list.";
   $("#jnext").textContent = next;
   const said = sum + (st.error ? ". " + st.error : "");
   if (said !== V.said) { V.said = said; $("#announce").textContent = said; }
@@ -608,7 +563,7 @@ function renderState(st, follow) {
   const name = V.job ? V.job.video.name : V.id || "";
   $("#where").replaceChildren(h("span", { class: "crumb" }, "/ " + name));  // the status shows once, under the title
   document.title = ({ running: `${cur || "running"} ${Math.min(nDone + 1, build.length)}/${build.length}`, queued: "Queued",
-    review: partList ? "Part list waiting" : "Review waiting", done: "Done", failed: "Failed", cancelled: "Cancelled", ready: "Ready", analyzing: "Reading",
+    review: "Review waiting", done: "Done", failed: "Failed", cancelled: "Cancelled", ready: "Ready", analyzing: "Reading",
     choose_topic: "Choose topic" }[st.status] || st.status) + (name ? " · " + name : "") + " · HARPOR";
 
   const started = st.stages.some((x) => x.started || x.status !== "pending");
@@ -627,9 +582,9 @@ function renderState(st, follow) {
     h("div", { class: "nm" }, live ? h("span", { class: "name" }, x.name)
       : h("button", { type: "button", class: "name link", "data-stage": x.name, "aria-controls": "log", "aria-pressed": String(x.name === V.logStage),
         onclick: () => showLog(x.name) }, x.name),
-    h("span", { class: "label" }, stageLabel(x.name, art))),
+    h("span", { class: "label" }, stageLabel(x.name))),
     h("span", { class: "gpu" }, x.gpu ? "GPU" : ""),
-    badge(x.status),  // a stage that is turned off says so in its note ("turned off: rigid object")
+    badge(x.status),  // a stage that is turned off says so in its note ("turned off")
     h("span", { class: "secs", "data-started": x.started || null, "data-ended": x.ended || null },
       x.started ? fmt(Math.max(0, (x.ended || now) - x.started)) : ""),
     x.status === "running" && x.progress != null ? h("progress", { max: 1, value: x.progress, "aria-label": x.name + " progress" }) : null,
@@ -648,15 +603,14 @@ function renderState(st, follow) {
   $("#retry").hidden = from === null || !(["failed", "cancelled"].includes(st.status) || rerun ||
     st.status === "done" && OPTIONAL.includes(from));
   if (!$("#retry").hidden) $("#retry").textContent = rerun ? RERUN_LIDAR : from === "frames" ? "Read input again"
-    : from === "propose" && (st.stages.find((y) => y.name === "propose") || {}).status === "done" ? "Back to part list"
-      : "Retry from " + from;
+    : "Retry from " + from;
   // A rerun from lidar runs the agent stage again, and a done job's key is gone (jobs.Runner._status).
   const agent = st.agent;
   $("#keyrow").hidden = st.key_ok || agent === "none" || !(["review", "failed", "cancelled"].includes(st.status) || rerun) ||
     from === "frames";
   $("#key2name").textContent = AGENTS[agent].key || "API key";
   // The key goes next to the button that sends it.
-  const home = st.status === "review" ? partList ? $("#partsbar") : $("#revbar") : $("#actions");
+  const home = st.status === "review" ? $("#revbar") : $("#actions");
   if ($("#keyrow").parentElement !== home) home.prepend($("#keyrow"));
   if (follow !== false) followStatus(st.status);
 }
@@ -666,10 +620,7 @@ function retryFrom(st) {  // "frames" analyzes the input again (no key needed); 
   const x = st.stages.find((x) => BUILD.includes(x.name) && !["done", "skipped"].includes(x.status));
   if (!x) return V.scaleStale === true ? "lidar" : null;  // a done job: again from lidar when its scale is stale
   if (stage("extract").status === "pending") return null;
-  // A job stopped before its part list was confirmed goes back to that list (the server resumes from propose).
-  const unconfirmed = st.articulated === true && st.parts_mode === "vlm_edit" && (stage("propose") || {}).status === "done"
-    && !(V.job && V.job.parts.confirmed === true);
-  const name = x.name === "parts" && unconfirmed ? "propose" : x.name;
+  const name = x.name;
   // A stale scale (V.scaleStale): the server starts from lidar (Runner.resume).
   return V.scaleStale === true && BUILD.indexOf(name) > BUILD.indexOf("lidar") ? "lidar" : name;
 }
@@ -807,10 +758,6 @@ async function loadFrames() {
       const first = radios.find((r) => r.disabled !== true);
       if (first) first.checked = true;
     }
-    $("#articulated").checked = job.articulated === true;
-    partsPick = job.parts.mode;
-    $("#nosplit").checked = job.parts.split === false;
-    $("#partlist").value = formatParts(job.parts.list);
     agentToggle();
     lidarSetup(job);
     document.querySelector(`input[name=mode][value=${V.manual ? "manual" : job.mode || "auto"}]`).checked = true;
@@ -873,25 +820,8 @@ function agentToggle() {
   $("#key").required = !!a.key;
   $("#keyname").textContent = a.key || "";
   $("#key").placeholder = a.placeholder;
-  partsToggle();
 }
 for (const r of document.querySelectorAll("input[name=agent]")) r.onchange = agentToggle;
-let partsPick = "vlm";  // the parts mode the user chose; agent "None" shows "I type them" and keeps this choice
-const chosenPartsMode = () => chosenAgent() === "none" ? "user" : partsPick;  // steps.parts_mode: no agent, no VLM
-function partsToggle() {  // the parts settings of an articulated object; the typed list only for "I type them"
-  const art = $("#articulated").checked === true, none = chosenAgent() === "none", pm = chosenPartsMode();
-  for (const r of document.querySelectorAll("input[name=partsmode]")) {
-    r.disabled = none && r.value !== "user";
-    r.checked = r.value === pm;
-  }
-  $("#partsbox").hidden = !art;
-  $("#partsnoagent").hidden = !none;
-  $("#partlistbox").hidden = pm !== "user";
-  $("#partlist").required = art && pm === "user";
-}
-for (const r of document.querySelectorAll("input[name=partsmode]")) r.onchange = () => { partsPick = r.value; partsToggle(); };
-$("#articulated").onchange = partsToggle;
-
 // ---- 2b. LiDAR for the metric scale: a bag's LiDAR topic with its TF link or the calibration; a Stray capture's depth ----
 
 // A topics.json "lidar" entry: "/livox/lidar (Livox, 10 Hz, livox_frame)".
@@ -1089,12 +1019,6 @@ $("#startform").onsubmit = async (e) => {
   e.preventDefault();
   const manual = mode() === "manual";
   if (manual && V.picks.length < 2) { say($("#startmsg"), "pick at least 2 frames"); return; }
-  // An articulated object sends who lists its parts, and the typed list for "I type them".
-  const articulated = $("#articulated").checked === true, pm = chosenPartsMode();
-  let parts = [];
-  if (articulated && pm === "user") {
-    try { parts = parseParts($("#partlist").value); } catch (err) { say($("#startmsg"), err.message); return; }
-  }
   let lidar = null;
   try { lidar = lidarChoice(); } catch (err) {  // no topic chosen: the select takes the focus
     say($("#startmsg"), err.message);
@@ -1109,8 +1033,7 @@ $("#startform").onsubmit = async (e) => {
   try {
     await post(`/api/jobs/${V.id}/start`, { mode: mode(), prompt: $("#prompt").value, n_views: +$("#nviews").value,
       picks: manual ? V.picks : [], view0: manual ? V.view0 : null, auto_continue: !$("#pause").checked,
-      agent, api_key: typed ? $("#key").value : null, articulated,
-      ...(articulated ? { parts_mode: pm, parts, ...($("#nosplit").checked === true && keyed ? { split: false } : {}) } : {}), lidar,
+      agent, api_key: typed ? $("#key").value : null, lidar,
       turntable: $("#turntable").checked === true });
     $("#key").value = "";
     say($("#startmsg"), "", true);
@@ -1373,56 +1296,6 @@ $("#build").onclick = () => act([$("#build"), $("#reselect")], $("#revmsg"), "ch
   () => post(`/api/jobs/${V.id}/continue`, { api_key: $("#key2").value || null }),
   () => { $("#key2").value = ""; $("#log").textContent = ""; toHead(); });
 
-// ---- 4b. the part list ("VLM, then I check": the job waits after propose) ----
-
-async function loadParts() {
-  const r = V.parts = await api(`/api/jobs/${V.id}/parts`), p = r.proposal || { parts: [], warnings: [] };
-  const moving = p.parts.filter((x) => x.parent), n = moving.length;
-  const who = p.source === "vlm" ? VLM[p.agent] || "The VLM" : "You";
-  fill($("#partssum"), !p.parts.length ? "No part list yet." : n ? `${who}: ${n} moving ${n === 1 ? "part" : "parts"}. Base: ${p.base}.`
-    : `${who} found no moving parts. Add them under the base (${p.base}).`);
-  // A stale scale comes first: the server refuses Build then, so the line says what to do. While the list waits, the
-  // calibration cannot change, so the cause is mostly an older estimator.
-  const stale = !!V.job && scaleStale(V.job) ? h("li", { class: "warn" }, SCALE_STALE[staleBy()].parts) : null;
-  fill($("#partswarn"), stale, (p.warnings || []).map((w) => h("li", {}, w)));
-  fill($("#partshints"), moving.filter((x) => x.axis_hint).map((x) => h("li", {}, h("b", {}, x.name), ": " + x.axis_hint)));
-  $("#partsfig").hidden = !r.photo;
-  if (r.photo) $("#partsphoto").src = file(r.photo);
-  const key = JSON.stringify(p.parts);  // a new proposal replaces the text; the same one keeps the user's edits
-  if (key !== V.partsKey) {
-    V.partsKey = key;
-    V.partsText = formatParts(p.parts);
-    $("#partsedit").value = V.partsText;
-  }
-  $("#partsreset").hidden = $("#partsedit").value === V.partsText;
-}
-// The parsed list for POST /parts: a part the user kept (same name, same joint) keeps the VLM's axis hint.
-function keepHints(parts, proposed) {
-  const norm = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
-  const was = new Map(proposed.map((p) => [norm(p.name), p]));
-  return parts.map((p) => {
-    const q = was.get(norm(p.name));
-    return q && q.axis_hint && (p.joint || "unknown") === q.joint ? { ...p, axis_hint: q.axis_hint } : p;
-  });
-}
-$("#partsedit").oninput = () => { $("#partsreset").hidden = $("#partsedit").value === V.partsText; say($("#partsmsg"), "", true); };
-$("#partsreset").onclick = () => {
-  $("#partsedit").value = V.partsText;
-  $("#partsreset").hidden = true;
-  say($("#partsmsg"), "", true);
-};
-$("#partsbuild").onclick = () => {  // the VLM's list as it is (continue), or the edited list (POST /parts)
-  // The text as shown confirms the VLM's list without parsing it here: a VLM's name may hold ":" or ">".
-  const same = $("#partsedit").value.trim() === (V.partsText || "").trim();
-  let parts;
-  if (!same) try { parts = parseParts($("#partsedit").value); } catch (e) { say($("#partsmsg"), e.message); return; }
-  const proposed = (V.parts && V.parts.proposal && V.parts.proposal.parts) || [];
-  const api_key = $("#key2").value || null;
-  return act([$("#partsbuild"), $("#partsreset")], $("#partsmsg"), "checking the parts",
-    () => same ? post(`/api/jobs/${V.id}/continue`, { api_key }) : post(`/api/jobs/${V.id}/parts`, { parts: keepHints(parts, proposed), api_key }),
-    () => { $("#key2").value = ""; $("#log").textContent = ""; V.partsKey = null; toHead(); });
-};
-
 // ---- 5. results ----
 
 // model-viewer comes from a module script: a CDN on the tunnel page, the site's own copy on the public site. When that
@@ -1459,38 +1332,27 @@ async function renderResults(job) {
     mvDefined().then((ok) => { if (!ok) failed(); });
     return fig;
   };
-  const off = job.agent === "none", a = job.agent_result, art = job.articulated === true;
+  const off = job.agent === "none", a = job.agent_result;
   const ran = a && ranBy(a);
-  const rigged = !!a && a.mode === "articulation";  // the agent set the joints of the split parts
-  const by = (title) => `${title} (${ran})`;
-  const notRefined = art ? "off (parts welded into one body)" : "off";
-  const refined = has("refined.glb") ? viewer("refined.glb", !rigged ? by("Refined")
-    : by(a.joints_delivered > 0 ? "Parts with joints" : "Agent result, no joints")) : null;
-  const split = has("run/parts.glb") ? viewer("run/parts.glb", "Split parts") : null;
-  $("#viewers").classList.toggle("single", !refined && !split);
-  $("#resultsbody").classList.toggle("onefig", !refined && !split);  // a wide screen puts the facts beside it
+  const refined = has("refined.glb") ? viewer("refined.glb", `Refined (${ran})`) : null;
+  $("#viewers").classList.toggle("single", !refined);
+  $("#resultsbody").classList.toggle("onefig", !refined);  // a wide screen puts the facts beside it
   // With the agent off there is no agent viewer; the Agent row of the facts says so.
-  fill($("#viewers"), viewer("run/posed.glb", "Posed mesh"), split, refined);
+  fill($("#viewers"), viewer("run/posed.glb", "Posed mesh"), refined);
   // The evidence alone may fail to read: its rows are left out then, not every row.
-  const [place, phys, mj, parts, pr, lid, ev] = await Promise.all([json("run/placement.json"), json("physics/summary.json"),
-    art ? json("physics/mjcf/mjcf.json") : null, art ? json("run/parts.json") : null,
-    art && has("run/parts.json") ? api(`/api/jobs/${V.id}/parts`).catch(() => null) : null, json("pool/lidar.json"),
-    art ? json("agent/evidence.json").catch(() => null) : null]);
+  const [place, phys, mj, lid, ev] = await Promise.all([json("run/placement.json"), json("physics/summary.json"),
+    json("physics/mjcf/mjcf.json"), json("pool/lidar.json"), json("agent/evidence.json").catch(() => null)]);
   // [label, value]: what each one means is in help.html.
   const rows = [], num = (x, d = 3) => x == null ? "?" : Number(x).toPrecision(d);
   // A position in m, to the mm. Rounding first turns float noise such as -1.51e-18 into 0.000, not -0.000.
   const mm = (x) => x == null ? "?" : (Math.round(1000 * x) / 1000).toFixed(3);
   if (place) rows.push(["Metric scale", metricScale(place, lid, job)]);
   if (place) rows.push(["Mask IoU", num(place.check && place.check.mean_mask_iou)]);
-  const lost = parts ? (parts.parts || []).filter((x) => x.status !== "found") : [];  // not_found, dropped_small, unconfirmed
-  if (lost.length) rows.push(["Parts not split off", lost.map((x) => `${x.prompt} (${x.why || x.status.replace("_", " ")})`).join("; ")]);
-  if (job.stages.agent.status === "skipped") rows.push(["Agent", off ? notRefined : "skipped: " + job.stages.agent.note]);
+  if (job.stages.agent.status === "skipped") rows.push(["Agent", off ? "off" : "skipped: " + job.stages.agent.note]);
   else if (a) {
     rows.push(["Agent", `${ran} (${a.model})`]);
-    rows.push(["Agent verdict", `${rigged && VERDICT[a.verdict] || a.verdict} (${a.source})`], ["Agent reason", a.reason || ""]);
+    rows.push(["Agent verdict", `${VERDICT[a.verdict] || a.verdict} (${a.source})`], ["Agent reason", a.reason || ""]);
     for (const l of a.limitations || []) rows.push(["Limitation", l]);
-    if (rigged) rows.push(["Joints", a.joints_delivered != null ? String(a.joints_delivered) : "?"]);
-    if (rigged) rows.push(["Joint changes", String(a.counts.joints)]);
     rows.push(...roundRows(a, ev));
     if (a.tokens) {
       const t = a.tokens;
@@ -1500,33 +1362,14 @@ async function renderResults(job) {
         ["Agent cost (estimate)", a.cost_usd != null ? "about $" + Number(a.cost_usd).toFixed(2) : "?"]);
     }
   }
-  if (mj && mj.links) {  // the MJCF of an object with joints: a body per link
-    const names = Object.keys(mj.links), deg = (x) => (x * 180 / Math.PI).toFixed(0), cmr = (x) => (100 * x).toFixed(1);
-    rows.push(["Links", `${names.length}: ${names.join(", ")}`],
-      ["Base", `${mj.root}, ${mj.fixed_base ? "fixed to the world" : "free to move"}`]);
-    for (const j of mj.joints || []) rows.push([`Joint of ${j.child}`, j.type === "revolute"
-      ? `turns on ${j.parent}, ${deg(j.range[0])}° to ${deg(j.range[1])}°` : j.type === "prismatic"
-        ? `slides on ${j.parent}, ${cmr(j.range[0])} to ${cmr(j.range[1])} cm` : j.type === "soft"
-          ? `soft on ${j.parent}` : `fixed to ${j.parent}`]);
-    for (const [k, to] of Object.entries(mj.welded || {})) rows.push([`Joint of ${k}`, `none (welded to ${to})`]);
-    rows.push(...softRows(mj));
-  } else if (mj && art) rows.push(["Links", "1 (no joints, one rigid body)"]);
   if (phys) {
-    const whole = mj && mj.links ? mj.inertial : null;  // every link, also one that VoMP could not voxelize
-    const rb = whole || phys.rigid_body || {}, md = phys.median || {}, skipped = Object.keys(phys.links_skipped || {});
+    const rb = phys.rigid_body || {}, md = phys.median || {};
     rows.push(["Mass", num(rb.mass) + " kg"], ["Center of mass", (rb.com || []).map(mm).join(", ") + " m"]);
-    if (whole) rows.push(["Link masses", Object.entries(mj.links).map(([k, l]) => `${k} ${num(l.inertial.mass)} kg` +
-      (l.source === "hull" ? " (from hulls)" : "")).join(", ")]);
-    else if (skipped.length) rows.push(["Mass note", `Leaves out ${skipped.join(", ")} (no VoMP result)`]);
     rows.push(["Young's modulus (median)", num(md.youngs_modulus_pa) + " Pa"], ["Poisson ratio (median)", num(md.poisson_ratio)],
       ["Density (median)", num(md.density_kg_m3) + " kg/m³"]);
   }
+  if (mj && typeof mj.friction === "number") rows.push(["Friction", `${mj.friction} (assumed, the same on every surface)`]);
   $("#facts2").replaceChildren(h("dl", {}, ...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])));
-  const checks = (pr && pr.checks) || [];  // run/parts/sam3/check/<view>.jpg
-  fill($("#partchecks"), checks.length ? h("details", { class: "sub" }, h("summary", {}, `Part masks (${checks.length})`),
-    h("p", { class: "hint" }, "One color per part."),
-    h("div", { class: "checks" }, ...checks.map((c) => h("a", { href: file(c), target: "_blank", rel: "noopener" },
-      h("img", { src: file(c), loading: "lazy", alt: "part masks in view " + /(\d+)\.jpg$/.exec(c)[1] }))))) : null);
 }
 // The "Metric scale" row: placement.json metric_scale (select applied it), with lidar.json's source, views and spread.
 function metricScale(place, rec, job) {
@@ -1539,22 +1382,14 @@ function metricScale(place, rec, job) {
   const shown = facts.filter(Boolean);
   return `×${m.toFixed(3)} from LiDAR` + (shown.length ? ` (${shown.join(", ")})` : "");
 }
-// The outcomes of a requirement (harpor.agent.controller.OUTCOMES), whose counts agent_result.requirements gives.
-const OUTCOMES = ["pass", "fail", "inconclusive", "unassessed"];
-const degrees = (x) => (x * 180 / Math.PI).toFixed(0);
-// The rows of a session in rounds (controller.run_session) and of the surface check: the rounds, how many requirements
-// the delivered candidate meets, each requirement of agent/evidence.json (ev) with its outcome and what the host's
-// check measured, and how much of the original's surface the result keeps. A key that the result lacks gives no row:
-// old jobs may have none of them.
+// The rows of a session in rounds (controller.run_session) and of the surface check: the rounds, the physics check of
+// the delivered candidate (agent/evidence.json, ev), and how much of the original's surface the result keeps. A key
+// that the result lacks gives no row: old jobs may have none of them.
 function roundRows(a, ev) {
   const rows = [], rounds = Array.isArray(a.rounds) ? a.rounds.filter((r) => r && typeof r === "object") : [];
   if (rounds.length) rows.push(["Rounds", roundsText(rounds, a.candidate)]);
-  const n = a.requirements && typeof a.requirements === "object" ? a.requirements : null;
-  if (n) {
-    const total = OUTCOMES.reduce((sum, k) => sum + (Number(n[k]) || 0), 0);
-    rows.push(["Requirements", `${Number(n.pass) || 0} of ${total} met`]);
-    for (const r of chosenRecords(ev)) rows.push([`Requirement ${r.requirement}`, requirementText(r, ev)]);
-  }
+  const pr = chosenReview(ev);
+  if (pr) rows.push(["Physics check", `${pr.outcome}${pr.reason ? ": " + pr.reason : ""}`]);
   if (a.surface && typeof a.surface === "object") rows.push(["Surface retained", surfaceText(a.surface)]);
   return rows;
 }
@@ -1566,37 +1401,12 @@ function roundsText(rounds, cand) {
     : cand === null ? "; no candidate delivered" : "";
   return `${rounds.length} (${each})${sent}`;
 }
-// The records of the candidate that the session delivered (evidence.json selected), else none.
-function chosenRecords(ev) {
+// The physics review of the candidate that the session delivered (evidence.json selected), else null.
+function chosenReview(ev) {
   const sel = ev && ev.selected, cands = ev && Array.isArray(ev.candidates) ? ev.candidates : [];
   const c = sel && sel.version != null ? cands.find((x) => x && x.version === sel.version) : null;
-  return c && Array.isArray(c.records) ? c.records.filter((r) => r && typeof r === "object") : [];
-}
-// "lid, revolute: pass, clear from 0° to 86°", "pad, soft: pass, dents 4.0 mm". A part that was not split off has
-// the name reserved for its link as its target: "flap_3 (cut out by the agent), revolute: pass" once the agent
-// created that link, else "flap (not split off), revolute: fail" (the check's part_missing), and for a job from
-// before the reserves "drawer (not split off), prismatic: unassessed".
-function requirementText(r, ev) {
-  const m = r.measured && typeof r.measured === "object" ? r.measured : {};
-  const target = Array.isArray(r.target) ? r.target[0] : null;
-  const req = (Array.isArray(ev.requirements) ? ev.requirements : []).find((q) => q && q.id === r.requirement) || {};
-  const absent = !target || r.outcome === "unassessed"
-    || (Array.isArray(r.findings) && r.findings.some((f) => f && f.code === "part_missing"));
-  const name = req.status !== "not_found" ? (target || `${req.prompt || "?"} (not split off)`)
-    : absent ? `${req.prompt || "?"} (not split off)` : `${target} (cut out by the agent)`;
-  let text = `${name}, ${r.joint}: ${r.outcome}`;
-  const [lo, hi] = Array.isArray(m.achieved) ? m.achieved : [];
-  if (typeof lo === "number" && typeof hi === "number") {
-    text += m.type === "prismatic" ? `, clear from ${(100 * lo).toFixed(1)} to ${(100 * hi).toFixed(1)} cm`
-      : `, clear from ${degrees(lo)}° to ${degrees(hi)}°`;
-  }
-  if (typeof m.dmax_m === "number") text += `, dents ${(1000 * m.dmax_m).toFixed(1)} mm`;
-  // The part list's range is graded: a joint that reaches less of it still meets the requirement, as reduced.
-  const red = m.reduced && typeof m.reduced === "object" ? m.reduced : null;
-  if (red && typeof red.span === "number" && typeof red.target === "number") {
-    text += `, reduced: ${degrees(red.span)}° of the ${degrees(red.target)}° that the part list estimated`;
-  }
-  return text + (r.required === false ? ", not required" : "");
+  const pr = c && c.physics_review;
+  return pr && typeof pr === "object" && typeof pr.outcome === "string" ? pr : null;
 }
 // "99.5% kept: 98.0% as it was, 1.5% changed", with the share whose UVs cannot be checked and the surface findings.
 function surfaceText(sf) {
@@ -1605,19 +1415,8 @@ function surfaceText(sf) {
   const codes = [...new Set(found.map((f) => f && f.code).filter(Boolean))];
   return `${pct(sh.present)} kept: ${pct(sh.retained)} as it was, ${pct(sh.modified)} changed`
     + (sh.unresolved > 0 ? `, ${pct(sh.unresolved)} without UVs to check` : "")
-    + (codes.length ? `; ${codes.join(", ")} (${sf.blocks ? "blocks articulated" : "report only"})` : "");
+    + (codes.length ? `; ${codes.join(", ")} (${sf.blocks ? "blocks delivery" : "report only"})` : "");
 }
-// The Soft part rows of mjcf.json: each soft link with its material and Young's modulus, and each one that stayed rigid
-// in MuJoCo too (soft_rigid), with the reason.
-function softRows(mj) {
-  const kpa = (y) => typeof y === "number" ? Math.round(y / 1e3).toLocaleString("en-US") : "?";
-  const soft = Object.entries(mj.soft || {}).map(([k, sp]) => ["Soft part",
-    `${k}: ${(sp && sp.material) || "?"}, about ${kpa(sp && sp.young)} kPa; rigid in URDF and USD`]);
-  const rigid = Object.entries(mj.soft_rigid || {}).map(([k, r]) => ["Soft part",
-    `${k}: rigid in MuJoCo too (${(r && r.reason) || "?"})`]);
-  return [...soft, ...rigid];
-}
-
 // ---- 5a. the Downloads tab: the job's files by group ----
 
 // The groups in order, each with its files as [path in the job folder, the name it downloads as]. They are
@@ -1625,12 +1424,12 @@ function softRows(mj) {
 // URDF's meshes and the agent's result are not served alone: they come only in results.zip (help.html says what it holds).
 const DOWNLOADS = [
   ["Everything", [["results.zip", "results.zip"]]],
-  ["Meshes", [["run/posed.glb", "posed.glb"], ["run/parts.glb", "parts.glb"], ["refined.glb", "refined.glb"],
+  ["Meshes", [["run/posed.glb", "posed.glb"], ["refined.glb", "refined.glb"],
     ["physics/aligned.glb", "aligned.glb"]]],
-  ["Video", [["turntable/turntable.mp4", "turntable.mp4"], ["softvideo/softvideo.mp4", "softvideo.mp4"]]],
+  ["Video", [["turntable/turntable.mp4", "turntable.mp4"]]],
   ["Simulation", [["physics/urdf/model.urdf", "model.urdf"]]],
   ["Records", [["run/placement.json", "placement.json"], ["physics/summary.json", "summary.json"], ["pool/lidar.json", "lidar.json"],
-    ["selection.json", "selection.json"], ["run/parts.json", "parts.json"], ["physics/mjcf/mjcf.json", "mjcf.json"],
+    ["selection.json", "selection.json"], ["physics/mjcf/mjcf.json", "mjcf.json"],
     ["agent/evidence.json", "evidence.json"]]]];
 // What the Simulation group says above its one file: model.urdf does not load alone.
 const SIM_TEXT = "Needs the meshes in results.zip.";
@@ -2192,14 +1991,11 @@ function cloudLegend(C, data) {
 
 // ---- 5d. the videos of the object (Results tab) ----
 
-// The videos above the viewers, side by side, each as [its slot in V, its file, its stage, its caption, its name for
-// a screen reader]: the turntable stage's 360 video, when the job asked for one and its render worked, and the
-// softvideo stage's video of the soft part pressed and let go, when the MuJoCo model has one. A slot holds the video,
+// The videos above the viewers, each as [its slot in V, its file, its stage, its caption, its name for a screen
+// reader]: the turntable stage's 360 video, when the job asked for one and its render worked. A slot holds the video,
 // the key of its draw, its figure and whether it plays when the tab shows (V.spin, V.spinKey, V.spinFig, V.spinOn).
-// A job stored on the site before the softvideo stage has no record of it.
-const SPIN = "turntable/turntable.mp4", SOFT = "softvideo/softvideo.mp4";
-const VIDEOS = [["spin", SPIN, "turntable", "360 video", (what) => `360 video of the ${what}`],
-  ["soft", SOFT, "softvideo", "Soft-part video", (what) => `The soft part of the ${what}, pressed and let go`]];
+const SPIN = "turntable/turntable.mp4";
+const VIDEOS = [["spin", SPIN, "turntable", "360 video", (what) => `360 video of the ${what}`]];
 function clearSpin() {  // another job opens, or a new build hides the results: the old videos go
   for (const [slot] of VIDEOS) V[slot] = V[slot + "Key"] = V[slot + "Fig"] = null;
   fill($("#spin"));
@@ -2236,7 +2032,7 @@ function renderSpin(job) {
   if (changed.some(Boolean)) fill($("#spin"), VIDEOS.map(([slot]) => V[slot + "Fig"]));
 }
 // The videos play only while the Results tab shows. Each stops when the tab hides, and plays again when the tab shows
-// if it played when the tab hid (V.spinOn, V.softOn), or at first unless the system asks for reduced motion.
+// if it played when the tab hid (V.spinOn), or at first unless the system asks for reduced motion.
 function spinTab(name) {
   if (name === V.tab) return;
   for (const [slot] of VIDEOS) {

@@ -5,7 +5,6 @@ summed. Each occupied voxel is a solid box of edge h (per axis) and density rho:
 m_i = rho_i * hx * hy * hz, COM = sum m_i x_i / M, and
 I = sum m_i [(r_i . r_i) I3 - r_i r_i^T] + the boxes' own inertia M / 12 * (hy^2 + hz^2, ...).
 `fullinertia` is about the COM, in MuJoCo's order Ixx Iyy Izz Ixy Ixz Iyz.
-An articulated object has one such body per link (build_plan.md note 11); combine() gives the whole object.
 """
 
 import numpy as np
@@ -24,31 +23,6 @@ def mass_properties(centers, rho, h):
     return {
         "mass": float(M),
         "volume": float(len(m) * h.prod()),
-        "com": com.tolist(),
-        "inertia": I.tolist(),
-        "fullinertia": [I[0, 0], I[1, 1], I[2, 2], I[0, 1], I[0, 2], I[1, 2]],
-    }
-
-
-def combine(bodies):
-    """One rigid body from several (dicts of mass_properties, or with fullinertia only): the masses add,
-    the COM is mass-weighted, and each inertia moves to the common COM (parallel axis theorem)."""
-    m = np.array([b["mass"] for b in bodies], float)
-    c = np.array([b["com"] for b in bodies], float)
-    M = m.sum()
-    com = (m[:, None] * c).sum(0) / M
-    I = np.zeros((3, 3))
-    for b, mi, ci in zip(bodies, m, c):
-        if "inertia" in b:
-            Ib = np.asarray(b["inertia"], float)
-        else:
-            xx, yy, zz, xy, xz, yz = b["fullinertia"]
-            Ib = np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]], float)
-        d = ci - com
-        I += Ib + mi * (d @ d * np.eye(3) - np.outer(d, d))
-    return {
-        "mass": float(M),
-        "volume": float(sum(b.get("volume", 0.0) for b in bodies)),
         "com": com.tolist(),
         "inertia": I.tolist(),
         "fullinertia": [I[0, 0], I[1, 1], I[2, 2], I[0, 1], I[0, 2], I[1, 2]],

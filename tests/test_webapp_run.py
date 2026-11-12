@@ -27,7 +27,6 @@ from test_webapp_server import ROOT, calibration_yaml, scene_bag, write_bag, wri
 
 OPUS = "sk-ant-test-" + secrets.token_hex(16)
 ASTRA = "sk-test-" + secrets.token_hex(16)
-PARTS = [{"name": "body"}, {"name": "lid", "parent": "body", "joint": "revolute"}]
 
 
 class Term:
@@ -142,26 +141,12 @@ def test_help_prints():
     (["{video}", "--picks", "1,x"], "--picks takes frames"),
     (["{video}", "--view0", "x"], "--view0 takes a frame"),
     (["{video}", "--lock", "12"], "answer a view review, on a resume"),
-    (["{video}", "--parts", "{parts}"], "--parts and --edit-parts need --articulated"),
-    (["{video}", "--edit-parts"], "--parts and --edit-parts need --articulated"),
-    (["{video}", "--articulated", "--agent", "opus", "--edit-parts", "--parts", "{parts}"], "choose one"),
-    (["{video}", "--articulated", "--edit-parts"], "--edit-parts needs --agent astra, opus or fable"),
-    (["{video}", "--no-split", "--agent", "opus"], "--no-split needs --articulated"),
-    (["{video}", "--articulated", "--no-split", "--parts", "{parts}"], "--no-split needs --agent astra, opus or fable"),
-    (["{video}", "--articulated"], "without an agent there is no VLM"),
     (["{video}", "--key-file", "{tmp}/k.env"], "--key-file needs --agent astra, opus or fable"),
-    (["{video}", "--articulated", "--parts", "{tmp}/nope.json"], "cannot read the part list"),
-    (["{video}", "--articulated", "--parts", "{tmp}/notes.txt"], "cannot read the part list"),
-    (["{video}", "--articulated", "--parts", "{tmp}/one.json"], 'not a JSON list of parts or an object with a "parts" list'),
-    (["{video}", "--articulated", "--parts", "{tmp}/roots.json"], "exactly one part, the base, has no parent"),
 ])
 def test_bad_arguments_stop_before_anything_runs(term, args, reason):
     (term.tmp / "empty.mp4").touch()
     (term.tmp / "notes.txt").write_text("notes")
-    (term.tmp / "one.json").write_text("1")
-    (term.tmp / "parts.json").write_text(json.dumps(PARTS))
-    (term.tmp / "roots.json").write_text(json.dumps([{"name": "body"}, {"name": "lid"}]))
-    paths = {"tmp": term.tmp, "video": term.tmp / "cup.mp4", "bag": term.tmp / "cup.bag", "parts": term.tmp / "parts.json"}
+    paths = {"tmp": term.tmp, "video": term.tmp / "cup.mp4", "bag": term.tmp / "cup.bag"}
     paths["video"].write_bytes(b"not read")
     paths["bag"].write_bytes(b"not read")
     code, out = term(*[x.format(**paths) for x in args])
@@ -310,76 +295,23 @@ def test_a_started_build_keeps_its_settings(term):
     code, out = term(term.video(), "--prompt", "box", "--review", "--n-views", 3)
     J = term.folder(out)
     times = stage_times(J)
-    parts = term.tmp / "parts.json"
-    parts.write_text(json.dumps(PARTS))
-    for flags in (("--prompt", "cup"), ("--n-views", "4"), ("--turntable",), ("--agent", "opus"), ("--articulated",),
-                  ("--review",), ("--edit-parts",), ("--picks", "1,2"), ("--no-lidar",), ("--camera-topic", "/a")):
+    for flags in (("--prompt", "cup"), ("--n-views", "4"), ("--turntable",), ("--agent", "opus"),
+                  ("--review",), ("--picks", "1,2"), ("--no-lidar",), ("--camera-topic", "/a")):
         code, out = term("--resume", J.name, *flags)
         assert code == run.BAD and "so it keeps its settings. Start a new job to use " + flags[0] in out, flags
         assert "to go on: " in out and jobs.load(J)["status"] == "review"
-    for flags, why in ((("--parts", parts), "does not wait for its part list"),
-                       (("--calibration", term.video()), "uses no LiDAR topic")):
-        code, out = term("--resume", J.name, *flags)
-        assert code == run.BAD and why in out, flags
+    code, out = term("--resume", J.name, "--calibration", term.video())
+    assert code == run.BAD and "uses no LiDAR topic" in out, out
     assert stage_times(J) == times
     job = jobs.load(J)
     assert (job["prompt"], job["n_views"], job["turntable"], job["agent"]) == ("box", 3, False, "none")
 
     code, out = term("--resume", J.name, "--agent", "none")  # the job's own agent is no change
     assert code == run.DONE, out
-    for flags in (("--exclude", "f00008"), ("--view0", "8"), ("--parts", parts)):
+    for flags in (("--exclude", "f00008"), ("--view0", "8"), ("--calibration", term.video())):
         code, out = term("--resume", J.name, *flags)
         assert code == run.BAD and f"job {J.name} is done. Start a new job to change it" in out, flags
     assert (J / "results.zip").is_file()
-
-
-def test_edit_parts_stops_and_a_resume_accepts_the_list(term):
-    key = term.key_file()
-    code, out = term(term.video(), "--prompt", "box", "--n-views", 3, "--articulated", "--edit-parts", "--agent", "opus",
-                     "--key-file", key)
-    J = term.folder(out)
-    assert code == run.WAITS and jobs.load(J)["stages"]["parts"]["status"] == "pending", out
-    assert "part: body: the base" in out and "part: lid: revolute on body" in out
-    assert f"the VLM saw this photo: {J / 'scene' / 'sam3_box' / 'check'}" in out
-    args = printed(out, "to accept the list: ")
-    assert f"--key-file={key}" in args
-    code, out = term.exact(args)
-    job = jobs.load(J)
-    assert code == run.DONE and job["parts"]["confirmed"] is True and [p["name"] for p in job["parts"]["list"]] == ["body", "lid"]
-    assert "agent: articulated: fake agent" in out
-
-
-def test_edit_parts_stops_and_a_resume_replaces_the_list(term):
-    key = term.key_file()
-    code, out = term(term.video(), "--prompt", "box", "--n-views", 3, "--articulated", "--edit-parts", "--agent", "opus",
-                     "--key-file", key)
-    J = term.folder(out)
-    assert code == run.WAITS, out
-    proposal = json.loads((J / "run" / "proposal.json").read_text())
-    proposal["parts"][1]["name"] = "cover"
-    edited = term.tmp / "edited.json"
-    edited.write_text(json.dumps(proposal))  # a copy of the proposal: an object with its "parts"
-    args = printed(out, " and run: ")
-    assert args[-2:] == ["--parts", "EDITED.json"]
-
-    bad = term.tmp / "bad.json"
-    bad.write_text(json.dumps([{"name": "lid"}, {"name": "box"}]))  # two bases, and one is the noun
-    code, out = term.exact([*args[:-1], str(bad)])
-    assert code == run.BAD and "to go on: " in out and jobs.load(J)["status"] == "review"
-
-    code, out = term.exact([*args[:-1], str(edited)])
-    job = jobs.load(J)
-    assert code == run.DONE and job["parts"]["confirmed"] is True, out
-    assert [p["name"] for p in job["parts"]["list"]] == ["body", "cover"]
-
-
-def test_a_typed_part_list_needs_no_agent(term):
-    parts = term.tmp / "parts.json"
-    parts.write_text(json.dumps({"parts": PARTS}))
-    code, out = term(term.video(), "--prompt", "box", "--n-views", 3, "--articulated", "--parts", parts)
-    job = jobs.load(term.folder(out))
-    assert code == run.DONE and (job["articulated"], job["parts"]["mode"], job["agent"]) == (True, "user", "none"), out
-    assert [p["name"] for p in job["parts"]["list"]] == ["body", "lid"]
 
 
 def test_a_bag_with_several_camera_topics_waits_for_the_choice(term):

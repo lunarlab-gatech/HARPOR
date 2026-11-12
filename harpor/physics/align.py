@@ -24,31 +24,20 @@ The GLB is not re-exported: the BIN chunk is copied byte for byte and the scene'
 one new node that holds the transform, so textures and materials stay exactly as the agent left them.
 
     python -m harpor.physics.align --glb IN.glb --out OUT.glb [--up pca|normals | --up-near X,Y,Z] [--x pca|footprint] [--opaque]
-        [--links-out DIR]
 writes OUT.glb and OUT.json (T_s_from_w, up in W, the camera tilt and the extents in S).
 --opaque also removes transmission, volume and IOR extensions and makes every material opaque, because
 VoMP rejects transmissive or partly transparent materials (the glass). The geometry is unchanged.
 
-An articulated GLB (build_plan.md note 11) holds joint specs in its nodes' extras (harpor.parts.joints),
-in frame W. They are checked and moved to S with T_s_from_w, and OUT.json adds joints (in S), links (the
-mesh nodes) and fixed_base; a rigid GLB gives {}, [] and false. --links-out DIR writes DIR/<link>.glb for
-every mesh node (the old *.glb there are removed first): OUT.glb with only that node's mesh and no joint,
-and the same BIN chunk, so VoMP sees each link with its textures. Its node names must be file names
-(safe_links).
 """
 
 import argparse
 import json
-import re
 import struct
 from pathlib import Path
 
 import numpy as np
 
 from harpor import frames
-from harpor.parts import joints as joint_spec
-
-LINK_NAME = re.compile(r"[\w .-]+")  # the characters of a link name (safe_links)
 
 
 def _triangles(vertices_w, faces):
@@ -182,56 +171,6 @@ def wrap_scene(doc, matrix):
     return doc
 
 
-def link_doc(doc, node):
-    """Copy of an aligned glTF dict (wrap_scene's) that holds only the mesh of node (an index), as a rigid GLB:
-    the meshes list keeps that one mesh, every other node loses its mesh, no node keeps a joint, and the
-    wrapper keeps only the branch that holds node. Accessors, materials and images stay, so the BIN chunk
-    is unchanged."""
-    doc = joint_spec.write_joints(doc, {})  # also a copy
-    nodes = doc["nodes"]
-    parent = {c: i for i, n in enumerate(nodes) for c in n.get("children", [])}
-    wrapper = doc["scenes"][doc.get("scene", 0)]["nodes"][0]
-    top = node
-    while parent.get(top, wrapper) != wrapper:
-        top = parent[top]
-    nodes[wrapper]["children"] = [top]
-    doc["meshes"] = [doc["meshes"][nodes[node]["mesh"]]]
-    for i, n in enumerate(nodes):
-        if i == node:
-            n["mesh"] = 0
-        else:
-            n.pop("mesh", None)
-    return doc
-
-
-def safe_links(names):
-    """names, a GLB's mesh node names, when they are unique and each is a file name of LINK_NAME without a
-    leading dot. Raises ValueError otherwise. The agent chooses these names, and harpor.physics.mjcf makes
-    files and XML of them, also during the agent's session (harpor.agent.validate)."""
-    bad = [n for n in names if not isinstance(n, str) or not LINK_NAME.fullmatch(n) or n.startswith(".")]
-    if bad or len(set(names)) != len(names):
-        raise ValueError(f"the mesh node names must be unique file names of letters, digits, spaces, '_', '.' "
-                         f"and '-', not starting with '.': {names}")
-    return names
-
-
-def write_links(doc, binary, out_dir):
-    """DIR/<link>.glb (link_doc) for every mesh node of an aligned glTF dict. Returns the link names."""
-    out_dir = Path(out_dir)
-    names = joint_spec.mesh_nodes(doc)
-    try:
-        safe_links(names)
-    except ValueError as e:
-        raise SystemExit(f"--links-out: {e}") from None
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for old in out_dir.glob("*.glb"):
-        old.unlink()
-    mesh_index = [i for i, n in enumerate(doc["nodes"]) if "mesh" in n]
-    for name, i in zip(names, mesh_index):
-        write_glb(out_dir / f"{name}.glb", link_doc(doc, i), binary)
-    return names
-
-
 def make_opaque(doc):
     """Copy of a glTF dict whose materials have no transmission, volume or IOR and are fully opaque."""
     doc = json.loads(json.dumps(doc))
@@ -271,15 +210,8 @@ def main(argv=None):
     ap.add_argument("--up-near", help="hint X,Y,Z in W: take the object axis closest to it; overrides --up")
     ap.add_argument("--x", choices=["pca", "footprint"], default="pca")
     ap.add_argument("--opaque", action="store_true")
-    ap.add_argument("--links-out", help="folder for one GLB per mesh node (the links of an articulated GLB)")
     a = ap.parse_args(argv)
     doc, binary = read_glb(a.glb)
-    joints, links = joint_spec.read_joints(doc), joint_spec.mesh_nodes(doc)
-    problems = joint_spec.validate(joints, links) if joints else []  # a rigid GLB's node names do not matter
-    if joints and not problems and any(j["frame"] != "W" for j in joints.values()):
-        problems.append("the joints must be in frame W")
-    if problems:
-        raise SystemExit(f"{a.glb}: bad joints: " + "; ".join(problems))
     v, f = load_w(a.glb)
     near = None
     if a.up_near:
@@ -290,14 +222,7 @@ def main(argv=None):
     T, eig = up_frame(v, f, up, x_rule=a.x)
     doc = make_opaque(doc) if a.opaque else doc
     doc = wrap_scene(doc, gltf_matrix(T))
-    fixed_base = False
-    if joints:
-        joints = joint_spec.transform(joints, T, "S")
-        doc = joint_spec.write_joints(doc, joints)
-        fixed_base = joint_spec.tree(joints, links)[2]
     write_glb(a.out, doc, binary)
-    if a.links_out:
-        write_links(doc, binary, a.links_out)
     vs, _ = load_w(a.out)  # the glTF -> W map is also Blender's import, so these are S coordinates
     up = T[2, :3]
     report = {
@@ -313,9 +238,6 @@ def main(argv=None):
         "extent_s": (vs.max(0) - vs.min(0)).tolist(),
         "min_s": vs.min(0).tolist(),
         "max_s": vs.max(0).tolist(),
-        "joints": joints,
-        "links": links if joints else [],
-        "fixed_base": fixed_base,
     }
     Path(a.out).with_suffix(".json").write_text(json.dumps(report, indent=1))
     print(json.dumps(report, indent=1))

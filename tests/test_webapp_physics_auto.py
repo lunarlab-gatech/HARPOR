@@ -185,10 +185,8 @@ def test_align_job_picks_the_glb_and_aligns_it(tmp_path, capsys):
 
 
 def test_align_job_refuses_an_agent_glb_of_another_size(tmp_path, capsys):
-    """The agent's GLB goes to physics only when it keeps the size of the GLB the agent started from (posed.glb,
-    or parts.glb for an articulated job; controller.check_size). Else physics uses that GLB."""
-    from harpor.agent.fake_agent import write_glb
-
+    """The agent's GLB goes to physics only when it keeps the size of the GLB the agent started from (posed.glb;
+    controller.check_size). Else physics uses posed.glb."""
     j = tmp_path / "job"
     write_run(j / "run", *plane_view())
     box_glb(j / "run" / "posed.glb")
@@ -209,64 +207,8 @@ def test_align_job_refuses_an_agent_glb_of_another_size(tmp_path, capsys):
         box_glb(exp / "001.glb", scale=scale)
         assert (A.pick_glb(j)[0] == exp / "001.glb") == used, scale
 
-    # An articulated job compares with the split parts, and falls back to them.
-    (j / "job.json").write_text(json.dumps({"articulated": True}))
-    write_glb(j / "run" / "parts.glb", "parts", 0.2)
-    write_glb(exp / "001.glb", "parts", 2.0)
-    (j / "agent" / "result.json").write_text(json.dumps({"source": "finish", "verdict": "articulated",
-                                                         "glb": "work/exports/001.glb"}))
-    g, rule = A.pick_glb(j)
-    assert g == j / "run" / "parts.glb" and "wrong size: every side of its box is at least 10 times" in rule
-    write_glb(exp / "001.glb", "parts", 0.2)
-    assert A.pick_glb(j)[0] == exp / "001.glb"
-
 
 def test_align_job_needs_a_glb(tmp_path):
     write_run(tmp_path / "job" / "run", *plane_view())
     with pytest.raises(SystemExit, match="posed.glb is missing"):
         A.main(["align", "--job", str(tmp_path / "job")])
-
-
-def test_align_job_writes_the_links_of_an_articulated_job(tmp_path):
-    """An articulated job aligns its split parts (no agent result) or the agent's GLB with joints, and
-    writes one GLB per link for VoMP; the joints go to frame S. A rigid job writes no links."""
-    from harpor.agent.fake_agent import write_glb
-    from harpor.parts.joints import mesh_nodes
-
-    j = tmp_path / "job"
-    write_run(j / "run", *plane_view())
-    box_glb(j / "run" / "posed.glb")
-    (j / "job.json").write_text(json.dumps({"articulated": True, "agent": "astra"}))
-    write_glb(j / "run" / "parts.glb", "parts", 0.2)
-    A.align_job(j)
-    up = json.loads((j / "physics" / "up.json").read_text())
-    assert up["glb"] == str(j / "run" / "parts.glb") and up["glb_rule"] == "no agent result"
-    rep = json.loads((j / "physics" / "aligned.json").read_text())
-    assert (rep["joints"], rep["links"], rep["fixed_base"]) == ({}, [], False)
-    links = sorted((j / "physics" / "links").glob("*.glb"))
-    assert [p.stem for p in links] == ["body", "lid"]
-    assert [mesh_nodes(read_glb(p)[0]) for p in links] == [["body"], ["lid"]]
-
-    hinge = {"version": 1, "frame": "W", "parent": "body", "type": "revolute", "origin": [0.0, -0.05, 0.1],
-             "axis": [1.0, 0.0, 0.0], "lower": 0.0, "upper": 1.0}
-    (j / "agent" / "s" / "work" / "exports").mkdir(parents=True)
-    write_glb(j / "agent" / "s" / "work" / "exports" / "001.glb", "parts", 0.2, joints={"lid": hinge})
-    (j / "agent" / "result.json").write_text(json.dumps({"source": "finish", "verdict": "articulated",
-                                                         "glb": "work/exports/001.glb"}))
-    A.align_job(j)
-    up = json.loads((j / "physics" / "up.json").read_text())
-    assert up["glb"].endswith("work/exports/001.glb") and "verdict articulated" in up["glb_rule"]
-    rep = json.loads((j / "physics" / "aligned.json").read_text())
-    T = np.array(rep["T_s_from_w"])
-    assert set(rep["joints"]) == {"lid"} and rep["joints"]["lid"]["frame"] == "S" and rep["links"] == ["body", "lid"]
-    assert np.allclose(rep["joints"]["lid"]["origin"], T[:3, :3] @ hinge["origin"] + T[:3, 3])
-    assert sorted(p.stem for p in (j / "physics" / "links").glob("*.glb")) == ["body", "lid"]
-
-    # The agent stage skipped (no result): the split parts again. A rigid job writes no links.
-    (j / "agent" / "result.json").unlink()
-    assert A.pick_glb(j) == (j / "run" / "parts.glb", "no agent result")
-    (j / "job.json").write_text(json.dumps({"articulated": False, "agent": "astra"}))
-    (j / "physics" / "links").rename(tmp_path / "old_links")
-    A.align_job(j)
-    assert json.loads((j / "physics" / "up.json").read_text())["glb"] == str(j / "run" / "posed.glb")
-    assert not (j / "physics" / "links").exists()

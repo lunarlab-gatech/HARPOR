@@ -17,8 +17,7 @@ Real code runs wherever it needs no GPU and none of the GPU envs: topics, frames
 for a rosbag, since rosbags is pure Python, and for a Stray Scanner zip), prep (mvsam3d.prep), lidar
 (lidar.py, with the LiDAR points of the views), select (views.py), align (physics_auto.py), cameras.json
 (mvsam3d.cameras), turntable (harpor.webapp.turntable with the fake Blender of harpor.agent.fake_agent,
-whose frames are the GLB's outline; the MP4 is a real H.264 file), softvideo (harpor.webapp.softvideo, the same
-way, after MuJoCo's press, or a synthetic dent where MuJoCo is not installed) and package (jobs.package).
+whose frames are the GLB's outline; the MP4 is a real H.264 file) and package (jobs.package).
 For a job with LiDAR (steps.lidar: a bag's LiDAR topic or a Stray Scanner capture's
 depth), the fake DA3 is off by FAKE_DA3_SCALE: its depth, pointmaps and camera translations are 0.8 x
 the scene's, so the real lidar stage must find 1.25 from the bag's true points or the capture's true
@@ -28,25 +27,12 @@ aligned size. The agent stage
 checks the key file (mode 0600, an OPENAI_API_KEY line for astra, an ANTHROPIC_API_KEY line for
 opus), never prints the key, and writes the result record of the agent it stands in for.
 
-An articulated job (build_plan.md note 11) has a lid. propose lists "body" and "lid" for the VLM
-modes (with the same key file check), with their requirements (harpor.parts.propose.requirements_from),
-and runs the real stage for the user's list. parts cuts the box at 75% of its height: the list's base
-is below the cut and its next part above it (the other parts are not found), with the part masks,
-check images, faces.npz, vote.json, parts.glb and parts.json (the seam's lines from
-harpor.parts.geometry, the requirements from harpor.parts.stage) of the real stage. The agent hinges
-that part on the base's back top edge, in frame W, or makes it soft on the base when its joint_guess
-is soft, so a typed list "body / pad > body : soft" runs the whole path with a soft part. Its result
-has the keys of the real session, and a part list with a found requirement those of a session in
-rounds and agent/evidence.json, without running the round code (in_rounds). Before the agent, vomp_parts
-predicts per split link; rigid objects run vomp immediately after sam3d. The real material transfer
-recomputes the final properties, and mjcf builds the nested model with the real harpor.physics.mjcf (one convex
-hull per link instead of CoACD) when the aligned GLB has joints. usd writes the articulation's
-layout as text, and urdf runs the real harpor.physics.urdf on such an MJCF (for the box MJCF of a
-rigid job it writes one box link).
+VoMP gives softwood to every voxel of the canonical box, and the real material transfer recomputes the final
+properties in align. mjcf writes a box body, usd its rigid body as text, and urdf one box link with the real
+harpor.physics.urdf.
 """
 
 import argparse
-import importlib.util
 import json
 import re
 import runpy
@@ -71,12 +57,7 @@ FAR = 4.0
 FOCAL = 0.9  # fx = fy = FOCAL * image width
 DELAY = 0.05
 FAKE_DA3_SCALE = 0.8  # a job with LiDAR: DA3's depth and camera translations are this times the scene's
-CUT_Y = BOX_HI[1] + 0.75 * (BOX_LO[1] - BOX_HI[1])  # world y of the cut at 75% of the box's height
 COLOR = [170, 120, 70, 255]
-# The VLM's list in the VLM modes: the lid hinges on the body.
-FAKE_PARTS = [{"name": "body", "parent": None, "joint": "fixed"},
-              {"name": "lid", "parent": "body", "joint": "revolute", "count": 1,
-               "axis_hint": "a hinge along the back top edge; the lid opens upward"}]
 FAKE_BLENDER = [sys.executable, "-m", "harpor.agent.fake_agent", "--blender"]  # the videos' Blender
 
 
@@ -337,290 +318,11 @@ def place(J):
     print(f"placement (fake): mean mask IoU 0.8 over {len(cams)} views")
 
 
-def propose(J, key_file=None, which="astra"):
-    """The VLM modes: FAKE_PARTS as the VLM's proposal, after the key file check. The user's list: the real
-    stage (harpor.parts.propose.run), which needs no key."""
-    from harpor.agent.tools import CLAUDE_MODEL, CODEX_MODEL
-    from harpor.parts import propose as P
-    from harpor.webapp import steps
-
-    job = json.loads((J / "job.json").read_text())
-    mode = steps.parts_mode(job)
-    if mode == "user":
-        P.run(J)
-        return
-    check_key_file(key_file, which)
-    pace(2)
-    try:
-        parts = P.validate(FAKE_PARTS, job["prompt"])
-    except ValueError as e:
-        raise SystemExit(f"fake VLM: {e}") from None
-    proposal = {"source": "vlm", "agent": which, "model": CLAUDE_MODEL if which == "opus" else CODEX_MODEL,
-                "noun": job["prompt"], "base": parts[0]["name"], "parts": parts,
-                "requirements": P.requirements_from(FAKE_PARTS, parts), "warnings": [], "seconds": 2 * DELAY,
-                "attempts": 1, "answer": "fake VLM: a body and a lid", "mode": mode, "fake": True}
-    write_json(J / "run" / "proposal.json", proposal)
-    print(f"proposal (fake {proposal['model']}): base {parts[0]['name']!r}, {len(parts) - 1} moving parts")
-
-
-def parts(J):
-    """The base of the proposal and its next part, cut from the box at CUT_Y (see the module docstring). A job
-    that skips the split (steps.split) gets the base alone, and every other part is not found."""
-    import trimesh
-    from PIL import Image
-
-    from harpor import frames
-    from harpor.agent import controller, tools
-    from harpor.parts import geometry, render, stage
-    from harpor.parts.vote import load_mesh
-    from harpor.stage_a.part_masks import COLORS, overlay_parts
-    from harpor.stage_a.sam3_masks import slug
-    from harpor.webapp import steps
-
-    R = J / "run"
-    for f in (R / "parts.json", R / "parts.glb"):
-        f.unlink(missing_ok=True)
-    shutil.rmtree(R / "parts", ignore_errors=True)
-    out = R / "parts" / "sam3"
-    proposal = json.loads((R / "proposal.json").read_text())
-    cams = json.loads((R / "cameras.json").read_text())
-    Rw, tw = view0_pose(R, cams[0]["name"])
-    base = next(p for p in proposal["parts"] if p["name"] == proposal["base"])
-    others = [p for p in proposal["parts"] if p is not base]
-    whole = not steps.split(json.loads((J / "job.json").read_text()))  # the job skips the split: only the base
-    found, lost = ([base], others) if whole else ([base, *others[:1]], others[1:])
-    names = [slug(p["name"]) for p in found]
-    for d in ("check", *names):
-        (out / d).mkdir(parents=True)
-
-    box = trimesh.creation.box(bounds=np.stack([BOX_LO, BOX_HI])).subdivide()  # finer faces: four clean seam lines
-
-    def capped_piece(m):  # the cut closed by a fan from its centre: trimesh's capping needs shapely, which envs/web lacks
-        m = m.copy()
-        m.merge_vertices()
-        _, inv, n = np.unique(m.edges_sorted, axis=0, return_inverse=True, return_counts=True)
-        edges = m.edges[n[inv.ravel()] == 1]  # the open edges, directed as in their faces
-        c = len(m.vertices)
-        return trimesh.Trimesh(np.vstack([m.vertices, m.vertices[np.unique(edges)].mean(0)]),
-                               np.vstack([m.faces, np.column_stack([edges[:, 1], edges[:, 0], np.full(len(edges), c)])]),
-                               process=False)
-
-    def pieces(cap):  # the base below the cut (y is down), the part above it
-        if len(found) == 1:
-            return [box]
-        # slice_faces_plane, not slice_mesh_plane, which imports shapely even without a cap (trimesh 5.1.1)
-        cut = [trimesh.Trimesh(*trimesh.intersections.slice_faces_plane(box.vertices, box.faces, n, [0.0, CUT_Y, 0.0])[:2],
-                               process=False) for n in ([0, 1, 0], [0, -1, 0])]
-        return [capped_piece(m) for m in cut] if cap else cut
-
-    def joined(meshes):  # (vertices in W, faces, piece of each face)
-        V = np.concatenate([m.vertices @ Rw.T + tw for m in meshes])
-        F = np.concatenate([m.faces + o for m, o in zip(meshes, np.cumsum([0] + [len(m.vertices) for m in meshes]))])
-        return V, F, np.concatenate([np.full(len(m.faces), k) for k, m in enumerate(meshes)])
-
-    capped, opened = pieces(True), pieces(False)
-    Vc, Fc, Pc = joined(capped)
-    Vo, Fo, Po = joined(opened)  # the seam is where the open pieces meet
-    seams = geometry.seams(geometry.topology(Vo, Fo), Po, names)
-    area = np.linalg.norm(np.cross(Vc[Fc[:, 1]] - Vc[Fc[:, 0]], Vc[Fc[:, 2]] - Vc[Fc[:, 0]]), axis=1) / 2
-
-    # Part masks and check images: the capped pieces drawn under every selected camera.
-    records = {p["name"]: {"name": p["name"], "slug": slug(p["name"]), "instances": 0, "views": {}}
-               for p in proposal["parts"]}
-    visibility = [{} for _ in found]
-    for v, c in enumerate(cams):
-        K, size = render.scaled(c["K"], (c["width"], c["height"]))
-        ids = render.face_ids(Vc, Fc, K, c["w2c"], size)
-        seen = np.zeros(len(Fc), bool)
-        seen[ids[ids >= 0]] = True
-        shown = []
-        for k, (p, name) in enumerate(zip(found, names)):
-            small = (ids >= 0) & (Pc[np.maximum(ids, 0)] == k)
-            m = np.array(Image.fromarray(small).resize((c["width"], c["height"]), Image.NEAREST))
-            recs = []
-            if m.any():
-                rows, cols = np.nonzero(m)
-                f = f"{name}/{c['name']}_0.png"
-                Image.fromarray(np.where(m, 255, 0).astype(np.uint8)).save(out / f)
-                recs.append({"index": 0, "score": 0.9, "box_xyxy": [float(cols.min()), float(rows.min()),
-                                                                     float(cols.max() + 1), float(rows.max() + 1)],
-                             "mask_px": int(m.sum()), "file": f})
-            records[p["name"]]["views"][c["name"]] = recs
-            records[p["name"]]["instances"] += len(recs)
-            shown.append((name, COLORS[k % len(COLORS)], [r["score"] for r in recs], [r["box_xyxy"] for r in recs],
-                          [m] if recs else []))
-            visibility[k][c["name"]] = round(float(area[seen & (Pc == k)].sum() / area[Pc == k].sum()), 4)
-        for p in lost:
-            records[p["name"]]["views"][c["name"]] = []
-        overlay_parts(np.array(Image.open(c["image"]).convert("RGB")), shown).save(out / "check" / f"{c['name']}.jpg",
-                                                                                   quality=90)
-        if v % 4 == 0:
-            print(f"PROGRESS {0.8 * (v + 1) / len(cams):.2f}", flush=True)
-    (out / "part_masks.json").write_text(json.dumps(
-        {"model": "fake", "threshold": 0.4, "mask_threshold": 0.5, "seconds": 0.1, "peak_gib": None,
-         "views": [c["name"] for c in cams], "size_wh": {c["name"]: [c["width"], c["height"]] for c in cams},
-         "parts": [records[p["name"]] for p in proposal["parts"]], "not_found": [p["name"] for p in lost]}, indent=1))
-
-    # The vote on posed.glb's faces: a face belongs to the part when its centroid is above the cut.
-    x_w, faces = load_mesh(R / "posed.glb")
-    cen = x_w[faces].mean(1)
-    above = (cen - (Rw @ [0.0, CUT_Y, 0.0] + tw)) @ (Rw @ [0.0, -1.0, 0.0]) > 0
-    label = above.astype(np.int64) if len(found) == 2 else np.zeros(len(faces), np.int64)
-    np.savez(R / "parts" / "faces.npz", part=label, names=np.array(names), centroids=cen, score=np.ones(len(faces)))
-    why = "the split was skipped: the agent cuts the parts" if whole else f"fake: only {names[-1]} is cut from the box"
-    share = [round(float(area[Pc == k].sum() / area.sum()), 5) for k in range(len(found))]
-    views = [[n for n, x in vis.items() if x > 0] for vis in visibility]
-    clusters = [{"name": n, "prompt": p["name"], "role": "base" if k == 0 else "part", "status": "found",
-                 "faces": int((label == k).sum()), "area_share": share[k], "confidence": 0.9,
-                 "visibility": visibility[k], "views": views[k]} for k, (p, n) in enumerate(zip(found, names))]
-    clusters += [{"name": None, "prompt": p["name"], "role": "part", "status": "not_found", "why": why, "faces": 0,
-                  "views": []} for p in lost]
-    (R / "parts" / "vote.json").write_text(json.dumps({"clusters": clusters, "counts": {"faces": len(faces)},
-                                                       "warnings": [], "seconds": 0.1, "fake": True}, indent=1))
-
-    # The split: the capped pieces as named root nodes in glTF axes.
-    scene = trimesh.Scene()
-    for name, m in zip(names, capped):
-        scene.add_geometry(trimesh.Trimesh(frames.w_to_gltf(m.vertices @ Rw.T + tw), m.faces, process=False,
-                                           visual=material()), node_name=name, geom_name=name)
-    scene.export(R / "parts.glb", file_type="glb")
-    bad = controller.check_glb(R / "parts.glb")
-    if bad:
-        raise SystemExit(f"parts.glb: {bad}")
-    caps = [len(c.faces) - len(o.faces) for c, o in zip(capped, opened)]
-    split = {"faces_in": len(faces), "faces_npz": len(faces), "mapping": "fake: the box cut by a plane", "unmatched": 0,
-             "welded_vertices": 0, "custom_normals_cleared": False, "warnings": [], "seconds": 0.1,
-             "parts": [{"name": n, "faces": len(m.faces), "cap_faces": cap, "holes": int(cap > 0), "open_seam_edges": 0}
-                       for n, m, cap in zip(names, capped, caps)], "names_again": sorted(names)}
-    (R / "parts" / "split_report.json").write_text(json.dumps(split, indent=1))
-    pace(1)
-
-    out_parts = []
-    for k, (p, n) in enumerate(zip(found, names)):
-        pts = Vc[np.unique(Fc[Pc == k])]
-        out_parts.append({"name": n, "role": clusters[k]["role"], "prompt": p["name"], "parent": names[0] if k else None,
-                          "joint_guess": "fixed" if k == 0 else p["joint"], "axis_hint": p.get("axis_hint"),
-                          "faces": clusters[k]["faces"], "area_share": share[k], "confidence": 0.9, "status": "found",
-                          "aabb": geometry.aabb(pts), "obb": geometry.obb(pts), "visibility": visibility[k],
-                          "views": views[k], "cap_faces": caps[k], "open_seam_edges": 0})
-    out_parts += [{"name": None, "role": "part", "prompt": p["name"], "parent": p.get("parent"),
-                   "joint_guess": p.get("joint", "unknown"), "axis_hint": p.get("axis_hint"), "faces": 0,
-                   "status": "not_found", "why": why} for p in lost]
-    reqs = stage.requirements(proposal, {c["name"]: c for c in clusters[:len(found)]}, names,
-                              {n: p["parent"] for n, p in zip(names, out_parts)})
-    doc = {"version": 1, "frame": "W", "glb": "parts.glb", "glb_sha256": tools.sha256(R / "parts.glb"),
-           "noun": proposal.get("noun"), "base": names[0], "source": proposal.get("source"),
-           "agent": proposal.get("agent"), "model": proposal.get("model"), "parts": out_parts, "requirements": reqs,
-           "seams": seams,
-           "split": {k: split[k] for k in ("mapping", "unmatched", "welded_vertices", "custom_normals_cleared")},
-           "warnings": [*proposal.get("warnings", []), *([f"{why}; not found: {', '.join(p['name'] for p in lost)}"]
-                                                         if lost else [])], "fake": True}
-    write_json(R / "parts.json", doc)
-    print(f"parts.json (fake): {len(names)} parts ({', '.join(names)}), {len(seams)} seams, "
-          f"{sum(r['status'] == 'found' for r in reqs)} of {len(reqs)} requirements found")
-    for s in seams:
-        print(f"  seam {s['parts'][0]}|{s['parts'][1]}: {s['edges']} edges, {s['length']:.3f} long, {len(s['lines'])} lines")
-
-
-def hinge(J, child, parent):
-    """child's joint in frame W: a hinge on the back top edge of the base (world z = BOX_HI z) at the cut,
-    about world -x, so that the part's front edge goes up for q > 0 (world y is down)."""
-    Rw, tw = view0_pose(J / "run")
-    axis = Rw @ [-1.0, 0.0, 0.0]
-    return {child: {"version": 1, "frame": "W", "parent": parent, "type": "revolute",
-                    "origin": (Rw @ [0.0, CUT_Y, BOX_HI[2]] + tw).tolist(), "axis": (axis / np.linalg.norm(axis)).tolist(),
-                    "lower": 0.0, "upper": 1.5}}
-
-
-def soft(rec, part):
-    """part's soft joint on its parent, of the material of its requirement in rec (run/parts.json), else foam."""
-    from harpor.agent import tools
-
-    material = next((r.get("material") for r in rec.get("requirements") or [] if r["part"] == part["name"]), None)
-    return {part["name"]: tools.soft_joint(part["parent"], material or "foam", (None,) * 4)}
-
-
-def articulate(J, out):
-    """parts.glb with the joint of its first moving part (run/parts.json) as out: a soft joint when its
-    joint_guess is soft (soft), else the hinge. Returns the joints ({} when the split found no moving part)."""
-    from harpor.agent import controller
-    from harpor.parts import joints
-    from harpor.physics.align import read_glb, write_glb
-
-    rec = json.loads((J / "run" / "parts.json").read_text())
-    moving = [p for p in rec["parts"] if p["status"] == "found" and p["parent"]]
-    doc, binary = read_glb(J / "run" / "parts.glb")
-    spec = {}
-    if moving:
-        p = moving[0]
-        spec = soft(rec, p) if p["joint_guess"] == "soft" else hinge(J, p["name"], p["parent"])
-    problems = joints.validate(spec, joints.mesh_nodes(doc)) if spec else []
-    if problems:
-        raise SystemExit("fake agent: bad joint: " + "; ".join(problems))
-    write_glb(out, joints.write_joints(doc, spec), binary)
-    bad = controller.check_glb(out)
-    if bad:
-        raise SystemExit(f"fake agent: {bad}")
-    return spec
-
-
-def fake_check(root, glb, joints):
-    """The report of harpor.agent.validate.check on the fake agent's GLB without running it: every found
-    requirement of control/parts.json passes, a hinge over its whole range and a soft part with a 4 mm dent that
-    springs back, each with validate.MIN_STATES states. glb: the GLB's path in root; joints: its joints. The fake
-    agent creates no part that the split missed, and such a requirement stays unassessed here, with its reserve
-    as its target; the real check fails it with part_missing (validate.assess)."""
-    from harpor.agent import surface, tools, validate
-    from harpor.parts.joints import load
-
-    def measured(j):
-        if j["type"] == "soft":
-            return {"type": "soft", "dmax_m": 0.004, "visible_dmax_m": 0.004, "residual_m": 0.0, "cap_limited": False,
-                    "states": validate.MIN_STATES}
-        ends = [j["lower"], j["upper"]]
-        return {"type": j["type"], "reference": ends, "achieved": ends, "reductions": 0, "states": validate.MIN_STATES}
-
-    records = []
-    for r in validate.requirements(root / "control"):
-        ok = r["status"] == "found" and r["part"] in joints
-        records.append({**validate.record(r, measured(joints[r["part"]]) if ok else None),
-                        "outcome": "pass" if ok else "unassessed"})
-    return {"version": 1, "sha256": tools.sha256(root / glb), "links": load(root / glb)[1], "joints": joints,
-            "clearance": {}, "sim": {"skipped": "the fake agent runs no MuJoCo"},
-            "surface": surface.compare(root / glb, root / "original.glb"), "records": records, "findings": [],
-            "errors": [], "scope": "none", "outcome": "pass"}
-
-
-def in_rounds(J, root, result, joints, keys):
-    """The keys of a session in rounds (controller.run_session) for the fake agent's articulation, without its round
-    code: one build that passes (fake_check), whose GLB stays where the agent left it, and its evidence
-    (harpor.agent.evidence) in control/evidence.json, published to agent/evidence.json as agent_step does."""
-    from harpor.agent import controller, evidence
-    from harpor.webapp.agent_step import BUDGET_S, publish_evidence
-
-    report = fake_check(root, result["glb"], joints)
-    cand = {"version": 1, "round": 1, "kind": "build", "glb": result["glb"], "from": result["glb"],
-            "sha256": report["sha256"], "source": result["source"], "agent_verdict": result["verdict"],
-            "reason": result["reason"], "limitations": result["limitations"], "report": report}
-    run = {"budget_s": BUDGET_S["articulation"], "exit": result["exit"], "wall_s": result["timings"]["wall_s"]}
-    end = {"pick": {"source": cand["source"], "verdict": cand["agent_verdict"], "glb": root / cand["glb"]},
-           "version": 1, "sha256": cand["sha256"], "report": report}
-    rounds = [controller.round_record(root, 1, "build", run, end)]
-    selected = {"version": 1, "verdict": result["verdict"], "why": controller.why_first([cand]),
-                "rank": [{"version": 1, "rank": list(controller.rank(cand))}], "ineligible": [],
-                "unresolved": [r["requirement"] for r in report["records"] if r["outcome"] != "pass"]}
-    evidence.write(root, rounds, [cand], selected)
-    publish_evidence(root, J / "agent" / "evidence.json", keys)
-    result.update(rounds=rounds, candidate=controller.candidate_summary(cand, selected),
-                  requirements=controller.requirement_counts(root, report), surface=report["surface"])
-
-
 def agent(J, key_file, which="astra"):
-    """A refinement that returns posed.glb, or for an articulated job (agent_step.mode) the parts with the joint of
-    articulate. The result has the surface report of the real session (harpor.agent.surface), and an articulation
-    whose parts.json has a found requirement the keys of a session in rounds (in_rounds)."""
+    """A refinement that returns posed.glb. The result has the surface report of the real session
+    (harpor.agent.surface); the fake runs no physics rounds."""
     from harpor.agent import controller, surface, tools
-    from harpor.webapp.agent_step import AGENTS, mode, print_rounds
+    from harpor.webapp.agent_step import AGENTS
 
     check_key_file(key_file, which)
     root = J / "agent" / "s"
@@ -630,39 +332,17 @@ def agent(J, key_file, which="astra"):
     for f in ("result.json", "evidence.json"):
         (J / "agent" / f).unlink(missing_ok=True)
     glb = root / "work" / "exports" / "001.glb"
-    articulation = mode(J, json.loads((J / "job.json").read_text())) == "articulation"
-    if articulation:  # as prepare_session does
-        shutil.copyfile(J / "run" / "parts.glb", root / "original.glb")
-        shutil.copyfile(J / "run" / "parts.json", root / "control" / "parts.json")
-        joints = articulate(J, glb)
-        n = len(joints)
-    else:
-        shutil.copyfile(J / "run" / "posed.glb", root / "original.glb")
-        shutil.copyfile(J / "run" / "posed.glb", glb)
+    shutil.copyfile(J / "run" / "posed.glb", root / "original.glb")
+    shutil.copyfile(J / "run" / "posed.glb", glb)
     pace(4)
     kind = AGENTS[which]  # the controller's name of the agent
     info = controller.agent_record(kind)
-    result = {"mode": "refinement", "agent": kind, "model": info["model"], "effort": info["effort"], "source": "finish",
+    result = {"agent": kind, "model": info["model"], "effort": info["effort"], "source": "finish",
               "verdict": "complete", "reason": "fake agent: the posed mesh is returned as the refinement", "limitations": [],
               "glb": "work/exports/001.glb", "sha256": tools.sha256(glb), "exit": "finish_sigint", "returncode": 130,
               "cli_exit": controller.cli_exit(130, kind), "timings": {"wall_s": 4 * DELAY},
               "counts": {"exports": 1, "reviews": 1, "checkpoints": 0}, "rejected": [], "network_commands": [],
-              "key_found_in": []}
-    if articulation:
-        rel = "work/exports/001.glb" if n else "original.glb"
-        child, j = next(iter(joints.items()), (None, {}))
-        said = (f"fake agent: {child} is soft ({j.get('material')}) on {j.get('parent')}" if j.get("type") == "soft"
-                else "fake agent: the lid hinges on the back top edge of the body")
-        result.update(mode="articulation", verdict="articulated" if n else "unchanged",
-                      reason=said if n else "fake agent: the split has no part that moves", glb=rel,
-                      sha256=tools.sha256(root / rel),
-                      counts={"exports": 1, "reviews": 0, "checkpoints": 0, "joints": n, "parts_added": 0, "faces_moved": 0,
-                              "articulation_reviews": int(n > 0)},
-                      joints_delivered=n, simulations=0)
-        if controller.has_rounds(root, "articulation"):
-            in_rounds(J, root, result, joints, controller.read_keys(key_file))
-    else:
-        result["surface"] = surface.compare(glb, root / "original.glb")
+              "key_found_in": [], "surface": surface.compare(glb, root / "original.glb")}
     if kind == "claude":
         tokens = {"input_tokens": 41000, "output_tokens": 9000, "cache_read_input_tokens": 380000,
                   "cache_creation_input_tokens": 52000}
@@ -670,10 +350,7 @@ def agent(J, key_file, which="astra"):
                       cost_usd=round(sum(tokens[k] * tools.PRICES[tools.CLAUDE_MODEL][k] for k in tokens) / 1e6, 4))
     write_json(root / "result.json", result)
     shutil.copyfile(root / "result.json", J / "agent" / "result.json")
-    print(f"agent (fake {info['model']}): finish {result['verdict']}, GLB {result['glb']}"
-          + (f", {n} joints" if articulation else ""))
-    if result.get("rounds"):
-        print_rounds(result)
+    print(f"agent (fake {info['model']}): finish {result['verdict']}, GLB {result['glb']}")
 
 
 def grid(glb, n=12):
@@ -687,71 +364,32 @@ def grid(glb, n=12):
     return lo + (hi - lo) * np.stack(np.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3), h, lo, hi
 
 
-def vomp(J, per_part=False):
-    """Softwood in every voxel: of canonical.glb, or of each early aligned part of an articulated job, with the
-    combined summary.json of vomp_run.combine_links."""
+def vomp(J):
+    """Softwood in every voxel of canonical.glb."""
     from harpor.physics.mass import mass_properties
-    from harpor.physics.vomp_run import combine_links
 
-    P = J / "run" / ("vomp_parts" if per_part else "vomp")
+    P = J / "run" / "vomp"
     P.mkdir(parents=True, exist_ok=True)
-    articulated = per_part
     shutil.rmtree(P / "work", ignore_errors=True)  # as the real stage: VoMP needs a fresh folder
     for old in ("materials.npz", "voxels.npz", "summary.json"):
         (P / old).unlink(missing_ok=True)
-    if articulated:
-        shutil.rmtree(P / "vomp", ignore_errors=True)
-    links = sorted((P / "links").glob("*.glb")) if articulated else []
     rho, E, nu = 600.0, 2.0e9, 0.3  # softwood
-
-    def record(glb):
-        centers, h, lo, hi = grid(glb)
-        return {"glb": str(Path(glb).resolve()), "config": "fake", "fake": True, "voxels_occupied": len(centers),
-                "voxels_predicted": len(centers), "voxel_edge_m": float(h.max()),
-                "median": {"youngs_modulus_pa": E, "poisson_ratio": nu, "density_kg_m3": rho},
-                "p05_p95": {"youngs_modulus_pa": [E, E], "poisson_ratio": [nu, nu], "density_kg_m3": [rho, rho]},
-                "rigid_body": mass_properties(centers, np.full(len(centers), rho), h)}, centers, h, (lo + hi) / 2
-
     pace(3)
-    if not links:
-        rec, centers, h, center = record(J / "run/canonical.glb")
-        np.savez(P / "voxels.npz", centers=centers, h=h, density=np.full(len(centers), rho),
-                 youngs_modulus=np.full(len(centers), E), poisson_ratio=np.full(len(centers), nu))
-        summary = {**rec, "seconds": {"load": 0.0, "predict": 3 * DELAY}, "gpu_peak_gb": None}
-        (P / "summary.json").write_text(json.dumps(summary, indent=1))
-        print(f"VoMP (fake): mass {summary['rigid_body']['mass']:.2f} kg")
-        return
-    for glb in links:
-        rec, centers, h, center = record(glb)
-        d, n = P / "vomp" / glb.stem, len(centers)
-        d.mkdir(parents=True)
-        np.savez(d / "voxels.npz", centers=centers, youngs_modulus=np.full(n, E), poisson_ratio=np.full(n, nu),
-                 density=np.full(n, rho), transform_center=center, transform_scale=float(12 * h.max()), h=h)
-        (d / "summary.json").write_text(json.dumps({**rec, "nearest_prediction_max_dist_voxels": 0.0,
-                                                    "seconds": {"predict": DELAY}, "gpu_peak_gb": None}, indent=1))
-        print(f"link {glb.stem}: {n} voxels, {rec['rigid_body']['mass']:.3f} kg", flush=True)
-    summary = {**combine_links(P, [g.stem for g in links], P / "aligned.glb", "fake", 0.0), "fake": True}
+    centers, h, lo, hi = grid(J / "run/canonical.glb")
+    np.savez(P / "voxels.npz", centers=centers, h=h, density=np.full(len(centers), rho),
+             youngs_modulus=np.full(len(centers), E), poisson_ratio=np.full(len(centers), nu))
+    summary = {"glb": str((J / "run/canonical.glb").resolve()), "config": "fake", "fake": True,
+               "voxels_occupied": len(centers), "voxels_predicted": len(centers), "voxel_edge_m": float(h.max()),
+               "median": {"youngs_modulus_pa": E, "poisson_ratio": nu, "density_kg_m3": rho},
+               "p05_p95": {"youngs_modulus_pa": [E, E], "poisson_ratio": [nu, nu], "density_kg_m3": [rho, rho]},
+               "rigid_body": mass_properties(centers, np.full(len(centers), rho), h),
+               "seconds": {"load": 0.0, "predict": 3 * DELAY}, "gpu_peak_gb": None}
     (P / "summary.json").write_text(json.dumps(summary, indent=1))
-    print(f"VoMP (fake): {len(links)} links, mass {summary['rigid_body']['mass']:.2f} kg")
-
-
-def vomp_parts(J):
-    from harpor.webapp.physics_auto import align_job
-
-    align_job(J, prepare_parts=True)
-    vomp(J, per_part=True)
-
-
-def hull(vertices, faces, threshold):
-    """The convex hull of a link: the fake's CoACD, for harpor.physics.mjcf.build."""
-    import trimesh
-
-    h = trimesh.Trimesh(vertices, faces).convex_hull
-    return [(np.asarray(h.vertices), np.asarray(h.faces))]
+    print(f"VoMP (fake): mass {summary['rigid_body']['mass']:.2f} kg")
 
 
 def mjcf(J):
-    """A box body for a rigid object; the real nested model (one hull per link) when aligned.glb has joints."""
+    """A box body with the VoMP inertial of physics/summary.json."""
     from harpor.webapp.physics_auto import sim_name
 
     job = json.loads((J / "job.json").read_text())
@@ -760,17 +398,6 @@ def mjcf(J):
     aligned = json.loads((P / "aligned.json").read_text())
     lo, hi = np.array(aligned["min_s"]), np.array(aligned["max_s"])
     shutil.rmtree(P / "mjcf", ignore_errors=True)
-    if aligned.get("joints"):
-        from harpor.physics import mjcf as model
-
-        report = model.build(P / "aligned.glb", P / "summary.json", P / "mjcf", name, decompose=hull)
-        compiled = model.check(P / "mjcf", name) if importlib.util.find_spec("mujoco") else \
-            {"mujoco": None, "fake": "mujoco is not installed, so scene.xml was not compiled"}
-        pace(2)
-        (P / "mjcf" / "mjcf.json").write_text(json.dumps({**report, "fake": True, "compiled": compiled}, indent=1))
-        print(f"MJCF (fake hulls): {len(report['links'])} links, {len(report['joints'])} joints, "
-              f"{P / 'mjcf' / 'scene.xml'}")
-        return
     (P / "mjcf").mkdir()
     z0 = max(0.0, -float(lo[2])) + 0.005
 
@@ -803,65 +430,14 @@ def mjcf(J):
     print(f"MJCF (fake): {P / 'mjcf' / 'scene.xml'}")
 
 
-USD_JOINT = {"revolute": "PhysicsRevoluteJoint", "prismatic": "PhysicsPrismaticJoint", "fixed": "PhysicsFixedJoint",
-             "soft": "PhysicsFixedJoint"}
-
-
-def usd_links(name, mj):
-    """(the asset's text, its check) for an MJCF with links: the layout of harpor.physics.usd, masses only."""
-    from harpor.parts.joints import STATIC
-
-    def vec(x):
-        return "(" + ", ".join(f"{v:.6g}" for v in x) + ")"
-
-    lines = [f'def Xform "{name}" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])', "{",
-             '    def Xform "links"', "    {"]
-    for link, rec in mj["links"].items():
-        lines += [f'        def Xform "{link}" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])',
-                  "        {", f"            float physics:mass = {rec['inertial']['mass']:.6g}", "        }"]
-    lines += ["    }", '    def Scope "joints"', "    {"]
-    joints = [*mj["joints"], *({"child": k, "parent": p, "type": "fixed", "pos": [0.0, 0.0, 0.0], "range": [0.0, 0.0]}
-                               for k, p in (mj.get("welded") or {}).items())]
-    for j in joints:
-        lines += [f'        def {USD_JOINT[j["type"]]} "{j["child"]}"', "        {",
-                  f'            rel physics:body0 = </{name}/links/{j["parent"]}>',
-                  f'            rel physics:body1 = </{name}/links/{j["child"]}>',
-                  f"            point3f physics:localPos0 = {vec(j['pos'])}",
-                  f"            point3f physics:localPos1 = {vec(j['pos'])}"]
-        if j["type"] not in STATIC:
-            k = 180 / np.pi if j["type"] == "revolute" else 1.0  # USD limits are degrees for a hinge
-            lines += ['            uniform token physics:axis = "X"',
-                      f"            float physics:lowerLimit = {j['range'][0] * k:.6g}",
-                      f"            float physics:upperLimit = {j['range'][1] * k:.6g}"]
-        lines.append("        }")
-    if mj.get("fixed_base"):
-        lines += ['        def PhysicsFixedJoint "world"', "        {",
-                  f"            rel physics:body1 = </{name}/links/{mj['root']}>", "        }"]
-    lines += ["    }", "}"]
-    checked = {"mass": mj["inertial"]["mass"], "links": {k: {"mass": r["inertial"]["mass"]} for k, r in mj["links"].items()},
-               "joints": [{"name": j["child"], "type": USD_JOINT[j["type"]], "body0": j["parent"], "body1": j["child"]}
-                          for j in joints]}
-    return "\n".join(lines) + "\n", checked
-
-
 def usd(J):
-    """A rigid body with the VoMP mass; for an MJCF with links, the articulation (usd_links)."""
+    """A rigid body with the VoMP mass, as text."""
     from harpor.webapp.physics_auto import sim_name
 
     job = json.loads((J / "job.json").read_text())
     name, P = sim_name(job["prompt"]), J / "physics"
     rb = json.loads((P / "summary.json").read_text())["rigid_body"]
-    mj = json.loads((P / "mjcf" / "mjcf.json").read_text())
     (P / "usd").mkdir(exist_ok=True)
-    if "links" in mj:
-        body, checked = usd_links(name, mj)
-    else:
-        body, checked = f"""\
-def Xform "{name}" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
-{{
-    float physics:mass = {rb['mass']:.6g}
-}}
-""", {"mass": rb["mass"]}
     (P / "usd" / f"{name}.usda").write_text(f"""\
 #usda 1.0
 (
@@ -870,7 +446,11 @@ def Xform "{name}" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI
     upAxis = "Z"
 )
 
-""" + body)
+def Xform "{name}" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+{{
+    float physics:mass = {rb['mass']:.6g}
+}}
+""")
     (P / "usd" / "scene.usda").write_text(f"""\
 #usda 1.0
 
@@ -882,12 +462,13 @@ def Xform "World"
 }}
 """)
     pace(2)
-    (P / "usd" / "usd.json").write_text(json.dumps({"name": name, "fake": True, "checked": checked}, indent=1))
+    (P / "usd" / "usd.json").write_text(json.dumps({"name": name, "fake": True, "checked": {"mass": rb["mass"]}},
+                                                   indent=1))
     print(f"USD (fake): {P / 'usd' / 'scene.usda'}")
 
 
 def urdf(J):
-    """The real URDF of an MJCF with links; for the box MJCF of a rigid job, one link with a box mesh."""
+    """One link with a box mesh, written by the real harpor.physics.urdf."""
     import trimesh
 
     from harpor.physics import urdf as U
@@ -898,20 +479,15 @@ def urdf(J):
     name, P = sim_name(job["prompt"]), J / "physics"
     out = P / "urdf"
     shutil.rmtree(out, ignore_errors=True)
-    mj = json.loads((P / "mjcf" / "mjcf.json").read_text())
-    if "links" in mj:
-        report = U.build(P / "aligned.glb", P / "summary.json", P / "mjcf", out, name)
-    else:
-        aligned = json.loads((P / "aligned.json").read_text())
-        rb = json.loads((P / "summary.json").read_text())["rigid_body"]
-        (out / "meshes").mkdir(parents=True)
-        box = trimesh.creation.box(bounds=np.array([aligned["min_s"], aligned["max_s"]]))
-        write_obj(out / "meshes" / "link_0.obj", box.vertices, box.faces)
-        links = [{"name": name, "frame": [0.0, 0.0, 0.0], "inertial": {k: rb[k] for k in ("mass", "com", "fullinertia")},
-                  "mesh": "meshes/link_0.obj", "collisions": ["meshes/link_0.obj"]}]
-        (out / "model.urdf").write_text(U.urdf_xml(name, links, [], False))
-        report = {"glb": str((P / "aligned.glb").resolve()), "name": name, "root": name, "fixed_base": False,
-                  "links": links, "joints": [], "excluded_pairs": []}
+    aligned = json.loads((P / "aligned.json").read_text())
+    rb = json.loads((P / "summary.json").read_text())["rigid_body"]
+    (out / "meshes").mkdir(parents=True)
+    box = trimesh.creation.box(bounds=np.array([aligned["min_s"], aligned["max_s"]]))
+    write_obj(out / "meshes" / "link_0.obj", box.vertices, box.faces)
+    link = {"name": name, "inertial": {k: rb[k] for k in ("mass", "com", "fullinertia")},
+            "mesh": "meshes/link_0.obj", "collisions": ["meshes/link_0.obj"]}
+    (out / "model.urdf").write_text(U.urdf_xml(name, link))
+    report = {"glb": str((P / "aligned.glb").resolve()), "name": name, "links": [link]}
     pace(2)
     report.update(fake=True, checked=U.check(out))
     (out / "urdf.json").write_text(json.dumps(report, indent=1))
@@ -929,55 +505,14 @@ def turntable(J):
     T.encode(J)
 
 
-def soft_motion(J):
-    """harpor.webapp.softvideo.motion without MuJoCo: the first soft part of mjcf.json dents along its press direction
-    by the motion's target, most at the middle of its press nodes and fading over 2 cm, in a press that ramps, holds and
-    springs back over the frames."""
-    from harpor.fileio import read_json
-    from harpor.webapp import softvideo as S
-
-    mj = read_json(J / "physics" / "mjcf" / "mjcf.json")
-    link, rec = next(iter(mj["soft"].items()))
-    with np.load(J / "physics" / "mjcf" / rec["file"]) as z:
-        rest, direction, press = z["vertices"], z["direction"], z["nodes"][z["press"]]
-    depth = float(np.ptp(rest @ direction))
-    target = min(S.DENT_M, S.DENT_SHARE * depth)
-    bump = np.exp(-(np.linalg.norm(rest - press.mean(0), axis=1) / 0.02) ** 2)
-    k = np.arange(S.FRAMES) / S.FRAMES
-    press_in = np.clip(np.minimum(k / 0.3, (0.6 - k) / 0.2), 0, 1)  # in over 0.3, held, out by 0.6 of the loop
-    disp = press_in[:, None, None] * target * bump[None, :, None] * direction
-    shutil.rmtree(J / "softvideo", ignore_errors=True)
-    (J / "softvideo").mkdir()
-    np.savez(J / "softvideo" / "motion.npz", rest=rest, disp=disp.astype(np.float32))
-    write_json(J / "softvideo" / "motion.json", {"link": link, "frames": S.FRAMES, "fps": S.FPS, "depth_m": depth,
-                                                 "target_m": target, "dent_m": target, "fake": True}, indent=1)
-    print(f"soft part {link} (fake motion, no MuJoCo): a dent of {1000 * target:.1f} mm")
-
-
-def softvideo(J):
-    """The real stage with the fake Blender: the motion (harpor.webapp.softvideo, or soft_motion without MuJoCo), the
-    frames and the MP4."""
-    from harpor.agent import tools
-    from harpor.webapp import softvideo as S
-    from harpor.webapp import turntable as T
-
-    signal.signal(signal.SIGTERM, tools._on_sigterm)
-    if importlib.util.find_spec("mujoco"):
-        S.motion(J)
-    else:
-        soft_motion(J)
-    S.render(J, blender=FAKE_BLENDER)
-    T.encode(J, "softvideo")
-
-
 def main(argv=None):
     from harpor.webapp import jobs, steps
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("stage", choices=steps.NAMES)
     ap.add_argument("--job", required=True)
-    ap.add_argument("--key-file", help="agent and propose stages: the env file with the agent's API key")
-    ap.add_argument("--agent", choices=("astra", "opus"), default="astra", help="agent and propose stages: the job's agent")
+    ap.add_argument("--key-file", help="agent stage: the env file with the agent's API key")
+    ap.add_argument("--agent", choices=("astra", "opus", "fable"), default="astra", help="agent stage: the job's agent")
     a = ap.parse_args(argv)
     J = Path(a.job)
     print(f"fake {a.stage}: {J.name}", flush=True)
@@ -995,8 +530,8 @@ def main(argv=None):
         real("harpor.webapp.physics_auto", "align", "--job", J)
     elif a.stage == "package":
         jobs.package(J)
-    elif a.stage in ("agent", "propose"):
-        globals()[a.stage](J, a.key_file, a.agent)
+    elif a.stage == "agent":
+        agent(J, a.key_file, a.agent)
     else:
         globals()[a.stage](J)
 

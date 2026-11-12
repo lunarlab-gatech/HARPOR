@@ -1,23 +1,30 @@
 # HARPOR
 
-HARPOR turns a short video of an object into a 3D model you can drop into a simulator. It started as a
+HARPOR turns a short capture of one rigid object into a 3D model that a simulator can load. It started as a
 re-implementation of GATOR (arXiv 2610.11215).
 
-You give it a phone video, a rosbag or a Stray Scanner export. You get back a textured mesh and MJCF, USD and URDF
-files with mass and materials filled in. If the object has moving parts, like a lid or a drawer, HARPOR splits them
-out and an AI agent adds the joints. It then tests the joints in MuJoCo and gives the agent another try when a test
-fails. A part can also be soft, like a seat cushion, so it dents in MuJoCo.
+The input is a phone video, a ROS 1 or 2 bag or a Stray Scanner export of one rigid object. The output is a textured
+mesh and MJCF, USD and URDF files with estimated mass and materials. An optional AI agent refines the geometry and the
+appearance in Blender, and MuJoCo checks each result. The research focus is estimating and refining the mass and the
+friction of rigid objects.
 
-![HARPOR pipeline: a video becomes a posed mesh (A), an object with parts is split into pieces (B), an optional agent refines the mesh or adds joints and is checked in MuJoCo (C), materials are estimated after generation (A) or splitting (B), and simulation files are written (D)](docs/pipeline.svg)
+![HARPOR pipeline: a capture becomes a posed mesh through SAM 3, Depth Anything 3, view selection, MV-SAM3D and a pose fit (A), VoMP estimates the materials right after MV-SAM3D (B), an optional agent refines the geometry and appearance and a host check settles each candidate in MuJoCo with the VoMP materials (C), and the export transfers the materials and writes MJCF, USD and URDF files, an optional 360 video and results.zip (D)](docs/pipeline.svg)
 
-HARPOR finds the object in the video and builds a mesh in the right pose (A). VoMP estimates a rigid object's
-materials immediately after MV-SAM3D generates it. For an object with parts, HARPOR first splits the mesh (B),
-then runs VoMP on each part. An optional agent in Blender refines the mesh or adds joints (C). MuJoCo tests the
-predicted physics, and a VLM judges simulation frames against the photos; failures feed repair rounds.
-Finally, HARPOR transfers the estimates to the final geometry, recomputes mass and inertia, and exports the
-simulation files (D).
+HARPOR finds the object in the frames with SAM 3, gets cameras and depth from Depth Anything 3 and picks the views.
+LiDAR or iPhone depth sets the metric scale when the capture has it. MV-SAM3D builds a textured mesh from the views,
+and a pose fit places it in the scene (A). VoMP v1.1 estimates the density, Young's modulus and Poisson's ratio of the
+mesh right after MV-SAM3D makes it (B).
 
-The soft parts and the repair rounds have only run in tests so far, not on a real object.
+The agent stage is optional (C). The agent works in Blender on the geometry and the appearance. After each build or
+repair, the host compares the surface with the original, settles the candidate under gravity in MuJoCo with the VoMP
+materials, and asks a VLM to judge the frames against the photo. A failed check starts a repair round, with at most 3
+builds. The host then delivers the best stored candidate. The export turns the mesh upright, transfers the VoMP
+materials to it and recomputes the mass and the inertia (D). Each of the MJCF, USD and URDF files holds one rigid body.
+Friction is fixed at 0.6, because VoMP does not predict it. An optional 360 video of the final mesh comes next, and the
+job ends with results.zip.
+
+HARPOR used to split objects into moving parts, add joints and simulate soft parts. Those features were removed so the
+work can focus on mass and friction. Commit 7f23a9a is the last commit that has them, for when they come back.
 
 ## Install
 
@@ -44,15 +51,15 @@ containers/harpor-docker serve
 
 Open the URL it prints. The weights, caches and jobs go in `~/harpor-data` (set `HARPOR_DATA` to change it).
 `weights` also keeps the Hugging Face token there, in `cache/huggingface/token`, because the pipeline needs it to load
-the gated models. The app
-listens on localhost only. To use it from another computer, run `ssh -L 8765:localhost:8765 <gpu machine>` there.
+the gated models. The app listens on localhost only. To use it from another computer, run
+`ssh -L 8765:localhost:8765 <gpu machine>` there.
 
 ### Without docker
 
-`setup/install.sh` builds the same seven environments under `HARPOR_ROOT` (by default `~/harpor`) and then downloads
-the weights. It runs `setup/web.sh`, `setup/sam3d.sh`, `setup/mvsam3d.sh`, `setup/sam3seg.sh`, `setup/vomp11.sh`,
-`setup/mujoco.sh`, `setup/agent.sh` and `setup/weights.sh` in order, and each one also runs on its own. The agent and
-Blender then run in Apptainer, so the machine needs `apptainer` too:
+`setup/install.sh` builds the six environments (web, sam3d, da3, sam3seg, vomp11 and mujoco) under `HARPOR_ROOT`
+(by default `~/harpor`) and then downloads the weights. It runs `setup/web.sh`, `setup/sam3d.sh`, `setup/mvsam3d.sh`,
+`setup/sam3seg.sh`, `setup/vomp11.sh`, `setup/mujoco.sh`, `setup/agent.sh` and `setup/weights.sh` in order, and each
+one also runs on its own. The agent and Blender then run in Apptainer, so the machine needs `apptainer` too:
 
 ```bash
 HF_TOKEN=hf_... bash setup/install.sh
@@ -71,8 +78,8 @@ containers/harpor-docker run cup.mp4 --prompt mug --agent opus     # with docker
 python -m harpor.webapp.run cup.mp4 --prompt mug --agent opus      # without docker, in envs/web
 ```
 
-`--agent` is `astra` (GPT-6-Astra), `opus` (Claude Opus 5.5), `fable` (Claude Fable 5.2) or `none`. `--help` lists
-every option and explains what to do when a job stops to ask you something.
+`--agent` is `astra` (GPT-6-Astra), `opus` (Claude Opus 5.5), `fable` (Claude Fable 5.2) or `none`, which is the
+default. `--help` lists every option and explains what to do when a job stops to ask you something.
 
 ## More
 
@@ -82,10 +89,10 @@ every option and explains what to do when a job stops to ask you something.
 
   ```bash
   python3.12 -m venv .venv
-  .venv/bin/pip install pytest fastapi uvicorn httpx numpy scipy pillow av rosbags pyyaml trimesh "anthropic==1.15.0" rtree
+  .venv/bin/pip install pytest fastapi uvicorn httpx numpy scipy pillow av rosbags pyyaml trimesh "anthropic==1.15.0"
   .venv/bin/python -m pytest -q tests
   ```
 
   Tests that need a package you don't have are skipped.
-- A standalone static demo gallery can be built separately; see [docs/public_site.md](docs/public_site.md).
+- A standalone static demo gallery can be built separately. [docs/public_site.md](docs/public_site.md) explains how.
 - HARPOR's code is MIT licensed ([LICENSE](LICENSE)). SAM 3, SAM 3D Objects and MV-SAM3D keep their own SAM License.

@@ -17,7 +17,7 @@ appended to logs/<stage>.log, where a line "== <stage> <time>" starts each run.
 job.json "agent" is the agent stage's agent (steps.AGENTS): "astra" (GPT-6-Astra through the Codex
 CLI, with the user's OpenAI API key), "opus" or "fable" (Claude Opus 5.5 or Claude Fable 5.2 through
 claude_agent, with the user's Anthropic API key) or "none" (no key: the agent stage is skipped and
-physics uses run/posed.glb, or run/parts.glb for an articulated job, whose parts then get no joints).
+physics uses run/posed.glb).
 
 job.json "lidar" (steps.lidar) turns on the metric scale from LiDAR: null, {"kind": "rosbag", "topic":
 T} for a LiDAR topic of the job's bag, or {"kind": "stray"} for the depth of a Stray Scanner capture,
@@ -29,23 +29,15 @@ upload or a delete of the calibration makes the lidar stage's record stale (step
 record of an older estimator (lidar_scale.VERSIONS), so the next Build or retry starts from lidar
 (Runner.resume). A Stray Scanner capture needs no calibration: its depth is aligned with the color camera.
 
-job.json "articulated" (false for a rigid object) and "parts" {"mode", "list", "confirmed"} set up the
-parts of an articulated object (steps.py). The job's VLM lists the parts in the propose stage
-(mode "vlm"), or proposes them and the job waits in "review" after propose until resume gets
-confirm_parts (mode "vlm_edit"; whatever auto_continue says), or the user typed the list at the start
-(mode "user", which is also the mode of a job without an agent). "confirmed" turns true when the user
-confirms the list, and false again whenever propose runs. A rigid job skips propose and parts.
-
 job.json "turntable" (false at first) asks for the 360 video: the turntable stage
 (steps.py) renders it after urdf. It is optional (steps.OPTIONAL): when it fails, the job gets a warning
-and the build goes on to package. So is the softvideo stage after it, which needs no setting: it runs when the
-MuJoCo model has a soft part.
+and the build goes on to package.
 
 A job folder of an earlier version may lack the record of a newer stage: Runner._recover adds it, skipped, at
-every start of the server.
+every start of the server. Its records of stages that this version no longer has stay in job.json and are not run.
 
 The API key stays in the runner's memory, with the agent it was checked for. For the stages that take
-it (steps.needs_key: the agent stage, and the propose stage when the VLM lists the parts) it is
+it (steps.needs_key: the agent stage) it is
 written to /dev/shm/gator-webapp-<uid>/<job_id>.env (folder 0700, file 0600, OPENAI_API_KEY=<key>
 for astra, ANTHROPIC_API_KEY=<key> for opus and fable) and deleted when the stage ends. A server that restarts
 has no key, and a change of agent drops the key held for the other one, so a job that reaches such a
@@ -60,10 +52,9 @@ holder_alive); a file it cannot check counts as stale.
     python -m harpor.webapp.jobs package --job J
 
 writes J/results.zip: posed.glb, refined.glb (the agent's GLB; physics/up.json glb_rule says whether
-physics used it), parts.glb and parts.json (an articulated job's split parts), aligned.glb,
-turntable.mp4 (the 360 video, when the job asked for it), softvideo.mp4 (the soft-part video, when the MuJoCo model
-has a soft part), summary.json, mjcf/, usd/, urdf/, placement.json, selection.json, lidar.json (the metric
-scale from LiDAR), agent_result.json and evidence.json (the agent's evidence of an articulation in rounds),
+physics used it), aligned.glb, turntable.mp4 (the 360 video, when the job asked for it), summary.json,
+mjcf/, usd/, urdf/, placement.json, selection.json, lidar.json (the metric scale from LiDAR),
+agent_result.json and evidence.json (the agent's evidence of its rounds, with the physics judgments),
 without any file that the agent result lists in key_found_in (agent_result.json too, when the session's
 result.json is listed, and evidence.json when its control/evidence.json is).
 """
@@ -104,10 +95,8 @@ INPUTS = {"video": "a video", "rosbag": "a rosbag", "stray": "a Stray Scanner ca
 DERIVED = {"frames": ("frames/meta.json", "frames/thumbs", "frames/stamps.json", "frames/preview.mp4",
                       "frames/.tmp_preview.mp4"),
            "extract": ("frames/pool.json", "scene", "pool"), "lidar": ("pool/lidar.json", "lidar/check", "lidar/cloud"),
-           "select": ("selection.json", "run"), "vomp": ("run/vomp",), "vomp_parts": ("run/vomp_parts",),
-           "propose": ("run/proposal.json",),
-           "parts": ("run/parts", "run/parts.glb", "run/parts.json"), "agent": ("agent",), "align": ("physics",),
-           "turntable": ("turntable",), "softvideo": ("softvideo",), "package": ("results.zip",)}
+           "select": ("selection.json", "run"), "vomp": ("run/vomp",), "agent": ("agent",), "align": ("physics",),
+           "turntable": ("turntable",), "package": ("results.zip",)}
 OLDER = "older than this stage"  # the note of a stage that a job folder of an earlier version has no record of
 NO_KEY = {a: f"The server no longer holds the {p} API key (it restarted); paste the key again and press Build."
           for a, p in steps.PROVIDER.items()}
@@ -115,7 +104,6 @@ NO_KEY_LATER = {a: f"The job needs the {p} API key now; paste it and press Build
 RUNNER_FILE = ".runner.json"  # in the runs folder: the server whose Runner runs its jobs (Runner._claim)
 # squeue states of a Slurm job whose server may still run (holder_alive)
 SLURM_ALIVE = ("RUNNING", "COMPLETING", "CONFIGURING", "SUSPENDED", "STOPPED", "SIGNALING")
-PARTS = {"mode": "vlm", "list": [], "confirmed": False}  # job.json "parts" of a new job
 _LOCK = threading.RLock()  # job.json read-modify-write, for the runner's threads and the server
 
 
@@ -150,7 +138,7 @@ def create_job(runs_dir, filename):
              "source": {"kind": k, "topic": None}, "agent": "astra", "status": "uploaded",
              "mode": "auto", "prompt": None, "slug": None, "n_views": 6, "picks": [], "view0": None,
              "auto_continue": False, "overrides": {"locked": [], "excluded": [], "instance": {}},
-             "articulated": False, "parts": dict(PARTS), "lidar": {"kind": "stray"} if k == "stray" else None,
+             "lidar": {"kind": "stray"} if k == "stray" else None,
              "calibration": None, "turntable": False,
              "stages": {s: dict(STAGE) for s in steps.NAMES}, "current": None, "error": None, "warnings": [],
              "key_ok": False})
@@ -193,39 +181,6 @@ def _clear(job_dir, stages):
                 shutil.rmtree(p)
             else:
                 p.unlink(missing_ok=True)
-
-
-def parts_settings(job):
-    """{"articulated", "parts"} of a job.json dict in the form the build runs with: parts {"mode", "list",
-    "confirmed": False}, the mode as steps.parts_mode gives it (agent "none" means "user"). parts "split"
-    false is kept too: it skips the split of the mesh, and the agent cuts every part (steps.split), which
-    needs an articulated job with an agent; a job that splits has no such key. Only an
-    articulated job in mode "user" keeps its list, in harpor.parts.propose.validate's form; the VLM
-    modes start without one. ValueError (with propose's reason for a bad list) when articulated is not
-    a bool, the mode is unknown, or the mode is "user" and the list is empty or breaks a rule."""
-    from harpor.parts import propose
-
-    art = job.get("articulated", False)
-    if not isinstance(art, bool):
-        raise ValueError("articulated is true or false")
-    parts = job.get("parts") or {}
-    if not isinstance(parts, dict):
-        raise ValueError('parts is {"mode", "list"}')
-    mode, items = steps.parts_mode({**job, "parts": parts}), []
-    if art and mode == "user":
-        if not parts.get("list"):
-            raise ValueError("type the parts of the object" + (": without an agent there is no VLM to list them"
-                                                               if steps.agent(job) == "none" else ""))
-        items = propose.validate(parts["list"], job["prompt"])
-    split = parts.get("split", True)
-    if not isinstance(split, bool):
-        raise ValueError("split is true or false")
-    if not split and not art:
-        raise ValueError("only an articulated job has a split to skip")
-    if not split and steps.agent(job) == "none":
-        raise ValueError("skipping the split needs an agent: it is the agent that cuts the parts")
-    return {"articulated": art, "parts": {"mode": mode, "list": items, "confirmed": False,
-                                          **({} if split else {"split": False})}}
 
 
 def lidar_settings(job_dir, job, value, read_bag=True):
@@ -590,15 +545,14 @@ class Runner:
 
     def submit_build(self, job_id, api_key, checked_calibration=None, **settings):
         """Queue the build from extract with the settings in job.json (mode, prompt, n_views, picks, view0,
-        auto_continue, overrides, agent, articulated, parts, lidar, turntable); settings are written to
-        job.json first, under the same lock. parts is {"mode": steps.PARTS_MODES, "list": the typed parts}; it
-        is stored with the mode the job runs with (parts_settings). lidar is None, {"topic": T} or
+        auto_continue, overrides, agent, lidar, turntable); settings are written to job.json first, under the
+        same lock. lidar is None, {"topic": T} or
         {"kind": "stray"}, stored as lidar_settings gives it (its ValueError passes on); the camera_info check,
         which opens the bag, is left to the caller (the server's Start makes it). checked_calibration is
         {"sha256": the job's calibration sha256 or None} when the caller made that check: a calibration that
         another tab changed since then is refused, since the check ran on the other one. turntable is true or
-        false; the server checks its type, as it does for mode and n_views. api_key is for the agent (and the VLM of
-        the part list), unless the agent is "none". None queues the build without a key (a key held for the job is
+        false; the server checks its type, as it does for mode and n_views. api_key is for the agent, which also
+        judges the physics, unless the agent is "none". None queues the build without a key (a key held for the job is
         dropped, key_ok is false): the job waits in review with NO_KEY_LATER when it reaches a stage that
         needs the key. An earlier build's outputs are deleted first."""
         from harpor.stage_a.sam3_masks import slug
@@ -614,7 +568,6 @@ class Runner:
                 s = slug(job.get("prompt") or "")
             except SystemExit as e:
                 raise ValueError(str(e)) from None
-            settings.update(parts_settings(job))
             if "lidar" in settings:  # the bag is not opened under the lock; the server's Start did that check
                 if checked_calibration is not None and settings["lidar"] and \
                         (job.get("calibration") or {}).get("sha256") != checked_calibration["sha256"]:
@@ -633,8 +586,7 @@ class Runner:
             self._queue.append((job_id, "extract", not job.get("auto_continue")))
             self._cv.notify()
 
-    def resume(self, job_id, from_stage, api_key=None, confirm_parts=False, parts_list=None, key_later=False,
-               checked_calibration=None, **fields):
+    def resume(self, job_id, from_stage, api_key=None, key_later=False, checked_calibration=None, **fields):
         """Queue the stages from from_stage on; api_key replaces the key held for the job, and fields
         (overrides, view0, agent) are written to job.json first, under the same lock. key_later, without
         api_key: the key was left out on purpose, so a job without one that reaches a stage that needs
@@ -645,32 +597,22 @@ class Runner:
         select and later are deleted; and the job stops at the review again (always when it was in
         review, else unless auto_continue). From sam3d on (Build, or a retry after a failure): the
         stages that finished are skipped, except that another agent than the job's reruns the agent
-        stage and every stage after it (the part list stays). Another agent drops the key held for the
+        stage and every stage after it. Another agent drops the key held for the
         old one. From an optional stage (steps.OPTIONAL; a done job's Retry after its 360 video failed):
         it and every stage after it run again, since package zipped its old output. Returns the stage
-        the run starts from: from_stage, or the agent stage when another agent moves it earlier.
+        the run starts from: from_stage, or an earlier stage that one of the rules below moves it to.
 
-        confirm_parts, while the job waits for its part list (steps.waits_for_parts): parts_list, or the
-        VLM's own list when it is None, becomes the confirmed list in run/proposal.json
-        (harpor.parts.propose.confirm, whose ValueError passes on with the reason) and in job.json parts
-        (list, confirmed); the outputs of parts and later are deleted, and the run starts from parts.
-        Without confirm_parts such a job resumes only from propose or earlier (it stops there again).
-        A job that was cancelled or failed while its part list waited (steps.pause_after propose) starts
-        from propose when from_stage is later, so it stops at the part list again.
+        A run from after vomp whose VoMP record is missing (it failed, or an older version skipped it for an articulated
+        job) starts from vomp, since the agent's physics check and align read it.
 
         A job with LiDAR whose lidar stage is not done (it failed or was cancelled, the calibration was
         uploaded or deleted since it ran, or an older estimator made its record: steps.done) starts from
         lidar when from_stage is later, as a run from a stage up to select does: the new scale is shown
-        in the review before the build goes on. A confirm_parts then raises ValueError, since the run
-        from lidar would drop the list. checked_calibration is {"sha256": the job's calibration sha256 or
+        in the review before the build goes on. checked_calibration is {"sha256": the job's calibration sha256 or
         None} when the caller checked the LiDAR settings outside the lock (server.lidar_check): a
         calibration that another tab changed since then raises ValueError, as in submit_build.
         """
         J = self.job_dir(job_id)
-        if confirm_parts:
-            from_stage = "parts"
-        elif parts_list is not None:
-            raise ValueError("a part list is given only with confirm_parts")
         if from_stage not in BUILD:
             raise ValueError(f"cannot resume from {from_stage!r}")
         i, r = steps.NAMES.index(from_stage), steps.NAMES.index(steps.REVIEW_AFTER)
@@ -679,30 +621,15 @@ class Runner:
             self._idle(job_id, job)
             agent = steps.agent({**job, **fields})
             changed = agent != steps.agent(job)
-            waits = steps.waits_for_parts(J, job)
-            if confirm_parts and not waits:
-                raise ValueError("the job does not wait for its part list")
-            p = steps.NAMES.index(steps.PARTS_AFTER)
-            if waits and not confirm_parts and i > p:
-                raise ValueError("the job waits for its part list; confirm or edit it first")
-            if not confirm_parts and i > p and steps.pause_after(steps.PARTS_AFTER, J):
-                from_stage, i = steps.PARTS_AFTER, p  # cancelled or failed at the part list: back to it
             if checked_calibration is not None and steps.lidar(job) is not None and \
                     (job.get("calibration") or {}).get("sha256") != checked_calibration["sha256"]:
                 raise ValueError("the calibration changed while the run was starting; try again")
             li = steps.NAMES.index("lidar")
             if i > li and steps.lidar({**job, **fields}) is not None and not steps.done("lidar", J):
-                if confirm_parts:
-                    raise ValueError("the LiDAR scale is not current (the calibration or the app's scale estimate "
-                                     "changed since it ran); cancel the job, then retry from the lidar stage")
                 from_stage, i = "lidar", li  # failed, cancelled or stale: the scale first
-            if confirm_parts:
-                from harpor.parts import propose
-
-                if parts_list is None:
-                    parts_list = json.loads((J / steps.MARKERS["propose"]).read_text())["parts"]
-                propose.validate(parts_list, job["prompt"])  # a bad list changes nothing
-            self._check_part_list(J, {**job, **fields}, i)
+            vi = steps.NAMES.index("vomp")
+            if i > vi and not steps.done("vomp", J):
+                from_stage, i = "vomp", vi  # an older version skipped VoMP for an articulated job: the materials first
             stages = job["stages"]
             if i <= r:
                 _clear(J, steps.NAMES[i:])
@@ -715,11 +642,6 @@ class Runner:
                 if from_stage in steps.OPTIONAL:  # results.zip holds its old output, or none
                     _clear(J, steps.NAMES[i:])
                     stages.update({s: dict(STAGE) for s in steps.NAMES[i:]})
-            if confirm_parts:
-                proposal = propose.confirm(J, parts_list)
-                _clear(J, steps.NAMES[i:])
-                stages.update({s: dict(STAGE) for s in steps.NAMES[i:]})
-                fields["parts"] = {**job["parts"], "list": proposal["parts"], "confirmed": True}
             if changed and i > r:  # the other agent runs, and the stages after it take its GLB
                 a = steps.NAMES.index("agent")
                 _clear(J, steps.NAMES[a:])
@@ -801,16 +723,6 @@ class Runner:
             raise ValueError(f"job {job_id} is still uploading")
         if job["status"] in ACTIVE or job_id in self._procs:
             raise ValueError(f"job {job_id} is {job['status']}")
-
-    def _check_part_list(self, J, job, i):
-        """ValueError when the propose stage would run from stage index i on a job whose parts mode is
-        "user" (also an agent "none") but whose job.json has no part list: it would fail."""
-        p = steps.NAMES.index("propose")
-        done = job["stages"]["propose"]["status"] == "done" and steps.done("propose", J)
-        runs = i <= p and (i <= steps.NAMES.index(steps.REVIEW_AFTER) or not done)
-        if runs and steps.articulated(job) and steps.parts_mode(job) == "user" and not job["parts"]["list"]:
-            raise ValueError("this job has no part list" + (": without an agent there is no VLM to list the parts"
-                                                            if steps.agent(job) == "none" else ""))
 
     def _take_key(self, job_id, key, agent):
         if not isinstance(key, str) or not KEY.fullmatch(key):
@@ -927,8 +839,8 @@ class Runner:
             ran = not (load(J)["stages"][stage]["status"] == "done" and steps.done(stage, J))
             if ran and self._run_stage(job_id, stage) not in ("done", "skipped", "warned"):
                 return
-            if (ran and stage == steps.REVIEW_AFTER and pause) or steps.pause_after(stage, J):
-                self._status(job_id, "review", current=None)  # after propose: the part list waits for the user
+            if ran and stage == steps.REVIEW_AFTER and pause:
+                self._status(job_id, "review", current=None)
                 return
         self._status(job_id, "done", current=None)
 
@@ -941,9 +853,6 @@ class Runner:
             update_stage(J, stage, **{**STAGE, "status": "skipped", "note": reason})
             return "skipped"
         key_file, job = None, load(J)
-        if stage == "propose":  # a new proposal is not confirmed
-            with self._cv:
-                job = update(J, parts={**load(J)["parts"], "confirmed": False})
         if steps.needs_key(stage, job):
             agent = steps.agent(job)
             with self._cv:
@@ -1052,19 +961,17 @@ def package(job_dir):
         copies = {"result.json": result, "control/evidence.json": evidence}
         keyed |= {copy.resolve() for src, copy in copies.items() if src in found}
     files = [("posed.glb", J / "run" / "posed.glb"), ("refined.glb", steps.agent_glb(J)),
-             ("parts.glb", J / "run" / "parts.glb"), ("parts.json", J / "run" / "parts.json"),
              ("aligned.glb", J / "physics" / "aligned.glb"), ("turntable.mp4", J / "turntable" / "turntable.mp4"),
-             ("softvideo.mp4", J / "softvideo" / "softvideo.mp4"), ("summary.json", J / "physics" / "summary.json"),
+             ("summary.json", J / "physics" / "summary.json"),
              ("placement.json", J / "run" / "placement.json"), ("selection.json", J / "selection.json"),
              ("lidar.json", J / "pool" / "lidar.json"), ("agent_result.json", result), ("evidence.json", evidence)]
     for d in ("mjcf", "usd", "urdf"):
         files += [(f"{d}/{p.relative_to(J / 'physics' / d)}", p) for p in sorted((J / "physics" / d).rglob("*"))]
-    # align copies the GLB byte for byte, MJCF, USD and URDF copy its meshes and textures, and the 360 video and the
-    # soft-part video show it.
+    # align copies the GLB byte for byte, MJCF, USD and URDF copy its meshes and textures, and the 360 video shows it.
     used = (json.loads((J / "physics" / "up.json").read_text()).get("glb") if (J / "physics" / "up.json").is_file() else None)
     if used and Path(used).resolve() in keyed:
         keyed |= {p.resolve() for a, p in files
-                  if a in ("aligned.glb", "turntable.mp4", "softvideo.mp4") or a.startswith(("mjcf/", "usd/", "urdf/"))}
+                  if a in ("aligned.glb", "turntable.mp4") or a.startswith(("mjcf/", "usd/", "urdf/"))}
     tmp = J / ".results.zip.tmp"
     names = []
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:

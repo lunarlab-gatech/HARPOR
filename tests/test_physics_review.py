@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -9,11 +10,13 @@ from harpor.fileio import write_json
 
 def test_judgment_schema_and_failures_feed_repair_loop():
     report = {"outcome": "pass", "scope": "none", "findings": []}
-    failed = P.parse(json.dumps({"outcome": "fail", "reason": "The lid detaches",
-                                "findings": [{"link": "lid", "why": "It separates during motion", "repair": "Fix its hinge anchor"}]}))
+    failed = P.parse(json.dumps({"outcome": "fail", "reason": "The box tips over",
+                                "findings": [{"why": "It rolls onto its side", "repair": "Flatten its base"}]}))
+    assert failed["findings"] == [{"why": "It rolls onto its side", "repair": "Flatten its base"}]
     result = P.apply(report, failed)
     assert result["outcome"] == "fail" and result["scope"] == "local"
-    assert "Fix its hinge anchor" in result["findings"][0]["why"]
+    assert result["findings"][0]["code"] == "physics_implausible"
+    assert "Flatten its base" in result["findings"][0]["why"]
     assert controller.next_round([{"kind": "build", "outcome": result["outcome"], "scope": result["scope"]}]) == "repair"
     missing = P.apply(report, {"outcome": "inconclusive", "reason": "No frames", "findings": []})
     assert missing["outcome"] == "fail" and missing["scope"] == "none"
@@ -25,16 +28,93 @@ def test_judgment_schema_and_failures_feed_repair_loop():
 
 
 def test_visual_pass_does_not_override_mechanical_failure():
-    report = {"outcome": "fail", "scope": "structural", "findings": [validate.finding("rest_collision")]}
-    assert P.apply(report, {"outcome": "pass", "reason": "Looks plausible", "findings": []})["outcome"] == "fail"
+    """A failed host check stays failed when the VLM passes the frames."""
+    report = {"outcome": "fail", "scope": "structural", "findings": [validate.finding("surface_identity")]}
+    result = P.apply(report, {"outcome": "pass", "reason": "Looks plausible", "findings": []})
+    assert result["outcome"] == "fail" and result["scope"] == "structural"
+    assert [f["code"] for f in result["findings"]] == ["surface_identity"]
+
+
+def checked(tmp_path, monkeypatch, report=None, judged=None, files=("sheet.jpg", "test_00.gif")):
+    """P.check of a candidate with the supervisor subprocess replaced: it writes report (with the candidate's
+    sha256 unless report sets one) and files into its --out folder and exits 0. judged: the VLM's judgment, or
+    None for a judge that must not be asked."""
+    from harpor.agent import tools
+
+    root = tmp_path / "session"
+    (root / "control/physics").mkdir(parents=True)
+    (root / "work").mkdir()
+    write_json(root / "control/physics/config.json", {"agent": "astra", "key_file": str(tmp_path / "key.env")})
+    glb = root / "candidate.glb"
+    glb.write_bytes(b"candidate")
+    sha = tools.sha256(glb)
+    monkeypatch.setenv("GATOR_MUJOCO", "python")
+    def run(cmd, log, timeout, **popen):
+        out = Path(cmd[cmd.index("--out") + 1])
+        for name in files:
+            (out / name).write_bytes(b"frame")
+        if report is not None:
+            write_json(out / "report.json", {"asset_sha256": sha, **report})
+        return 0
+    monkeypatch.setattr(tools, "_run", run)
+    def judge(*a):
+        assert judged is not None, "the judge was asked without simulation evidence"
+        return {**judged, "findings": list(judged["findings"])}
+    monkeypatch.setattr(P, "judge", judge)
+    return root, P.check(root, glb)
+
+
+def simulation(warnings=()):
+    return {"materials": {}, "settling": {"warnings": list(warnings), "states": []},
+            "sheet": "sheet.jpg", "clips": {"settling": "test_00.gif"}}
+
+
+def test_a_mujoco_warning_fails_a_visual_pass(tmp_path, monkeypatch):
+    """A MuJoCo warning while settling fails the candidate even when the VLM passes its frames; without a warning
+    the same pass stands. Either way the frames are published as evidence for the next round."""
+    passed = {"outcome": "pass", "reason": "Rests on its base", "findings": []}
+    root, judgment = checked(tmp_path / "warned", monkeypatch, simulation(["BADQACC"]), passed)
+    assert judgment["outcome"] == "fail"
+    assert "BADQACC" in judgment["findings"][0]["why"] and judgment["findings"][0]["repair"]
+    applied = P.apply({"outcome": "pass", "scope": "none", "findings": []}, judgment)
+    assert applied["outcome"] == "fail" and applied["findings"][0]["code"] == "physics_implausible"
+    root, judgment = checked(tmp_path / "quiet", monkeypatch, simulation(), passed)
+    assert judgment["outcome"] == "pass" and judgment["findings"] == []
+    assert (root / "work" / judgment["evidence"] / "test_00.gif").is_file()
+    assert judgment["clips"] == {"settling": "test_00.gif"}
+
+
+@pytest.mark.parametrize("case", ["no_mujoco", "no_report", "wrong_sha", "error"])
+def test_missing_simulation_evidence_is_inconclusive(tmp_path, monkeypatch, case):
+    """No configured MuJoCo, no report, a report of another asset or a supervisor error is inconclusive, never a
+    pass, and the VLM is not asked. Applied to a passing check, it fails with scope none."""
+    report = {"no_mujoco": simulation(), "no_report": None, "wrong_sha": {**simulation(), "asset_sha256": "b" * 64},
+              "error": {"error": "ValueError: No simulation frames were captured"}}[case]
+    if case == "no_mujoco":
+        monkeypatch.delenv("GATOR_MUJOCO", raising=False)
+        from harpor.agent import tools
+        monkeypatch.setattr(tools, "_run", lambda *a, **k: pytest.fail("the supervisor ran without GATOR_MUJOCO"))
+        root = tmp_path / "session"
+        (root / "control/physics").mkdir(parents=True)
+        write_json(root / "control/physics/config.json", {"agent": "astra", "key_file": str(tmp_path / "key.env")})
+        (root / "candidate.glb").write_bytes(b"candidate")
+        monkeypatch.setattr(P, "judge", lambda *a: pytest.fail("the judge was asked without evidence"))
+        judgment = P.check(root, root / "candidate.glb")
+    else:
+        root, judgment = checked(tmp_path, monkeypatch, report)
+    assert judgment["outcome"] == "inconclusive" and judgment["findings"] == []
+    assert judgment["reason"].startswith("Physics supervision unavailable")
+    applied = P.apply({"outcome": "pass", "scope": "none", "findings": []}, judgment)
+    assert applied["outcome"] == "fail" and applied["scope"] == "none"
+    assert [f["code"] for f in applied["findings"]] == ["physics_unassessed"]
 
 
 def test_refinement_rounds_accept_complete_and_unchanged(tmp_path):
     control = tmp_path / "control"
     (control / "physics").mkdir(parents=True)
     write_json(control / "physics/config.json", {})
-    write_json(control / "manifest.json", {"mode": "refinement"})
-    assert controller.has_rounds(tmp_path, "refinement")
+    write_json(control / "manifest.json", {})
+    assert controller.has_rounds(tmp_path)
     report = {"outcome": "pass", "scope": "none", "findings": []}
     for verdict in ("complete", "unchanged"):
         assert validate.round_report(control, report, {"source": "finish", "verdict": verdict})["outcome"] == "pass"
@@ -47,7 +127,7 @@ def test_controller_repairs_a_visual_failure_and_selects_verified_candidate(tmp_
     (tmp_path / "control/physics").mkdir(parents=True)
     (tmp_path / "work/exports").mkdir(parents=True)
     write_json(tmp_path / "control/physics/config.json", {})
-    write_json(tmp_path / "control/manifest.json", {"mode": "refinement"})
+    write_json(tmp_path / "control/manifest.json", {})
     original = box(tmp_path / "original.glb", (0.2, 0.2, 0.2))
     mesh = tmp_path / "work/exports/001.glb"
     mesh.write_bytes(original.read_bytes())
@@ -58,7 +138,7 @@ def test_controller_repairs_a_visual_failure_and_selects_verified_candidate(tmp_
                 "surface": {}, "errors": []}
     monkeypatch.setattr(validate, "check", mechanical)
     verdicts = iter([
-        {"outcome": "fail", "reason": "Unstable", "findings": [{"link": None, "why": "It tips", "repair": "Fix the base"}]},
+        {"outcome": "fail", "reason": "Unstable", "findings": [{"why": "It tips", "repair": "Fix the base"}]},
         {"outcome": "pass", "reason": "Stable", "findings": []}])
     monkeypatch.setattr(P, "check", lambda *a, **k: next(verdicts))
     first = controller.check_round(tmp_path, 1, "build")
@@ -71,8 +151,10 @@ def test_controller_repairs_a_visual_failure_and_selects_verified_candidate(tmp_
 
 
 def test_judge_uses_reference_and_simulation_and_redacts_answer(tmp_path, monkeypatch):
+    """The judge sees the manifest's photo above the simulation sheet and the materials and settling measurements,
+    with the job's key; an API key echoed in its answer, even split by a control character, is redacted."""
     from PIL import Image
-    from harpor.parts import propose
+    from harpor.agent import vlm
 
     (tmp_path / "control").mkdir()
     (tmp_path / "work/input").mkdir(parents=True)
@@ -85,41 +167,17 @@ def test_judge_uses_reference_and_simulation_and_redacts_answer(tmp_path, monkey
     def ask(k, prompt, image):
         calls.append((k, prompt, image))
         return json.dumps({"outcome": "pass", "reason": "Stable " + key[:7] + "\x1b" + key[7:], "findings": []})
-    monkeypatch.setattr(propose, "ask_astra", ask)
-    sim = {k: {} for k in ("materials", "dynamics", "settling", "soft_materials", "fixed_base")}
+    monkeypatch.setattr(vlm, "ask_astra", ask)
+    sim = {"materials": {"rigid_body": {"mass": 1.5}}, "settling": {"warnings": [], "states": [{"t": 0.0}]},
+           "sheet": "sheet.jpg", "clips": {}}
     result = P.judge(tmp_path, tmp_path, sim, {"agent": "astra", "key_file": str(tmp_path / "key.env")})
     assert result["outcome"] == "pass" and key not in json.dumps(result)
     assert "[redacted API key]" in result["reason"]
     assert calls[0][0] == key and "Measurements:" in calls[0][1] and len(calls[0][2]) > 1000
-    assert json.loads(calls[0][1].split("Measurements:\n")[1])["requirements"] == []
-    # the span targets reach the judge with the measurements, so it can tell a real stop from a range cut short
-    goals = [{"link": "lid", "does": "opens upward", "target_span": 4.712, "range": [0.0, 2.0], "unit": "rad"}]
-    P.judge(tmp_path, tmp_path, sim, {"agent": "astra", "key_file": str(tmp_path / "key.env")}, goals)
-    assert json.loads(calls[1][1].split("Measurements:\n")[1])["requirements"] == goals
-    assert "A range under its target is acceptable" in calls[1][1]
-
-
-def test_the_judge_gets_each_requirements_target_and_the_range_that_ran(tmp_path):
-    """targets: one entry per hinge or slide with a requirement, with the part list's text and span target and the
-    range that the sweep found clear, also for a part that the agent created under its reserve.
-    A requirement whose link has no clear range has none."""
-    def req(rid, part, **more):
-        return {"id": rid, "part": part, "status": "found", "text": f"{part} moves", "test": {}, **more}
-    reqs = [req("r1", "lid", test={"min_span": 4.712}), req("r2", "drawer"),
-            req("r3", None, status="not_found", reserve="flap", text="folds", test={"min_span": 1.0}),
-            req("r4", "knob"), req("r5", None, status="not_found")]
-    (tmp_path / "control").mkdir()
-    write_json(tmp_path / "control/parts.json", {"requirements": reqs})
-    clear = lambda kind, limits, achieved: {"type": kind, "limits": limits, "achieved": achieved}  # noqa: E731
-    report = {"clearance": {"lid": clear("revolute", [0.0, 1.0], [0.0, 1.0]),
-                            "drawer": clear("prismatic", [0.0, 0.3], [0.0, 0.3]),
-                            "flap": clear("revolute", [-1.0, 1.0], [-1.0, 1.0]),
-                            "knob": clear("revolute", [0.0, 1.0], None)}}
-    assert P.targets(tmp_path / "control", report) == [
-        {"link": "lid", "does": "lid moves", "target_span": 4.712, "range": [0.0, 1.0], "unit": "rad"},
-        {"link": "drawer", "does": "drawer moves", "target_span": None, "range": [0.0, 0.3], "unit": "m"},
-        {"link": "flap", "does": "folds", "target_span": 1.0, "range": [-1.0, 1.0], "unit": "rad"}]
-    assert P.targets(tmp_path / "control", {}) == []
+    assert "Object: a box" in calls[0][1]
+    assert json.loads(calls[0][1].split("Measurements:\n")[1]) == {k: sim[k] for k in ("materials", "settling")}
+    with Image.open(tmp_path / "judge.jpg") as panel:
+        assert panel.size == (400, 100 + 300)  # the photo above the sheet, never enlarged
 
 
 def test_session_preparation_uses_placed_mass_and_preserves_predictions(tmp_path, monkeypatch):
@@ -129,7 +187,7 @@ def test_session_preparation_uses_placed_mass_and_preserves_predictions(tmp_path
     (job / "run/vomp").mkdir(parents=True)
     for folder in ("control", "work/input", "session"):
         (root / folder).mkdir(parents=True)
-    write_json(job / "job.json", {"articulated": False})
+    write_json(job / "job.json", {})
     write_json(job / "run/vomp/summary.json", {"config": "test", "rigid_body": {"mass": 600}})
     np.savez(job / "run/vomp/voxels.npz", **prediction())
     pose = {"rotation_wxyz": [1, 0, 0, 0], "translation": [1, 2, 3], "scale": [2]}
@@ -145,40 +203,39 @@ def test_session_preparation_uses_placed_mass_and_preserves_predictions(tmp_path
     assert P.enabled(root / "control") and "Physics supervision" in (root / "session/prompt.txt").read_text()
 
 
-@pytest.mark.parametrize("kind", ["rigid", "articulated", "soft"])
-def test_real_settling_and_motion_evidence(tmp_path, monkeypatch, kind):
+def hull(vertices, faces, threshold):
+    """One convex hull in place of CoACD: exact for a box, and fast."""
+    import trimesh
+
+    h = trimesh.Trimesh(vertices, faces).convex_hull
+    return [(np.asarray(h.vertices), np.asarray(h.faces))]
+
+
+def test_real_settling_evidence(tmp_path, monkeypatch):
+    """supervise.run settles a real box in MuJoCo for three seconds under gravity: 13 states, the predicted
+    material on the candidate, no warnings for a box at rest, and a contact sheet and clip of rendered frames.
+    It needs a working local GL context."""
     pytest.importorskip("mujoco")
     from harpor.physics import supervise, mjcf
-    from test_sim_check import chest, hull_parts, pad_on_block
     from test_material_transfer import box, prediction
 
-    glb = (chest(tmp_path) if kind == "articulated" else pad_on_block(tmp_path) if kind == "soft"
-           else box(tmp_path / "box.glb", (0.3, 0.2, 0.2)))
-    from harpor.parts import joints
-    from harpor.physics import align
-    doc, binary = align.read_glb(glb)
-    align.write_glb(glb, joints.write_joints(doc, joints.transform(joints.read_joints(doc), np.eye(4), "W")), binary)
-    # chest is authored in S. The supervisor accepts W, so choose its existing +Z as up.
+    glb = box(tmp_path / "box.glb", (0.3, 0.2, 0.2))
     source = tmp_path / "materials"
     source.mkdir()
-    names = {"rigid": [""], "articulated": ["body", "lid", "drawer"], "soft": ["block", "pad"]}[kind]
-    files = {name: f"part_{i}.npz" for i, name in enumerate(names)}
-    write_json(source / "config.json", {"up": [0, 0, 1], "articulated": kind != "rigid", "predictions": files})
+    write_json(source / "config.json", {"up": [0, 0, 1], "predictions": {"": "voxels_00.npz"}})
     write_json(source / "summary.json", {"config": "test"})
-    for name, filename in files.items():
-        np.savez(source / filename, **prediction(density=1000 if name == "lid" else 600))
+    np.savez(source / "voxels_00.npz", **prediction(density=600))
     build = mjcf.build
-    monkeypatch.setattr(mjcf, "build", lambda *a, **k: build(*a, decompose=hull_parts, **k))
-    # Exercise real dynamics, frames and clips. This needs a working local GL context.
+    monkeypatch.setattr(mjcf, "build", lambda *a, **k: build(*a, decompose=hull, **k))
     result = supervise.run(glb, source, tmp_path / "out", "a" * 64)
     assert result["asset_sha256"] == "a" * 64
-    assert len(result["settling"]["states"]) == 13
-    assert result["settling"]["gravity"] == [0, 0, -9.81]
-    assert len(result["clips"]) >= (1 if kind == "rigid" else 2)
+    settling = result["settling"]
+    assert len(settling["states"]) == 13 and settling["seconds"] == 3.0
+    assert settling["gravity"] == [0, 0, -9.81] and settling["warnings"] == []
+    assert settling["states"][-1]["t"] == pytest.approx(3.0, abs=0.01)
+    assert settling["states"][-1]["speed"] < 0.05  # a box on its face comes to rest
+    assert result["materials"]["median"]["density_kg_m3"] == 600
+    assert result["materials"]["rigid_body"]["mass"] == pytest.approx(600 * 0.3 * 0.2 * 0.2, rel=0.1)
+    assert result["clips"] == {"settling": "test_00.gif"}
     assert (tmp_path / "out" / result["sheet"]).is_file()
     assert all((tmp_path / "out" / name).stat().st_size > 1000 for name in result["clips"].values())
-    if kind == "articulated":
-        assert result["dynamics"]["joints"]
-        assert result["materials"]["links"]["lid"]["median"]["density_kg_m3"] == 1000
-    elif kind == "soft":
-        assert result["dynamics"]["soft"] and result["soft_materials"]["pad"]["material"] == "foam"
