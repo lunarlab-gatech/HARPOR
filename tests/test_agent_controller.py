@@ -35,6 +35,9 @@ from harpor.agent.bin import gator_tool
 from harpor.agent.fake_agent import write_glb
 from harpor.agent.server import ToolServer
 
+# one xdist worker runs the whole file, so the module fixtures (27 sessions at once in runs) run once
+pytestmark = pytest.mark.xdist_group("agent_controller")
+
 REPO = Path(__file__).resolve().parents[1]
 FAST = {"poll_s": 0.02, "kill_after_s": 0.5, "finish_wait_s": 0.5}
 FAKE_BLENDER = [sys.executable, "-m", "harpor.agent.fake_agent", "--blender"]

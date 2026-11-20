@@ -2,7 +2,6 @@ import json
 import os
 import re
 import secrets
-import shutil
 import signal
 import socket
 import stat
@@ -1941,48 +1940,3 @@ def test_fake_build_end_to_end(make_runner, tmp_path):
     assert all(s["seconds"] is not None for s in jobs.progress(J) if s["name"] not in skipped)
     assert not list(runner.key_dir.iterdir())
     assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))
-
-
-def test_an_older_articulated_job_resumes_as_a_rigid_one(make_runner, tmp_path):
-    """A job folder that an older version left mid-build for an articulated object: job.json still says articulated,
-    has a part list and the records of the stages this version no longer has; VoMP was skipped (it ran per part
-    then), physics/summary.json and mjcf.json are per link, and usd.json has joints. A retry from usd starts from
-    vomp, since the physics check and align read run/vomp; align, mjcf, usd and urdf run again, so every export is
-    one rigid body; the old records stay in job.json and are not run."""
-    for m in ("av", "trimesh", "harpor.webapp.video", "harpor.webapp.views", "harpor.webapp.physics_auto"):
-        pytest.importorskip(m)
-    from test_webapp_server import write_video
-
-    runner, cfg = make_runner()
-    job_id, upload = jobs.create_job(cfg.runs, "clip.mov")
-    J = cfg.runs / job_id
-    write_video(upload)
-    jobs.update(J, video={**jobs.load(J)["video"], "bytes": upload.stat().st_size})
-    runner.submit_analyze(job_id)
-    wait(J, "ready")
-    jobs.update(J, mode="auto", prompt="box", n_views=4, auto_continue=True, agent="none")
-    runner.submit_build(job_id, None)
-    job = wait(J, "done")
-    old = {"articulated": True, "parts": {"mode": "vlm", "list": [], "confirmed": True}}
-    stages = {**job["stages"], **{s: {**jobs.STAGE, "status": "done"} for s in ("propose", "parts", "vomp_parts")},
-              "softvideo": {**jobs.STAGE, "status": "skipped", "note": "no soft part"},
-              "vomp": {**jobs.STAGE, "status": "skipped", "note": "materials run after the part split"},
-              "usd": {**jobs.STAGE, "status": "failed"}, "urdf": {**jobs.STAGE}, "turntable": {**jobs.STAGE},
-              "package": {**jobs.STAGE}}
-    jobs.update(J, **old, stages=stages, status="failed")
-    shutil.rmtree(J / "run" / "vomp")
-    for rel, extra in (("physics/summary.json", {"links": {"body": {}, "lid": {}}}),
-                       ("physics/mjcf/mjcf.json", {"links": {"body": {}, "lid": {}}}),
-                       ("physics/usd/usd.json", {"joints": [{"name": "lid", "type": "PhysicsRevoluteJoint"}]})):
-        (J / rel).write_text(json.dumps({**json.loads((J / rel).read_text()), **extra}))
-    assert [s for s in ("vomp", "align", "mjcf", "usd") if steps.done(s, J)] == []
-
-    assert runner.resume(job_id, "usd") == "vomp"
-    job = wait(J, "done")
-    assert all(job["stages"][s]["status"] == "done" for s in ("vomp", "align", "mjcf", "usd", "urdf", "package"))
-    assert all(steps.done(s, J) for s in ("vomp", "align", "mjcf", "usd", "urdf"))
-    for rel in ("physics/summary.json", "physics/mjcf/mjcf.json"):
-        assert "links" not in json.loads((J / rel).read_text())
-    assert not json.loads((J / "physics" / "usd" / "usd.json").read_text()).get("joints")
-    assert {k: job[k] for k in old} == old  # kept as data, unused
-    assert {job["stages"][s]["status"] for s in ("propose", "parts", "vomp_parts")} == {"done"}

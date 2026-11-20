@@ -186,9 +186,8 @@ def command(stage, job, cfg, key_file=None):
 def done(stage, job_dir):
     """True when the stage's outputs are all there (see the module docstring)."""
     J = Path(job_dir)
-    if stage == "align":  # a summary with links is an older version's, of an articulated job: align again
-        summary = J / "physics/summary.json"
-        return (J / MARKERS[stage]).is_file() and summary.is_file() and "links" not in _json(summary)
+    if stage == "align":
+        return (J / MARKERS[stage]).is_file() and (J / "physics/summary.json").is_file()
     if stage in MARKERS:
         return (J / MARKERS[stage]).is_file()
     if stage == "extract":
@@ -219,12 +218,10 @@ def done(stage, job_dir):
         return (rec.get("extrinsic") or {}).get("calibration_sha256") == cal.get("sha256")
     if stage == "select":
         return _json(J / "selection.json").get("ok") is True and (J / "run" / "da3_output.npz").is_file()
-    if stage == "mjcf":  # links or joints: an older version's articulated model, which usd and urdf cannot read
-        mj = _json(J / "physics" / "mjcf" / "mjcf.json")
-        return "compiled" in mj and "links" not in mj
+    if stage == "mjcf":
+        return "compiled" in _json(J / "physics" / "mjcf" / "mjcf.json")
     if stage in ("usd", "urdf"):
-        rec = _json(J / "physics" / stage / f"{stage}.json")
-        return "checked" in rec and not rec.get("joints") and not rec.get("articulation_root")
+        return "checked" in _json(J / "physics" / stage / f"{stage}.json")
     raise ValueError(f"unknown stage {stage!r}")
 
 

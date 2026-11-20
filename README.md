@@ -88,7 +88,7 @@ default. `--help` lists every option and explains what to do when a job stops to
 
   ```bash
   python3.12 -m venv .venv
-  .venv/bin/pip install pytest fastapi uvicorn httpx numpy scipy pillow av rosbags pyyaml trimesh "anthropic==1.15.0"
+  .venv/bin/pip install pytest pytest-xdist fastapi uvicorn httpx numpy scipy pillow av rosbags pyyaml trimesh "anthropic==1.15.0"
   .venv/bin/python -m pytest -q tests
   ```
 

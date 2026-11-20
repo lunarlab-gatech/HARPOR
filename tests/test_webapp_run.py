@@ -404,7 +404,7 @@ def test_the_key_stays_out_of_every_output(term):
     (f"OPENAI_API_KEY={ASTRA}\n", 0o600, "has no ANTHROPIC_API_KEY= line"),
     (f"ANTHROPIC_API_KEY={ASTRA}\n", 0o600, "Anthropic keys start with sk-ant-"),
     (f"ANTHROPIC_API_KEY={OPUS}\n", 0o644, "mode 0600"),
-])
+], ids=["missing", "no-anthropic-line", "not-sk-ant", "mode-0644"])  # fixed ids: the keys are random, and xdist needs the same names in every worker
 def test_a_bad_key_stops_before_the_job_starts(term, text, mode, reason):
     key = term.key_file(text or "", mode)
     if text is None:

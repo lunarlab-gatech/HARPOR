@@ -22,6 +22,9 @@ from test_webapp_server import TOKEN, login, run_app_js, uploaded, wait, write_v
 
 from harpor.webapp import demos, server, steps  # noqa: E402
 
+# one xdist worker runs the whole file, so the finished job in the module fixture is built once
+pytestmark = pytest.mark.xdist_group("webapp_demos")
+
 ROOT = Path(__file__).resolve().parents[1]
 OPUS = "sk-ant-test-" + secrets.token_hex(16)
 SRC = (server.STATIC / "demos.html").read_text()

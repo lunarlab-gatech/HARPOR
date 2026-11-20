@@ -602,8 +602,7 @@ class Runner:
         it and every stage after it run again, since package zipped its old output. Returns the stage
         the run starts from: from_stage, or an earlier stage that one of the rules below moves it to.
 
-        A run from after vomp whose VoMP record is missing (it failed, or an older version skipped it for an articulated
-        job) starts from vomp, since align reads it.
+        A run from after vomp whose VoMP record is missing (it failed) starts from vomp, since align reads it.
 
         A job with LiDAR whose lidar stage is not done (it failed or was cancelled, the calibration was
         uploaded or deleted since it ran, or an older estimator made its record: steps.done) starts from
@@ -629,7 +628,7 @@ class Runner:
                 from_stage, i = "lidar", li  # failed, cancelled or stale: the scale first
             vi = steps.NAMES.index("vomp")
             if i > vi and not steps.done("vomp", J):
-                from_stage, i = "vomp", vi  # an older version skipped VoMP for an articulated job: the materials first
+                from_stage, i = "vomp", vi  # VoMP failed: the materials first
             stages = job["stages"]
             if i <= r:
                 _clear(J, steps.NAMES[i:])

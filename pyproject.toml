@@ -12,3 +12,5 @@ include = ["harpor*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# parallel by default (pytest-xdist); loadgroup keeps each xdist_group file on one worker. -n 0 runs serially
+addopts = "-n auto --dist loadgroup"
