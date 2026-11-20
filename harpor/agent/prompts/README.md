@@ -14,9 +14,8 @@ Codex-specific tool, so no tool names change. Features that the prompt expects f
 original's previews, `review --clay` and a shared detail rig through `review --detail`) are
 implemented in the controller and `tools.py`.
 
-The physics check runs the session in rounds (`controller.run_rounds`): after each build or repair,
-the host settles the candidate in MuJoCo and the job's VLM judges the frames
-(`harpor.agent.physics_review`). Each round is a new agent with no memory of the others, so
+A web-app job runs the session in rounds (`controller.run_rounds`): after each build or repair,
+the host checks the candidate against the original (`harpor.agent.validate`). Each round is a new agent with no memory of the others, so
 `round_prompt(kind, budget_s, feedback, best, evidence)` gives it the whole task:
 
 - repair: the refinement prompt, then a short paragraph with the round's budget, the best candidate
@@ -24,4 +23,4 @@ the host settles the candidate in MuJoCo and the job's VLM judges the frames
   planning round gets `PLAN`, the sentence that tells it to follow `/work/plan.md`
 - replan: a short planning prompt alone; its agent writes `/work/plan.md`, and every helper is refused
 
-`physics_review.GUIDANCE` is appended to the first prompt and to every round prompt.
+`GUIDANCE` is appended to the first prompt and to every round prompt.

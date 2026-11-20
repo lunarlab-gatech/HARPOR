@@ -54,7 +54,7 @@ holder_alive); a file it cannot check counts as stale.
 writes J/results.zip: posed.glb, refined.glb (the agent's GLB; physics/up.json glb_rule says whether
 physics used it), aligned.glb, turntable.mp4 (the 360 video, when the job asked for it), summary.json,
 mjcf/, usd/, urdf/, placement.json, selection.json, lidar.json (the metric scale from LiDAR),
-agent_result.json and evidence.json (the agent's evidence of its rounds, with the physics judgments),
+agent_result.json and evidence.json (the agent's evidence of its rounds),
 without any file that the agent result lists in key_found_in (agent_result.json too, when the session's
 result.json is listed, and evidence.json when its control/evidence.json is).
 """
@@ -603,7 +603,7 @@ class Runner:
         the run starts from: from_stage, or an earlier stage that one of the rules below moves it to.
 
         A run from after vomp whose VoMP record is missing (it failed, or an older version skipped it for an articulated
-        job) starts from vomp, since the agent's physics check and align read it.
+        job) starts from vomp, since align reads it.
 
         A job with LiDAR whose lidar stage is not done (it failed or was cancelled, the calibration was
         uploaded or deleted since it ran, or an older estimator made its record: steps.done) starts from

@@ -21,13 +21,11 @@ the agent's links, are printed as one line without control characters (tools.pri
 replaced again after that cleaning: a key split by a control character that it drops is whole only
 then. The helpers already store the agent's text that way; this also cleans an older result.
 
-The session runs in rounds (controller.run_rounds) with physics supervision (harpor.agent.physics_review): the host
-settles each round's candidate in MuJoCo, the python of envs/mujoco that GATOR_MUJOCO names (steps.command exports
-it), and the job's VLM judges the frames. Without that python every round would be inconclusive, so the step stops
-before the session runs. The session's evidence, root/control/evidence.json (harpor.agent.evidence), holds the
+The session runs in rounds (controller.run_rounds): the host checks each round's candidate against the original
+(harpor.agent.validate), and a failed check feeds a repair round. The session's evidence, root/control/evidence.json (harpor.agent.evidence), holds the
 agent's reason and limitations, so it goes to J/agent/evidence.json, which the web app serves, only scrubbed as the
 result is, and as
-strict JSON (finite: browsers' JSON.parse takes no NaN or Infinity, which MuJoCo's states can give). It is written
+strict JSON (finite: browsers' JSON.parse takes no NaN or Infinity). It is written
 whether the session ends or stops, since the controller keeps it after every round; agent/result.json is finite too.
 
 SIGTERM (Cancel in the web app) ends the step as it ends a helper of harpor.agent.tools: the Blender
@@ -40,8 +38,6 @@ J/agent/result.json.
 import argparse
 import json
 import math
-import os
-import shlex
 import shutil
 import signal
 from pathlib import Path
@@ -94,18 +90,6 @@ def publish_evidence(root, out, keys):
         write_json(out, finite(scrub(ev, keys)))
 
 
-def check_mujoco():
-    """SystemExit unless GATOR_MUJOCO (split like a shell) names a python that exists (see the module docstring)."""
-    value = os.environ.get("GATOR_MUJOCO", "")
-    try:
-        python = shlex.split(value)
-    except ValueError:
-        python = []
-    if not python or shutil.which(python[0]) is None:
-        raise SystemExit(f"GATOR_MUJOCO is {value!r}, not the python of envs/mujoco: the host checks each "
-                         "candidate's physics with MuJoCo there. Make it with setup/mujoco.sh")
-
-
 def print_rounds(r):
     """Print the rounds of a result r in rounds and the stored candidate that it delivered."""
     for x in r["rounds"]:
@@ -129,7 +113,7 @@ def source(prompt, n, kind):
 
 
 def run(job_dir, sif, key_file, agent="astra"):
-    from harpor.agent import controller, physics_review
+    from harpor.agent import controller
     from harpor.stage_a import mvsam3d
 
     J = Path(job_dir)
@@ -147,10 +131,7 @@ def run(job_dir, sif, key_file, agent="astra"):
     views = mvsam3d.session_views(J / "run")
     controller.prepare_session(root, None, views, source=source(job["prompt"], len(views), steps.source(job)["kind"]),
                                metric=True, original=J / "run" / "posed.glb", agent=AGENTS[agent],
-                               effort=EFFORT.get(agent), model=MODEL.get(agent))
-    physics_review.prepare(root, J, key_file, agent)
-    if controller.has_rounds(root):
-        check_mujoco()
+                               effort=EFFORT.get(agent), model=MODEL.get(agent), rounds=True)
     try:
         controller.run_container_session(root, sif, key_file, budget_s=BUDGET_S)
     finally:

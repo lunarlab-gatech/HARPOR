@@ -2,10 +2,9 @@
 
 Prepares the session folder, runs the agent under a watchdog with a 600 s budget, serves the helper
 commands from the host, checks GLBs as paper A.4 describes and against the original's size, and picks the
-deliverable with the fallback order. A session with physics supervision (harpor.agent.physics_review) runs in
+deliverable with the fallback order. A session with rounds (prepare_session rounds=True) runs in
 rounds, as PhysAg3D's repair loop does (paper A.3, A.4; run_rounds): a build, then repairs or one planning
-round (replan) while the host's check (harpor.agent.validate and the physics review) finds something an agent
-can fix, each round with a new agent. Each build or repair keeps its pick as a candidate in
+round (replan) while the host's check (harpor.agent.validate) finds something an agent can fix, each round with a new agent. Each build or repair keeps its pick as a candidate in
 control/candidates, and the session delivers the best of them (select_candidate, paper A.6). The agent is one
 of two, chosen per session in prepare_session and recorded in control/agent.json:
 
@@ -24,8 +23,8 @@ Session layout:
                       and the deadline come from it, and from a round's own events in rounds),
                       budget.json, manifest.json, agent.json, candidate.log, previews.log, exports/
                       (the host's copy of each export and its report) and staging/ (where Blender
-                      writes them first, tools.export_glb); physics/ (harpor.agent.physics_review); in
-                      rounds also validate/ and physics_checks/ of the host's checks, candidates/vNN/
+                      writes them first, tools.export_glb); rounds.json (has_rounds); in
+                      rounds also validate/ of the host's checks, candidates/vNN/
                       (store_candidate) and evidence.json (harpor.agent.evidence)
   root/work/          mounted as /work: AGENTS.md (codex only), input/, original/, candidate.blend,
                       exports/, reviews/, checkpoints/, run_budget.json, finish.json; in rounds also
@@ -76,7 +75,7 @@ ROUND_BUDGET_S = {"repair": 450.0, "replan": 300.0}  # a build takes the budget_
 ROUND_FILES = ("codex.jsonl", "claude.jsonl", "stderr.log", "claude_stdout.log", "last_message.txt", "prompt.txt")
 # Of result.json's rounds: no why, a finding's text.
 FINDING_KEYS = ("code", "measured", "expected")
-# What a stored candidate's rank compares, in order (rank): physics comes first, ahead of paper A.6's order.
+# What a stored candidate's rank compares, in order (rank): a passing round comes first, ahead of paper A.6's order.
 RANK = ("round outcome pass", "surface not blocking", "source not an export", "version")
 AGENT_DIR = Path(__file__).resolve().parent
 REPO = AGENT_DIR.parents[1]  # claude_agent runs from here, as `python -m harpor.agent.claude_agent`
@@ -285,16 +284,21 @@ def agent_record(agent, effort=None, model=None):
     return {"agent": "claude", "model": model, "effort": effort}
 
 
-def prepare_session(root, prompt, views, *, source, metric, original=None, agent="codex", effort=None, model=None):
+def prepare_session(root, prompt, views, *, source, metric, original=None, agent="codex", effort=None, model=None,
+                    rounds=False):
     """Write the session folder of a refinement of original.
 
     prompt: None for the refinement prompt (harpor.agent.prompts). views: dicts with K, w2c
     (OpenCV world-to-camera in W), width, height, and image and mask files. agent: "codex" (GPT-6-Astra
     through the Codex CLI, at the xhigh effort of codex/config.toml) or "claude" (model through
     claude_agent at effort: by default Claude Opus 5.5 at xhigh; model can also be Claude Fable 5.2).
+    rounds: run the session in rounds (has_rounds, run_rounds); control/rounds.json marks it, and
+    prompts.GUIDANCE is added to the prompt.
     """
     record = agent_record(agent, effort, model)
     prompt = prompts.load() if prompt is None else prompt
+    if rounds:
+        prompt += prompts.GUIDANCE
     root, work = Path(root), Path(root) / "work"
     for d in ("input", "exports", "reviews", "checkpoints"):
         (work / d).mkdir(parents=True, exist_ok=True)
@@ -302,6 +306,8 @@ def prepare_session(root, prompt, views, *, source, metric, original=None, agent
         (root / "control" / d).mkdir(parents=True, exist_ok=True)
     (root / "control" / "events.jsonl").touch()
     write_json(root / "control" / "agent.json", record)
+    if rounds:
+        write_json(root / "control" / "rounds.json", {"max_builds": MAX_BUILDS})
     (root / "session").mkdir(exist_ok=True)
     if agent == "codex":
         (root / "session" / "codex_home").mkdir(exist_ok=True)
@@ -685,10 +691,8 @@ def build_candidate(root, blender, timeout=300):
 
 
 def has_rounds(root):
-    """Rounds for a session with physics supervision (physics_review.enabled)."""
-    from harpor.agent.physics_review import enabled
-
-    return enabled(Path(root) / "control")
+    """Whether the session runs in rounds: prepare_session(rounds=True) wrote control/rounds.json."""
+    return (Path(root) / "control" / "rounds.json").is_file()
 
 
 def next_round(rounds):
@@ -765,7 +769,7 @@ def store_candidate(root, n, kind, pick):
     sha256, source, agent_verdict, reason, limitations, report}, whose report (the round's) check_round adds. The
     GLB is read once, and every later step reads the copy. Each round gets its own version, also with the bytes of
     an earlier one, so that each keeps its own verdict. Returns the record, or None for fallback_original, which is
-    no agent's GLB. An unchanged pick is stored: its GLB is root/original.glb, which the physics check may pass."""
+    no agent's GLB. An unchanged pick is stored: its GLB is root/original.glb, which the host's check may pass."""
     root = Path(root)
     if pick["source"] == "fallback_original":
         return None
@@ -795,7 +799,7 @@ def _written(errors, path, data):
 
 def check_round(root, n, kind):
     """The end of build or repair round n: the round's pick (select_deliverable on its events), stored as a
-    candidate (store_candidate), the host's check of the stored copy (validate.check, then physics_review.check) and
+    candidate (store_candidate), the host's check of the stored copy (validate.check) and
     validate.round_report of them. A copy of the report goes to work/evidence/round_NN.json for the next round's
     agent, and then into the candidate's record. A step that fails is a validation_error of the round (_host_step).
     Returns {pick, rejected, version, sha256, report}; pick is None when select_deliverable failed, and version when
@@ -807,12 +811,6 @@ def check_round(root, n, kind):
     glb = root / cand["glb"] if cand else None
     if glb:
         report = _host_step(errors, validate.check, glb, control, root / "original.glb")
-        from harpor.agent import physics_review
-
-        if report is not None and physics_review.enabled(control):
-            judgment = _host_step(errors, physics_review.check, root, glb)
-            if judgment is not None:
-                report = physics_review.apply(report, judgment)
     folder = _host_step(errors, tools.real_dir, root / "work", "evidence")
     final = validate.round_report(control, report, pick, errors)
     if folder is not None and not _written(errors, folder / f"round_{n:02d}.json", final):
@@ -853,8 +851,8 @@ def passed(cand):
 
 
 def rank(cand):
-    """A stored candidate's rank, highest first (RANK). A passing round always wins, which puts physics ahead of
-    paper A.6's order on purpose: that order would let a reviewed failure beat a later pass."""
+    """A stored candidate's rank, highest first (RANK). A passing round always wins, ahead of paper A.6's order on
+    purpose: that order would let a reviewed failure beat a later pass."""
     report = cand.get("report") or {}
     return (passed(cand), not (report.get("surface") or {}).get("blocks"), cand["source"] != "export", cand["version"])
 
@@ -967,9 +965,9 @@ def candidate_summary(chosen, selected):
 
 
 def run_rounds(root, cmd, env, blender, sock_dir, watchdog):
-    """The rounds of a session with physics supervision (has_rounds; paper A.3, A.4): the build, then while
+    """The rounds of a session with rounds (has_rounds; paper A.3, A.4): the build, then while
     next_round says so a repair or a replan, each a new agent with a prompt (prompts.round_prompt, then
-    physics_review.GUIDANCE) that carries the feedback of the last check and the best stored candidate
+    prompts.GUIDANCE) that carries the feedback of the last check and the best stored candidate
     (best_candidate); only the repair right after a replan is told to follow its /work/plan.md, which a later one
     would take for a plan of its own check. Each build or repair ends with check_round, and every round with control/evidence.json (harpor.agent.evidence), so a
     session that stops keeps the evidence of the rounds that ran.
@@ -979,8 +977,6 @@ def run_rounds(root, cmd, env, blender, sock_dir, watchdog):
     SystemExit such as Cancel's always is. Returns (runs, rounds, ends): run_agent's records, result.json's
     rounds and check_round's {n: end}."""
     root = Path(root)
-    from harpor.agent.physics_review import GUIDANCE
-
     runs, rounds, ends, kind, prompt, last = [], [], {}, "build", None, None
     try:
         while kind:
@@ -994,7 +990,7 @@ def run_rounds(root, cmd, env, blender, sock_dir, watchdog):
             if kind:
                 prompt = prompts.round_prompt(kind, ROUND_BUDGET_S[kind], validate.feedback(ends[last]["report"]),
                                               best_candidate(root), f"evidence/round_{last:02d}.json",
-                                              planned=rounds[-1]["kind"] == "replan") + GUIDANCE
+                                              planned=rounds[-1]["kind"] == "replan") + prompts.GUIDANCE
     except SystemExit as e:
         if not isinstance(e.code, str) or not runs:
             raise

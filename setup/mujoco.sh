@@ -16,8 +16,7 @@ fi
 "$G/envs/mujoco/bin/pip" install mujoco==4.0.0 coacd==1.0.14 trimesh==5.1.1 usd-core==26.8 numpy==2.4.6 scipy==1.17.1 pillow==12.3.0
 "$G/envs/mujoco/bin/python" -c "import coacd, mujoco, numpy, PIL, pxr, scipy, trimesh
 print('mujoco', mujoco.__version__, 'trimesh', trimesh.__version__, 'numpy', numpy.__version__, 'scipy', scipy.__version__)"
-# A free box on a floor, as the physics check settles a candidate (harpor.physics.supervise): it compiles and comes to
-# rest on the floor without a warning.
+# A free box on a floor: it compiles and comes to rest on the floor without a warning.
 "$G/envs/mujoco/bin/python" -c "import mujoco
 m = mujoco.MjModel.from_xml_string('''<mujoco><worldbody><geom type=\"plane\" size=\"1 1 0.05\"/>
 <body pos=\"0 0 0.2\"><freejoint/><geom type=\"box\" size=\"0.05 0.05 0.05\" mass=\"0.5\"/></body>

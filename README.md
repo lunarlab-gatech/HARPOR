@@ -16,9 +16,8 @@ and a pose fit places it in the scene (A). VoMP v1.1 estimates the density, Youn
 mesh right after MV-SAM3D makes it (B).
 
 The agent stage is optional (C). The agent works in Blender on the geometry and the appearance. After each build or
-repair, the host compares the surface with the original, settles the candidate under gravity in MuJoCo with the VoMP
-materials, and asks a VLM to judge the frames against the photo. A failed check starts a repair round, with at most 3
-builds. The host then delivers the best stored candidate. The export turns the mesh upright, transfers the VoMP
+repair, the host compares the surface with the original and checks that the agent finished. A failed check starts a
+repair round, with at most 3 builds. The host then delivers the best stored candidate. The export turns the mesh upright, transfers the VoMP
 materials to it and recomputes the mass and the inertia (D). Each of the MJCF, USD and URDF files holds one rigid body.
 Friction is fixed at 0.6, because VoMP does not predict it. An optional 360 video of the final mesh comes next, and the
 job ends with results.zip.

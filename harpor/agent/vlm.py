@@ -1,6 +1,6 @@
 """One request with one image to the job's VLM, and the parse of its JSON answer (build_plan.md note 5).
 
-harpor.agent.physics_review asks the job's agent model to judge MuJoCo frames with these. Opus is Claude Opus
+Nothing calls these at the moment: the physics judge that used them was removed on 2026-11-20. Opus is Claude Opus
 5.5 and Fable is Claude Fable 5.2, both through the anthropic SDK (beta messages with the server-side refusal
 fallback, as claude_agent; effort high; both always think and take no temperature). Astra is GPT-6-Astra
 through the OpenAI Responses API, called with urllib (no openai SDK is installed). parse() takes the first JSON

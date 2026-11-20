@@ -5,8 +5,7 @@ It reads the GLB once without following a symlink, hashes it and copies it to co
 and compares that copy with original, root/original.glb (harpor.agent.surface.compare). A failure of the comparison
 is surface_error. The report is cached at control/validate/<sha16>/report.json unless a step failed.
 
-The physics review of the same copy (harpor.agent.physics_review) adds its own findings to the report: the
-controller applies them after check. The outcome is pass when no finding counts. Surface findings count only while
+The outcome is pass when no finding counts. Surface findings count only while
 surface.ENFORCE is on; until then they are reported and decide nothing. scope (SCOPE, paper A.3) is structural with a
 structural finding, else local with a local one, else none: none means no agent action can help.
 
@@ -29,7 +28,7 @@ LOCAL, STRUCTURAL, NONE = "local", "structural", "none"
 SCOPE = {  # paper A.3: local repairs, structural replanning, or nothing an agent can do
     "no_candidate": LOCAL, "not_finished": LOCAL, "surface_uv": LOCAL, "surface_material": LOCAL,
     "surface_deleted": LOCAL, "surface_flipped": LOCAL, "surface_error": LOCAL, "validation_error": LOCAL,
-    "physics_implausible": LOCAL, "surface_identity": STRUCTURAL, "physics_unassessed": NONE}
+    "surface_identity": STRUCTURAL}
 LABELS = (STRUCTURAL, LOCAL, NONE, "report only")  # the order of findings in feedback
 FINISHED = ("complete", "unchanged")  # the verdicts of a round that handed off
 
@@ -100,7 +99,7 @@ def _not_finished(pick, findings):
 
 def round_report(control, report, pick, errors=()):
     """The report of a build or repair round (controller.check_round; paper A.3). report: check's report of the
-    round's pick (select_deliverable's, in the copy of controller.store_candidate), with the physics review applied,
+    round's pick (select_deliverable's, in the copy of controller.store_candidate),
     or None when nothing was checked. The round adds a validation_error for each of errors (a host step that raised),
     no_candidate when it left no valid GLB (pick None or fallback_original), and not_finished when its verdict is not
     complete or unchanged (needs_review, or a checkpoint or export taken without finish). Its outcome is pass only

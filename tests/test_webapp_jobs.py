@@ -101,8 +101,7 @@ def test_commands_have_the_ice_environment():
                                 '--sam3d-root $G/sam-3d-objects --out "$J/run"')
     assert sc["agent"].endswith('-m harpor.webapp.agent_step --job "$J" --sif $G/sif/harpor-agent.sif '
                                 "--key-file /dev/shm/gator-webapp-1/k.env --agent astra")
-    # The host's check of each round runs MuJoCo in envs/mujoco (agent_step stops without it).
-    assert [s for s, text in sc.items() if "export GATOR_MUJOCO=$G/envs/mujoco/bin/python\n" in text] == ["agent"]
+    assert not any("GATOR_MUJOCO" in text for text in sc.values())  # the agent's rounds no longer run MuJoCo
     opus = steps.command("agent", {**JOB, "agent": "opus"}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
     assert opus == sc["agent"][:-len("astra")] + "opus"
     assert "\n".join(VOMP) in sc["vomp"] and sc["vomp"].endswith(
@@ -1521,7 +1520,7 @@ def test_agent_step_runs_a_fresh_refinement_session(tmp_path, monkeypatch):
         write_json(Path(root) / "result.json", r)
         return r
 
-    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
+    monkeypatch.setattr(C, "has_rounds", lambda root: False)  # one session, without the rounds
     monkeypatch.setattr(C, "run_container_session", container)
     r = agent_step.run(J, "/sif/agent.sif", J / "key.env")
     assert calls == [(J / "agent" / "s", "/sif/agent.sif", J / "key.env", 600.0)]
@@ -1554,7 +1553,7 @@ def test_agent_step_prints_the_agents_text_on_clean_lines(tmp_path, monkeypatch,
         write_json(Path(root) / "result.json", r)
         return r
 
-    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
+    monkeypatch.setattr(C, "has_rounds", lambda root: False)  # one session, without the rounds
     monkeypatch.setattr(C, "run_container_session", container)
     agent_step.run(J, "/sif/agent.sif", J / "key.env")
     out = capsys.readouterr().out
@@ -1582,7 +1581,7 @@ def test_agent_step_redacts_a_key_that_cleaning_joins(tmp_path, monkeypatch, cap
         write_json(Path(root) / "result.json", r)
         return r
 
-    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
+    monkeypatch.setattr(C, "has_rounds", lambda root: False)  # one session, without the rounds
     monkeypatch.setattr(C, "run_container_session", container)
     agent_step.run(J, "/sif/agent.sif", J / "key.env")
     out = capsys.readouterr().out
@@ -1626,7 +1625,7 @@ def test_agent_step_runs_a_claude_session_for_opus(tmp_path, monkeypatch, capsys
         write_json(Path(root) / "result.json", r)
         return r
 
-    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
+    monkeypatch.setattr(C, "has_rounds", lambda root: False)  # one session, without the rounds
     monkeypatch.setattr(C, "run_container_session", container)
     r = agent_step.run(J, "/sif/agent.sif", J / "key.env", "opus")
     root = J / "agent" / "s"
@@ -1663,10 +1662,10 @@ def test_fake_agent_stage_stands_in_for_both_agents(tmp_path):
 
 def test_fake_agent_stage_alone_skips_the_round_code(tmp_path, monkeypatch, capsys):
     """The fake agent stage writes its refinement result without the round code: neither the controller's session and
-    rounds nor the host's check or the physics review run. It deletes the evidence of an earlier try, writes none
+    rounds nor the host's check run. It deletes the evidence of an earlier try, writes none
     of its own, and the GLB stays where the fake agent left it."""
     from harpor.agent import controller as C
-    from harpor.agent import physics_review, validate
+    from harpor.agent import validate
     import fake_steps
 
     J = run_folder(tmp_path)
@@ -1677,7 +1676,6 @@ def test_fake_agent_stage_alone_skips_the_round_code(tmp_path, monkeypatch, caps
     for name in ("run_session", "run_rounds", "run_round", "check_round", "store_candidate", "select_candidate"):
         monkeypatch.setattr(C, name, not_here)
     monkeypatch.setattr(validate, "check", not_here)
-    monkeypatch.setattr(physics_review, "check", not_here)
     key = J / "fake.env"
     key.write_text(f"OPENAI_API_KEY={KEY}\n")
     key.chmod(0o600)
@@ -1695,23 +1693,20 @@ def test_fake_agent_stage_alone_skips_the_round_code(tmp_path, monkeypatch, caps
 
 
 def test_agent_step_publishes_the_evidence_of_its_rounds(tmp_path, monkeypatch, capsys, fake_stages):
-    """The real agent_step.run on a refinement with physics supervision (control/physics/config.json): the session
-    runs in rounds, the fake agent only exports in round 1 and finishes in round 2 with the API key in its reason, and
-    a stand-in for physics_review.check passes every candidate. agent/evidence.json is control/evidence.json without
+    """The real agent_step.run on a refinement: the session runs in rounds (control/rounds.json), and the fake agent
+    only exports in round 1 and finishes in round 2 with the API key in its reason. agent/evidence.json is control/evidence.json without
     the key and as strict JSON: a number that is not finite (here the diagonal) is null. The stage log prints the
     rounds, and the server's view of the job takes the result's round keys. Since control/evidence.json held the key,
-    the file route and results.zip leave the evidence out; a result without that finding serves it. Without
-    GATOR_MUJOCO the step stops before the session runs."""
+    the file route and results.zip leave the evidence out; a result without that finding serves it."""
     for m in ("fastapi", "av"):
         pytest.importorskip(m)
     import math
-    import shlex
     import tempfile
 
     from fastapi.testclient import TestClient
 
     from harpor.agent import controller as C
-    from harpor.agent import evidence, physics_review, tools
+    from harpor.agent import evidence
     from harpor.webapp import server
 
     cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs")
@@ -1742,30 +1737,9 @@ def test_agent_step_publishes_the_evidence_of_its_rounds(tmp_path, monkeypatch, 
         write_json(Path(root) / "result.json", r)
         return r
 
-    def prepare(root, job_dir, key_file, agent):  # physics supervision on, without VoMP's predictions
-        (Path(root) / "control" / "physics").mkdir()
-        write_json(Path(root) / "control" / "physics" / "config.json", {"agent": agent, "key_file": str(key_file)})
-
-    judged = []
-
-    def check(root, glb, timeout=600):  # the VLM passes the frames
-        judged.append(os.path.relpath(glb, root))
-        return {"outcome": "pass", "reason": "it rests on its base", "findings": [], "asset_sha256": tools.sha256(glb),
-                "seconds": 0.0}
-
-    monkeypatch.setattr(physics_review, "prepare", prepare)
-    monkeypatch.setattr(physics_review, "check", check)
     monkeypatch.setattr(C, "run_container_session", container)
-    for value in (None, "/no/such/python -I", "'unclosed"):
-        if value is None:
-            monkeypatch.delenv("GATOR_MUJOCO", raising=False)
-        else:
-            monkeypatch.setenv("GATOR_MUJOCO", value)
-        with pytest.raises(SystemExit, match="not the python of envs/mujoco"):
-            agent_step.run(J, "/sif/agent.sif", J / "key.env")
-        assert not (J / "agent" / "s" / "result.json").exists()
-    monkeypatch.setenv("GATOR_MUJOCO", shlex.join([sys.executable, "-I"]))
-    monkeypatch.setattr(evidence, "diagonal", lambda original: math.nan)  # as a NaN of MuJoCo's states would be
+    monkeypatch.setattr(evidence, "diagonal", lambda original: math.nan)  # a number that is not finite
+    (J / "agent").mkdir()
     (J / "agent" / "evidence.json").write_text("of an earlier try")
     r = agent_step.run(J, "/sif/agent.sif", J / "key.env")
     root = J / "agent" / "s"
@@ -1773,7 +1747,7 @@ def test_agent_step_publishes_the_evidence_of_its_rounds(tmp_path, monkeypatch, 
                                                      f"refined; key {agent_step.REDACTED}")
     assert [(x["kind"], x["outcome"], x["scope"]) for x in r["rounds"]] == [("build", "fail", "local"),
                                                                            ("repair", "pass", "none")]
-    assert judged == ["control/candidates/v01/candidate.glb", "control/candidates/v02/candidate.glb"]
+    assert (root / "control" / "rounds.json").is_file()
     assert {"result.json", "control/evidence.json"} <= set(r["key_found_in"])
     raw, published = (root / "control" / "evidence.json").read_text(), (J / "agent" / "evidence.json").read_text()
     assert KEY in raw and "NaN" in raw and KEY not in published and agent_step.REDACTED in published
@@ -1785,7 +1759,7 @@ def test_agent_step_publishes_the_evidence_of_its_rounds(tmp_path, monkeypatch, 
     assert ev == agent_step.finite(agent_step.scrub(json.loads(raw), [KEY])) and ev["diagonal_m"] is None
     assert [c["reason"] for c in ev["candidates"]] == ["uninspected export recovered; the session ended without finish",
                                                        f"refined; key {agent_step.REDACTED}"]
-    assert [c["physics_review"]["reason"] for c in ev["candidates"]] == ["it rests on its base"] * 2
+    assert all("physics_review" not in c for c in ev["candidates"])
     assert ev["selected"]["version"] == 2 and ev["rounds"] == r["rounds"]
     out = capsys.readouterr().out
     assert KEY not in out and "round 1 build: fail, scope local, candidate v01 (needs_review); findings: " in out
@@ -1828,7 +1802,7 @@ def test_agent_step_scrubs_the_key_from_the_result(tmp_path, monkeypatch, capsys
         write_json(Path(root) / "result.json", r)
         return r
 
-    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
+    monkeypatch.setattr(C, "has_rounds", lambda root: False)  # one session, without the rounds
     monkeypatch.setattr(C, "run_container_session", container)
     r = agent_step.run(J, "/sif/agent.sif", J / "key.env")
     out = capsys.readouterr().out
@@ -1864,7 +1838,7 @@ def test_agent_step_scrubs_every_key_of_a_shared_env_file(tmp_path, monkeypatch,
         write_json(Path(root) / "result.json", r)
         return r
 
-    monkeypatch.setattr("harpor.agent.physics_review.prepare", lambda *a, **k: None)
+    monkeypatch.setattr(C, "has_rounds", lambda root: False)  # one session, without the rounds
     monkeypatch.setattr(C, "run_container_session", container)
     r = agent_step.run(J, "/sif/agent.sif", J / "key.env")
     out, saved = capsys.readouterr().out, (J / "agent" / "result.json").read_text()
@@ -1882,8 +1856,7 @@ def test_agent_step_sigterm_stops_the_agent(tmp_path):
         import sys, tempfile
         from harpor.agent import controller as C
         from harpor.webapp import agent_step
-        from harpor.agent import physics_review
-        physics_review.prepare = lambda *a, **k: None
+        C.has_rounds = lambda root: False
         AGENT = [sys.executable, "-c", "import os, time; f = open('agent.pid', 'w'); f.write(str(os.getpid())); "
                  "f.close(); time.sleep(120)"]
         C.run_container_session = lambda root, sif, key_file, budget_s: C.run_session(

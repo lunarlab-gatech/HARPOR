@@ -4323,22 +4323,13 @@ ROUNDS_RESULT = {
     "candidate": {"version": 2, "round": 3, "kind": "repair", "outcome": "pass", "why": "the only eligible candidate"},
     "surface": {"shares": {"present": 0.995, "retained": 0.98, "modified": 0.015, "unresolved": 0.0},
                 "findings": [{"code": "surface_uv"}, {"code": "surface_uv"}], "blocks": False}}
-EVIDENCE = {"version": 2, "object": "a cabinet",
-            "candidates": [{"version": 1, "physics_review": {"outcome": "fail", "reason": "it tips over", "findings": []}},
-                           "not a record",
-                           {"version": 2, "physics_review": {"outcome": "pass", "reason": "<img src=x onerror=alert(1)> rests",
-                                                             "findings": []}}],
-            "selected": {"version": 2}}
 
 
 def test_app_js_results_of_a_session_in_rounds():
-    """A session that ran in rounds adds Rounds, the Physics check of the delivered candidate (agent/evidence.json:
-    the selected candidate's physics review, with its reason) and Surface retained after the agent's limitations.
-    Agent and VLM text stays text. The rows read every field defensively: a refinement's surface alone, a result whose
-    keys are not of the expected kinds (a view stored on the public site) and an evidence file that does not parse
-    leave out what they cannot give, never the other rows."""
+    """A session that ran in rounds adds Rounds and Surface retained after the agent's limitations. Agent text stays
+    text. The rows read every field defensively: a refinement's surface alone and a result whose keys are not of the
+    expected kinds (a view stored on the public site) leave out what they cannot give, never the other rows."""
     job, replies = results_job()
-    replies["/api/jobs/a/file/agent/evidence.json"] = EVIDENCE
     rounds = {**job, "files": [*job["files"], "agent/evidence.json"], "agent_result": ROUNDS_RESULT}
     odd = {**rounds, "agent_result": {**ROUNDS_RESULT, "rounds": "3", "candidate": 5, "surface": {"error": "TypeError: x"}}}
     refined = {"id": "s", "agent": "astra", "files": ["run/posed.glb", "refined.glb"],
@@ -4355,12 +4346,6 @@ def test_app_js_results_of_a_session_in_rounds():
             await renderResults(job);
             out[name] = rows();
           }
-          const fetch0 = T.fetch;  // an evidence file that does not parse, as JSON.parse refuses NaN
-          T.fetch = async (url, opts) => url.endsWith("/agent/evidence.json")
-            ? { json: async () => { throw new SyntaxError("Unexpected token N in JSON"); } } : fetch0(url, opts);
-          V = { id: "a" };
-          await renderResults(""" + json.dumps(rounds) + """);
-          out.unread = rows();
           console.log(JSON.stringify(out));
         })()
         """, replies)
@@ -4368,18 +4353,14 @@ def test_app_js_results_of_a_session_in_rounds():
     pairs = lambda name: [(out[name][i][0], out[name][i + 1][0]) for i in range(0, len(out[name]), 2)]  # noqa: E731
     got = pairs("rounds")
     at = got.index(("Limitation", "the handles are smoothed"))
-    assert got[at + 1:at + 5] == [
+    assert got[at + 1:at + 4] == [
         ("Rounds", "3 (build fail, replan, repair pass); delivered round 3's candidate"),
-        ("Physics check", "pass: <img src=x onerror=alert(1)> rests"),
         ("Surface retained", "99.5% kept: 98.0% as it was, 1.5% changed; surface_uv (report only)"),
         ("Agent tokens", "1,000 input, 500 output, 9,000 cache read, 800 cache write in 9 turns")]
     odd = pairs("odd")
     assert ("Surface retained", "not compared (the check failed)") in odd
-    assert "Rounds" not in [k for k, _ in odd] and ("Physics check", "pass: <img src=x onerror=alert(1)> rests") in odd
+    assert "Rounds" not in [k for k, _ in odd]
     assert ("Surface retained", "100.0% kept: 0.0% as it was, 0.0% changed, 100.0% without UVs to check") in pairs("refined")
-    unread = pairs("unread")
-    assert ("Rounds", "3 (build fail, replan, repair pass); delivered round 3's candidate") in unread
-    assert [k for k, _ in unread] == [k for k, _ in got if k != "Physics check"]
     # The evidence downloads with the records, and help.html explains the rows (tests/test_help_page.py).
     assert '["agent/evidence.json", "evidence.json"]' in (server.STATIC / "app.js").read_text()
 

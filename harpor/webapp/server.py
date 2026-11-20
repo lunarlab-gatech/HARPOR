@@ -116,8 +116,7 @@ to the sharpest frame within 0.25 s (frames/pool.json "picks"). The overrides na
 
 The API key of the job's agent (OpenAI for astra, Anthropic for opus and fable) arrives in the start,
 overrides and continue bodies. It is checked with jobs.check_key before anything runs and then lives
-only in the runner's memory (jobs.py). The VLM that judges the physics is the agent's model, so it
-takes the same key. A job with "agent": "none" takes no key. With "key_later": true and no api_key,
+only in the runner's memory (jobs.py). A job with "agent": "none" takes no key. With "key_later": true and no api_key,
 start and continue go on without the key: the job asks for it when it reaches a stage that needs it
 (jobs.NO_KEY_LATER), and the answer's "key" says KEY_LATER. Bodies are parsed by hand, and FastAPI's
 telemetry is off.

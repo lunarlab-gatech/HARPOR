@@ -185,7 +185,7 @@
     mode, the app takes the best view whose mask stays off the image border. View 0 sets the frame of every mesh, and
     it is the photo that the VLM sees. You can change it in the review.</dd>
   <dt>Agent</dt>
-  <dd>The model that refines the mesh and judges the physics check. See <a href="#agent">The agent and API keys</a>.</dd>
+  <dd>The model that refines the mesh. See <a href="#agent">The agent and API keys</a>.</dd>
   <dt>Use LiDAR for metric scale</dt>
   <dd>See <a href="#lidar">Metric scale and LiDAR</a>.</dd>
   <dt>Make a 360 video</dt>
@@ -306,17 +306,13 @@
   count, up to 600 s in each round. The agent is skipped when it is turned off, or when the mean mask IoU is below 0.5
   (see <a href="#results">Results</a>). Physics then uses the posed mesh.</p>
 
-<h3>The physics check and rounds</h3>
-<p>After the agent hands off a mesh, the app checks it. It turns the mesh upright, gives it the materials that VoMP
-  predicted, and lets it settle on a floor under gravity in MuJoCo for 3 s. The agent's model then looks at the
-  simulation frames next to the photo, with the mass and the motion, and judges whether the object rests the way the
-  real one would. It does not tip over, roll away, sink into the floor or drift. The app also compares the mesh's
+<h3>The check and rounds</h3>
+<p>After the agent hands off a mesh, the app checks it. It checks that the agent finished, and it compares the mesh's
   surface with the original's.</p>
 <p>The agent works in rounds, each with a new agent that gets the last check's findings. The first round builds, in
   the 600 s above. When the check fails and the agent can fix the flaw, a repair round follows, with 450 s for a
   repair, up to 2 repairs. When the flaw needs a new plan, a planning round with 300 s to plan comes before the next
-  repair. It writes a plan and builds nothing. When the check cannot run, for example when MuJoCo or the VLM is not available, the result is
-  inconclusive and no repair follows. The job delivers the best mesh of the rounds: a mesh whose check passed wins,
+  repair. It writes a plan and builds nothing. The job delivers the best mesh of the rounds: a mesh whose check passed wins,
   then one whose surface findings do not block, then one that did not come from an export, then the later one. A mesh
   whose check did not pass is delivered as needs review.</p>
 
@@ -356,9 +352,6 @@
   <dd>For a session in rounds: how many ran, each with its kind (build, repair or replan) and the outcome of its
     check, pass or fail, and the round whose GLB the job delivered. A replan round has no check. <b>no candidate
     delivered</b> means that no round left a GLB that the app could deliver.</dd>
-  <dt>Physics check</dt>
-  <dd>The physics check of the delivered mesh: pass, fail or inconclusive, with the VLM's reason. See
-    <a href="#agent">The physics check and rounds</a> above.</dd>
   <dt>Surface retained</dt>
   <dd>How much of the original surface (the posed mesh) the agent's GLB keeps: the share still
     there, the share as it was (the same UVs, material and facing) and the share changed (cut, remeshed, or with
@@ -600,14 +593,6 @@ time_offset_s: 0.0</pre>
     not predict friction, so it is an assumed value, 0.6 by default.</dd>
 </dl>
 <p>The three material rows are medians of VoMP's prediction over the object's voxels.</p>
-<h3>Physics review during refinement</h3>
-<p>Each mesh that the agent hands off gets the earlier VoMP estimates and settles under gravity in MuJoCo. The VLM
-  compares the simulation frames, the material and mass estimates, and the original photo. A failed judgment feeds a
-  repair round. Missing evidence or an unavailable judge cannot pass. The best checked mesh is delivered. See
-  <a href="#agent">The physics check and rounds</a>.</p>
-<p>The app keeps the simulation GIF clips and contact sheets with the session evidence. A visual judgment checks
-  whether the motion looks plausible. A photo cannot give an exact mass or stiffness, and the object settles the same
-  way whatever its mass.</p>
 </section>
 
 <section id="downloads">
@@ -635,7 +620,7 @@ time_offset_s: 0.0</pre>
     <tr><td><code>agent_result.json</code></td><td>The agent's result: its verdict, reason, limitations and
       counts.</td><td>When the agent ran.</td></tr>
     <tr><td><code>evidence.json</code></td><td>The evidence of the agent's rounds below.</td><td>When the agent ran
-      in rounds with the physics check.</td></tr>
+      in rounds.</td></tr>
   </tbody>
 </table>
 <p>The MJCF and USD models, the URDF's meshes and the agent's result come only in results.zip.</p>

@@ -6,8 +6,8 @@ found, and once more with the choice of its deliverable (controller.select_candi
   object        the manifest's source line, which names the object and the capture
   diagonal_m    the diagonal of root/original.glb's box
   candidates    one entry per stored candidate (controller.store_candidate), oldest first, with the agent's verdict,
-                reason and limitations, the surface report against the original (harpor.agent.surface), the physics
-                review (harpor.agent.physics_review), and the findings, errors, scope and outcome of its round
+                reason and limitations, the surface report against the original (harpor.agent.surface), and the
+                findings, errors, scope and outcome of its round
   rounds        result.json's rounds
   selected      controller.select_candidate's choice, null until the session ends
 """
@@ -36,7 +36,7 @@ def candidate(cand):
     """A stored candidate's entry (see the module docstring). cand: its record in control/candidates."""
     report = cand.get("report") or {}
     return {**{k: cand.get(k) for k in CANDIDATE_KEYS}, "surface": report.get("surface") or {},
-            "physics_review": report.get("physics_review"), "findings": report.get("findings") or [],
+            "findings": report.get("findings") or [],
             "errors": report.get("errors") or [], "scope": report.get("scope"), "outcome": report.get("outcome")}
 
 

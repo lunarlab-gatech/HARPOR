@@ -7,8 +7,6 @@ This folder is `/work`, the only folder you can write to.
 - `input/manifest.json`: the frame W, the glTF axis mapping, the units, and one entry per input view
   with its camera (`K`, the OpenCV world-to-camera matrix `w2c`, `width`, `height`) and its files
   under `input/` (`image` and `mask`).
-- `input/physics.json` (sessions with physics supervision): VoMP's material and mass estimates for
-  the original, made before refinement. They are estimates, not ground truth.
 - `original/original.glb`: the asset to refine. `original/previews/` has renders of it under each input camera
   (`view00_original.png`, ...) and from 6 orbit views, and a `sheet.png` of all of them.
 - `candidate.blend`: the scene that the helpers read. It starts as `original/original.glb` loaded
@@ -18,8 +16,7 @@ This folder is `/work`, the only folder you can write to.
   time. Time spent in `export_glb` does not count, and the deadline moves by that time, up to 600 s
   in total. In a session with rounds it also gives the `round` (1 to 4) and its
   `kind` (`build`, `repair` or `replan`).
-- `evidence/round_NN.json` (sessions with rounds): the host's check of the candidate of round NN,
-  with the physics judgment. `evidence/physics_<sha>/` holds the MuJoCo frames it judged.
+- `evidence/round_NN.json` (sessions with rounds): the host's check of the candidate of round NN.
 - `plan.md`: the plan that a planning round writes.
 
 Shell commands run in `/work`. Blender 5.2 runs headless:
@@ -29,10 +26,9 @@ before `--python`, or a failing script still exits 0). Save the scene with
 
 ## Rounds
 
-A session with physics supervision runs in rounds, up to four, each with a new agent that knows
-only its prompt and this folder. The first round builds. After each build the host compares the
-candidate's surface with the original's, lets it settle under gravity in MuJoCo with the VoMP
-materials, and asks a vision model to judge the frames against the photos. While it finds
+A session with rounds runs up to four of them, each with a new agent that knows only its prompt
+and this folder. The first round builds. After each build the host compares the candidate's surface
+with the original's and checks the hand-off. While it finds
 something to fix, a repair round follows (at most two), or once a planning round (`replan`), which
 only writes `plan.md` and in which every helper is refused. Each round has its own budget and
 deadline. `candidate.blend` and the other files carry over from one round to the next. The host

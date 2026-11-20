@@ -52,15 +52,14 @@ What works (the notes hold the main results; git history holds the run logs):
   and 4b).
 - Stage B: GPT-6-Astra and Claude Opus 5.5 refine meshes under the controller's deadline (note 5).
 - Physics: VoMP v1.1 materials and MJCF, USD and URDF models (note 9).
-- The physics check, the repair rounds and the surface check (note 5): built, with tests on the Mac in
-  which Blender, the agent and the judge are stand-ins.
+- The repair rounds and the surface check (note 5): built, with tests on the Mac in which Blender and
+  the agent are stand-ins. The physics judge (a VLM that judged MuJoCo settling frames) was removed on
+  2026-11-20.
 - Metric scale: MV-SAM3D is scale-equivariant, and the `lidar` stage works in the tests' stand-in jobs (note 12).
 
 Not verified yet:
 - No rosbag job is recorded end to end.
-- No rigid job has run the physics check and the repair rounds on ICE with a real agent. The settling
-  test and the judge ran on ICE only in jobs with moving parts, before those features were removed
-  (note 11).
+- No rigid job has run the repair rounds on ICE with a real agent.
 - No rigid refinement with Claude Fable 5.2 has run yet.
 - The masses are not checked against a scale, and no step estimates friction (note 9).
 - No real rosbag with a LiDAR and no real Stray capture has run (note 12).
@@ -87,7 +86,7 @@ flowchart TB
     lidar["lidar: metric scale (optional, note 12)"]
     select["select: the views, then the review"]
     stageA["sam3d (MV-SAM3D), vomp (VoMP materials), place (notes 2, 4b and 9)"]
-    agent["agent: GPT-6-Astra, Claude Opus 5.5 or Claude Fable 5.2 in Blender, with the physics check (note 5)"]
+    agent["agent: GPT-6-Astra, Claude Opus 5.5 or Claude Fable 5.2 in Blender, with repair rounds (note 5)"]
     physics["align, transfer materials, mjcf, usd, urdf (note 9)"]
     package["turntable (optional 360 video), then package: results.zip"]
   end
@@ -104,11 +103,11 @@ flowchart TB
 | MV-SAM3D | github.com/devinli123/MV-SAM3D (HEAD `abb04b5`) | SAM License | Stage A |
 | Depth Anything 3 | github.com/ByteDance-Seed/Depth-Anything-3, HF `depth-anything/DA3NESTED-GIANT-LARGE-1.1` | code Apache-2.0, weights CC BY-NC 4.0 | cameras and depth for MV-SAM3D |
 | SAM 3 | HF `facebook/sam3` through transformers 5.20.0 (`Sam3Model`) | SAM License, gated (access granted) | masks from a text prompt, when the dataset has none (note 3) |
-| GPT-6-Astra | OpenAI API, model `gpt-6-astra` | API key | the default agent, and its job's VLM that judges the physics frames (note 5) |
+| GPT-6-Astra | OpenAI API, model `gpt-6-astra` | API key | the default agent (note 5) |
 | Codex CLI 0.162.1 | npm `@openai/codex@0.162.1` | Apache-2.0 | runs GPT-6-Astra |
-| Claude Opus 5.5 | Anthropic API, model `claude-opus-5-5` | API key | the alternative agent, and its job's VLM (note 5) |
-| Claude Fable 5.2 | Anthropic API, model `claude-fable-5-2` | API key, 30-day data retention | the second Claude agent, and its job's VLM (note 5) |
-| anthropic 1.15.0 | pip, in `envs/sam3d` and `envs/web` | MIT | runs Claude Opus 5.5 and Claude Fable 5.2 (`harpor/agent/claude_agent.py`), the physics judge of `harpor/agent/vlm.py` (note 5) and the web app's key check |
+| Claude Opus 5.5 | Anthropic API, model `claude-opus-5-5` | API key | the alternative agent (note 5) |
+| Claude Fable 5.2 | Anthropic API, model `claude-fable-5-2` | API key, 30-day data retention | the second Claude agent (note 5) |
+| anthropic 1.15.0 | pip, in `envs/sam3d` and `envs/web` | MIT | runs Claude Opus 5.5 and Claude Fable 5.2 (`harpor/agent/claude_agent.py`), `harpor/agent/vlm.py` (unused since the physics judge was removed) and the web app's key check |
 | Blender 5.2.2 LTS | blender.org | GPL | agent workspace and review renders |
 | trimesh, scipy | pip | open source | GLB handling, the surface check and the material transfer |
 | PyAV 19.0.1, rosbags 0.11.8 (with ruamel.yaml 0.19.1), FastAPI 0.143.2, uvicorn 0.54.0 | pip | BSD (the PyAV wheel bundles FFmpeg, LGPL), Apache-2.0, MIT, BSD | the web app: video and rosbag decoding, the calibration file (note 12), the server (note 10) |
@@ -496,17 +495,17 @@ apptainer exec --nv --containall --no-mount bind-paths \
   app's 360 video encodes these frames (note 10). `python3 harpor/agent/loop_trace.py RUN_DIR` prints
   a session's loop in order.
 
-#### Rounds and the physics check
+#### Rounds
 
-A web-app session runs in rounds with physics supervision, after PhysAg3D (arXiv 2610.39924v1).
-`agent_step` calls `physics_review.prepare`, which writes `control/physics/`: `config.json` (the up hint,
-the agent and the key file), `summary.json` and the VoMP voxels of `run/vomp`, moved into W with the
-placement's pose. It also writes `work/input/physics.json`, the materials and the mass recomputed on
-`original.glb`, and it adds `physics_review.GUIDANCE` to the prompt. `controller.has_rounds` is true when
-`control/physics/config.json` exists, so a session that the controller runs without it (by hand or in a
-test) is one round, as before. `steps.command` exports `GATOR_MUJOCO=$G/envs/mujoco/bin/python` for the
-agent stage. The variable is split like a shell, as `GATOR_BLENDER` is. `agent_step` stops before the
-session runs when it does not name a python that exists, because every check would then be inconclusive.
+A web-app session runs in rounds, after PhysAg3D (arXiv 2610.39924v1). `agent_step` calls
+`prepare_session(..., rounds=True)`, which writes `control/rounds.json` and adds `prompts.GUIDANCE` to the
+prompt. `controller.has_rounds` is true when `control/rounds.json` exists, so a session that the
+controller runs without it (by hand or in a test) is one round.
+
+Until 2026-11-20 the rounds also ran a physics judge (`harpor/agent/physics_review.py` and
+`harpor/physics/supervise.py`): the host let each candidate settle for 3 s in MuJoCo with the VoMP
+materials, and the job's VLM judged the frames against the photo. It only judged geometry and could
+not check mass or friction, so it was removed. Commit f6e72c4 still has it.
 
 Each round is a new agent process with its own tool server, budget and deadline, and with no memory of
 the other rounds, so its prompt carries the whole task. The `round_start` event begins a round. The
@@ -530,8 +529,7 @@ session has at most 3 builds (the build and 2 repairs) and 1 replan, and a repla
 replan comes once, after a structural round, while builds are left, and a repair always follows it.
 Any other failure gets a repair. The only structural finding is `surface_identity`, which counts only
 while `surface.ENFORCE` is on. So with today's settings no replan runs, and the agent time is at most
-600 + 450 + 450 = 1500 s. Each build or repair can add up to 600 s off the clock for exports and up to
-600 s for the physics check.
+600 + 450 + 450 = 1500 s. Each build or repair can add up to 600 s off the clock for exports.
 
 After each build or repair, `check_round` runs these steps on the host:
 1. `select_deliverable` on the round's events picks the round's GLB. `store_candidate` copies it to
@@ -542,31 +540,14 @@ After each build or repair, `check_round` runs these steps on the host:
 2. `validate.check` reads the stored GLB once without following a link, hashes it, copies it to
    `control/validate/<sha16>/candidate.glb` and runs the surface check against `root/original.glb`
    (below). The report is cached there unless a step failed.
-3. `physics_review.check` runs `GATOR_MUJOCO -m harpor.physics.supervise` from the repository with
-   `PYTHONSAFEPATH=1` (and `MUJOCO_GL=egl` on Linux), for at most 600 s. `supervise` turns the
-   candidate upright (`align --up-near` at the up hint, `--x footprint`), moves the pre-refinement
-   VoMP materials onto it (`material_transfer.transfer`), builds an MJCF without textures
-   (`mjcf.build(..., textures=False)`) and lets it settle for 3 s under gravity on the floor. Every
-   0.25 s it records the speed and the COM and renders a 400 x 300 frame. It writes a GIF clip, a
-   contact sheet of 4 frames, the transferred materials and MuJoCo's warnings to `report.json`, with
-   the candidate's sha256.
-4. The judge (`physics_review.judge`, `harpor/agent/vlm.py`) is the job's agent model: GPT-6-Astra
-   through the OpenAI Responses API, or Claude Opus 5.5 or Claude Fable 5.2 through the `anthropic`
-   SDK, with the job's key. It gets view 0's photo above the contact sheet, the manifest's object line,
-   and the materials and settling numbers as JSON. It answers pass, fail or inconclusive, with a reason
-   and findings that each have a why and a repair. An answer that does not parse gets one retry. A
-   MuJoCo warning while settling makes the outcome fail, whatever the judge says. The host copies the
-   sheet and the clips to `work/evidence/physics_<sha16>/` for the next agent.
-5. `physics_review.apply` adds a `physics_implausible` finding for each finding of a fail, and
-   `physics_unassessed` for an inconclusive judgment. A missing simulation, a missing key or a request
-   that fails is inconclusive, never a pass. `validate.round_report` then adds `no_candidate` when the
-   round left no valid GLB, and `not_finished` when its verdict is not `complete` or `unchanged`. A host
-   step that raises becomes a `validation_error` finding, and a failure of the loop itself keeps the
-   rounds that ran. Cancel still ends the session.
+3. `validate.round_report` adds `no_candidate` when the round left no valid GLB, and `not_finished`
+   when its verdict is not `complete` or `unchanged`. A host step that raises becomes a
+   `validation_error` finding, and a failure of the loop itself keeps the rounds that ran. Cancel
+   still ends the session.
 
 The report goes to `work/evidence/round_NN.json` for the next agent and into the candidate's
 `report.json`. `validate.feedback` turns it into at most 6000 characters for the next prompt, structural
-findings first. The judge's and the agent's text appear in it only as JSON, which `json.dumps` keeps
+findings first. The agent's text appears in it only as JSON, which `json.dumps` keeps
 ASCII.
 
 `validate.SCOPE` gives each finding a scope (PhysAg3D, section A.3):
@@ -574,13 +555,11 @@ ASCII.
 | Scope | Findings |
 |---|---|
 | structural | `surface_identity` |
-| local | `no_candidate`, `not_finished`, `physics_implausible`, `surface_uv`, `surface_material`, `surface_deleted`, `surface_flipped`, `surface_error`, `validation_error` |
-| none (no agent can help) | `physics_unassessed` |
+| local | `no_candidate`, `not_finished`, `surface_uv`, `surface_material`, `surface_deleted`, `surface_flipped`, `surface_error`, `validation_error` |
 
 A round is structural with a structural finding, else local with a local one, else none. Surface
 findings count only while `surface.ENFORCE` is on, and it is off. A round passes when no finding that
-counts is left, so a pass needs the judge's pass and the agent's `complete` or `unchanged`. A round with
-only `physics_unassessed` has scope none, so the session ends there without a pass.
+counts is left, so with `surface.ENFORCE` off a pass needs only the agent's `complete` or `unchanged`.
 
 *Candidates and selection.* At the end, `select_candidate` delivers the best eligible stored candidate.
 A candidate is eligible when its copy still has its sha256, passes `check_glb` and `check_size`, and has
@@ -601,8 +580,8 @@ exit, wall_s, candidate, outcome, scope, and findings with only code, measured a
 *Evidence* (`harpor/agent/evidence.py`). `control/evidence.json` is written after every round and once
 more with the choice, so a session that stops keeps it. It holds `version`, `object`, `diagonal_m`,
 `candidates`, `rounds` and `selected` (the choice, its rank and the candidates that were not
-eligible). Each candidate holds the agent's verdict, reason and limitations, the surface report, the
-physics review, and its findings, errors, scope and outcome. `agent_step` publishes it to
+eligible). Each candidate holds the agent's verdict, reason and limitations, the surface report, and
+its findings, errors, scope and outcome. `agent_step` publishes it to
 `J/agent/evidence.json` in a `finally`, scrubbed of the key and with every number that is not finite as
 null. The web app serves it, and `results.zip` holds it as `evidence.json`, except when the controller
 found the key in `control/evidence.json`.
@@ -623,9 +602,7 @@ False, and every surface finding is report-only. It shows in the report and in t
 decides nothing.
 
 *Tested so far.* On the Mac the tests drive the rounds with `harpor.agent.fake_agent` in place of
-Blender and the agent, and with a stand-in judge. No rigid job has run the rounds on ICE with a real
-agent and real Blender, so the time of the physics check on ICE and the judge's answers on rigid
-objects are not measured.
+Blender and the agent. No rigid job has run the rounds on ICE with a real agent and real Blender.
 
 #### The sandbox: Apptainer or docker
 
@@ -725,8 +702,7 @@ read-only. The Claude shell (`--net --network none`) and the Blender containers 
 - The claude agent can also run `claude-fable-5-2` (`tools.CLAUDE_MODELS`). The web app's agent `fable`,
   `run.py --agent fable` and `prepare_session(..., agent="claude", model="claude-fable-5-2")` pick it.
   `agent.json` records the model, and `claude_command` passes it as `--model`. The requests are the same
-  as for Opus 5.5; Fable 5.2 accepts all of them. The same model judges the physics frames, as for the other
-  agents, and the web app checks the key against it.
+  as for Opus 5.5; Fable 5.2 accepts all of them. The web app checks the key against it.
 - The web app runs Fable at effort `high`, not `xhigh`. Anthropic advises `high` for Fable 5.2, because its
   `xhigh` turns run longer and use many more tokens, and the session keeps the 600 s budget of a build round.
 - Prices in `tools.PRICES`: $8 input, $40 output, $0.20 cache read, $10 for a 5-minute and $16 for a
@@ -750,7 +726,7 @@ The photo-match scores were removed. `harpor/eval/photo_match.py` is in commit 9
 | `envs/web` (micromamba) | Python 3.12, fastapi 0.143.2, uvicorn 0.54.0, av 19.0.1, rosbags 0.11.8, anthropic 1.15.0 (note 10) | The web app's server; every stage runs in its own env. Built by `setup/web.sh` |
 | `envs/sam3seg` (micromamba) | Python 3.12, torch 2.14.1+cu130, transformers 5.20.0 (note 3) | SAM 3 masks; transformers 5.20 needs torch 2.6 or newer, so it cannot go into `envs/sam3d`. Built by `setup/sam3seg.sh` |
 | `sif/harpor-agent.sif` (Apptainer) | Node.js 24.21.0, Codex CLI 0.162.1, Blender 5.2.2 | Built from `containers/harpor-agent.def` with `--fakeroot` by `setup/agent.sh` (note 5); run with `--nv` for Cycles OptiX. The docker image has these tools inside instead |
-| `envs/mujoco` (micromamba) | Python 3.11, mujoco 4.0.0 (3.16.0 until 2026-11-11), coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF, USD and URDF export, and the settling test of the agent's rounds (`harpor.physics.supervise`, note 5); no pytest. Built by `setup/mujoco.sh` (first run as a recipe on 2026-11-08) |
+| `envs/mujoco` (micromamba) | Python 3.11, mujoco 4.0.0 (3.16.0 until 2026-11-11), coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF, USD and URDF export, ; no pytest. Built by `setup/mujoco.sh` (first run as a recipe on 2026-11-08) |
 | `envs/vomp11` (micromamba) | VoMP v1.1 (641a22d) in `VoMP/`, Python 3.11, torch 2.4.0+cu121, bpy 4.2.0, kaolin 0.18.0, spconv-cu121 2.3.8 (note 9) | Built by `setup/vomp11.sh` |
 
 `bash setup/install.sh` builds all of them in order and then the weights: `setup/web.sh`, `setup/sam3d.sh`,
@@ -805,10 +781,7 @@ final geometry and scale. The transfer is approximate for geometry that the agen
 stage writes `physics/summary.json` through this transfer and does not run VoMP again, so a rerun of the
 agent or of the exports keeps the early predictions.
 
-The agent's physics check (note 5) uses the same predictions. `physics_review.prepare` copies them into
-host-owned session files and shows the agent their summary, and `harpor.physics.supervise` transfers
-them onto each candidate before it settles under gravity in MuJoCo. These checks show plausibility, not
-a measured mass. Linux headless rendering uses `MUJOCO_GL=egl` by default.
+Linux headless rendering uses `MUJOCO_GL=egl` by default.
 
 The commands below also remain available for standalone prediction and export workflows.
 
@@ -882,10 +855,8 @@ Setup traps (`setup/vomp11.sh` builds `envs/vomp11`, and `setup/mujoco.sh` build
   steps, so a machine without the libraries needs them first. ICE nodes have them.
 - `setup/mujoco.sh` was rebuilt on 2026-11-01 from the installed versions in `envs/mujoco`, and it first
   ran as a recipe on 2026-11-08 (note 7). It pins the packages that HARPOR imports, and pip picks their
-  dependencies. Its last check drops a free box on a floor, as the physics check settles a candidate,
-  and fails when the box warns or does not come to rest on the floor. Run the script once with
+  dependencies. Its last check drops a free box on a floor and fails when the box warns or does not come to rest on the floor. Run the script once with
   `HARPOR_ROOT` set to a scratch folder before you run it on the real root.
-- `envs/mujoco` also runs the settling test of the agent's rounds (`harpor.physics.supervise`, note 5).
 - VoMP's `install_env.sh` asks for `spconv-cu120==2.3.8` with CUDA 12.1, but spconv-cu120 stops
   at 2.3.6 on PyPI. We use `spconv-cu121==2.3.8`.
 - The renders use Cycles on the GPU with no CPU fallback, so step 2 must run on a GPU node.
@@ -906,7 +877,7 @@ the whole pipeline. The stages (`steps.NAMES`, in order) are `topics` (a bag onl
 `masks` (SAM 3), `prep`, `da3` (Depth Anything 3), `lidar` (the metric scale, optional, note 12),
 `select` (the views; the job can pause for review here), `sam3d` (MV-SAM3D), `vomp` (VoMP materials on
 the canonical mesh), `place` (the pose fit), `agent` (optional: GPT-6-Astra, Claude Opus 5.5 or Claude
-Fable 5.2 with the physics check, note 5), `align` (upright, and the materials moved onto the final
+Fable 5.2 with repair rounds, note 5), `align` (upright, and the materials moved onto the final
 mesh), `mjcf`, `usd`, `urdf`, `turntable` (the 360 video, optional) and `package` (`results.zip`). The
 GPU stages are `masks`, `da3`, `sam3d`, `vomp`, `agent` and `turntable` (`steps.GPU`). Only a failure of
 `turntable` leaves the job usable (`steps.OPTIONAL`).
@@ -979,7 +950,7 @@ terminal command as a process of its own.
    the sharpest frame within 0.25 s). Type the object noun for SAM 3, and pick the agent:
    GPT-6-Astra (asks for an OpenAI key), Claude Opus 5.5 or Claude Fable 5.2 (asks for an Anthropic
    key, checked against that model with the `anthropic` SDK), or none (no key; the agent stage is skipped and physics uses the Stage A
-   mesh). The agent's model is also the VLM that judges the physics frames, so it takes the same key.
+   mesh).
    For a rosbag or a Stray capture, the box "Use LiDAR for metric scale" turns on the `lidar` stage
    (note 12). It is on by default for a Stray capture. For a bag, the user picks the LiDAR topic,
    sees how TF links it to the camera, and can upload a calibration file (`.yaml`, `.yml` or `.json`,
@@ -1020,7 +991,7 @@ terminal command as a process of its own.
    instance or "not in frame", and set view 0. Then Build.
 6. MV-SAM3D, then `vomp` on the canonical mesh (note 9), then `place`.
 7. The agent runs if it is on and the mean mask IoU is at least 0.5. It refines `posed.glb` in rounds
-   with the physics check: a build round of 600 s, and repair rounds while the check fails (note 5).
+   with the host's check: a build round of 600 s, and repair rounds while the check fails (note 5).
    When the agent is off or skipped, or gives no usable GLB, physics uses `posed.glb`. Physics also
    uses `posed.glb` when the agent's GLB does not keep the size of the GLB it started from
    (`physics_auto.pick_glb`, `controller.check_size`). `physics/up.json`
@@ -1243,7 +1214,7 @@ terminal command as a process of its own.
 the agent's Codex container shares the docker network, so every request
 needs the login cookie (a random token), except the help page and its stylesheet, which hold no
 job data. The API key lives only in the server's memory. For the
-agent stage, which also runs the physics judge, it is written to a 0600 file
+agent stage, it is written to a 0600 file
 in a 0700 folder under `/dev/shm` and deleted afterwards.
 It is never written to `job.json`, logs or argv. Files the controller lists in `key_found_in` are
 never served or zipped, and the key is scrubbed from the agent's result. The key travels unencrypted

@@ -1339,9 +1339,8 @@ async function renderResults(job) {
   $("#resultsbody").classList.toggle("onefig", !refined);  // a wide screen puts the facts beside it
   // With the agent off there is no agent viewer; the Agent row of the facts says so.
   fill($("#viewers"), viewer("run/posed.glb", "Posed mesh"), refined);
-  // The evidence alone may fail to read: its rows are left out then, not every row.
-  const [place, phys, mj, lid, ev] = await Promise.all([json("run/placement.json"), json("physics/summary.json"),
-    json("physics/mjcf/mjcf.json"), json("pool/lidar.json"), json("agent/evidence.json").catch(() => null)]);
+  const [place, phys, mj, lid] = await Promise.all([json("run/placement.json"), json("physics/summary.json"),
+    json("physics/mjcf/mjcf.json"), json("pool/lidar.json")]);
   // [label, value]: what each one means is in help.html.
   const rows = [], num = (x, d = 3) => x == null ? "?" : Number(x).toPrecision(d);
   // A position in m, to the mm. Rounding first turns float noise such as -1.51e-18 into 0.000, not -0.000.
@@ -1353,7 +1352,7 @@ async function renderResults(job) {
     rows.push(["Agent", `${ran} (${a.model})`]);
     rows.push(["Agent verdict", `${VERDICT[a.verdict] || a.verdict} (${a.source})`], ["Agent reason", a.reason || ""]);
     for (const l of a.limitations || []) rows.push(["Limitation", l]);
-    rows.push(...roundRows(a, ev));
+    rows.push(...roundRows(a));
     if (a.tokens) {
       const t = a.tokens;
       rows.push(["Agent tokens", `${count(t.input_tokens)} input, ${count(t.output_tokens)} output, ` +
@@ -1382,14 +1381,11 @@ function metricScale(place, rec, job) {
   const shown = facts.filter(Boolean);
   return `×${m.toFixed(3)} from LiDAR` + (shown.length ? ` (${shown.join(", ")})` : "");
 }
-// The rows of a session in rounds (controller.run_session) and of the surface check: the rounds, the physics check of
-// the delivered candidate (agent/evidence.json, ev), and how much of the original's surface the result keeps. A key
-// that the result lacks gives no row: old jobs may have none of them.
-function roundRows(a, ev) {
+// The rows of a session in rounds (controller.run_session) and of the surface check: the rounds and how much of the
+// original's surface the result keeps. A key that the result lacks gives no row: old jobs may have none of them.
+function roundRows(a) {
   const rows = [], rounds = Array.isArray(a.rounds) ? a.rounds.filter((r) => r && typeof r === "object") : [];
   if (rounds.length) rows.push(["Rounds", roundsText(rounds, a.candidate)]);
-  const pr = chosenReview(ev);
-  if (pr) rows.push(["Physics check", `${pr.outcome}${pr.reason ? ": " + pr.reason : ""}`]);
   if (a.surface && typeof a.surface === "object") rows.push(["Surface retained", surfaceText(a.surface)]);
   return rows;
 }
@@ -1400,13 +1396,6 @@ function roundsText(rounds, cand) {
   const sent = cand && typeof cand === "object" ? `; delivered round ${cand.round}'s candidate`
     : cand === null ? "; no candidate delivered" : "";
   return `${rounds.length} (${each})${sent}`;
-}
-// The physics review of the candidate that the session delivered (evidence.json selected), else null.
-function chosenReview(ev) {
-  const sel = ev && ev.selected, cands = ev && Array.isArray(ev.candidates) ? ev.candidates : [];
-  const c = sel && sel.version != null ? cands.find((x) => x && x.version === sel.version) : null;
-  const pr = c && c.physics_review;
-  return pr && typeof pr === "object" && typeof pr.outcome === "string" ? pr : null;
 }
 // "99.5% kept: 98.0% as it was, 1.5% changed", with the share whose UVs cannot be checked and the surface findings.
 function surfaceText(sf) {

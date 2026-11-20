@@ -11,6 +11,12 @@ CHANGES = [
 ]
 # The sentence of the repair right after a planning round, and only there: that plan came from the same check.
 PLAN = " The planning round before this one wrote /work/plan.md from the same check: follow it."
+# Added to the first prompt of a session with rounds and to every round prompt (controller.prepare_session, run_rounds).
+GUIDANCE = """
+This session runs in rounds. After each build or repair the host checks the candidate against the
+original and writes the check to evidence/round_NN.json. A failed check feeds a repair round. Repair
+the reported issues while preserving the photographed object, and do not change the object's scale.
+"""
 
 
 def original():
@@ -48,9 +54,9 @@ def round_prompt(kind, budget_s, feedback, best, evidence, planned=False):
     """
     if kind == "replan":
         return (f"This is a planning round with {budget_s:.0f} seconds. Do not edit the mesh or call helpers. "
-                f"Inspect {evidence} and write a concrete physics repair plan to /work/plan.md. "
+                f"Inspect {evidence} and write a concrete repair plan to /work/plan.md. "
                 "Preserve the object's photographed shape and scale.\n" + feedback)
-    return (load() + f"\nThis is a physics repair round with a {budget_s:.0f} second budget. The deadline in "
-            "run_budget.json takes precedence. Continue from candidate.blend. Inspect the simulation evidence "
-            f"in {evidence}, fix the reported physical defects, then review and finish complete (or unchanged "
+    return (load() + f"\nThis is a repair round with a {budget_s:.0f} second budget. The deadline in "
+            "run_budget.json takes precedence. Continue from candidate.blend. Inspect the host's check "
+            f"in {evidence}, fix the reported defects, then review and finish complete (or unchanged "
             "if no repair is supported)." + (PLAN if planned else "") + "\n" + _best(best) + "\nHost feedback:\n" + feedback)

@@ -10,7 +10,7 @@ before the deadline, also when it fails, but not after a usage error. Paths in o
 relative to work/, so they read the same on the host and in the container. export_glb runs outside
 the time budget (OFF_CLOCK).
 
-A session with physics supervision runs in rounds (controller.run_rounds), each with a new agent. The
+A session with rounds runs them with controller.run_rounds, each with a new agent. The
 round_start event begins one, and the deadline, the finish that ends a round and its deliverable come
 from the events since then (round_events). In a planning round (kind replan) every helper is refused.
 
@@ -55,8 +55,7 @@ BLENDER_SCRIPTS = Path(__file__).resolve().parent / "blender"
 # CLAUDE_MODEL (Claude Opus 5.5) by default, or FABLE_MODEL (Claude Fable 5.2).
 CODEX_MODEL, CLAUDE_MODEL, FABLE_MODEL = "gpt-6-astra", "claude-opus-5-5", "claude-fable-5-2"
 CLAUDE_MODELS = (CLAUDE_MODEL, FABLE_MODEL)  # the models that the claude agent takes
-# The web app's agents (steps.AGENTS, without "none") and the model of each one. The same model also
-# judges the physics (physics_review).
+# The web app's agents (steps.AGENTS, without "none") and the model of each one.
 MODELS = {"astra": CODEX_MODEL, "opus": CLAUDE_MODEL, "fable": FABLE_MODEL}
 EFFORTS = ("low", "medium", "high", "xhigh", "max")  # Claude's effort levels
 FALLBACK_BETA = "server-side-fallback-2026-07-01"  # Claude's server-side refusal fallback

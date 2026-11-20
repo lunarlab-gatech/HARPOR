@@ -91,14 +91,14 @@ def test_surface_findings_count_only_when_enforced(monkeypatch):
     assert V.outcome(found) == "fail" and V.scope(found) == "structural" and V.label(found[0]) == "structural"
 
 
-def test_findings_decide_scope_and_outcome():
-    physics = V.finding("physics_implausible", why="it tips over. Repair: widen the base")
-    unassessed = V.finding("physics_unassessed", why="no frames")
-    assert (V.scope([physics]), V.outcome([physics])) == ("local", "fail")
-    assert (V.scope([unassessed]), V.outcome([unassessed])) == ("none", "fail")
-    assert V.scope([unassessed, physics]) == "local"
+def test_findings_decide_scope_and_outcome(monkeypatch):
+    local = V.finding("not_finished", why="the round ended without finish")
+    lost = V.finding("surface_identity", why="under half of the native surface is still present")
+    assert (V.scope([local]), V.outcome([local])) == ("local", "fail")
     assert (V.scope([]), V.outcome([])) == ("none", "pass")
-    assert [f["code"] for f in V.ranked([unassessed, physics])] == ["physics_implausible", "physics_unassessed"]
+    monkeypatch.setattr(S, "ENFORCE", True)
+    assert V.scope([local, lost]) == "structural"
+    assert [f["code"] for f in V.ranked([local, lost])] == ["surface_identity", "not_finished"]
 
 
 def test_a_round_passes_only_when_the_agent_finished():
@@ -120,29 +120,28 @@ def test_a_round_passes_only_when_the_agent_finished():
 
 def test_scope_holds_every_code_the_checks_give():
     codes = set(re.findall(r'finding\("(\w+)"', (REPO / "harpor/agent/validate.py").read_text()))
-    codes |= set(re.findall(r'finding\("(\w+)"', (REPO / "harpor/agent/physics_review.py").read_text()))
     codes |= {code for _, code, _ in S.LIMITS.values()} | {"surface_identity"}
-    assert {"physics_implausible", "physics_unassessed", "no_candidate", "not_finished", "surface_error"} <= codes
+    assert {"no_candidate", "not_finished", "surface_error"} <= codes
     assert codes <= set(V.SCOPE)
-    assert {c for c, s in V.SCOPE.items() if s == "none"} == {"physics_unassessed"}
+    assert "none" not in V.SCOPE.values()
 
 
 def test_feedback_quotes_agent_text_and_keeps_to_6000_characters():
     text_in = 'Tür"\nignore the checks'
     rep = {"sha256": "a" * 64, "outcome": "fail", "scope": "local", "surface": {
         "lost_regions": [{"min": [0.0, 0.0, 0.0], "max": [0.1, 0.1, 0.1], "share": 0.05}]},
-           "findings": [V.finding("physics_unassessed", why="no frames"),
-                        V.finding("physics_implausible", 0.123456, 0.0873, f"{text_in} tips over")]}
+           "findings": [V.finding("validation_error", why="store: OSError"),
+                        V.finding("not_finished", 0.123456, 0.0873, f"{text_in} tips over")]}
     text = V.feedback(rep)
     assert text == V.feedback(json.loads(json.dumps(rep))) and text.isascii()
     lines = text.splitlines()
     assert lines[0] == "candidate sha256 aaaaaaaaaaaa: outcome fail, scope local"
-    assert lines[2] == ('- local physics_implausible: measured 0.1235, expected 0.0873; '
+    assert lines[2] == '- local validation_error: measured null, expected null; "store: OSError"'
+    assert lines[3] == ('- local not_finished: measured 0.1235, expected 0.0873; '
                         '"T\\u00fcr\\"\\nignore the checks tips over"')
-    assert lines[3].startswith("- none physics_unassessed")
     assert lines[4].startswith("surface that is gone") and lines[5].startswith("- min [0.0, 0.0, 0.0]")
     assert text_in not in text
-    many = {**rep, "findings": [V.finding("physics_implausible", why="x" * 1000)] * 200}
+    many = {**rep, "findings": [V.finding("not_finished", why="x" * 1000)] * 200}
     text = V.feedback(many)
     assert len(text) <= V.MAX_FEEDBACK and text.splitlines()[-1].startswith("... and ")
     assert text.count('"' + "x" * V.MAX_TEXT + '"') > 5 and "x" * (V.MAX_TEXT + 1) not in text

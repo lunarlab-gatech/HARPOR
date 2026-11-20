@@ -1019,6 +1019,17 @@ def test_paper_prompt_loads_with_recorded_changes(tmp_path):
     write_glb(tmp_path / "original.glb")
     C.prepare_session(tmp_path / "s", None, [], source="s", metric=False, original=tmp_path / "original.glb")
     assert (tmp_path / "s" / "session" / "prompt.txt").read_text(encoding="utf-8") == PR.load()
+    assert not C.has_rounds(tmp_path / "s")
+
+
+def test_prepare_session_turns_the_rounds_on(tmp_path):
+    """rounds=True writes control/rounds.json, which has_rounds reads, and adds the round guidance to the prompt."""
+    write_glb(tmp_path / "original.glb")
+    C.prepare_session(tmp_path / "s", None, [], source="s", metric=False, original=tmp_path / "original.glb",
+                      rounds=True)
+    assert C.has_rounds(tmp_path / "s")
+    assert json.loads((tmp_path / "s" / "control" / "rounds.json").read_text()) == {"max_builds": C.MAX_BUILDS}
+    assert (tmp_path / "s" / "session" / "prompt.txt").read_text(encoding="utf-8") == PR.load() + PR.GUIDANCE
 
 
 def test_review_passes_the_detail_rig(tmp_path, monkeypatch):
@@ -1624,16 +1635,9 @@ def test_tool_server_does_not_import_from_the_work_folder(tmp_path):
     assert not marker.exists()
 
 
-# ---- rounds: a refinement with physics supervision (controller.run_rounds) ----
+# ---- rounds: a refinement in rounds (controller.run_rounds) ----
 
 READ_PROMPT = {"do": "read_prompt"}
-# The physics judge's answers (physics_review.apply's form), by outcome. fake_physics gives them in order.
-JUDGMENTS = {
-    "pass": {"outcome": "pass", "reason": "it rests on its base", "findings": []},
-    "fail": {"outcome": "fail", "reason": "it tips over", "findings": [{"why": "it tips onto its side",
-                                                                       "repair": "widen the base"}]},
-    "inconclusive": {"outcome": "inconclusive", "reason": "Physics supervision unavailable: OSError", "findings": []},
-}
 
 
 def exported(k):
@@ -1650,38 +1654,27 @@ LOST = [{"code": "surface_identity", "measured": 0.0, "expected": "at least 0.5"
 SURFACE = [f["code"] for f in LOST]
 
 
-ROUND_SESSIONS = {  # name: (the agent's rounds, the judge's outcomes in order, the last one repeated)
-    "rounds_pass": ([[READ_PROMPT, edit(1.2), REVIEW, finish("complete")]], ["pass"]),
-    "rounds_repair": ([exported(0), [READ_PROMPT, edit(1.25), REVIEW, finish("complete")]], ["pass"]),
-    "rounds_physics": ([[edit(1.2), REVIEW, finish("complete")], [READ_PROMPT, edit(1.3), REVIEW, finish("complete")]],
-                       ["fail", "pass"]),
-    "rounds_cap": ([exported(0), exported(1), exported(2), [CRASH]], ["pass"]),
-    # Round 1 finishes, but the judge fails it; round 2 only exports; round 3 hands off nothing.
-    "rounds_regress": ([[edit(1.2), REVIEW, finish("complete")], exported(1), [READ_PROMPT, CRASH]], ["fail"]),
-    "rounds_unchanged": ([[REVIEW, finish("unchanged")]] * 3, ["pass"]),
-    "rounds_inconclusive": ([[edit(1.2), REVIEW, finish("complete")], [CRASH]], ["inconclusive"]),
+ROUND_SESSIONS = {  # name: the agent's rounds
+    "rounds_pass": [[READ_PROMPT, edit(1.2), REVIEW, finish("complete")]],
+    "rounds_repair": [exported(0), [READ_PROMPT, edit(1.25), REVIEW, finish("complete")]],
+    "rounds_cap": [exported(0), exported(1), exported(2), [CRASH]],
+    # Round 1 finishes as needs_review; round 2 only exports; round 3 hands off nothing.
+    "rounds_regress": [[edit(1.2), REVIEW, finish("needs_review")], exported(1), [READ_PROMPT, CRASH]],
+    "rounds_unchanged": [[REVIEW, finish("unchanged")]] * 3,
     # Round 2 reviews round 1's scene again, unchanged, and finishes it complete: the same bytes.
-    "rounds_review_then_pass": ([[edit(1.2), REVIEW, finish("needs_review")], [REVIEW, finish("complete")]], ["pass"]),
+    "rounds_review_then_pass": [[edit(1.2), REVIEW, finish("needs_review")], [REVIEW, finish("complete")]],
 }
 
 
-def fake_physics(outcomes):
-    """A stand-in for physics_review.check(root, glb): the next of outcomes (the last one again past the end), with
-    the candidate's sha256, as the real check gives it. It logs each glb in root/control/judged.txt."""
-    def check(root, glb, timeout=600):
-        log = Path(root) / "control" / "judged.txt"
-        seen = log.read_text().splitlines() if log.is_file() else []
-        log.write_text("".join(f"{x}\n" for x in [*seen, os.path.relpath(glb, root)]))
-        return {**JUDGMENTS[outcomes[min(len(seen), len(outcomes) - 1)]], "asset_sha256": T.sha256(glb), "seconds": 0.0}
-    return check
+def mark_rounds(root):
+    """Turn rounds on for the session in root, as prepare_session(rounds=True) does."""
+    (Path(root) / "control" / "rounds.json").write_text(json.dumps({"max_builds": C.MAX_BUILDS}))
 
 
 def run_in_rounds(root, rounds, budget_s=LONG):
-    """A refinement session with physics supervision on (control/physics/config.json), with a fake agent script of
-    rounds. The caller replaces physics_review.check."""
+    """A refinement session in rounds (control/rounds.json), with a fake agent script of rounds."""
     work = prepare(root)
-    (work.parent / "control" / "physics").mkdir()
-    (work.parent / "control" / "physics" / "config.json").write_text("{}")
+    mark_rounds(work.parent)
     (root / "script.json").write_text(json.dumps({"rounds": rounds}))
     with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
         env = {**os.environ, "PYTHONPATH": str(REPO), "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
@@ -1691,13 +1684,9 @@ def run_in_rounds(root, rounds, budget_s=LONG):
 
 @pytest.fixture(scope="module")
 def round_runs(tmp_path_factory):
-    from harpor.agent import physics_review
-
     roots = {name: tmp_path_factory.mktemp(name) for name in ROUND_SESSIONS}
-    by_root = {str(roots[name] / "s"): fake_physics(outcomes) for name, (_, outcomes) in ROUND_SESSIONS.items()}
-    with pytest.MonkeyPatch.context() as m, ThreadPoolExecutor(len(ROUND_SESSIONS)) as ex:
-        m.setattr(physics_review, "check", lambda root, glb, timeout=600: by_root[str(root)](root, glb, timeout))
-        results = list(ex.map(lambda name: run_in_rounds(roots[name], ROUND_SESSIONS[name][0]), ROUND_SESSIONS))
+    with ThreadPoolExecutor(len(ROUND_SESSIONS)) as ex:
+        results = list(ex.map(lambda name: run_in_rounds(roots[name], ROUND_SESSIONS[name]), ROUND_SESSIONS))
     return {name: (roots[name] / "s", r) for name, r in zip(ROUND_SESSIONS, results)}
 
 
@@ -1705,9 +1694,9 @@ def codes(rec):
     return [f["code"] for f in rec["findings"]]
 
 
-def test_a_session_with_physics_supervision_runs_in_rounds(round_runs):
-    """A build that passes is the only round. The round is logged, run_budget.json names it, its check (the surface
-    and the physics judgment) goes to work/evidence/, and the result adds rounds and candidate. The deliverable is
+def test_a_session_with_rounds_runs_in_rounds(round_runs):
+    """A build that passes is the only round. The round is logged, run_budget.json names it, its check (the surface)
+    goes to work/evidence/, and the result adds rounds and candidate. The deliverable is
     the round's stored candidate, a read-only copy in control/candidates, with the agent's verdict and reason, since
     its round passed. The session folder keeps the layout of a session without rounds."""
     root, r = round_runs["rounds_pass"]
@@ -1724,10 +1713,9 @@ def test_a_session_with_physics_supervision_runs_in_rounds(round_runs):
                             "wall_s": r["timings"]["wall_s"], "outcome": "pass", "scope": "none", "findings": LOST,
                             "candidate": {"version": 1, "source": "finish", "verdict": "complete",
                                           "glb": "work/exports/001.glb", "sha256": sha}}]
-    assert (control / "judged.txt").read_text() == f"{glb}\n"  # the judge sees the stored copy
     stored = json.loads((control / "candidates" / "v01" / "report.json").read_text())
     assert stored["report"] == json.loads((work / "evidence" / "round_01.json").read_text())
-    assert stored["report"]["physics_review"]["outcome"] == "pass"
+    assert stored["report"]["outcome"] == "pass" and "physics_review" not in stored["report"]
     ev = json.loads((control / "evidence.json").read_text())
     assert (ev["object"], ev["diagonal_m"], ev["rounds"]) == ("sensor depth", pytest.approx(ORIGINAL_SIZE * 3 ** 0.5),
                                                               r["rounds"])
@@ -1736,7 +1724,7 @@ def test_a_session_with_physics_supervision_runs_in_rounds(round_runs):
     (c,) = ev["candidates"]
     assert (c["glb"], c["from"], c["sha256"], c["source"], c["agent_verdict"], c["outcome"]) == (
         glb, "work/exports/001.glb", sha, "finish", "complete", "pass")
-    assert c["physics_review"]["reason"] == "it rests on its base"
+    assert "physics_review" not in c
     assert (r["surface"]["shares"]["present"], r["surface"]["shares"]["deleted"]) == (0.0, pytest.approx(1.0))
     assert [x["code"] for x in r["surface"]["findings"]] == SURFACE and r["surface"]["blocks"] is False
     assert r["timings"]["budget_s"] == LONG
@@ -1753,10 +1741,8 @@ def test_a_session_with_physics_supervision_runs_in_rounds(round_runs):
 def test_a_local_failure_gets_a_repair_round(round_runs):
     """Round 1 leaves only an export: not_finished, a local finding, so a repair of 450 s follows. Its agent is new,
     and its prompt is the refinement prompt, then the round's budget, the evidence file, the best candidate so far,
-    the check's feedback and the physics guidance. Round 1's logs and prompt move to rounds/01/, and the result's
+    the check's feedback and the round guidance. Round 1's logs and prompt move to rounds/01/, and the result's
     exit is the last round's, with the timings summed."""
-    from harpor.agent.physics_review import GUIDANCE
-
     root, r = round_runs["rounds_repair"]
     session, work = root / "session", root / "work"
     assert [(x["round"], x["kind"], x["budget_s"], x["outcome"], x["scope"]) for x in r["rounds"]] == [
@@ -1772,13 +1758,13 @@ def test_a_local_failure_gets_a_repair_round(round_runs):
     assert t["budget_s"] == LONG + 450.0 and t["wall_s"] == pytest.approx(sum(x["wall_s"] for x in r["rounds"]))
     evidence = json.loads((work / "evidence" / "round_01.json").read_text())
     best = {"glb": "exports/001.glb", "round": 1, "passed": False}
-    prompt = PR.round_prompt("repair", 450.0, V.feedback(evidence), best, "evidence/round_01.json") + GUIDANCE
+    prompt = PR.round_prompt("repair", 450.0, V.feedback(evidence), best, "evidence/round_01.json") + PR.GUIDANCE
     assert (work / "prompt_seen.txt").read_text(encoding="utf-8") == prompt
     assert (session / "prompt.txt").read_text(encoding="utf-8") == prompt
     assert prompt.startswith(PR.load()) and "450 second budget" in prompt and "not_finished" in prompt
     assert "/work/exports/001.glb, from round 1; its check did not pass" in prompt
     assert sorted(p.name for p in (session / "rounds" / "01").iterdir()) == ["codex.jsonl", "prompt.txt", "stderr.log"]
-    assert (session / "rounds" / "01" / "prompt.txt").read_text(encoding="utf-8") == PROMPT
+    assert (session / "rounds" / "01" / "prompt.txt").read_text(encoding="utf-8") == PROMPT  # prepare() sets no rounds
     assert "$ export_glb" in (session / "rounds" / "01" / "codex.jsonl").read_text()
     assert "$ review" in agent_log(root) and "$ export_glb" not in agent_log(root)
     assert (work / "AGENTS.md").read_text() == (C.AGENT_DIR / "codex" / "AGENTS.md").read_text()
@@ -1787,22 +1773,6 @@ def test_a_local_failure_gets_a_repair_round(round_runs):
     starts = [e for e in T.read_events(root / "control") if e["event"] == "round_start"]
     assert [(e["round"], e["kind"]) for e in starts] == [(1, "build"), (2, "repair")]
     assert json.loads((root / "result.json").read_text()) == r
-
-
-def test_a_physics_failure_gets_a_repair_round(round_runs):
-    """The judge fails round 1's finished candidate: physics_implausible, with its repair advice in the next prompt.
-    The repair passes and is delivered."""
-    root, r = round_runs["rounds_physics"]
-    work = root / "work"
-    assert [(x["kind"], x["outcome"], x["scope"]) for x in r["rounds"]] == [("build", "fail", "local"),
-                                                                            ("repair", "pass", "none")]
-    assert r["rounds"][0]["findings"] == [*LOST, {"code": "physics_implausible", "measured": None, "expected": None}]
-    evidence = json.loads((work / "evidence" / "round_01.json").read_text())
-    assert evidence["physics_review"]["outcome"] == "fail"
-    assert [f["why"] for f in evidence["findings"] if f["code"] == "physics_implausible"] == [
-        "it tips onto its side Repair: widen the base"]
-    assert "widen the base" in (work / "prompt_seen.txt").read_text(encoding="utf-8")
-    assert (r["verdict"], r["glb"], edge(root / r["glb"])) == ("complete", "control/candidates/v02/candidate.glb", 1.3)
 
 
 def test_the_rounds_stop_after_three_builds(round_runs):
@@ -1838,30 +1808,29 @@ def test_loop_trace_shows_the_last_round(round_runs, capsys):
 
 
 def test_an_earlier_candidate_wins_when_a_repair_regresses(round_runs, tmp_path):
-    """Round 1 finishes, but the judge fails it; round 2 only exports, and round 3 hands off nothing, so it stores no
+    """Round 1 finishes as needs_review; round 2 only exports, and round 3 hands off nothing, so it stores no
     candidate. No round passed, so the session delivers round 1's finished candidate over round 2's newer export, as
     needs_review with the host's reason. harpor.webapp.steps.agent_glb finds it in a job folder as before."""
-    from harpor.agent.physics_review import GUIDANCE
     from harpor.webapp import steps
 
     root, r = round_runs["rounds_regress"]
     control, work = root / "control", root / "work"
     assert [(x["kind"], x["outcome"], x["candidate"]["version"], codes(x)) for x in r["rounds"]] == [
-        ("build", "fail", 1, [*SURFACE, "physics_implausible"]),
-        ("repair", "fail", 2, [*SURFACE, "physics_implausible", "not_finished"]),
+        ("build", "fail", 1, [*SURFACE, "not_finished"]),
+        ("repair", "fail", 2, [*SURFACE, "not_finished"]),
         ("repair", "fail", None, ["no_candidate"])]
     assert (r["source"], r["verdict"], r["glb"]) == ("finish", "needs_review", "control/candidates/v01/candidate.glb")
-    assert r["reason"] == "the host's check of candidate v01 (round 1) did not pass; open: physics_implausible"
-    assert r["limitations"] == ["physics_implausible"]
+    assert r["reason"] == "the host's check of candidate v01 (round 1) did not pass; open: not_finished"
+    assert r["limitations"] == ["not_finished"]
     assert r["candidate"] == {"version": 1, "round": 1, "kind": "build", "from": "work/exports/001.glb",
-                              "agent_verdict": "complete", "outcome": "fail",
+                              "agent_verdict": "needs_review", "outcome": "fail",
                               "why": "first of 2 eligible candidates; it beats v02 on source not an export"}
     assert sorted(p.name for p in (control / "candidates").iterdir()) == ["v01", "v02"]
     # Round 3's prompt points the agent at the best candidate, round 1's, not at round 2's newer export.
     evidence = json.loads((work / "evidence" / "round_02.json").read_text())
     best = {"glb": "exports/001.glb", "round": 1, "passed": False}
     assert (work / "prompt_seen.txt").read_text(encoding="utf-8") == PR.round_prompt(
-        "repair", 450.0, V.feedback(evidence), best, "evidence/round_02.json") + GUIDANCE
+        "repair", 450.0, V.feedback(evidence), best, "evidence/round_02.json") + PR.GUIDANCE
     ev = json.loads((control / "evidence.json").read_text())
     assert (ev["selected"]["version"], [x["version"] for x in ev["selected"]["rank"]]) == (1, [1, 2])
     job = tmp_path / "job"
@@ -1892,11 +1861,9 @@ def test_a_structural_failure_gets_one_planning_round(tmp_path, monkeypatch):
     planning round of 300 s follows, in which every helper is refused, so it logs no event and stores no candidate;
     the build's finish does not end it, and it writes plan.md. The repair after it is told to follow the plan, and its
     box keeps the original's surface, so it passes."""
-    from harpor.agent import physics_review, surface
-    from harpor.agent.physics_review import GUIDANCE
+    from harpor.agent import surface
 
     monkeypatch.setattr(surface, "ENFORCE", True)
-    monkeypatch.setattr(physics_review, "check", fake_physics(["pass"]))
     plan = [READ_PROMPT, EXPORT, finish("needs_review"), {"do": "sleep", "seconds": 1.0},
             {"do": "write", "path": "plan.md", "text": "keep the original's faces\n"}]
     r = run_in_rounds(tmp_path, [[edit(1.2), REVIEW, finish("complete")], plan,
@@ -1917,32 +1884,22 @@ def test_a_structural_failure_gets_one_planning_round(tmp_path, monkeypatch):
     evidence = json.loads((work / "evidence" / "round_01.json").read_text())
     feedback = V.feedback(evidence)  # v01 lost the surface, so it is not eligible and no best candidate is named
     assert (session / "rounds" / "02" / "prompt.txt").read_text(encoding="utf-8") == PR.round_prompt(
-        "replan", 300.0, feedback, None, "evidence/round_01.json") + GUIDANCE
+        "replan", 300.0, feedback, None, "evidence/round_01.json") + PR.GUIDANCE
     seen = (work / "prompt_seen.txt").read_text(encoding="utf-8")  # round 3's
-    assert seen == PR.round_prompt("repair", 450.0, feedback, None, "evidence/round_01.json", planned=True) + GUIDANCE
+    assert seen == PR.round_prompt("repair", 450.0, feedback, None, "evidence/round_01.json", planned=True) + PR.GUIDANCE
     assert PR.PLAN in seen and r["timings"]["budget_s"] == LONG + 300.0 + 450.0
     assert (r["source"], r["verdict"], r["glb"]) == ("finish", "complete", "control/candidates/v02/candidate.glb")
     assert edge(root / r["glb"]) == ORIGINAL_SIZE
 
 
 def test_an_unchanged_verdict_is_stored_and_can_pass(round_runs):
-    """unchanged hands off root/original.glb. It is stored and checked like any candidate, and when the judge passes
+    """unchanged hands off root/original.glb. It is stored and checked like any candidate, and when the check passes
     it the session ends after round 1 with the verdict unchanged."""
     root, r = round_runs["rounds_unchanged"]
     sha = T.sha256(root / "original.glb")
     assert [(x["candidate"]["version"], x["candidate"]["sha256"], x["outcome"]) for x in r["rounds"]] == [(1, sha, "pass")]
     assert (r["source"], r["verdict"], r["glb"]) == ("finish", "unchanged", "control/candidates/v01/candidate.glb")
     assert r["sha256"] == sha
-
-
-def test_an_inconclusive_judgment_ends_the_rounds(round_runs):
-    """A judge that cannot run (no MuJoCo, no frames, no answer) is inconclusive: physics_unassessed, scope none, so
-    no repair can be checked and the session ends after its build, as needs_review."""
-    root, r = round_runs["rounds_inconclusive"]
-    assert [(x["kind"], x["outcome"], x["scope"], codes(x)) for x in r["rounds"]] == [
-        ("build", "fail", "none", [*SURFACE, "physics_unassessed"])]
-    assert (r["verdict"], r["glb"]) == ("needs_review", "control/candidates/v01/candidate.glb")
-    assert r["reason"] == "the host's check of candidate v01 (round 1) did not pass; open: physics_unassessed"
 
 
 def stored(version, outcome="fail", sha="a", blocks=False, source="finish"):
@@ -2025,9 +1982,6 @@ def test_the_evidence_and_the_candidates_outlive_a_failed_loop(tmp_path, monkeyp
     """control/evidence.json is written after every round, so it holds what the rounds found when the loop itself
     fails, here at the start of round 2; the session still selects from the stored candidates and writes
     result.json, and the evidence then names the choice."""
-    from harpor.agent import physics_review
-
-    monkeypatch.setattr(physics_review, "check", fake_physics(["pass"]))
     real = C.run_round
 
     def run_round(root, cmd, env, blender, sock_dir, n, *args):
@@ -2049,9 +2003,6 @@ def test_a_failed_check_is_a_finding_but_cancel_ends_the_session(tmp_path, monke
     """The steps after a round read what the agent made, so an exception or a string SystemExit there is a
     validation_error of the round, and the rounds go on. Cancel's integer SystemExit (tools._on_sigterm) ends the
     session, and no result.json is written."""
-    from harpor.agent import physics_review
-
-    monkeypatch.setattr(physics_review, "check", fake_physics(["pass"]))
     real, calls = V.check, []
 
     def check(*args, **kw):
@@ -2069,8 +2020,6 @@ def test_a_failed_check_is_a_finding_but_cancel_ends_the_session(tmp_path, monke
     stored = tmp_path / "a" / "s" / "control" / "candidates"
     assert calls == [stored / f"v0{n}" / "candidate.glb" for n in (1, 2, 3)]  # each check reads the stored copy
     assert r["rounds"][0]["scope"] == "local"
-    # The judge is not asked about a round whose host check failed.
-    assert (tmp_path / "a" / "s" / "control" / "judged.txt").read_text() == "control/candidates/v03/candidate.glb\n"
     evidence = [json.loads((tmp_path / "a" / "s" / "work" / "evidence" / f"round_0{n}.json").read_text()) for n in (1, 2)]
     assert [e["findings"][0]["why"] for e in evidence] == [
         "RuntimeError: a bug in a check", "reviews/ must be a folder, not a link or a file"]
@@ -2085,10 +2034,8 @@ def test_a_failed_check_is_a_finding_but_cancel_ends_the_session(tmp_path, monke
 
 CANCEL = '''
 import os, signal, sys
-from harpor.agent import controller, physics_review, tools
+from harpor.agent import controller, tools
 signal.signal(signal.SIGTERM, tools._on_sigterm)  # as harpor.webapp.agent_step runs the stage
-physics_review.check = lambda root, glb, timeout=600: {"outcome": "pass", "reason": "it rests", "findings": [],
-                                                       "asset_sha256": tools.sha256(glb), "seconds": 0.0}
 root, script, sock_dir = sys.argv[1:]
 env = {**os.environ, "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
 controller.run_session(root, [sys.executable, "-m", "harpor.agent.fake_agent", script], env,
@@ -2102,8 +2049,7 @@ def test_cancel_ends_a_session_in_its_second_round(tmp_path):
     step exits with 143, and no result.json is written. control/evidence.json keeps round 1 and its candidate, with
     no choice made."""
     root = prepare(tmp_path).parent
-    (root / "control" / "physics").mkdir()
-    (root / "control" / "physics" / "config.json").write_text("{}")
+    mark_rounds(root)
     script = tmp_path / "script.json"
     script.write_text(json.dumps({"rounds": [exported(0), [{"do": "sleep", "seconds": 60}]]}))
     (tmp_path / "cancel.py").write_text(CANCEL)
@@ -2183,12 +2129,12 @@ def test_round_prompts_carry_the_whole_task():
     """A new agent knows only its prompt: a repair is the refinement prompt, then the round's budget, the evidence,
     the best candidate and the check's feedback; a replan is a short planning prompt that names the evidence and
     /work/plan.md, with the feedback."""
-    feedback = 'candidate sha256 0123456789ab: outcome fail, scope local\n- local physics_implausible: {"x": 1}\n'
+    feedback = 'candidate sha256 0123456789ab: outcome fail, scope local\n- local not_finished: {"x": 1}\n'
     best = {"glb": "exports/002.glb", "round": 1, "passed": False}
     repair = PR.round_prompt("repair", 450.0, feedback, best, "evidence/round_01.json")
     assert repair.startswith(PR.load()) and repair.endswith(feedback)
     flat = " ".join(repair.split())
-    for fact in ("physics repair round with a 450 second budget", "evidence/round_01.json",
+    for fact in ("repair round with a 450 second budget", "evidence/round_01.json",
                  "/work/exports/002.glb, from round 1; its check did not pass", "finish complete"):
         assert fact in flat
     # Only the repair right after a planning round follows its plan, which came from the same check.

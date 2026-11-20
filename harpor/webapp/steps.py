@@ -23,9 +23,8 @@ G/webapp_runs (or WEBAPP_RUNS). "The SIF" below is the agent's sandbox: G/sif/ha
   place    envs/sam3d   mvsam3d place           run/placement.json
   agent    envs/sam3d   agent_step --agent A    agent/result.json (skipped below 0.5 mask IoU, or when
                                                 the job's agent is "none"); it refines posed.glb (600 s),
-                                                with physics repair rounds whose host check settles each
-                                                candidate in MuJoCo in envs/mujoco (GATOR_MUJOCO) and asks
-                                                the job's VLM to judge the frames
+                                                with repair rounds after the host's check of each
+                                                candidate (harpor.agent.validate)
   align    envs/sam3d   physics_auto align      physics/aligned.json and physics/summary.json:
                                                 transfer pre-refinement materials to the final mesh
   mjcf     envs/mujoco  physics.mjcf            physics/mjcf/mjcf.json with "compiled"
@@ -63,7 +62,6 @@ STAGE_A_ENV = ('HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch TORCH_E
                'CPATH=$G/envs/sam3d/targets/x86_64-linux/include '
                'LIBRARY_PATH=$G/envs/sam3d/targets/x86_64-linux/lib:$G/envs/sam3d/lib PATH=$G/envs/sam3d/bin:$PATH')
 SAM3_ENV = "HF_HOME=$G/.cache/huggingface"
-MUJOCO_ENV = "GATOR_MUJOCO=$G/envs/mujoco/bin/python"
 VOMP_ACTIVATE = 'eval "$($G/tools/micromamba shell hook -s bash)"; micromamba activate $G/envs/vomp11'
 VOMP_ENV = ('CUDA_HOME=$CONDA_PREFIX HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch '
             'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 OMP_NUM_THREADS=${OMP_NUM_THREADS:-16} '
@@ -181,8 +179,6 @@ def command(stage, job, cfg, key_file=None):
                 "align": '-m harpor.webapp.physics_auto align --job "$J"'}[stage]
         if stage == "prep":  # a view that lost its mask must not stay in the pool from an earlier prep
             lines.append('rm -rf "$J/pool/input" "$J/pool/masks" "$J/pool/prep.json"')
-        if stage == "agent":  # the host's check of each round runs MuJoCo (harpor.agent.validate)
-            lines.append(f"export {MUJOCO_ENV}")
         lines.append(run + f"{py} {args}")
     return ["bash", "-c", "\n".join(lines)], str(cfg.code), env
 
