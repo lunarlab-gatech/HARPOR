@@ -7,21 +7,24 @@
 
 const $ = (sel) => document.querySelector(sel);
 const ACTIVE = ["analyzing", "queued", "running"];
-const BUILD = ["extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "vomp", "place", "agent", "align",
+const BUILD = ["extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "place", "agent", "align", "estimate",
   "mjcf", "usd", "urdf", "turntable", "package"];
 const OPTIONAL = ["turntable"];  // steps.OPTIONAL: when it fails, the job still ends done
 // job.json "agent" (steps.AGENTS): the key it takes and the placeholder of the key field.
 const AGENTS = { astra: { key: "OpenAI API key", placeholder: "sk-..." },
   opus: { key: "Anthropic API key", placeholder: "sk-ant-..." }, fable: { key: "Anthropic API key", placeholder: "sk-ant-..." },
   none: { key: null, placeholder: "" } };
-const RAN = { codex: "GPT-6-Astra", claude: "Claude Opus 5.5" };  // agent_result.agent, the controller's name
-const MODEL_NAME = { "claude-fable-5-2": "Claude Fable 5.2" };  // agent_result.model, when it is not the agent's default
+// A model id (agent_result.model, summary.json estimate.model) and its name: tools.MODELS, and gpt-6-astra, which
+// the jobs built before 2026-11-20 ran.
+const MODEL_NAME = { "gpt-6-astra": "GPT-6-Astra", "gpt-6.2-astra": "GPT-6.2-Astra", "claude-opus-5-5": "Claude Opus 5.5",
+  "claude-fable-5-2": "Claude Fable 5.2" };
+const RAN = { codex: "GPT-6.2-Astra", claude: "Claude Opus 5.5" };  // agent_result.agent, for a result without a known model id
 const ranBy = (a) => MODEL_NAME[a.model] || RAN[a.agent];  // the model that ran the agent stage
 // What each stage does, shown muted next to its name.
 const STAGE_LABEL = { topics: "camera topics", frames: "frame analysis", extract: "extract frames", masks: "SAM 3 masks",
   prep: "prepare views", da3: "depth (Depth Anything 3)", lidar: "metric scale (LiDAR)", select: "view selection",
-  sam3d: "mesh (MV-SAM3D)", place: "pose and scale", agent: "agent refinement", align: "align upright", vomp: "materials (VoMP)",
-  mjcf: "MuJoCo model", usd: "USD", urdf: "URDF", turntable: "360 video", package: "results.zip" };
+  sam3d: "mesh (MV-SAM3D)", place: "pose and scale", agent: "agent refinement", align: "align upright",
+  estimate: "mass and friction", mjcf: "MuJoCo model", usd: "USD", urdf: "URDF", turntable: "360 video", package: "results.zip" };
 // A stage's label; a stage of an older job that this version no longer has gets none.
 const stageLabel = (name) => STAGE_LABEL[name] || "";
 const VERDICT = { needs_review: "needs review" };  // agent_result.verdict as the page shows it; the others as they are
@@ -1361,13 +1364,20 @@ async function renderResults(job) {
         ["Agent cost (estimate)", a.cost_usd != null ? "about $" + Number(a.cost_usd).toFixed(2) : "?"]);
     }
   }
+  // The estimate stage's summary holds the model's answer (estimate). The summary of a job built before that stage
+  // has none, so it gets no Material row, and its friction is the value that mjcf.json assumed.
+  const est = phys && phys.estimate && typeof phys.estimate === "object" ? phys.estimate : null;
+  const short = (x) => x == null ? "?" : String(Number(Number(x).toPrecision(3)));  // 0.5, not 0.500
   if (phys) {
-    const rb = phys.rigid_body || {}, md = phys.median || {};
-    rows.push(["Mass", num(rb.mass) + " kg"], ["Center of mass", (rb.com || []).map(mm).join(", ") + " m"]);
-    rows.push(["Young's modulus (median)", num(md.youngs_modulus_pa) + " Pa"], ["Poisson ratio (median)", num(md.poisson_ratio)],
-      ["Density (median)", num(md.density_kg_m3) + " kg/m³"]);
+    const rb = phys.rigid_body || {};
+    if (est) rows.push(["Material", `${est.material} (${est.structure})`]);
+    rows.push(["Mass", num(rb.mass) + " kg" + (est ? ` (range ${num(est.mass_low_kg)} to ${num(est.mass_high_kg)} kg)` : "")],
+      ["Center of mass", (rb.com || []).map(mm).join(", ") + " m"]);
   }
-  if (mj && typeof mj.friction === "number") rows.push(["Friction", `${mj.friction} (assumed, the same on every surface)`]);
+  if (est) {
+    rows.push(["Friction", `${short(est.friction)} (range ${short(est.friction_low)} to ${short(est.friction_high)}, ` +
+      `estimated by ${MODEL_NAME[est.model] || est.model || "?"})`]);  // another id shows as it is
+  } else if (mj && typeof mj.friction === "number") rows.push(["Friction", `${mj.friction} (assumed, the same on every surface)`]);
   $("#facts2").replaceChildren(h("dl", {}, ...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])));
 }
 // The "Metric scale" row: placement.json metric_scale (select applied it), with lidar.json's source, views and spread.

@@ -26,7 +26,7 @@ def canonical_glb_to_w(V, pose):
     """GLB vertices (SAM 3D canonical, y up) -> frame W.
 
     SAM 3D applies Transform3d().scale(s).rotate(R).translate(t) to row vectors, so a point maps
-    to (v * s) @ R + t in PyTorch3D camera axes (research.md section 2.5).
+    to (v * s) @ R + t in PyTorch3D camera axes (build_plan.md note 2).
     """
     v = np.asarray(V, dtype=float) @ GLB_TURN.T
     R = quat_wxyz_to_matrix(pose["rotation_wxyz"])

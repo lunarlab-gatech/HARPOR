@@ -20,6 +20,7 @@ pytest.importorskip("PIL")
 from fastapi.testclient import TestClient  # noqa: E402
 from test_webapp_server import TOKEN, login, run_app_js, uploaded, wait, write_video  # noqa: E402
 
+from harpor.agent import tools  # noqa: E402
 from harpor.webapp import demos, server, steps  # noqa: E402
 
 # one xdist worker runs the whole file, so the finished job in the module fixture is built once
@@ -136,8 +137,8 @@ def test_add_from_a_finished_job(job, made, tmp_path):
 
 
 def test_demo_facts_are_rows_of_the_results_tab(job):
-    """app.js renderResults on the same job: the Mass fact is one of its rows, and the Agent row starts with the
-    Agent fact (it adds the model)."""
+    """app.js renderResults on the same job: the Mass row starts with the Mass fact (it adds the model's range when
+    the job has an estimate), and the Agent row starts with the Agent fact (it adds the model)."""
     J, view, replies = job
     out = run_app_js(replies, """
         (async () => {
@@ -148,8 +149,19 @@ def test_demo_facts_are_rows_of_the_results_tab(job):
         """)
     rows = {out[i + 1]: out[i + 3] for i in range(len(out) - 3) if out[i] == "dt" and out[i + 2] == "dd"}
     facts = dict(demos.facts_of(J, json.loads((J / "job.json").read_text())))
-    assert rows["Mass"] == facts["Mass"]
+    assert rows["Mass"] == facts["Mass"] or rows["Mass"].startswith(facts["Mass"] + " (range ")
     assert rows["Agent"].startswith(facts["Agent"] + " (")
+
+
+def test_demo_agent_fact_names_the_model_that_ran(tmp_path):
+    """The Agent fact names the model of agent/result.json: a job built with gpt-6-astra (before 2026-11-20) keeps
+    GPT-6-Astra, a new job shows GPT-6.2-Astra, and a result without a known model id gets its agent's name."""
+    (tmp_path / "agent").mkdir()
+    for model, name in (("gpt-6-astra", "GPT-6-Astra"), ("gpt-6.2-astra", "GPT-6.2-Astra"), (None, "GPT-6.2-Astra"),
+                        ("claude-fable-5-2", "Claude Fable 5.2"), ("claude-opus-5-5", "Claude Opus 5.5")):
+        agent = "codex" if model is None or model.startswith("gpt") else "claude"
+        (tmp_path / "agent" / "result.json").write_text(json.dumps({"agent": agent, "model": model}))
+        assert demos.facts_of(tmp_path) == [["Agent", name]], model
 
 
 def test_add_refuses_private_data(job, tmp_path):
@@ -485,11 +497,13 @@ def test_demos_js_plays_the_open_demo():
 
 
 def test_mirrors_of_app_js():
-    """KIND, RAN and MODEL_NAME are app.js's KIND_LABEL, RAN and MODEL_NAME, and size_text is its fileSize."""
+    """KIND, RAN and MODEL_NAME are app.js's KIND_LABEL, RAN and MODEL_NAME, and size_text is its fileSize. MODEL_NAME
+    names every model of tools.MODELS."""
     app = (server.STATIC / "app.js").read_text()
     for name, mirror in (("KIND_LABEL", demos.KIND), ("RAN", demos.RAN), ("MODEL_NAME", demos.MODEL_NAME)):
-        body = re.search(rf"const {name} = \{{(.*?)\}};", app)[1]
-        assert dict(re.findall(r'"?([\w-]+)"?: "([^"]*)"', body)) == mirror, name
+        body = re.search(rf"const {name} = \{{(.*?)\}};", app, re.S)[1]
+        assert dict(re.findall(r'"?([\w.-]+)"?: "([^"]*)"', body)) == mirror, name
+    assert set(tools.MODELS.values()) < set(demos.MODEL_NAME)
     if shutil.which("node") is None:
         pytest.skip("no node")
     code = "\n".join(re.search(rf"^const {n} = .*;$", app, re.M)[0] for n in ("size", "fileSize"))

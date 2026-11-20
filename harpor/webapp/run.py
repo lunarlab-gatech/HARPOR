@@ -478,8 +478,11 @@ class Run:
         lidar = steps.lidar(job)
         if a.calibration and not (lidar or {}).get("topic"):
             raise Stop(BAD, f"job {self.job_id} uses no LiDAR topic, so it takes no calibration")
+        # The routes' rule for the key (jobs.key_needed), from where the continue below starts: the server's default,
+        # sam3d, for a job in review, else the first stage not done or skipped.
+        start = "sam3d" if job["status"] == "review" else first_not_done({"stages": jobs.progress(J)})
         if viewed or a.calibration or (lidar and not steps.done("lidar", J)) \
-                or job["stages"]["agent"]["status"] not in ("done", "skipped"):  # the routes' rule for the key
+                or (start in jobs.BUILD and jobs.key_needed(J, job, start)):
             self.take_key(steps.agent(job))
         if a.calibration:
             self.calibration(lidar["topic"])

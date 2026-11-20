@@ -208,6 +208,28 @@ def test_align_job_refuses_an_agent_glb_of_another_size(tmp_path, capsys):
         assert (A.pick_glb(j)[0] == exp / "001.glb") == used, scale
 
 
+def test_align_writes_no_summary(tmp_path):
+    """The align stage writes physics/aligned.glb and aligned.json and no physics/summary.json: it deletes the summary
+    of an earlier mesh, and the estimate stage writes the next one. So align is done and estimate is not. The
+    run/vomp folder that a job of an earlier version has stays as it is: align neither reads nor deletes it."""
+    from harpor.webapp import steps
+
+    j = tmp_path / "job"
+    write_run(j / "run", *plane_view())
+    box_glb(j / "run" / "posed.glb")
+    (j / "run" / "placement.json").write_text(json.dumps({"check": {"mean_mask_iou": 0.8}}))
+    (j / "run" / "vomp").mkdir()
+    (j / "run" / "vomp" / "summary.json").write_text(json.dumps({"rigid_body": {"mass": 2.0}}))
+    (j / "physics").mkdir()
+    (j / "physics" / "summary.json").write_text(json.dumps({"rigid_body": {"mass": 1.0}, "estimate": {"mass_kg": 1.0}}))
+    assert steps.done("estimate", j)
+    A.main(["align", "--job", str(j)])
+    assert (j / "physics" / "aligned.glb").is_file() and steps.done("align", j)
+    assert not (j / "physics" / "summary.json").exists() and not steps.done("estimate", j)
+    assert sorted(p.name for p in (j / "physics").iterdir()) == ["aligned.glb", "aligned.json", "up.json"]
+    assert json.loads((j / "run" / "vomp" / "summary.json").read_text()) == {"rigid_body": {"mass": 2.0}}
+
+
 def test_align_job_needs_a_glb(tmp_path):
     write_run(tmp_path / "job" / "run", *plane_view())
     with pytest.raises(SystemExit, match="posed.glb is missing"):

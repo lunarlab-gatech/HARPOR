@@ -96,9 +96,10 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       job's reruns the agent stage and the stages after it. A run that
                                       starts at or before select (or from lidar, when the scale
                                       is stale: another calibration or estimator) needs the API key when
-                                      the agent stage is done, since a done job has dropped it, and answers
-                                      400 when the job's LiDAR would fail the lidar stage's checks
-                                      (jobs.lidar_settings), before anything is deleted
+                                      the agent stage is done, since a done job has dropped it. A later
+                                      start needs it when the run runs the agent or estimate stage
+                                      (jobs.key_needed). It answers 400 when the job's LiDAR would fail the
+                                      lidar stage's checks (jobs.lidar_settings), before anything is deleted
   POST   /api/jobs/{id}/cancel
   GET    /api/jobs/{id}/events        SSE: "state" (status and stages) when it changes, "log" (whole
                                       lines of the running stage's log; id <stage>:<byte offset>, so a
@@ -857,16 +858,17 @@ def make_app(cfg, token, key_dir=None):
             raise Bad(400, f"from is frames or one of {jobs.BUILD}")
         changed = agent != steps.agent(job)  # the other agent's stage runs anew (Runner.resume)
         # Runner.resume runs every stage again from a start at or before select, also from lidar when the
-        # scale is stale (the calibration or the estimator changed after the scale was found). A done agent
-        # stage then needs the key, and the job's LiDAR must pass the lidar stage's checks (lidar_check).
+        # scale is stale (the calibration or the estimator changed after the scale was found). The done stages
+        # that take the key (steps.KEYED) then need it, and the job's LiDAR must pass the lidar stage's checks
+        # (lidar_check). From a later start, a keyed stage needs the key when the run runs it (jobs.key_needed).
         stale, checked = lidar_check(J, job, first)
         again = steps.NAMES.index(first) <= steps.NAMES.index(steps.REVIEW_AFTER) or stale
-        if changed or again or job["stages"]["agent"]["status"] not in ("done", "skipped"):
+        if changed or again or jobs.key_needed(J, job, first):
             key = held_key(job_id, b, agent, later)
         elif key is not None:
             check_key(key, agent)
         else:
-            later = False  # the agent stage is done: no stage needs a key
+            later = False  # the run runs no agent or estimate stage: no stage needs a key
         first = runner_call(runner.resume, job_id, first, key, agent=agent, key_later=later,
                             checked_calibration=checked)
         # from: the agent stage when the agent changed

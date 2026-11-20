@@ -9,10 +9,11 @@ align takes the GLB for physics (steps.next_glb: the agent's delivery, or run/po
 agent was skipped or delivered nothing usable; pick_glb also refuses a delivery whose size is not
 that of posed.glb, which the agent started from) and runs harpor.physics.align on it with --up-near
 at the up hint and --x footprint, plus --opaque when the GLB has transparent or transmissive
-materials, which VoMP rejects. It writes J/physics/up.json {hint, info, glb, glb_rule, opaque} and
-J/physics/aligned.glb with aligned.json. Then it moves the materials that VoMP predicted on the
-canonical mesh onto the aligned GLB (harpor.physics.material_transfer.transfer_job), which writes
-J/physics/summary.json with the mass and inertia of the final geometry.
+materials, so that aligned.glb is opaque (needs_opaque). --opaque was added for VoMP, which rejected
+such materials, and it stays for now. It writes J/physics/up.json {hint, info, glb, glb_rule,
+opaque} and J/physics/aligned.glb with aligned.json. It deletes J/physics/summary.json first, since
+the mass and inertia of an earlier mesh no longer fit; the estimate stage (harpor.webapp.estimate_step)
+writes a new one for the aligned GLB.
 
 The up hint (up_hint()) is the normal of the support plane under the object in view 0's DA3
 pointmap: a RANSAC plane fit to the confident points in a band around the mask and below its
@@ -184,22 +185,19 @@ def align_job(job_dir):
     up = {"hint": np.round(hint, 6).tolist(), "info": info, "glb": str(glb), "glb_rule": rule, "opaque": opaque}
     (out / "up.json").write_text(json.dumps(up, indent=1))
     print(f"GLB: {glb} ({rule}); up hint {up['hint']} from the {info['source']}"
-          + (f" ({info['reason']})" if "reason" in info else "") + ("; made opaque for VoMP" if opaque else ""))
+          + (f" ({info['reason']})" if "reason" in info else "") + ("; made opaque" if opaque else ""))
     # --up-near=... in one argument: argparse takes "-0.1,..." after a space for an option.
     align.main(["--glb", str(glb), "--out", str(out / "aligned.glb"), "--up-near=" + ",".join(map(str, up["hint"])),
                 "--x", "footprint", *(["--opaque"] if opaque else [])])
 
 
 def main(argv=None):
-    from harpor.physics.material_transfer import transfer_job
-
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="step", required=True)
     sub.add_parser("align").add_argument("--job", required=True, help="job folder")
     a = ap.parse_args(argv)
-    (Path(a.job) / "physics/summary.json").unlink(missing_ok=True)
+    (Path(a.job) / "physics/summary.json").unlink(missing_ok=True)  # the estimate of an earlier mesh
     align_job(a.job)
-    transfer_job(a.job)
 
 
 if __name__ == "__main__":

@@ -8,8 +8,8 @@ round (replan) while the host's check (harpor.agent.validate) finds something an
 control/candidates, and the session delivers the best of them (select_candidate, paper A.6). The agent is one
 of two, chosen per session in prepare_session and recorded in control/agent.json:
 
-  codex    GPT-6-Astra through the Codex CLI, as in the paper. The CLI runs in an Apptainer
-           container that holds the API key (apptainer_command).
+  codex    GPT-6.2-Astra through the Codex CLI. The paper ran GPT-6-Astra the same way. The CLI runs in an
+           Apptainer container that holds the API key (apptainer_command).
   claude   Claude Opus 5.5, or Claude Fable 5.2 when agent.json's model names it, through our own
            Messages API loop, harpor/agent/claude_agent.py. The loop runs on the host with the key in
            its memory only, and runs the model's shell commands in an Apptainer container without the
@@ -82,7 +82,7 @@ REPO = AGENT_DIR.parents[1]  # claude_agent runs from here, as `python -m harpor
 CODEX_ENV = {"CODEX_HOME": "/session/codex_home"}
 HELPER_ENV = {"GATOR_SOCKET": "/opt/gator/sock/tools.sock", "PREPEND_PATH": "/opt/gator/bin"}
 CODEX_MODEL, CLAUDE_MODEL, EFFORTS = tools.CODEX_MODEL, tools.CLAUDE_MODEL, tools.EFFORTS
-CLAUDE_EFFORT = "xhigh"  # the effort of the Astra comparison runs; Opus 5.5's own default is medium, so it is always sent
+CLAUDE_EFFORT = "xhigh"  # the effort of the GPT-6-Astra comparison runs; Opus 5.5's own default is medium, so it is always sent
 LOGS = {"codex": "codex.jsonl", "claude": "claude.jsonl"}  # each agent's event log, in root/session
 # --no-mount bind-paths turns off every bind path in the site's apptainer.conf, such as a cluster's /scratch and
 # /storage.
@@ -115,8 +115,8 @@ CODEX_KEY_WRAPPER = ["sh", "-c", 'export CODEX_API_KEY="$OPENAI_API_KEY"; unset 
 
 
 def codex_command():
-    """The codex exec command of note 5, as the paper ran GPT-6-Astra: highest reasoning effort, no
-    Codex sandbox or approvals inside our container. The prompt comes on stdin ("-")."""
+    """The codex exec command of note 5, with the settings that the paper ran GPT-6-Astra with: highest reasoning
+    effort, no Codex sandbox or approvals inside our container. The prompt comes on stdin ("-")."""
     return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "--strict-config",
             "-C", "/work", "-m", CODEX_MODEL, "-c", 'model_reasoning_effort="xhigh"', "--json",
             "-o", "/session/last_message.txt", "-"]
@@ -289,7 +289,7 @@ def prepare_session(root, prompt, views, *, source, metric, original=None, agent
     """Write the session folder of a refinement of original.
 
     prompt: None for the refinement prompt (harpor.agent.prompts). views: dicts with K, w2c
-    (OpenCV world-to-camera in W), width, height, and image and mask files. agent: "codex" (GPT-6-Astra
+    (OpenCV world-to-camera in W), width, height, and image and mask files. agent: "codex" (GPT-6.2-Astra
     through the Codex CLI, at the xhigh effort of codex/config.toml) or "claude" (model through
     claude_agent at effort: by default Claude Opus 5.5 at xhigh; model can also be Claude Fable 5.2).
     rounds: run the session in rounds (has_rounds, run_rounds); control/rounds.json marks it, and

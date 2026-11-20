@@ -1,5 +1,5 @@
+import inspect
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -307,23 +307,6 @@ def test_align_turns_a_posed_object_into_s_and_keeps_its_bytes(tmp_path):
     assert len(lid_visual.uv) == 8 and lid_visual.material.baseColorTexture.size == (16, 16)
 
 
-def test_a_model_without_textures_writes_no_png(tmp_path):
-    """build(..., textures=False) writes no PNG and no UVs, and its model has no texture; the inertial is still the
-    summary's."""
-    mujoco = pytest.importorskip("mujoco")
-    from harpor.physics.mjcf import build, check
-
-    glb, summary = body_and_lid(tmp_path)
-    rb = json.loads(summary.read_text())["rigid_body"]
-    report = build(glb, summary, tmp_path / "mjcf", "chest", decompose=hull_parts, textures=False)
-    assets = tmp_path / "mjcf" / "assets"
-    assert not list(assets.glob("*.png")) and all(v["texture"] is None for v in report["visuals"])
-    assert len(report["visuals"]) == 2 and not any(
-        line.startswith("vt ") for v in report["visuals"] for line in (assets / f"{v['mesh']}.obj").read_text().splitlines())
-    assert mujoco.MjModel.from_xml_path(str(tmp_path / "mjcf" / "chest.xml")).ntex == 0  # scene.xml has the floor's
-    assert np.isclose(check(tmp_path / "mjcf", "chest")["mass"], rb["mass"])
-
-
 def test_mjcf_command_line_compiles_the_model_and_refuses_a_bad_name(tmp_path, monkeypatch):
     """main() writes mjcf.json with the compiled model: one body on a free joint with the summary's inertial, both
     visuals and the lid's texture (and the floor's). A --name that is not a plain identifier, or is 'scene', stops it."""
@@ -350,56 +333,41 @@ def test_mjcf_command_line_compiles_the_model_and_refuses_a_bad_name(tmp_path, m
             mjcf.main()
 
 
-def test_vomp_run_glb_gives_each_occupied_voxel_its_nearest_prediction(tmp_path, monkeypatch):
-    """run_glb gives every occupied voxel the material of its nearest VoMP prediction and sums those voxels into
-    the rigid body, with the voxel edge h = transform_scale / 64. VoMP and torch are stand-ins: the voxeliser
-    returns normalized coordinates, which denormalize_coords scales back. No occupied voxel is an error."""
-    import sys
-    import types
+def test_mjcf_takes_the_summarys_friction(tmp_path, monkeypatch):
+    """build takes summary.json "friction" (the estimate stage's) for every collision geom and the floor, and
+    DEFAULT_FRICTION for a summary without one, such as one written before the estimate stage. A friction given to
+    build, or --friction on the command line, overrides both. mjcf.json records the value used."""
+    mujoco = pytest.importorskip("mujoco")
+    from harpor.physics import mjcf
 
-    from harpor.physics.vomp_run import run_glb
+    glb, summary = body_and_lid(tmp_path)
+    s = json.loads(summary.read_text())
+    assert mjcf.DEFAULT_FRICTION == 0.6 and inspect.signature(mjcf.build).parameters["friction"].default is None
 
-    center, scale = np.array([0.1, -0.03, 0.02]), 0.64
-    h = scale / 64
-    idx = np.array(np.meshgrid(range(10), range(6), range(4), indexing="ij")).reshape(3, -1).T
-    occupied = (idx + 0.5) * h + center
-    pred = occupied[::2] + [0, 0, 0.2 * h]  # each z pair (0, 1), (2, 3) shares the prediction just above its low voxel
-    rng = np.random.default_rng(4)
-    E, nu, rho = rng.uniform(1e8, 1e10, len(pred)), rng.uniform(0.2, 0.4, len(pred)), rng.uniform(200, 900, len(pred))
+    def friction(out):  # the sliding friction of the collision geoms and of the floor, as MuJoCo compiles them
+        m = mujoco.MjModel.from_xml_path(str(out / "scene.xml"))
+        names = [m.geom(i).name for i in range(m.ngeom)]
+        used = [i for i, n in enumerate(names) if n == "floor" or n.startswith("chest_collision_")]
+        assert len(used) >= 2 and "floor" in names
+        return sorted({round(float(m.geom_friction[i][0]), 6) for i in used})
 
-    class Model:
-        voxels = (occupied - center) / scale
+    summary.write_text(json.dumps({**s, "friction": 0.35}))
+    report = mjcf.build(glb, summary, tmp_path / "estimated", "chest", decompose=hull_parts)
+    assert report["friction"] == 0.35 and friction(tmp_path / "estimated") == [0.35]
+    assert json.loads((tmp_path / "estimated" / "mjcf.json").read_text())["friction"] == 0.35
+    report = mjcf.build(glb, summary, tmp_path / "given", "chest", 0.9, decompose=hull_parts)
+    assert report["friction"] == 0.9 and friction(tmp_path / "given") == [0.9]
+    summary.write_text(json.dumps(s))  # no "friction"
+    report = mjcf.build(glb, summary, tmp_path / "default", "chest", decompose=hull_parts)
+    assert report["friction"] == mjcf.DEFAULT_FRICTION and friction(tmp_path / "default") == [0.6]
 
-        def get_mesh_materials(self, glb, output_dir, query_points, return_original_scale):
-            assert query_points == "voxel_centers" and return_original_scale and Path(output_dir).is_dir()
-            return {"transform_center": center.tolist(), "transform_scale": scale, "voxel_coords_world": pred,
-                    "youngs_modulus": E, "poisson_ratio": nu, "density": rho}
+    build = mjcf.build
+    monkeypatch.setattr(mjcf, "build", lambda *a, **k: build(*a, decompose=hull_parts, **k))  # no CoACD here
+    summary.write_text(json.dumps({**s, "friction": 0.35}))
+    argv = ["mjcf", "--glb", str(glb), "--summary", str(summary), "--name", "chest"]
+    for extra, want in (([], 0.35), (["--friction", "1.1"], 1.1)):
+        out = tmp_path / f"cli{len(extra)}"
+        monkeypatch.setattr("sys.argv", argv + ["--out", str(out)] + extra)
+        mjcf.main()
+        assert json.loads((out / "mjcf.json").read_text())["friction"] == want and friction(out) == [want]
 
-        def _voxelize_mesh(self, glb, work):
-            return self.voxels
-
-    torch = types.ModuleType("torch")
-    torch.cuda = types.SimpleNamespace(is_available=lambda: False)
-    utils = types.ModuleType("vomp.inference.utils")
-    utils.denormalize_coords = lambda c, ctr, s: np.asarray(c) * s + ctr
-    utils.save_materials = lambda r, path: Path(path).write_bytes(b"materials")
-    for name, module in (("torch", torch), ("vomp", types.ModuleType("vomp")),
-                         ("vomp.inference", types.ModuleType("vomp.inference")), ("vomp.inference.utils", utils)):
-        monkeypatch.setitem(sys.modules, name, module)
-
-    s = run_glb(Model(), tmp_path / "in.glb", tmp_path / "run", "test.json", load_s=3.0)
-    want = np.repeat(rho, 2)
-    with np.load(tmp_path / "run" / "voxels.npz") as v:
-        assert np.allclose(v["centers"], occupied) and np.allclose(v["density"], want) and float(v["h"]) == h
-        assert np.allclose(v["youngs_modulus"], np.repeat(E, 2)) and np.allclose(v["poisson_ratio"], np.repeat(nu, 2))
-    assert (s["voxels_occupied"], s["voxels_predicted"], s["voxel_edge_m"]) == (240, 120, h)
-    assert np.isclose(s["nearest_prediction_max_dist_voxels"], 0.8)
-    assert s["rigid_body"] == mass_properties(occupied, want, h) and s["config"] == "test.json"
-    assert s["median"]["density_kg_m3"] == np.median(rho) and s["p05_p95"]["density_kg_m3"] == np.percentile(rho, [5, 95]).tolist()
-    assert s["seconds"]["load"] == 3.0 and set(s["seconds"]) == {"load", "predict"} and s["gpu_peak_gb"] is None
-    assert json.loads((tmp_path / "run" / "summary.json").read_text()) == s
-    assert (tmp_path / "run" / "materials.npz").read_bytes() == b"materials"
-
-    Model.voxels = np.zeros((0, 3))
-    with pytest.raises(ValueError, match="gives no occupied voxel"):
-        run_glb(Model(), tmp_path / "in.glb", tmp_path / "empty", "test.json")

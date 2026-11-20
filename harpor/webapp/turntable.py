@@ -6,7 +6,7 @@
 render runs blender/turntable.py (build_plan.md note 5) on the GLB that physics used (physics/up.json "glb":
 the agent's GLB, else run/posed.glb), turned upright with physics/aligned.json "T_s_from_w".
 So the video shows the object and pose of aligned.glb, but with the GLB's own materials, since
-align may make aligned.glb opaque for VoMP. Blender runs in the agent's SIF, in a container that sees only
+align may make aligned.glb opaque. Blender runs in the agent's SIF, in a container that sees only
 J/turntable, the GLB (read-only) and the Blender scripts (read-only), for at most RENDER_TIMEOUT_S. It writes
 FRAMES PNG frames of SIDE px into J/turntable/frames: one turn, seen from ELEVATION_DEG above, with the long side
 toward the camera in frame 1. Then J/turntable/render.json. Blender's arguments are J/turntable/args.json, and

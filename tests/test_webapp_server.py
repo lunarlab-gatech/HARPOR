@@ -278,7 +278,7 @@ def test_upload_review_overrides_and_results(client, tmp_path):
     assert job["sizes"]["refined.glb"] == (J / "agent/s/work/exports/001.glb").stat().st_size
     assert job["agent_result"]["verdict"] == "complete"
     assert not {"articulated", "parts_mode", "parts_review"} & set(job)
-    assert not {"propose", "parts", "vomp_parts", "softvideo"} & set(job["stages"])
+    assert not {"propose", "parts", "vomp", "vomp_parts", "softvideo"} & set(job["stages"])
     names = set(zipfile.ZipFile(io.BytesIO(c.get(f"/api/jobs/{job_id}/file/results.zip").content)).namelist())
     assert {"posed.glb", "refined.glb", "aligned.glb", "summary.json", "selection.json", "mjcf/mjcf.json",
             "urdf/model.urdf"} <= names and not {"parts.glb", "parts.json", "softvideo.mp4"} & names
@@ -287,6 +287,15 @@ def test_upload_review_overrides_and_results(client, tmp_path):
         assert r.status_code == 200 and r.headers["content-type"] == "model/gltf-binary" and r.content[:4] == b"glTF"
     assert c.get(f"/api/jobs/{job_id}/file/refined.glb").content == (J / "agent/s/work/exports/001.glb").read_bytes()
     assert "== package" in c.get(f"/api/jobs/{job_id}/file/logs/package.log").text
+    # The physics outputs are served, and nothing else of the MJCF or the URDF.
+    assert "links" not in c.get(f"/api/jobs/{job_id}/file/physics/mjcf/mjcf.json").json()  # one body
+    for p, kind in [("physics/summary.json", "application/json"), ("physics/mjcf/mjcf.json", "application/json"),
+                    ("physics/urdf/model.urdf", "application/xml")]:
+        r = c.get(f"/api/jobs/{job_id}/file/{p}")
+        assert r.status_code == 200 and r.headers["content-type"] == kind, p
+    for p in ("physics/urdf/urdf.json", "physics/urdf/meshes/link_0.obj", "physics/urdf/../../job.json",
+              "physics/mjcf/scene.xml", "physics/mjcf/../../job.json", "run/parts.glb", "run/parts.json"):
+        assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
 
     # Only the allowlist is served: no job.json, no video, no way out of the job folder.
     (tmp_path / "outside.jpg").write_bytes(b"secret")
@@ -308,7 +317,8 @@ def test_sizes_of_leaves_out_a_file_that_went(tmp_path):
 
 def test_rosbag_upload_topic_choice_and_no_agent(client, tmp_path):
     """A bag with two camera topics waits for the choice; the build without the agent needs no key and
-    gives physics the Stage A mesh."""
+    gives physics the Stage A mesh. With no key, the stages of the mass, the friction and the simulation models are
+    skipped (steps.NO_KEY_SKIP), so results.zip holds the meshes and no summary.json or model."""
     pytest.importorskip("rosbags")
     c, cfg = client
     login(c)
@@ -361,9 +371,12 @@ def test_rosbag_upload_topic_choice_and_no_agent(client, tmp_path):
     assert job["agent_result"] is None and "refined.glb" not in job["files"] and "physics/aligned.glb" in job["files"]
     up = json.loads((J / "physics" / "up.json").read_text())
     assert up["glb"] == str(J / "run" / "posed.glb") and up["glb_rule"] == "turned off: physics uses the Stage A mesh"
+    for s in ("estimate", "mjcf", "usd", "urdf"):
+        assert (job["stages"][s]["status"], job["stages"][s].get("note")) == ("skipped", steps.NO_KEY_SKIP), s
     names = set(zipfile.ZipFile(io.BytesIO(c.get(f"/api/jobs/{job_id}/file/results.zip").content)).namelist())
-    assert {"posed.glb", "aligned.glb", "summary.json", "mjcf/mjcf.json"} <= names
-    assert "refined.glb" not in names and "agent_result.json" not in names
+    assert {"posed.glb", "aligned.glb"} <= names
+    assert not {"refined.glb", "agent_result.json", "summary.json"} & names
+    assert not [n for n in names if n.startswith(("mjcf/", "usd/", "urdf/"))]
     assert c.post(f"/api/jobs/{job_id}/topic", json={"topic": raw}).status_code == 409  # done
     assert not list((tmp_path / "keys").iterdir())
 
@@ -664,6 +677,145 @@ def test_a_run_again_from_lidar_needs_the_key(client, tmp_path):
     assert r.json() == {"status": "queued", "from": "lidar"}, r.text
     job = wait(c, job_id, "done", "failed", "review")
     assert job["status"] == "done" and job["lidar_current"] is True and job["warnings"] == [], job
+
+
+def test_a_retry_of_a_failed_estimate_needs_the_key(client, tmp_path, monkeypatch):
+    """The estimate stage takes the key too (steps.KEYED). A retry of a job whose agent stage is done but whose
+    estimate failed needs the key when the server holds none (here forget_key stands in for a restart). Before, the
+    retry went on and the job stopped at estimate, saying that the server had restarted."""
+    import fake_steps as F
+
+    left = ["estimate"]
+
+    def command(name, job, cfg, key_file=None):
+        if name in left:
+            left.remove(name)
+            return ["bash", "-c", "echo 'the API is down' >&2; exit 1"], str(cfg.runs / job["id"]), {}
+        return F.command(name, job, cfg, key_file)
+
+    monkeypatch.setattr(steps, "command", command)
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "Wooden box", "n_views": 4,
+                                                  "auto_continue": True, "agent": "astra", "api_key": KEY})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "failed" and (job["stages"]["agent"]["status"], job["stages"]["estimate"]["status"]) \
+        == ("done", "failed"), job
+    agent_started = job["stages"]["agent"]["started"]
+    assert c.app.app.state.runner.forget_key(job_id)
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "estimate"})
+    assert r.status_code == 400 and "holds no OpenAI API key" in r.json()["detail"], r.text
+    assert jobs.load(cfg.runs / job_id)["status"] == "failed"  # nothing ran
+    r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "estimate", "api_key": KEY})
+    assert r.json() == {"status": "queued", "from": "estimate"}, r.text
+    job = wait(c, job_id, "done", "failed", "review")
+    assert job["status"] == "done" and job["stages"]["estimate"]["status"] == "done", job
+    assert job["stages"]["agent"]["started"] == agent_started  # the agent stage stays done
+
+
+def test_a_retry_of_an_older_job_needs_the_key_for_estimate(client, tmp_path, monkeypatch):
+    """A job folder from before the estimate stage has no record of it, and a server start adds one, skipped
+    (jobs.OLDER). The runner still runs that stage, so a retry from align of an older job that failed there needs
+    the key. Before, the retry went on without it, and the job stopped at estimate each time, saying that the server
+    had restarted."""
+    import fake_steps as F
+
+    left = ["align"]
+
+    def command(name, job, cfg, key_file=None):
+        if name in left:
+            left.remove(name)
+            return ["bash", "-c", "echo 'no mesh' >&2; exit 1"], str(cfg.runs / job["id"]), {}
+        return F.command(name, job, cfg, key_file)
+
+    monkeypatch.setattr(steps, "command", command)
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "Wooden box", "n_views": 4,
+                                                  "auto_continue": True, "agent": "astra", "api_key": KEY})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "failed" and (job["stages"]["agent"]["status"], job["stages"]["align"]["status"]) \
+        == ("done", "failed"), job
+    J = cfg.runs / job_id
+    old = jobs.load(J)
+    del old["stages"]["estimate"]  # as a job folder of the version before the estimate stage
+    jobs.save(J, old)
+    with TestClient(server.make_app(cfg, TOKEN, key_dir=tmp_path / "keys")) as c:  # a restart: no key, OLDER
+        login(c)
+        assert jobs.load(J)["stages"]["estimate"] == {**jobs.STAGE, "status": "skipped", "note": jobs.OLDER}
+        r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "align"})
+        assert r.status_code == 400 and "holds no OpenAI API key" in r.json()["detail"], r.text
+        assert jobs.load(J)["status"] == "failed"  # nothing ran
+        r = c.post(f"/api/jobs/{job_id}/continue", json={"from": "align", "api_key": KEY})
+        assert r.json() == {"status": "queued", "from": "align"}, r.text
+        job = wait(c, job_id, "done", "failed", "review")
+        assert job["status"] == "done" and job["warnings"] == [], job
+        assert job["stages"]["estimate"]["status"] == "done" and job["stages"]["mjcf"]["status"] == "done", job
+
+
+def test_an_old_job_that_failed_at_vomp_is_listed_shown_and_retried(client, tmp_path, monkeypatch):
+    """A job folder of the version that still had the vomp stage, which failed there: job.json has a failed "vomp"
+    record right after sam3d, the job's error names it, and run/vomp/ and logs/vomp.log are on disk. After a server
+    start, the jobs list, the job API and its event stream work and show no vomp stage in the progress. A retry
+    from place, the first stage that the progress shows as not done (the app's Retry), ends done. The record and
+    the files stay as they were."""
+    import fake_steps as F
+
+    left = ["place"]
+
+    def command(name, job, cfg, key_file=None):
+        if name in left:
+            left.remove(name)
+            return ["bash", "-c", "echo 'CUDA error' >&2; exit 1"], str(cfg.runs / job["id"]), {}
+        return F.command(name, job, cfg, key_file)
+
+    monkeypatch.setattr(steps, "command", command)
+    c, cfg = client
+    login(c)
+    job_id = uploaded(c, tmp_path)
+    r = c.post(f"/api/jobs/{job_id}/start", json={"mode": "auto", "prompt": "Wooden box", "n_views": 4,
+                                                  "auto_continue": True, "agent": "none"})
+    assert r.status_code == 200, r.text
+    job = wait(c, job_id, "done", "failed")
+    assert job["status"] == "failed" and job["stages"]["place"]["status"] == "failed", job
+    J = cfg.runs / job_id
+    old = jobs.load(J)
+    t = old["stages"]["place"]["started"]
+    vomp = {**jobs.STAGE, "status": "failed", "started": t, "ended": t + 1, "returncode": 1, "note": "exit 1: CUDA error"}
+    stages = {}
+    for name, st in old["stages"].items():  # place had not run yet
+        stages[name] = dict(jobs.STAGE) if name == "place" else st
+        if name == "sam3d":
+            stages["vomp"] = vomp
+    jobs.save(J, {**old, "stages": stages, "error": "vomp: exit 1: CUDA error"})
+    (J / "logs" / "place.log").unlink()
+    log, summary = "== vomp 2026-11-19 10:00:00\nCUDA error\n", json.dumps({"rigid_body": {"mass": 2.0}})
+    (J / "logs" / "vomp.log").write_text(log)
+    (J / "run" / "vomp").mkdir()
+    (J / "run" / "vomp" / "summary.json").write_text(summary)
+    with TestClient(server.make_app(cfg, TOKEN, key_dir=tmp_path / "keys")) as c:  # a server start
+        login(c)
+        assert [(j["id"], j["status"]) for j in c.get("/api/jobs").json()] == [(job_id, "failed")]
+        job = c.get(f"/api/jobs/{job_id}").json()
+        assert job["stages"]["vomp"] == vomp and job["error"] == "vomp: exit 1: CUDA error"
+        assert [s["name"] for s in job["progress"]] == steps.NAMES
+        first = next(s["name"] for s in job["progress"] if s["name"] in jobs.BUILD
+                     and s["status"] not in ("done", "skipped"))
+        assert first == "place"
+        ev = events(c, job_id)  # the newest stage run is the vomp record's, so its log comes first
+        assert ev[0][:2] == ("log", {"stage": "vomp", "text": log}) and ev[-1][:2] == ("end", {"status": "failed"})
+        assert [[s["name"] for s in d["stages"]] for e, d, _ in ev if e == "state"] == [steps.NAMES]
+        r = c.post(f"/api/jobs/{job_id}/continue", json={"from": first})
+        assert r.json() == {"status": "queued", "from": "place"}, r.text
+        job = wait(c, job_id, "done", "failed", "review")
+        assert job["status"] == "done" and job["warnings"] == [] and job["error"] is None, job
+        assert job["stages"]["vomp"] == vomp and "results.zip" in job["files"]
+        assert [s["status"] for s in job["progress"] if s["name"] == "place"] == ["done"]
+    assert (J / "run" / "vomp" / "summary.json").read_text() == summary and (J / "logs" / "vomp.log").read_text() == log
 
 
 def test_a_run_from_lidar_checks_the_intrinsics_first(client, tmp_path):
@@ -1033,7 +1185,7 @@ def test_start_without_the_agent_needs_no_key(client, tmp_path):
 
 def test_opus_build_and_a_change_of_agent(client, tmp_path):
     """A build with Claude Opus 5.5 takes an Anthropic key and shows the model, tokens and cost; back to
-    GPT-6-Astra, the agent and the stages after it run again, with an OpenAI key."""
+    GPT-6.2-Astra, the agent and the stages after it run again, with an OpenAI key."""
     c, cfg = client
     login(c)
     job_id = uploaded(c, tmp_path)
@@ -1060,7 +1212,7 @@ def test_opus_build_and_a_change_of_agent(client, tmp_path):
     assert r.json() == {"status": "queued", "from": "agent"}  # the other agent's stage runs first
     job = wait(c, job_id, "done", "failed")
     assert job["status"] == "done", job["error"]
-    assert job["agent"] == "astra" and job["agent_result"]["model"] == "gpt-6-astra" and "tokens" not in job["agent_result"]
+    assert job["agent"] == "astra" and job["agent_result"]["model"] == "gpt-6.2-astra" and "tokens" not in job["agent_result"]
     assert c.get(f"/api/jobs/{job_id}/file/logs/agent.log").text.count("== agent ") == 2
     assert not list((tmp_path / "keys").iterdir())
     assert not any(k.encode() in p.read_bytes() for p in all_files(tmp_path) for k in (KEY, opus))
@@ -1070,9 +1222,10 @@ BUILD = {"mode": "auto", "prompt": "Wooden box", "n_views": 4, "auto_continue": 
 
 
 def test_a_job_without_an_agent_and_the_360_video(client, tmp_path):
-    """Without an agent there is no refined.glb (physics uses run/posed.glb). The physics outputs are served, and
-    nothing else of the MJCF or the URDF. The job asks for the 360 video: it is served as video/mp4, with 206 for a
-    Range request, and results.zip holds it; its records are not served."""
+    """Without an agent there is no refined.glb (physics uses run/posed.glb). There is no key either, so the estimate,
+    mjcf, usd and urdf stages are skipped (steps.NO_KEY_SKIP) and the job has no summary.json, mjcf.json or
+    model.urdf. The job asks for the 360 video: it is served as video/mp4, with 206 for a Range request, and
+    results.zip holds it; its records are not served."""
     c, cfg = client
     login(c)
     job_id = uploaded(c, tmp_path)
@@ -1083,7 +1236,10 @@ def test_a_job_without_an_agent_and_the_360_video(client, tmp_path):
     assert job["status"] == "done", job["error"]
     assert (job["agent"], job["agent_result"]) == ("none", None)
     assert job["stages"]["agent"]["note"] == "turned off: physics uses the Stage A mesh"
-    assert set(job["files"]) == set(server.OUTPUTS) - {"refined.glb", "pool/lidar.json", "agent/evidence.json"}
+    for s in ("estimate", "mjcf", "usd", "urdf"):
+        assert (job["stages"][s]["status"], job["stages"][s].get("note")) == ("skipped", steps.NO_KEY_SKIP), s
+    physics = {"physics/summary.json", "physics/mjcf/mjcf.json", "physics/urdf/model.urdf"}
+    assert set(job["files"]) == set(server.OUTPUTS) - {"refined.glb", "pool/lidar.json", "agent/evidence.json"} - physics
     assert (job["turntable"], job["stages"]["turntable"]["status"], job["warnings"]) == (True, "done", [])
     mp4 = (J / "turntable" / "turntable.mp4").read_bytes()
     r = c.get(f"/api/jobs/{job_id}/file/turntable/turntable.mp4")
@@ -1099,16 +1255,10 @@ def test_a_job_without_an_agent_and_the_360_video(client, tmp_path):
               "turntable/../job.json"):
         assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
     assert steps.next_glb(J) == J / "run" / "posed.glb"
-    assert c.get(f"/api/jobs/{job_id}/file/refined.glb").status_code == 404
-    assert "links" not in c.get(f"/api/jobs/{job_id}/file/physics/mjcf/mjcf.json").json()  # one body
-
-    for p, kind in [("run/posed.glb", "model/gltf-binary"), ("physics/mjcf/mjcf.json", "application/json"),
-                    ("physics/urdf/model.urdf", "application/xml")]:
-        r = c.get(f"/api/jobs/{job_id}/file/{p}")
-        assert r.status_code == 200 and r.headers["content-type"] == kind, p
-    for p in ("physics/urdf/urdf.json", "physics/urdf/meshes/link_0.obj", "physics/urdf/../../job.json",
-              "physics/mjcf/scene.xml", "physics/mjcf/../../job.json", "run/parts.glb", "run/parts.json"):
+    for p in ("refined.glb", *sorted(physics)):
         assert c.get(f"/api/jobs/{job_id}/file/{p}").status_code == 404, p
+    r = c.get(f"/api/jobs/{job_id}/file/run/posed.glb")
+    assert r.status_code == 200 and r.headers["content-type"] == "model/gltf-binary"
 
 
 def test_manual_start_cancel_and_delete(client, tmp_path):
@@ -2073,7 +2223,8 @@ def test_app_js_calibration_summary_says_where_k_comes_from():
 
 def test_app_js_upload_kinds_and_the_jobs_list():
     """A .zip is a Stray Scanner upload; another suffix is refused (help.html names the kinds). The jobs list names
-    each job's kind, and the stage list has the lidar stage after da3."""
+    each job's kind. The stage list is the server's build stages (jobs.BUILD), with the lidar stage after da3 and the
+    estimate stage after align, and each stage has a label."""
     rows = [{"id": "a", "created": "2026-10-21T09:00:00", "status": "ready", "prompt": None, "video": "a.mp4", "kind": "video"},
             {"id": "b", "created": "2026-10-21T08:00:00", "status": "ready", "prompt": None, "video": "b.bag", "kind": "rosbag"},
             {"id": "c", "created": "2026-10-21T07:00:00", "status": "done", "prompt": "box", "video": "c.zip", "kind": "stray"}]
@@ -2088,7 +2239,8 @@ def test_app_js_upload_kinds_and_the_jobs_list():
           upload({ name: "my capture.zip", size: 3e6 });
           texts.length = 0;
           renderJobs(""" + json.dumps(rows) + """);
-          console.log(JSON.stringify({ kinds, refused, opened, list: [...texts], label: stageLabel("lidar"), build: BUILD }));
+          console.log(JSON.stringify({ kinds, refused, opened, list: [...texts], label: stageLabel("lidar"), build: BUILD,
+            labels: BUILD.map(stageLabel) }));
         })()
         """)
     assert out["kinds"] == [True, True, True, True, True, False, False]
@@ -2097,6 +2249,8 @@ def test_app_js_upload_kinds_and_the_jobs_list():
     assert {"video", "rosbag", "Stray capture"} <= set(out["list"]) and "stray" not in out["list"]
     assert out["label"] == "metric scale (LiDAR)"
     assert out["build"][out["build"].index("da3") + 1] == "lidar" and out["build"].index("lidar") + 1 == out["build"].index("select")
+    assert out["build"] == jobs.BUILD and out["build"][out["build"].index("align") + 1] == "estimate"
+    assert all(out["labels"]) and out["labels"][out["build"].index("estimate")] == "mass and friction"
 
 
 def test_app_js_lidar_box_per_kind():
@@ -4248,6 +4402,13 @@ const walk = (e, out = []) => { if (e && typeof e === "object") { out.push(e); e
 
 RESULT_MJCF = {"name": "cabinet", "inertial": {"mass": 12.5, "com": [0.0, 0.01, 0.4], "fullinertia": [0.1] * 6},
                "friction": 0.6}
+# summary.json "estimate" as harpor.webapp.estimate_step writes it: the checked answer, then the run's own fields.
+ESTIMATE = {"material": "painted plywood", "structure": "hollow", "mass_kg": 12.4, "mass_low_kg": 9.0, "mass_high_kg": 16.0,
+            "friction": 0.45, "friction_low": 0.3, "friction_high": 0.6, "reason": "a plywood cabinet with thin walls",
+            "agent": "opus", "model": "claude-opus-5-5", "attempts": 1, "seconds": 8.5, "views": [0, 2, 5, 8]}
+# The summary of a job built before the estimate stage: the medians of the per-voxel materials and no estimate.
+OLD_SUMMARY = {"rigid_body": {"mass": 12.4, "com": [0, 0.01, 0.4]},
+                "median": {"youngs_modulus_pa": 4.1e9, "poisson_ratio": 0.3, "density_kg_m3": 990.0}}
 OPUS_RESULT = {"source": "finish", "verdict": "complete", "reason": "the doors are closed and the top is flat",
                "limitations": ["the back is a guess", "the handles are smoothed"], "exit": "exited", "agent": "claude",
                "model": "claude-opus-5-5", "counts": {"exports": 1, "reviews": 2, "checkpoints": 0},
@@ -4261,8 +4422,7 @@ def results_job():
     place = {"metric_scale": 1.25, "check": {"mean_mask_iou": 0.82}}
     lidar = {"ok": True, "s": 1.25, "source": {"kind": "rosbag", "topic": "/lidar/points"},
              "combine": {"views": 8, "views_used": 8, "spread_rel": 0.01}}
-    summary = {"rigid_body": {"mass": 12.4, "com": [0, 0.01, 0.4]},
-               "median": {"youngs_modulus_pa": 4.1e9, "poisson_ratio": 0.3, "density_kg_m3": 990.0}}
+    summary = {"rigid_body": {"mass": 12.4, "com": [0, 0.01, 0.4]}, "friction": 0.45, "estimate": ESTIMATE}
     every = ["run/posed.glb", "refined.glb", "run/placement.json", "pool/lidar.json", "physics/aligned.glb",
              "physics/summary.json", "physics/mjcf/mjcf.json", "physics/urdf/model.urdf", "results.zip", "selection.json"]
     job = {"id": "a", "agent": "opus", "files": every, "agent_result": OPUS_RESULT,
@@ -4273,19 +4433,27 @@ def results_job():
 
 
 def test_app_js_results_facts_rows():
-    """The Results tab's facts are plain dt/dd rows, in a fixed order: for an Opus job every row, with the friction
-    that mjcf.json assumed; for a job whose agent was skipped for its mask IoU, the scale, the IoU and the Agent row
-    with the skip note. help.html (#results, #agent, #physics) explains each label."""
+    """The Results tab's facts are plain dt/dd rows, in a fixed order: for an Opus job every row, with the material,
+    the mass's range and the friction that the model estimated; for a job whose agent was skipped for its mask IoU,
+    the scale, the IoU and the Agent row with the skip note; for a job built before the estimate stage, whose summary
+    holds the medians of the per-voxel materials and no estimate, the mass with no range and the friction that
+    mjcf.json assumed, and no row of those medians. help.html (#results, #agent, #physics) explains each label."""
     job, replies = results_job()
     rigid = {"id": "s", "agent": "astra", "agent_result": None,
              "files": ["run/posed.glb", "run/placement.json"],
              "stages": {"agent": {"status": "skipped", "note": "Stage A mean mask IoU 0.41 is below 0.5; physics uses "
                                                               "run/posed.glb"}}}
     replies["/api/jobs/s/file/run/placement.json"] = {"metric_scale": None, "check": {"mean_mask_iou": 0.41}}
+    old = {"id": "o", "agent": "none", "agent_result": None,
+           "files": ["run/posed.glb", "run/placement.json", "physics/summary.json", "physics/mjcf/mjcf.json"],
+           "stages": {"agent": {"status": "skipped", "note": "turned off"}}}
+    replies.update({"/api/jobs/o/file/run/placement.json": {"metric_scale": None, "check": {"mean_mask_iou": 0.82}},
+                    "/api/jobs/o/file/physics/summary.json": OLD_SUMMARY,
+                    "/api/jobs/o/file/physics/mjcf/mjcf.json": RESULT_MJCF})
     out = run_dom_js("""
         (async () => {
           const out = {};
-          for (const job of """ + json.dumps([job, rigid]) + """) {
+          for (const job of """ + json.dumps([job, rigid, old]) + """) {
             V = { id: job.id };
             await renderResults(job);
             const [dl, ...more] = $("#facts2").kids;
@@ -4305,13 +4473,90 @@ def test_app_js_results_facts_rows():
         ("Agent verdict", "complete (finish)"), ("Agent reason", "the doors are closed and the top is flat"),
         ("Limitation", "the back is a guess"), ("Limitation", "the handles are smoothed"),
         ("Agent tokens", "1,000 input, 500 output, 9,000 cache read, 800 cache write in 9 turns"),
-        ("Agent cost (estimate)", "about $0.31"), ("Mass", "12.4 kg"), ("Center of mass", "0.000, 0.010, 0.400 m"),
-        ("Young's modulus (median)", "4.10e+9 Pa"), ("Poisson ratio (median)", "0.300"), ("Density (median)", "990 kg/m³"),
-        ("Friction", "0.6 (assumed, the same on every surface)")]
+        ("Agent cost (estimate)", "about $0.31"), ("Material", "painted plywood (hollow)"),
+        ("Mass", "12.4 kg (range 9.00 to 16.0 kg)"), ("Center of mass", "0.000, 0.010, 0.400 m"),
+        ("Friction", "0.45 (range 0.3 to 0.6, estimated by Claude Opus 5.5)")]
     assert rows("s") == [("Metric scale", "Depth Anything 3's estimate (no LiDAR)"), ("Mask IoU", "0.410"),
                          ("Agent", "skipped: Stage A mean mask IoU 0.41 is below 0.5; physics uses run/posed.glb")]
+    assert rows("o") == [("Metric scale", "Depth Anything 3's estimate (no LiDAR)"), ("Mask IoU", "0.820"), ("Agent", "off"),
+                         ("Mass", "12.4 kg"), ("Center of mass", "0.000, 0.010, 0.400 m"),
+                         ("Friction", "0.6 (assumed, the same on every surface)")]
     # The skip note says "Stage A" (steps.py), and the help page says what that is.
     assert "call it the Stage A mesh" in (server.STATIC / "help.html").read_text()
+
+
+def test_app_js_results_physics_rows_of_an_estimate():
+    """With an estimate in summary.json, the Friction row names the model that made it (estimate.model), or gives the
+    id of a model that app.js does not know. The estimate's friction shows before mjcf.json exists, and in place of
+    the value that mjcf.json holds. The friction keeps three significant digits without trailing zeros; the mass
+    keeps them, as the Mass row did before."""
+    cases = {"f": ({**ESTIMATE, "agent": "fable", "model": "claude-fable-5-2"}, 12.4),
+             "x": ({**ESTIMATE, "agent": "astra", "model": "gpt-6-astra", "material": "cast iron", "structure": "solid",
+                    "mass_kg": 0.0123, "mass_low_kg": 0.01, "mass_high_kg": 0.02, "friction": 0.123456,
+                    "friction_low": 0.1, "friction_high": 1.25}, 0.0123),
+             "n": ({**ESTIMATE, "model": "claude-next-1"}, 12.4)}
+    all_jobs, replies = [], {}
+    for job_id, (est, mass) in cases.items():
+        files = ["physics/summary.json"] + (["physics/mjcf/mjcf.json"] if job_id == "f" else [])
+        all_jobs.append({"id": job_id, "agent": est["agent"], "agent_result": None, "files": files,
+                         "stages": {"agent": {"status": "done"}}})
+        replies[f"/api/jobs/{job_id}/file/physics/summary.json"] = {
+            "rigid_body": {"mass": mass, "com": [0, 0, 0.1]}, "friction": est["friction"], "estimate": est}
+    replies["/api/jobs/f/file/physics/mjcf/mjcf.json"] = RESULT_MJCF  # friction 0.6
+    out = run_dom_js("""
+        (async () => {
+          const out = {};
+          for (const job of """ + json.dumps(all_jobs) + """) {
+            V = { id: job.id };
+            await renderResults(job);
+            const kids = $("#facts2").kids[0].kids;
+            out[job.id] = kids.filter((k, i) => i % 2 === 0).map((k, i) => [k.textContent, kids[2 * i + 1].textContent]);
+          }
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    com = ["Center of mass", "0.000, 0.000, 0.100 m"]
+    assert out["f"] == [["Material", "painted plywood (hollow)"], ["Mass", "12.4 kg (range 9.00 to 16.0 kg)"], com,
+                        ["Friction", "0.45 (range 0.3 to 0.6, estimated by Claude Fable 5.2)"]]
+    assert out["x"] == [["Material", "cast iron (solid)"], ["Mass", "0.0123 kg (range 0.0100 to 0.0200 kg)"], com,
+                        ["Friction", "0.123 (range 0.1 to 1.25, estimated by GPT-6-Astra)"]]
+    assert out["n"][-1] == ["Friction", "0.45 (range 0.3 to 0.6, estimated by claude-next-1)"]
+
+
+def test_app_js_names_the_astra_model_that_each_job_ran():
+    """The refined viewer's caption, the Agent row and the Friction row name the model id of the job's records: a job
+    built with gpt-6-astra (before 2026-11-20) keeps GPT-6-Astra, and a new job (tools.CODEX_MODEL) shows
+    GPT-6.2-Astra."""
+    from harpor.agent import tools
+
+    all_jobs, replies = [], {}
+    for job_id, model in (("old", "gpt-6-astra"), ("new", tools.CODEX_MODEL)):
+        all_jobs.append({"id": job_id, "agent": "astra", "files": ["run/posed.glb", "refined.glb", "physics/summary.json"],
+                         "stages": {"agent": {"status": "done"}},
+                         "agent_result": {"agent": "codex", "model": model, "source": "finish", "verdict": "complete",
+                                          "reason": "fixed the lid", "limitations": [], "exit": "exited"}})
+        replies[f"/api/jobs/{job_id}/file/physics/summary.json"] = {
+            "rigid_body": {"mass": 12.4, "com": [0, 0, 0.1]}, "friction": 0.45,
+            "estimate": {**ESTIMATE, "agent": "astra", "model": model}}
+    out = run_dom_js(WALK + """
+        (async () => {
+          const out = {};
+          for (const job of """ + json.dumps(all_jobs) + """) {
+            V = { id: job.id };
+            await renderResults(job);
+            const kids = $("#facts2").kids[0].kids;
+            const rows = Object.fromEntries(kids.filter((k, i) => i % 2 === 0).map((k, i) => [k.textContent, kids[2 * i + 1].textContent]));
+            const caps = walk($("#viewers")).filter((e) => e.tag === "figure").map((f) => f.kids[0].textContent);
+            out[job.id] = [caps[1], rows.Agent, rows.Friction];
+          }
+          console.log(JSON.stringify(out));
+        })()
+        """, replies)
+    assert out["old"] == ["Refined (GPT-6-Astra): loading", "GPT-6-Astra (gpt-6-astra)",
+                          "0.45 (range 0.3 to 0.6, estimated by GPT-6-Astra)"]
+    assert tools.CODEX_MODEL == "gpt-6.2-astra"
+    assert out["new"] == ["Refined (GPT-6.2-Astra): loading", "GPT-6.2-Astra (gpt-6.2-astra)",
+                          "0.45 (range 0.3 to 0.6, estimated by GPT-6.2-Astra)"]
 
 
 ROUNDS_RESULT = {

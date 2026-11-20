@@ -107,10 +107,14 @@ def test_a_job_runs_from_the_input_to_its_results(term):
         == ("done", "Wooden box", 4, "auto", "none", True, True)
     assert job["video"]["bytes"] == video.stat().st_size and os.path.samefile(video, J / "video" / "my_cup.mp4")
     assert "topics: skipped: video input" in lines and "agent: skipped: turned off: physics uses the Stage A mesh" in lines
+    # Without an agent there is no model and no key, so nothing gives the mass and the friction.
+    assert all(f"{name}: skipped: {steps.NO_KEY_SKIP}" in lines for name in steps.NO_KEY_SKIPPED)
     assert all(any(x.startswith(f"{name}: ") for x in lines) for name in jobs.BUILD)
     assert lines[-1] == f"results: {J / 'results.zip'}"
     with zipfile.ZipFile(J / "results.zip") as z:
-        assert {"aligned.glb", "turntable.mp4", "mjcf/mjcf.json"} <= set(z.namelist())
+        names = set(z.namelist())
+    assert {"aligned.glb", "turntable.mp4"} <= names and not any(n.startswith(("mjcf/", "usd/", "urdf/")) for n in names)
+    assert "summary.json" not in names
     # Nothing of the Runner stays.
     assert not (term.runs / jobs.RUNNER_FILE).exists() and not list((term.tmp / "shm").glob("*"))
 
@@ -397,6 +401,46 @@ def test_the_key_stays_out_of_every_output(term):
     assert "agent: complete: fake agent" in out and OPUS not in out
     assert not [p for p in term.runs.rglob("*") if p.is_file() and OPUS.encode() in p.read_bytes()]
     assert not list((term.tmp / "shm").glob("*"))  # the key file of the stage is gone with its folder
+
+
+def test_a_resume_after_a_failed_estimate_reads_the_key(term, monkeypatch):
+    """The estimate stage takes the key too, so a resume of a job whose agent stage is done reads the key again while
+    estimate is not done. A fresh command holds no key, so without it the job would wait for the key at estimate."""
+    key = term.key_file()
+    fail_once(monkeypatch, "estimate", "echo 'the API is down'; exit 1")
+    code, out = term(term.video(), "--prompt", "box", "--n-views", 3, "--agent", "opus", "--key-file", key)
+    J = term.folder(out)
+    job = jobs.load(J)
+    assert code == run.FAILED and (job["stages"]["agent"]["status"], job["stages"]["estimate"]["status"]) \
+        == ("done", "failed"), out
+    assert "the job failed: estimate: exit 1: the API is down" in out
+    args, before = printed(out), stage_times(J)
+    assert f"--key-file={key}" in args
+    code, out = term.exact(args)
+    job = jobs.load(J)
+    assert code == run.DONE and job["stages"]["estimate"]["status"] == "done" and "estimate: done" in out, out
+    assert stage_times(J)["agent"] == before["agent"] and OPUS not in out  # the agent stage stays done
+    with zipfile.ZipFile(J / "results.zip") as z:
+        assert {"mjcf/mjcf.json", "summary.json"} <= set(z.namelist())
+
+
+def test_a_resume_of_an_older_job_reads_the_key_for_estimate(term, monkeypatch):
+    """A job folder from before the estimate stage has no record of it, and the command's Runner adds one, skipped
+    (jobs.OLDER). The run still runs that stage, so a resume of an older job that failed at align reads the key.
+    Before, the resume never read it, and the job stopped at estimate for the key on every resume."""
+    key = term.key_file()
+    fail_once(monkeypatch, "align", "echo 'no mesh'; exit 1")
+    code, out = term(term.video(), "--prompt", "box", "--n-views", 3, "--agent", "opus", "--key-file", key)
+    J = term.folder(out)
+    assert code == run.FAILED and "the job failed: align: exit 1: no mesh" in out, out
+    old = jobs.load(J)
+    del old["stages"]["estimate"]  # as a job folder of the version before the estimate stage
+    jobs.save(J, old)
+    code, out = term.exact(printed(out))
+    job = jobs.load(J)
+    assert code == run.DONE and "estimate: done" in out and "waiting for the" not in out, out
+    assert (job["stages"]["estimate"]["status"], job["stages"]["mjcf"]["status"]) == ("done", "done")
+    assert OPUS not in out
 
 
 @pytest.mark.parametrize("text, mode, reason", [

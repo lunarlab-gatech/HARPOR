@@ -1,6 +1,6 @@
 """Stand-ins for the stages of a web-app job, so the tests run whole jobs without GPUs or the GPU envs.
 
-    python tests/fake_steps.py STAGE --job J [--key-file F] [--agent astra|opus]
+    python tests/fake_steps.py STAGE --job J [--key-file F] [--agent astra|opus|fable]
 
 The fake_stages fixture (conftest.py) puts command in place of steps.command and ask_provider in place of
 jobs.ask_provider, and tests/fake_launch.py does the same for a test that starts the server or the terminal command
@@ -15,7 +15,8 @@ alignment work on them.
 
 Real code runs wherever it needs no GPU and none of the GPU envs: topics, frames and extract (video.py, also
 for a rosbag, since rosbags is pure Python, and for a Stray Scanner zip), prep (mvsam3d.prep), lidar
-(lidar.py, with the LiDAR points of the views), select (views.py), align (physics_auto.py), cameras.json
+(lidar.py, with the LiDAR points of the views), select (views.py), align (physics_auto.py), estimate
+(estimate_step.py, with the fake model's answer), cameras.json
 (mvsam3d.cameras), turntable (harpor.webapp.turntable with the fake Blender of harpor.agent.fake_agent,
 whose frames are the GLB's outline; the MP4 is a real H.264 file) and package (jobs.package).
 For a job with LiDAR (steps.lidar: a bag's LiDAR topic or a Stray Scanner capture's
@@ -23,13 +24,14 @@ depth), the fake DA3 is off by FAKE_DA3_SCALE: its depth, pointmaps and camera t
 the scene's, so the real lidar stage must find 1.25 from the bag's true points or the capture's true
 depth images, and place records metric_scale as the real place does. place sizes the posed box in the
 run's DA3 units (run_scale), as MV-SAM3D would, so a scale that select did not apply shows in the
-aligned size. The agent stage
-checks the key file (mode 0600, an OPENAI_API_KEY line for astra, an ANTHROPIC_API_KEY line for
-opus), never prints the key, and writes the result record of the agent it stands in for.
+aligned size. The agent and estimate stages
+check the key file (mode 0600, an OPENAI_API_KEY line for astra, an ANTHROPIC_API_KEY line for
+opus and fable) and never print the key. The agent stage writes the result record of the agent it
+stands in for. The estimate stage runs the real harpor.webapp.estimate_step with ESTIMATE as the
+model's answer in place of a request: a hollow cardboard box of 0.25 kg with friction 0.4.
 
-VoMP gives softwood to every voxel of the canonical box, and the real material transfer recomputes the final
-properties in align. mjcf writes a box body, usd its rigid body as text, and urdf one box link with the real
-harpor.physics.urdf.
+mjcf writes a box body with the mass and the friction of physics/summary.json, usd its rigid body as text, and
+urdf one box link with the real harpor.physics.urdf.
 """
 
 import argparse
@@ -59,6 +61,10 @@ DELAY = 0.05
 FAKE_DA3_SCALE = 0.8  # a job with LiDAR: DA3's depth and camera translations are this times the scene's
 COLOR = [170, 120, 70, 255]
 FAKE_BLENDER = [sys.executable, "-m", "harpor.agent.fake_agent", "--blender"]  # the videos' Blender
+# The fake model's answer in the estimate stage
+ESTIMATE = {"material": "cardboard", "structure": "hollow", "mass_kg": 0.25, "mass_low_kg": 0.15, "mass_high_kg": 0.4,
+            "friction": 0.4, "friction_low": 0.3, "friction_high": 0.5,
+            "reason": "fake model: an empty cardboard box of this size weighs about a quarter of a kilogram"}
 
 
 def command(stage, job, cfg, key_file=None):
@@ -353,48 +359,31 @@ def agent(J, key_file, which="astra"):
     print(f"agent (fake {info['model']}): finish {result['verdict']}, GLB {result['glb']}")
 
 
-def grid(glb, n=12):
-    """(centers, h, lo, hi): an n^3 voxel grid over the GLB's box in S, the fake VoMP's occupied voxels."""
-    from harpor.physics.align import load_w
+def estimate(J, key_file, which="astra"):
+    """The real estimate stage (harpor.webapp.estimate_step.run) with ESTIMATE as the model's answer: vlm.ask_claude
+    and vlm.ask_astra give it in this process, with no request."""
+    from harpor.agent import vlm
+    from harpor.webapp import estimate_step
 
-    v, _ = load_w(glb)  # glTF -> W is Blender's import, so these are S coordinates (z up)
-    lo, hi = v.min(0), v.max(0)
-    h = (hi - lo) / n
-    g = (np.arange(n) + 0.5) / n
-    return lo + (hi - lo) * np.stack(np.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3), h, lo, hi
-
-
-def vomp(J):
-    """Softwood in every voxel of canonical.glb."""
-    from harpor.physics.mass import mass_properties
-
-    P = J / "run" / "vomp"
-    P.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(P / "work", ignore_errors=True)  # as the real stage: VoMP needs a fresh folder
-    for old in ("materials.npz", "voxels.npz", "summary.json"):
-        (P / old).unlink(missing_ok=True)
-    rho, E, nu = 600.0, 2.0e9, 0.3  # softwood
-    pace(3)
-    centers, h, lo, hi = grid(J / "run/canonical.glb")
-    np.savez(P / "voxels.npz", centers=centers, h=h, density=np.full(len(centers), rho),
-             youngs_modulus=np.full(len(centers), E), poisson_ratio=np.full(len(centers), nu))
-    summary = {"glb": str((J / "run/canonical.glb").resolve()), "config": "fake", "fake": True,
-               "voxels_occupied": len(centers), "voxels_predicted": len(centers), "voxel_edge_m": float(h.max()),
-               "median": {"youngs_modulus_pa": E, "poisson_ratio": nu, "density_kg_m3": rho},
-               "p05_p95": {"youngs_modulus_pa": [E, E], "poisson_ratio": [nu, nu], "density_kg_m3": [rho, rho]},
-               "rigid_body": mass_properties(centers, np.full(len(centers), rho), h),
-               "seconds": {"load": 0.0, "predict": 3 * DELAY}, "gpu_peak_gb": None}
-    (P / "summary.json").write_text(json.dumps(summary, indent=1))
-    print(f"VoMP (fake): mass {summary['rigid_body']['mass']:.2f} kg")
+    check_key_file(key_file, which)
+    answer = "Here is my estimate.\n" + json.dumps(ESTIMATE)
+    vlm.ask_claude = lambda key, prompt, image, client=None, model=None: answer
+    vlm.ask_astra = lambda key, prompt, image: answer
+    pace(2)
+    estimate_step.run(J, key_file, which)
 
 
 def mjcf(J):
-    """A box body with the VoMP inertial of physics/summary.json."""
+    """A box body with the inertial and the friction of physics/summary.json (harpor.physics.mjcf.DEFAULT_FRICTION
+    without one), as the real build takes them."""
+    from harpor.physics.mjcf import DEFAULT_FRICTION
     from harpor.webapp.physics_auto import sim_name
 
     job = json.loads((J / "job.json").read_text())
     name, P = sim_name(job["prompt"]), J / "physics"
-    rb = json.loads((P / "summary.json").read_text())["rigid_body"]
+    summary = json.loads((P / "summary.json").read_text())
+    rb = summary["rigid_body"]
+    friction = DEFAULT_FRICTION if summary.get("friction") is None else float(summary["friction"])
     aligned = json.loads((P / "aligned.json").read_text())
     lo, hi = np.array(aligned["min_s"]), np.array(aligned["max_s"])
     shutil.rmtree(P / "mjcf", ignore_errors=True)
@@ -410,7 +399,7 @@ def mjcf(J):
     <body name="{name}" pos="0 0 {z0:.4f}">
       <freejoint/>
       <inertial pos="{vec(rb['com'])}" mass="{rb['mass']:.6g}" fullinertia="{vec(rb['fullinertia'])}"/>
-      <geom type="box" pos="{vec((lo + hi) / 2)}" size="{vec((hi - lo) / 2)}"/>
+      <geom type="box" pos="{vec((lo + hi) / 2)}" size="{vec((hi - lo) / 2)}" friction="{friction:g} 0.005 0.0001"/>
     </body>
   </worldbody>
 </mujoco>
@@ -419,19 +408,20 @@ def mjcf(J):
 <mujoco model="scene">
   <include file="{name}.xml"/>
   <worldbody>
-    <geom name="floor" type="plane" size="0 0 0.05"/>
+    <geom name="floor" type="plane" size="0 0 0.05" friction="{friction:g} 0.005 0.0001"/>
   </worldbody>
 </mujoco>
 """)
     pace(2)
-    (P / "mjcf" / "mjcf.json").write_text(json.dumps({"name": name, "fake": True, "collision_hulls": 1, "start_z": z0,
+    (P / "mjcf" / "mjcf.json").write_text(json.dumps({"name": name, "fake": True, "friction": friction,
+                                                      "collision_hulls": 1, "start_z": z0,
                                                       "inertial": {k: rb[k] for k in ("mass", "com", "fullinertia")},
                                                       "compiled": True}, indent=1))
     print(f"MJCF (fake): {P / 'mjcf' / 'scene.xml'}")
 
 
 def usd(J):
-    """A rigid body with the VoMP mass, as text."""
+    """A rigid body with the mass of physics/summary.json, as text."""
     from harpor.webapp.physics_auto import sim_name
 
     job = json.loads((J / "job.json").read_text())
@@ -511,8 +501,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("stage", choices=steps.NAMES)
     ap.add_argument("--job", required=True)
-    ap.add_argument("--key-file", help="agent stage: the env file with the agent's API key")
-    ap.add_argument("--agent", choices=("astra", "opus", "fable"), default="astra", help="agent stage: the job's agent")
+    ap.add_argument("--key-file", help="agent and estimate stages: the env file with the API key of the job's agent")
+    ap.add_argument("--agent", choices=("astra", "opus", "fable"), default="astra",
+                    help="agent and estimate stages: the job's agent")
     a = ap.parse_args(argv)
     J = Path(a.job)
     print(f"fake {a.stage}: {J.name}", flush=True)
@@ -530,8 +521,8 @@ def main(argv=None):
         real("harpor.webapp.physics_auto", "align", "--job", J)
     elif a.stage == "package":
         jobs.package(J)
-    elif a.stage == "agent":
-        agent(J, a.key_file, a.agent)
+    elif a.stage in ("agent", "estimate"):
+        globals()[a.stage](J, a.key_file, a.agent)
     else:
         globals()[a.stage](J)
 

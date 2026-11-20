@@ -1,10 +1,10 @@
 """One request with one image to the job's VLM, and the parse of its JSON answer (build_plan.md note 5).
 
-Nothing calls these at the moment: the physics judge that used them was removed on 2026-11-20. Opus is Claude Opus
-5.5 and Fable is Claude Fable 5.2, both through the anthropic SDK (beta messages with the server-side refusal
-fallback, as claude_agent; effort high; both always think and take no temperature). Astra is GPT-6-Astra
-through the OpenAI Responses API, called with urllib (no openai SDK is installed). parse() takes the first JSON
-object of an answer.
+harpor.webapp.estimate_step calls them for the mass and the friction of the final mesh. The physics judge that
+called them before was removed on 2026-11-20. Opus is Claude Opus 5.5 and Fable is Claude Fable 5.2, both
+through the anthropic SDK (beta messages with the server-side refusal fallback, as claude_agent; effort high;
+both always think and take no temperature). Astra is GPT-6.2-Astra through the OpenAI Responses API, called with
+urllib (no openai SDK is installed). parse() takes the first JSON object of an answer.
 
 The API key comes from the key file (the line of the agent's provider) into memory only. It is never printed or
 stored: the caller passes each answer through agent_step.scrub with every key of the file, with its JSON escapes
@@ -104,7 +104,7 @@ def ask_claude(key, prompt, image, client=None, model=CLAUDE_MODEL):
 
 
 def ask_astra(key, prompt, image):
-    """GPT-6-Astra's answer text, from POST /v1/responses with the photo as a data URL."""
+    """GPT-6.2-Astra's answer text, from POST /v1/responses with the photo as a data URL."""
     import urllib.error
     import urllib.request
 

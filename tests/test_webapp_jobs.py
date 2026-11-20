@@ -23,7 +23,7 @@ from harpor.webapp import agent_step, jobs, steps
 ROOT = Path(__file__).resolve().parents[1]
 KEY = "sk-fake-" + secrets.token_hex(16)
 ICE = steps.Config(G=Path("/storage/ice1/5/0/ali497/gator"), runs=Path("/storage/ice1/5/0/ali497/gator/webapp_runs"),
-                   code=Path("/storage/ice1/5/0/ali497/gator/gator_clone"))
+                   code=Path("/storage/ice1/5/0/ali497/gator/HARPOR"))
 JOB = {"id": "20261015-120000-abcdef", "prompt": "coffee cup", "slug": "coffee_cup", "agent": "astra",
        "overrides": {"locked": [], "excluded": [], "instance": {"f00012": "1", "f00020": "none"}}}
 # The spec's environment lines, copied from our ICE scripts, with the thread count open to the server's environment.
@@ -31,10 +31,6 @@ STAGE_A = ('HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch TORCH_EXTEN
            'OMP_NUM_THREADS=${OMP_NUM_THREADS:-16} CONDA_PREFIX=$G/envs/sam3d '
            'CPATH=$G/envs/sam3d/targets/x86_64-linux/include '
            'LIBRARY_PATH=$G/envs/sam3d/targets/x86_64-linux/lib:$G/envs/sam3d/lib PATH=$G/envs/sam3d/bin:$PATH')
-VOMP = ('eval "$($G/tools/micromamba shell hook -s bash)"; micromamba activate $G/envs/vomp11',
-        'export CUDA_HOME=$CONDA_PREFIX HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch '
-        'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 OMP_NUM_THREADS=${OMP_NUM_THREADS:-16} '
-        'CPATH=$CONDA_PREFIX/targets/x86_64-linux/include LIBRARY_PATH=$CONDA_PREFIX/targets/x86_64-linux/lib:$CONDA_PREFIX/lib')
 
 
 @pytest.fixture
@@ -82,12 +78,12 @@ def test_commands_have_the_ice_environment():
     scripts = {s: steps.command(s, JOB, ICE, key_file="/dev/shm/gator-webapp-1/k.env") for s in steps.NAMES
                if s not in ("mjcf", "usd", "urdf")}
     for s, (argv, cwd, env) in scripts.items():
-        assert argv[:2] == ["bash", "-c"] and cwd == "/storage/ice1/5/0/ali497/gator/gator_clone"
+        assert argv[:2] == ["bash", "-c"] and cwd == "/storage/ice1/5/0/ali497/gator/HARPOR"
         assert argv[2].startswith("set -eo pipefail\nG=/storage/ice1/5/0/ali497/gator\n"
                                   "J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n"
-                                  "C=/storage/ice1/5/0/ali497/gator/gator_clone\n")
+                                  "C=/storage/ice1/5/0/ali497/gator/HARPOR\n")
         assert ("export " + STAGE_A in argv[2]) == (s in ("prep", "da3", "sam3d", "place", "agent", "align",
-                                                          "turntable")), s
+                                                          "estimate", "turntable")), s
         assert env == {"PYTHONUNBUFFERED": "1"} and KEY not in argv[2]
     sc = {s: v[0][2] for s, v in scripts.items()}
     assert sc["masks"].endswith("\nexport HF_HOME=$G/.cache/huggingface\nrm -f \"$J/scene/sam3_coffee_cup/sam3.json\"\n"
@@ -103,8 +99,17 @@ def test_commands_have_the_ice_environment():
     assert not any("GATOR_MUJOCO" in text for text in sc.values())  # the agent's rounds no longer run MuJoCo
     opus = steps.command("agent", {**JOB, "agent": "opus"}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
     assert opus == sc["agent"][:-len("astra")] + "opus"
-    assert "\n".join(VOMP) in sc["vomp"] and sc["vomp"].endswith(
-        'cd $G/VoMP && python $C/harpor/physics/vomp_run.py --glb "$J/run/canonical.glb" --out "$J/run/vomp" --opaque-input')
+    # The estimate stage: the job's model in envs/sam3d, with the same key file and agent.
+    assert sc["align"].endswith(f'\nexport {STAGE_A}\ncd $C && $G/envs/sam3d/bin/python -m harpor.webapp.physics_auto '
+                                'align --job "$J"')
+    assert sc["estimate"].endswith(f'\nexport {STAGE_A}\ncd $C && $G/envs/sam3d/bin/python -m '
+                                   'harpor.webapp.estimate_step --job "$J" --key-file /dev/shm/gator-webapp-1/k.env '
+                                   '--agent astra')
+    for a in ("opus", "fable"):
+        est = steps.command("estimate", {**JOB, "agent": a}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
+        assert est == sc["estimate"][:-len("astra")] + a
+    # No stage activates another env with micromamba or sets CUDA_HOME.
+    assert not any("micromamba" in text or "CUDA_HOME" in text for text in sc.values())
     assert sc["topics"].endswith('$G/envs/web/bin/python -m harpor.webapp.video topics --job "$J"')
     assert sc["frames"].endswith('$G/envs/web/bin/python -m harpor.webapp.video analyze --job "$J"')
     assert sc["package"].endswith('$G/envs/web/bin/python -m harpor.webapp.jobs package --job "$J"')
@@ -115,24 +120,27 @@ def test_commands_have_the_ice_environment():
         '--sif $G/sif/harpor-agent.sif\ncd $C && $G/envs/web/bin/python -m harpor.webapp.turntable encode --job "$J"')
     assert sc["lidar"] == ('set -eo pipefail\nG=/storage/ice1/5/0/ali497/gator\n'
                            'J=/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef\n'
-                           'C=/storage/ice1/5/0/ali497/gator/gator_clone\n'
+                           'C=/storage/ice1/5/0/ali497/gator/HARPOR\n'
                            'cd $C && $G/envs/web/bin/python -m harpor.webapp.lidar scale --job "$J"')
-    with pytest.raises(ValueError):
-        steps.command("agent", JOB, ICE)
     import fake_steps  # the tests' stand-in for steps.command refuses the same calls
 
-    with pytest.raises(ValueError):
-        fake_steps.command("agent", JOB, ICE)
-    fake = fake_steps.command("agent", JOB, ICE, key_file="/k/x.env")
-    assert fake[0][2] == (f"exec {sys.executable} {ROOT}/tests/fake_steps.py agent --job "
-                          "/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef --key-file /k/x.env --agent astra")
-    assert fake[1] == str(ROOT)
-    # Only the agent stage takes the key file: every other stage runs without one, also with an agent.
-    for s in set(steps.NAMES) - {"agent", "mjcf", "usd", "urdf"}:
+    for s in ("agent", "estimate"):
+        with pytest.raises(ValueError, match=f"the {s} stage needs the key file"):
+            steps.command(s, JOB, ICE)
+        with pytest.raises(ValueError, match=f"the {s} stage needs the key file"):
+            fake_steps.command(s, JOB, ICE)
+        fake = fake_steps.command(s, {**JOB, "agent": "fable"}, ICE, key_file="/k/x.env")
+        assert fake[0][2] == (f"exec {sys.executable} {ROOT}/tests/fake_steps.py {s} --job "
+                              "/storage/ice1/5/0/ali497/gator/webapp_runs/20261015-120000-abcdef --key-file /k/x.env "
+                              "--agent fable")
+        assert fake[1] == str(ROOT)
+    # Only the agent and estimate stages take the key file: every other stage runs without one, also with an agent.
+    for s in set(steps.NAMES) - {"agent", "estimate", "mjcf", "usd", "urdf"}:
         assert steps.command(s, JOB, ICE)[0][2] == sc[s], s
         assert "--key-file" not in fake_steps.command(s, JOB, ICE)[0][2], s
-    assert steps.command("agent", {**JOB, "agent": "none"}, ICE)[0][2] == sc["agent"].replace(
-        " --key-file /dev/shm/gator-webapp-1/k.env --agent astra", "")
+    for s in ("agent", "estimate"):  # a job without an agent skips both (steps.skip), and has no key to give them
+        assert steps.command(s, {**JOB, "agent": "none"}, ICE)[0][2] == sc[s].replace(
+            " --key-file /dev/shm/gator-webapp-1/k.env --agent astra", ""), s
 
 
 
@@ -154,7 +162,7 @@ def test_stages_run_from_the_config_code(tmp_path):
     cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs", code=Path("/my repo"))
     for s in set(steps.NAMES) - {"mjcf", "usd", "urdf"}:
         argv, cwd, _ = steps.command(s, JOB, cfg, key_file="/k/x.env")
-        assert cwd == "/my repo" and "\nC='/my repo'\n" in argv[2] and "gator_clone" not in argv[2], s
+        assert cwd == "/my repo" and "\nC='/my repo'\n" in argv[2] and str(ICE.code) not in argv[2], s
 
 
 def test_physics_commands_name_the_object():
@@ -171,7 +179,7 @@ def test_physics_commands_name_the_object():
 
 
 def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
-    """The scripts run as written: stand-in interpreters and micromamba report what they were given."""
+    """The scripts run as written: stand-in interpreters report what they were given."""
     monkeypatch.delenv("TORCH_CUDA_ARCH_LIST", raising=False)
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
     G = tmp_path / "G"
@@ -179,23 +187,18 @@ def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
         #!/bin/bash
         echo "ran $0 $*"
         echo "pwd $(pwd -P)"
-        for v in HF_HOME CONDA_PREFIX TORCH_CUDA_ARCH_LIST TORCH_EXTENSIONS_DIR CPATH LIBRARY_PATH CUDA_HOME OMP_NUM_THREADS; do
+        for v in HF_HOME CONDA_PREFIX TORCH_CUDA_ARCH_LIST TORCH_EXTENSIONS_DIR CPATH LIBRARY_PATH OMP_NUM_THREADS; do
           echo "$v=${!v}"
         done
         echo "PATH0=${PATH%%:*}"
         """)
-    for env in ("sam3d", "sam3seg", "vomp11"):
+    for env in ("sam3d", "sam3seg"):
         p = G / "envs" / env / "bin" / "python"
         p.parent.mkdir(parents=True)
         p.write_text(report)
         p.chmod(0o755)
-    (G / "tools").mkdir()
-    (G / "tools" / "micromamba").write_text(
-        "#!/bin/bash\necho 'micromamba() { export CONDA_PREFIX=\"$2\"; export PATH=\"$2/bin:$PATH\"; }'\n")
-    (G / "tools" / "micromamba").chmod(0o755)
-    for d in ("gator_clone", "VoMP"):
-        (G / d).mkdir()
-    cfg = steps.Config(G=G, runs=tmp_path / "runs", code=G / "gator_clone")
+    (G / "HARPOR").mkdir()
+    cfg = steps.Config(G=G, runs=tmp_path / "runs", code=G / "HARPOR")
     J = cfg.runs / JOB["id"]
 
     def run(stage):
@@ -207,30 +210,23 @@ def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
     env, (ran, pwd) = run("prep")
     G = G.resolve()
     assert ran == f"ran {G}/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d prep --scene {J}/scene " \
-                  f"--mask-prompt sam3_coffee_cup --out {J}/pool" and pwd == f"pwd {G}/gator_clone"
+                  f"--mask-prompt sam3_coffee_cup --out {J}/pool" and pwd == f"pwd {G}/HARPOR"
     assert env["CONDA_PREFIX"] == f"{G}/envs/sam3d" and env["TORCH_CUDA_ARCH_LIST"] == ""  # no stage picks the GPU arch
     assert env["PATH0"] == f"{G}/envs/sam3d/bin" and env["TORCH_EXTENSIONS_DIR"] == f"{G}/.cache/torch_extensions"
     assert env["LIBRARY_PATH"] == f"{G}/envs/sam3d/targets/x86_64-linux/lib:{G}/envs/sam3d/lib"
-    env, (ran, pwd) = run("vomp")
-    assert ran == f"ran {G}/envs/vomp11/bin/python {G}/gator_clone/harpor/physics/vomp_run.py " \
-                  f"--glb {J}/run/canonical.glb --out {J}/run/vomp --opaque-input" and pwd == f"pwd {G}/VoMP"
-    assert env["CUDA_HOME"] == env["CONDA_PREFIX"] == f"{G}/envs/vomp11"
-    assert env["TORCH_EXTENSIONS_DIR"] == f"{G}/.cache/torch_extensions_vomp11" and env["TORCH_CUDA_ARCH_LIST"] == ""
-    assert env["CPATH"] == f"{G}/envs/vomp11/targets/x86_64-linux/include" and env["HF_HOME"] == f"{G}/.cache/huggingface"
 
-    # The thread count is 16 unless the server's environment sets it, in the Stage A line and in VoMP's after activation.
-    for stage in ("prep", "vomp"):
-        assert run(stage)[0]["OMP_NUM_THREADS"] == "16"
-        monkeypatch.setenv("OMP_NUM_THREADS", "")
-        assert run(stage)[0]["OMP_NUM_THREADS"] == "16"
-        monkeypatch.setenv("OMP_NUM_THREADS", "4")
-        assert run(stage)[0]["OMP_NUM_THREADS"] == "4"
-        monkeypatch.delenv("OMP_NUM_THREADS")
+    # The thread count is 16 unless the server's environment sets it, in the Stage A line.
+    assert run("prep")[0]["OMP_NUM_THREADS"] == "16"
+    monkeypatch.setenv("OMP_NUM_THREADS", "")
+    assert run("prep")[0]["OMP_NUM_THREADS"] == "16"
+    monkeypatch.setenv("OMP_NUM_THREADS", "4")
+    assert run("prep")[0]["OMP_NUM_THREADS"] == "4"
+    monkeypatch.delenv("OMP_NUM_THREADS")
 
     # The masks stage: SAM 3 in envs/sam3seg with HF_HOME only, not the Stage A environment of envs/sam3d.
     env, (ran, pwd) = run("masks")
     assert ran == f"ran {G}/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks --scene {J}/scene " \
-                  "--prompt=coffee cup --overwrite --pick f00012=1 --pick f00020=none" and pwd == f"pwd {G}/gator_clone"
+                  "--prompt=coffee cup --overwrite --pick f00012=1 --pick f00020=none" and pwd == f"pwd {G}/HARPOR"
     assert env["HF_HOME"] == f"{G}/.cache/huggingface" and env["CONDA_PREFIX"] != f"{G}/envs/sam3d"
     assert env["PATH0"] != f"{G}/envs/sam3d/bin" and env["TORCH_EXTENSIONS_DIR"] != f"{G}/.cache/torch_extensions"
 
@@ -242,7 +238,50 @@ def test_config_from_env(monkeypatch, tmp_path):
     assert cfg.G == tmp_path and cfg.runs == tmp_path / "webapp_runs"
     monkeypatch.setenv("WEBAPP_RUNS", str(tmp_path / "r"))
     assert steps.config_from_env().runs == tmp_path / "r"
-    assert [s["name"] for s in steps.STAGES if s["gpu"]] == ["masks", "da3", "sam3d", "vomp", "agent", "turntable"]
+    assert [s["name"] for s in steps.STAGES if s["gpu"]] == ["masks", "da3", "sam3d", "agent", "turntable"]
+
+
+def test_estimate_stage_order():
+    """The estimate stage runs after align, on the aligned mesh, and before mjcf, usd and urdf, which read its
+    summary.json. It needs no GPU. A rerun deletes its summary and its photo sheet, and nothing of align."""
+    n = steps.NAMES
+    assert n[n.index("align"):n.index("turntable")] == ["align", "estimate", "mjcf", "usd", "urdf"]
+    assert "estimate" in jobs.BUILD and "estimate" not in steps.GPU
+    assert jobs.DERIVED["estimate"] == ("physics/summary.json", "physics/estimate_views.jpg")
+    assert steps.KEYED == ("agent", "estimate")
+
+
+def test_the_stages_have_no_vomp():
+    """The estimate stage gives the mass and the friction, so there is no vomp stage: no name, GPU slot, marker,
+    command, env line or files to clear. place follows sam3d. steps.command and the tests' stand-in refuse "vomp" as
+    an unknown stage."""
+    import fake_steps
+
+    assert steps.NAMES == ["topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "place",
+                           "agent", "align", "estimate", "mjcf", "usd", "urdf", "turntable", "package"]
+    assert "vomp" not in steps.NAMES and "vomp" not in steps.GPU and "vomp" not in steps.MARKERS
+    assert "vomp" not in jobs.BUILD and "vomp" not in jobs.DERIVED
+    assert not [n for n in dir(steps) if "VOMP" in n.upper()]
+    assert not hasattr(fake_steps, "vomp")
+    for command in (steps.command, fake_steps.command):
+        with pytest.raises(ValueError, match="unknown stage 'vomp'"):
+            command("vomp", JOB, ICE)
+    with pytest.raises(ValueError, match="unknown stage 'vomp'"):
+        steps.done("vomp", ROOT)
+
+
+def test_a_rerun_after_select_keeps_run(tmp_path):
+    """A rerun from sam3d or later (a retry, or another agent) deletes agent/ and physics/, which hold what was made
+    from the agent's GLB, and keeps run/: Stage A's outputs, and the run/vomp that a job of an earlier version has. A
+    rerun from select or earlier deletes run/, as every new build does."""
+    for folder in ("run/vomp", "agent", "physics"):
+        (tmp_path / folder).mkdir(parents=True)
+        (tmp_path / folder / "summary.json").write_text("{}")
+    jobs._clear(tmp_path, steps.NAMES[steps.NAMES.index("sam3d"):])
+    assert (tmp_path / "run" / "vomp" / "summary.json").is_file()
+    assert not (tmp_path / "agent").exists() and not (tmp_path / "physics").exists()
+    jobs._clear(tmp_path, steps.NAMES[steps.NAMES.index("select"):])
+    assert not (tmp_path / "run").exists()
 
 
 def test_config_from_env_takes_only_harpor_root(monkeypatch, tmp_path):
@@ -309,6 +348,23 @@ def test_done_markers_guard_and_skip(tmp_path):
     (J / "turntable" / "turntable.json").write_text("{}")
     assert steps.done("turntable", J) and steps.guard("turntable", J) is None
     assert steps.OPTIONAL == {"turntable": "360 video"} and jobs.DERIVED["turntable"] == ("turntable",)
+    # align is done with its record alone; estimate when physics/summary.json holds the model's "estimate". A
+    # summary written before the estimate stage existed has none, so estimate runs.
+    (J / "physics").mkdir()
+    (J / "physics" / "aligned.glb").write_bytes(b"glTF")
+    (J / "physics" / "aligned.json").write_text("{}")
+    assert steps.done("align", J) and not steps.done("estimate", J)
+    old_summary = {"glb": "aligned.glb", "median": {"density_kg_m3": 600.0},
+                   "rigid_body": {"mass": 2.0, "com": [0, 0, 0], "fullinertia": [1, 1, 1, 0, 0, 0]}}
+    for text in (json.dumps(old_summary), "{", "[]", json.dumps({**old_summary, "friction": 0.4})):
+        (J / "physics" / "summary.json").write_text(text)
+        assert not steps.done("estimate", J) and steps.done("align", J), text
+    (J / "physics" / "summary.json").write_text(json.dumps({**old_summary, "friction": 0.4, "estimate": {}}))
+    (J / "physics" / "estimate_views.jpg").write_bytes(b"jpg")
+    assert steps.done("estimate", J) and steps.guard("estimate", J) is None and steps.skip("estimate", J) is None
+    jobs._clear(J, ["estimate"])  # a rerun of estimate keeps align's files
+    assert not steps.done("estimate", J) and steps.done("align", J)
+    assert sorted(p.name for p in (J / "physics").iterdir()) == ["aligned.glb", "aligned.json"]
     (J / "physics" / "mjcf").mkdir(parents=True)
     (J / "physics" / "mjcf" / "mjcf.json").write_text(json.dumps({"name": "x"}))
     assert not steps.done("mjcf", J)
@@ -324,25 +380,36 @@ def test_done_markers_guard_and_skip(tmp_path):
     assert steps.skip("agent", J) is None
     (J / "run" / "placement.json").write_text(json.dumps({"check": {"mean_mask_iou": 0.31}}))
     assert "0.31 is below 0.5" in steps.skip("agent", J) and steps.skip("align", J) is None
+    # A poor placement skips only the agent: the job's model still gives the mass and the friction.
+    assert not any(steps.skip(s, J) for s in ("estimate", "mjcf", "usd", "urdf"))
 
 
-def test_only_the_agent_stage_takes_the_key(tmp_path):
-    """needs_key is true for the agent stage of a job with an agent, and for no other stage; a job without one has no
-    stage that takes a key, and its agent stage is skipped, so physics uses the Stage A mesh."""
+def test_the_agent_and_estimate_stages_take_the_key(tmp_path):
+    """needs_key is true for the agent and estimate stages of a job with an agent, and for no other stage. A job
+    without one has no stage that takes a key: its agent stage is skipped, so physics uses the Stage A mesh, and
+    estimate, mjcf, usd and urdf are skipped, since only the job's model gives the mass and the friction."""
     J = tmp_path
     job = {"prompt": "toy box", "slug": "toy_box", "agent": "astra"}
     for agent in ("astra", "opus", "fable"):
-        assert [s for s in steps.NAMES if steps.needs_key(s, {**job, "agent": agent})] == ["agent"]
-    assert not any(steps.needs_key(s, {**job, "agent": "none"}) for s in steps.NAMES)
+        assert [s for s in steps.NAMES if steps.needs_key(s, {**job, "agent": agent})] == ["agent", "estimate"]
+    assert [s for s in steps.NAMES if steps.needs_key(s, {**job, "agent": "none"})] == []
     with pytest.raises(ValueError, match="agent is one of"):
-        steps.needs_key("agent", {**job, "agent": "gpt"})
-    (J / "job.json").write_text(json.dumps({**job, "agent": "none"}))
+        steps.needs_key("estimate", {**job, "agent": "gpt"})
+    assert steps.NO_KEY_SKIP == "turned off: mass and friction need the job's model and API key"
+    (J / "job.json").write_text(json.dumps({**job, "agent": "none", "turntable": True}))
     assert steps.skip("agent", J) == "turned off: physics uses the Stage A mesh"
+    assert {s: steps.skip(s, J) for s in steps.NAMES[steps.NAMES.index("align"):]} == {
+        "align": None, "estimate": steps.NO_KEY_SKIP, "mjcf": steps.NO_KEY_SKIP, "usd": steps.NO_KEY_SKIP,
+        "urdf": steps.NO_KEY_SKIP, "turntable": None, "package": None}
+    for agent in ("astra", "opus", "fable"):
+        (J / "job.json").write_text(json.dumps({**job, "agent": agent}))
+        assert not any(steps.skip(s, J) for s in ("agent", "estimate", "mjcf", "usd", "urdf")), agent
+    (J / "job.json").unlink()  # a run folder without job.json (physics_auto asks about it): nothing is turned off
+    assert not any(steps.skip(s, J) for s in ("estimate", "mjcf", "usd", "urdf"))
     (J / "job.json").write_text(json.dumps(job))
-    assert steps.skip("agent", J) is None
     (J / "run").mkdir()
     (J / "run" / "placement.json").write_text(json.dumps({"check": {"mean_mask_iou": 0.31}}))
-    assert steps.skip("agent", J).endswith("physics uses run/posed.glb")
+    assert steps.skip("agent", J).endswith("physics uses run/posed.glb") and steps.skip("estimate", J) is None
 
 
 def test_lidar_stage_done_skip_guard_and_derived(tmp_path):
@@ -780,7 +847,7 @@ def test_runner_opus_key_and_a_change_of_agent(make_runner, tmp_path, monkeypatc
     def command(stage, job, cfg, key_file=None):
         J = cfg.runs / job["id"]
         script = f"touch {J}/done_{stage}"
-        if stage == "agent":
+        if stage in steps.KEYED:
             script += f"; {sys.executable} -c \"{probe}\" {key_file}"
         return ["bash", "-c", script], str(J), {}
 
@@ -792,9 +859,10 @@ def test_runner_opus_key_and_a_change_of_agent(make_runner, tmp_path, monkeypatc
     runner.submit_build(job_id, OPUS_KEY, agent="opus")
     job = wait(J, "done")
     assert job["agent"] == "opus" and job["key_ok"] is False and not runner.has_key(job_id)
-    assert "key file 0o600 ANTHROPIC_API_KEY" in (J / "logs" / "agent.log").read_text()
+    for s in ("agent", "estimate"):  # the job's model refines the mesh and gives the mass and the friction
+        assert "key file 0o600 ANTHROPIC_API_KEY" in (J / "logs" / f"{s}.log").read_text()
 
-    # Selected with GPT-6-Astra, then Build with Opus and no key: the OpenAI key is dropped, and the agent
+    # Selected with GPT-6.2-Astra, then Build with Opus and no key: the OpenAI key is dropped, and the agent
     # stage waits for the Anthropic one.
     job_id, J = ready_job(cfg)
     runner.submit_build(job_id, KEY)
@@ -808,17 +876,23 @@ def test_runner_opus_key_and_a_change_of_agent(make_runner, tmp_path, monkeypatc
     job = wait(J, "done")
     agent_started, place_started = job["stages"]["agent"]["started"], job["stages"]["place"]["started"]
 
-    # Done; back to GPT-6-Astra from vomp: the agent and every stage after it run again, with an OpenAI key file.
-    runner.resume(job_id, "vomp", api_key=KEY, agent="astra")
+    # Done; back to GPT-6.2-Astra from place: the agent and every stage after it run again, with an OpenAI key file.
+    # place stays done, so it does not run again.
+    assert runner.resume(job_id, "place", api_key=KEY, agent="astra") == "place"
     job = wait(J, "done")
     assert job["agent"] == "astra" and job["stages"]["agent"]["started"] > agent_started
     assert job["stages"]["place"]["started"] == place_started and job["stages"]["package"]["status"] == "done"
-    log = (J / "logs" / "agent.log").read_text()
-    assert log.count("== agent ") == 2 and log.index("ANTHROPIC_API_KEY") < log.index("key file 0o600 OPENAI_API_KEY")
-    # And no agent: no key, and the agent stage is skipped.
+    for s in ("agent", "estimate"):
+        log = (J / "logs" / f"{s}.log").read_text()
+        assert log.count(f"== {s} ") == 2
+        assert log.index("ANTHROPIC_API_KEY") < log.index("key file 0o600 OPENAI_API_KEY")
+    # And no agent: no key, and the agent stage is skipped, and so are the stages that need the mass and the friction.
     runner.resume(job_id, "align", agent="none")
     job = wait(J, "done")
     assert job["agent"] == "none" and job["stages"]["agent"]["status"] == "skipped"
+    for s in ("estimate", "mjcf", "usd", "urdf"):
+        assert job["stages"][s] == {**jobs.STAGE, "status": "skipped", "note": steps.NO_KEY_SKIP}, s
+    assert (J / "logs" / "estimate.log").read_text().count("== estimate ") == 2
     assert not list(runner.key_dir.iterdir())
     assert not any(k.encode() in p.read_bytes() for p in all_files(tmp_path) for k in (KEY, OPUS_KEY))
 
@@ -868,7 +942,7 @@ def test_runner_warns_when_the_360_video_fails(make_runner, monkeypatch):
     assert job["stages"]["package"]["status"] == "done" and job["stages"]["package"]["started"] > package_started
 
 
-def test_runner_key_file_lives_only_during_the_agent_stage(make_runner, tmp_path, monkeypatch):
+def test_runner_key_file_lives_only_during_the_keyed_stages(make_runner, tmp_path, monkeypatch):
     runner, cfg = make_runner()
     (runner.key_dir / "stale.env").write_text("OPENAI_API_KEY=old\n")
     runner, cfg = make_runner()  # a restart deletes key files a dead server left
@@ -879,8 +953,10 @@ def test_runner_key_file_lives_only_during_the_agent_stage(make_runner, tmp_path
     def command(stage, job, cfg, key_file=None):
         J = cfg.runs / job["id"]
         script = f"echo PROGRESS 1; touch {J}/done_{stage}"
-        if stage == "agent":
+        if stage in ("agent", "estimate"):
             script += f"; {sys.executable} -c \"{probe}\" {key_file}"
+        elif stage == "mjcf":  # the key file of estimate is gone once it ended
+            script += f"; ls {runner.key_dir}"
         return ["bash", "-c", script], str(J), {}
 
     monkeypatch.setattr(steps, "command", command)
@@ -893,6 +969,8 @@ def test_runner_key_file_lives_only_during_the_agent_stage(make_runner, tmp_path
     assert job["key_ok"] is False
     assert job["slug"] == "box" and job_id not in runner._keys
     assert "key file 0o600 True" in (J / "logs" / "agent.log").read_text()
+    assert "key file 0o600 True" in (J / "logs" / "estimate.log").read_text()
+    assert ".env" not in (J / "logs" / "mjcf.log").read_text()
     assert not list(runner.key_dir.iterdir())
     assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))
 
@@ -915,6 +993,57 @@ def test_runner_key_file_lives_only_during_the_agent_stage(make_runner, tmp_path
         runner.resume(job_id, "frames")
     with pytest.raises(ValueError):
         runner.job_dir("../" + job_id)
+
+
+def test_runner_gives_the_key_to_estimate_after_a_skipped_agent(make_runner, tmp_path, monkeypatch):
+    """A poor Stage A placement skips the agent stage, which leaves the key unused: the runner holds it for the whole
+    build, so estimate gets it. A job that resumes from estimate while the runner holds no key (forget_key, or a
+    restart) waits in review at estimate with NO_KEY, or with NO_KEY_LATER after a resume with key_later, and runs
+    once the key is given."""
+    runner, cfg = make_runner()
+    probe = "import os, stat, sys; f = sys.argv[1]; print('key file', oct(stat.S_IMODE(os.stat(f).st_mode)), " \
+            "open(f).read().split('=')[0])"
+
+    def command(stage, job, cfg, key_file=None):
+        J = cfg.runs / job["id"]
+        script = f"touch {J}/done_{stage}"
+        if stage == "place":  # mean mask IoU 0.31, below steps.MIN_IOU
+            script += " && mkdir -p run && cp placement_in.json run/placement.json"
+        if stage == "estimate":
+            script = f"{sys.executable} -c \"{probe}\" {key_file}; test ! -e fail_estimate && {script}"
+        return ["bash", "-c", script], str(J), {}
+
+    monkeypatch.setattr(steps, "command", command)
+    monkeypatch.setattr(steps, "done", lambda stage, J: (Path(J) / f"done_{stage}").exists() or stage == "frames")
+    job_id, J = ready_job(cfg, auto_continue=True)
+    (J / "placement_in.json").write_text(json.dumps({"check": {"mean_mask_iou": 0.31}}))
+    (J / "fail_estimate").touch()
+    runner.submit_build(job_id, KEY)
+    job = wait(J, "failed")
+    assert job["stages"]["agent"]["status"] == "skipped" and "0.31 is below 0.5" in job["stages"]["agent"]["note"]
+    assert not (J / "done_agent").exists() and job["stages"]["align"]["status"] == "done"
+    assert job["stages"]["estimate"]["status"] == "failed" and job["error"].startswith("estimate: exit 1")
+    assert "key file 0o600 OPENAI_API_KEY" in (J / "logs" / "estimate.log").read_text()
+    assert runner.has_key(job_id, "astra")  # a failed build keeps the key for its retry
+
+    (J / "fail_estimate").unlink()
+    assert runner.forget_key(job_id)
+    assert runner.resume(job_id, "estimate") == "estimate"
+    job = wait(J, "review")
+    assert job["warnings"] == [jobs.NO_KEY["astra"]] and job["key_ok"] is False
+    assert job["stages"]["estimate"]["note"] == "waiting for the OpenAI API key" and not (J / "done_estimate").exists()
+    runner.resume(job_id, "estimate", key_later=True)
+    assert wait(J, "review")["warnings"] == [jobs.NO_KEY_LATER["astra"]]
+    runner, _ = make_runner()  # a restart: still no key
+    runner.resume(job_id, "estimate")
+    assert wait(J, "review")["warnings"] == [jobs.NO_KEY["astra"]]
+    runner.resume(job_id, "estimate", api_key=KEY)
+    job = wait(J, "done")
+    assert [job["stages"][s]["status"] for s in ("agent", "align", "estimate", "mjcf", "usd", "urdf", "package")] == [
+        "skipped", "done", "done", "done", "done", "done", "done"]
+    assert (J / "logs" / "estimate.log").read_text().count("key file 0o600 OPENAI_API_KEY") == 2
+    assert not list(runner.key_dir.iterdir())
+    assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))
 
 
 def test_runner_failures_select_review_and_resume(make_runner, monkeypatch):
@@ -1126,7 +1255,7 @@ def test_runner_rosbag_topics_and_the_agent_off(make_runner, monkeypatch):
     real_done = steps.done
 
     def command(stage, job, cfg, key_file=None):
-        assert stage != "agent"  # turned off, so it never runs and needs no key
+        assert stage not in ("agent", "estimate", "mjcf", "usd", "urdf")  # turned off, so they never run
         script = {"topics": "mkdir -p frames && cp topics_in.json frames/topics.json",
                   "frames": f"mkdir -p frames && echo {steps.source(job)['topic']} >> frames_ran && echo {{}} > frames/meta.json"}
         return ["bash", "-c", script.get(stage, f"mkdir -p scene && touch scene/done_{stage}")], str(cfg.runs / job["id"]), {}
@@ -1170,11 +1299,15 @@ def test_runner_rosbag_topics_and_the_agent_off(make_runner, monkeypatch):
     assert job["source"]["topic"] == "/b/image_raw" and job["stages"]["topics"]["started"] == topics_started
     assert job["calibration"]["name"] == "c.yaml" and (J / "lidar" / "calibration" / "c.yaml").is_file()
 
-    # A build without the agent: no key, and the agent stage is skipped.
+    # A build without the agent: no key, and the agent stage is skipped, and so are estimate, mjcf, usd and urdf,
+    # since the mass and the friction come from the job's model.
     jobs.update(J, prompt="box", auto_continue=True)
     runner.submit_build(job_id, None, agent="none")
     job = wait(J, "done")
     assert job["stages"]["agent"] == {**jobs.STAGE, "status": "skipped", "note": "turned off: physics uses the Stage A mesh"}
+    for s in ("estimate", "mjcf", "usd", "urdf"):
+        assert job["stages"][s] == {**jobs.STAGE, "status": "skipped", "note": steps.NO_KEY_SKIP}, s
+    assert job["stages"]["align"]["status"] == job["stages"]["package"]["status"] == "done"
     assert job["agent"] == "none" and job["key_ok"] is False and job_id not in runner._keys
     assert not list(runner.key_dir.iterdir())
     with pytest.raises(ValueError, match="is done"):
@@ -1246,6 +1379,117 @@ def test_restart_gives_an_older_job_the_newer_stages(make_runner):
     assert job["stages"]["turntable"]["note"] == "the server stopped" and job["stages"]["package"]["status"] == "done"
     make_runner()  # once there, the record stays as it is
     assert jobs.load(done)["stages"]["lidar"] == older
+
+
+def test_an_old_job_with_a_vomp_record_loads_shows_progress_and_resumes(make_runner, monkeypatch):
+    """A job folder of the version that still had the vomp stage has its record right after sam3d, run/vomp/ and
+    logs/vomp.log. A server start leaves all three as they are; the job loads, and progress lists the stages of
+    steps.NAMES only. A job that failed at a later stage (align) resumes from there, and one that failed at vomp
+    resumes from place, the first stage that progress shows as not done (where the app's Retry and run.py's resume
+    start). Both end done. The stand-ins for command and done refuse an unknown stage, as the real ones do, so no
+    step may ask about vomp."""
+    runner, cfg = make_runner()
+
+    def command(stage, job, cfg, key_file=None):
+        if stage not in steps.NAMES:
+            raise ValueError(f"unknown stage {stage!r}")
+        J = cfg.runs / job["id"]
+        return ["bash", "-c", f"touch {J}/done_{stage}"], str(J), {}
+
+    def done(stage, J):
+        if stage not in steps.NAMES:
+            raise ValueError(f"unknown stage {stage!r}")
+        return (Path(J) / f"done_{stage}").exists() or stage == "frames"
+
+    monkeypatch.setattr(steps, "command", command)
+    monkeypatch.setattr(steps, "done", done)
+    job_id, J = ready_job(cfg, auto_continue=True)
+    runner.submit_build(job_id, None, agent="none")
+    built = wait(J, "done")
+    t = built["stages"]["sam3d"]["ended"]
+    vomp_done = {**jobs.STAGE, "status": "done", "started": t, "ended": t + 1, "returncode": 0}
+    vomp_failed = {**vomp_done, "status": "failed", "returncode": 1, "note": "exit 1: CUDA error"}
+    (J / "run" / "vomp" / "work").mkdir(parents=True)
+    summary, log = json.dumps({"rigid_body": {"mass": 2.0}}), "== vomp 2026-11-19 10:00:00\nmass 2.00 kg\n"
+    (J / "run" / "vomp" / "summary.json").write_text(summary)
+    (J / "logs" / "vomp.log").write_text(log)
+
+    def make_old(failed, vomp):
+        """job.json as the earlier version left it: the vomp record after sam3d, a failure at failed (vomp or a later
+        stage), and every stage after the failure pending and without its output."""
+        later = steps.NAMES[steps.NAMES.index("place" if failed == "vomp" else failed):]
+        stages = {}
+        for name, st in built["stages"].items():  # job.json keeps the stages in run order
+            stages[name] = dict(jobs.STAGE) if name in later else st
+            if name == "sam3d":
+                stages["vomp"] = vomp
+        if failed != "vomp":
+            stages[failed] = {**jobs.STAGE, "status": "failed", "started": t + 2, "ended": t + 3, "returncode": 1,
+                              "note": "exit 1: no mesh"}
+        for name in later:
+            (J / f"done_{name}").unlink(missing_ok=True)
+        jobs.save(J, {**built, "status": "failed", "stages": stages, "error": f"{failed}: exit 1"})
+
+    for failed, vomp, first in (("align", vomp_done, "align"), ("vomp", vomp_failed, "place")):
+        make_old(failed, vomp)
+        runner, _ = make_runner()  # a server start: _recover reads every job folder
+        job = jobs.load(J)
+        assert job["status"] == "failed" and job["stages"]["vomp"] == vomp, failed
+        assert list(job["stages"]).index("vomp") == list(job["stages"]).index("sam3d") + 1
+        progress = jobs.progress(J)
+        assert [s["name"] for s in progress] == steps.NAMES
+        assert next(s["name"] for s in progress if s["name"] in jobs.BUILD
+                    and s["status"] not in ("done", "skipped")) == first
+        assert not jobs.key_needed(J, job, first)  # the job has no agent
+        assert runner.resume(job_id, first) == first
+        job = wait(J, "done", "failed")
+        assert job["status"] == "done" and job["error"] is None, job
+        assert all(job["stages"][s]["status"] in ("done", "skipped") for s in jobs.BUILD), job["stages"]
+        assert job["stages"]["vomp"] == vomp and job["stages"]["sam3d"] == built["stages"]["sam3d"]
+        assert (J / "run" / "vomp" / "summary.json").read_text() == summary
+        assert (J / "run" / "vomp" / "work").is_dir() and (J / "logs" / "vomp.log").read_text() == log
+
+
+def test_key_needed_counts_the_keyed_stages_that_the_run_runs(tmp_path):
+    """jobs.key_needed: a keyed stage needs the key when a run from first runs it. Runner._build runs it unless its
+    record is done and its outputs are there, and a skipped one runs again unless steps.skip still gives a reason. So
+    the estimate record that _recover gives an older job folder (skipped, OLDER) needs the key, from a start at or
+    before estimate. A stage before the start does not run. A job without an agent never needs the key."""
+    cfg = steps.Config(G=tmp_path / "G", runs=tmp_path / "runs")
+    _, J = ready_job(cfg)  # agent astra
+    job = jobs.load(J)
+    for d in ("agent", "run", "physics"):
+        (J / d).mkdir()
+    (J / "agent" / "result.json").write_text("{}")
+    summary = J / "physics" / "summary.json"
+
+    def needs(first, agent="done", estimate="done", model="astra"):
+        """key_needed with these statuses of the agent and estimate stages, and model as job.json's agent."""
+        st = {**job["stages"], "agent": {**jobs.STAGE, "status": agent}, "estimate": {**jobs.STAGE, "status": estimate}}
+        return jobs.key_needed(J, {**job, "agent": model, "stages": st}, first)
+
+    summary.write_text(json.dumps({"estimate": {"mass_kg": 1.0}}))
+    assert not any(needs(first) for first in ("extract", "sam3d", "align", "estimate", "turntable"))
+    assert needs("align", estimate="failed") and needs("sam3d", estimate="pending") and needs("agent", agent="failed")
+    assert not needs("estimate", agent="failed")  # the run starts after the agent stage
+    # An older job that failed at align: its summary has no estimate, and its estimate record is skipped.
+    summary.write_text(json.dumps({"rigid_body": {"mass": 1.0}}))
+    assert needs("align", estimate="skipped") and needs("sam3d", estimate="skipped")
+    assert not needs("mjcf", estimate="skipped") and not needs("turntable", estimate="skipped")
+    assert needs("estimate", estimate="done")  # a record that says done without its output runs again
+    assert not needs("align", estimate="skipped", model="none")
+    # A skipped agent stage that a poor placement skips again needs no key; without that reason it runs.
+    summary.write_text(json.dumps({"estimate": {"mass_kg": 1.0}}))
+    (J / "run" / "placement.json").write_text(json.dumps({"check": {"mean_mask_iou": 0.31}}))
+    assert not needs("sam3d", agent="skipped")
+    (J / "run" / "placement.json").unlink()
+    assert needs("sam3d", agent="skipped")
+    # A job folder with a record of the removed vomp stage, failed, and no run/vomp: a start after the agent stage
+    # stays there, so the failed agent stage before it does not run and needs no key.
+    old = {**job["stages"], "vomp": {**jobs.STAGE, "status": "failed", "note": "exit 1"},
+           "agent": {**jobs.STAGE, "status": "failed"}, "estimate": {**jobs.STAGE, "status": "done"}}
+    assert not jobs.key_needed(J, {**job, "stages": old}, "estimate") and not needs("estimate", agent="failed")
+    assert jobs.key_needed(J, {**job, "stages": old}, "place")
 
 
 def stub_stages(monkeypatch, hold=()):
@@ -1643,7 +1887,7 @@ def test_fake_agent_stage_stands_in_for_both_agents(tmp_path):
 
     J = run_folder(tmp_path)
     key = J / "fake.env"
-    for which, line, model, cli in (("astra", f"OPENAI_API_KEY={KEY}", "gpt-6-astra", "cancelled"),
+    for which, line, model, cli in (("astra", f"OPENAI_API_KEY={KEY}", "gpt-6.2-astra", "cancelled"),
                                     ("opus", f"ANTHROPIC_API_KEY={OPUS_KEY}", "claude-opus-5-5", "interrupted")):
         key.unlink(missing_ok=True)
         key.write_text(line + "\n")
@@ -1688,7 +1932,7 @@ def test_fake_agent_stage_alone_skips_the_round_code(tmp_path, monkeypatch, caps
     assert r["surface"]["shares"]["present"] == 1.0 and steps.agent_glb(J) == J / "agent" / "s" / glb
     assert r == json.loads((J / "agent" / "s" / "result.json").read_text())
     assert not (J / "agent" / "evidence.json").exists() and not (J / "agent" / "s" / "control" / "evidence.json").exists()
-    assert "agent (fake gpt-6-astra): finish complete, GLB work/exports/001.glb" in capsys.readouterr().out
+    assert "agent (fake gpt-6.2-astra): finish complete, GLB work/exports/001.glb" in capsys.readouterr().out
 
 
 def test_agent_step_publishes_the_evidence_of_its_rounds(tmp_path, monkeypatch, capsys, fake_stages):
@@ -1881,6 +2125,10 @@ def test_agent_step_sigterm_stops_the_agent(tmp_path):
 def test_fake_build_end_to_end(make_runner, tmp_path):
     for m in ("av", "trimesh", "harpor.webapp.video", "harpor.webapp.views", "harpor.webapp.physics_auto"):
         pytest.importorskip(m)
+    import xml.etree.ElementTree as ET
+
+    import fake_steps
+    from harpor.agent.tools import MODELS
     from test_webapp_server import write_video
 
     runner, cfg = make_runner()
@@ -1931,6 +2179,25 @@ def test_fake_build_end_to_end(make_runner, tmp_path):
     up = json.loads((J / "physics" / "up.json").read_text())
     assert up["glb"].endswith("work/exports/001.glb")
     assert not (J / "physics" / "links").exists() and "links" not in json.loads((J / "physics" / "summary.json").read_text())
+    # estimate ran between align and mjcf: the real stage with the fake model's answer, on the aligned mesh. The
+    # MJCF's mass and friction are the summary's.
+    st = job["stages"]
+    assert st["align"]["ended"] <= st["estimate"]["started"] <= st["estimate"]["ended"] <= st["mjcf"]["started"]
+    summary = json.loads((J / "physics" / "summary.json").read_text())
+    est = summary["estimate"]
+    assert {k: est[k] for k in fake_steps.ESTIMATE} == fake_steps.ESTIMATE and steps.done("estimate", J)
+    n = len(json.loads((J / "run" / "cameras.json").read_text()))  # 3 or 4: up to 4 photos, so all of them
+    assert (est["agent"], est["model"], est["attempts"], est["views"]) == ("astra", MODELS["astra"], 1, list(range(n)))
+    assert summary["glb"] == str((J / "physics" / "aligned.glb").resolve()) and summary["friction"] == 0.4
+    assert summary["rigid_body"]["mass"] == pytest.approx(0.25) and (J / "physics" / "estimate_views.jpg").is_file()
+    assert summary["geometry"]["extent_m"] == pytest.approx(json.loads((J / "physics" / "aligned.json").read_text())
+                                                            ["extent_s"], rel=1e-6)
+    mj = json.loads((J / "physics" / "mjcf" / "mjcf.json").read_text())
+    assert mj["friction"] == summary["friction"] and mj["inertial"]["mass"] == summary["rigid_body"]["mass"]
+    body = ET.parse(J / "physics" / "mjcf" / "wooden_box.xml").getroot()
+    assert float(body.find(".//inertial").get("mass")) == pytest.approx(summary["rigid_body"]["mass"])
+    assert float(body.find(".//geom").get("friction").split()[0]) == summary["friction"]
+    assert "estimate: mass 0.25 kg" in (J / "logs" / "estimate.log").read_text()
     names = set(zipfile.ZipFile(J / "results.zip").namelist())
     assert {"posed.glb", "refined.glb", "aligned.glb", "summary.json", "placement.json", "selection.json",
             "agent_result.json", "mjcf/mjcf.json", "mjcf/wooden_box.xml", "mjcf/scene.xml", "usd/usd.json",

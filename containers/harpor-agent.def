@@ -15,7 +15,7 @@ From: ubuntu:24.04
   rm -rf /var/lib/apt/lists/*
   curl -fsSL https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz | tar -xJ -C /opt
   ln -s /opt/node-v24.21.0-linux-x64 /opt/node
-  PATH=/opt/node/bin:$PATH npm install -g --prefix /opt/codex @openai/codex@0.162.1
+  PATH=/opt/node/bin:$PATH npm install -g --prefix /opt/codex @openai/codex@0.171.0
   curl -fsSL https://download.blender.org/release/Blender5.2/blender-5.2.2-linux-x64.tar.xz | tar -xJ -C /opt
   ln -s /opt/blender-5.2.2-linux-x64 /opt/blender
 

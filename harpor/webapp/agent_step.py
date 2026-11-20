@@ -1,4 +1,4 @@
-"""Agent stage of a web-app job: GPT-6-Astra, Claude Opus 5.5 or Claude Fable 5.2 refines the Stage A mesh
+"""Agent stage of a web-app job: GPT-6.2-Astra, Claude Opus 5.5 or Claude Fable 5.2 refines the Stage A mesh
 (build_plan.md note 5).
 
 Runs in envs/sam3d from the repo root, with apptainer on the PATH:
@@ -7,7 +7,7 @@ Runs in envs/sam3d from the repo root, with apptainer on the PATH:
 
 It prepares a fresh session in J/agent/s from J/run, runs it with controller.run_container_session and
 writes a copy of J/agent/s/result.json, without the key, to J/agent/result.json. The session is a
-refinement of posed.glb (600 s for the build round) with every view of cameras.json. --agent astra (the default) runs GPT-6-Astra through the Codex
+refinement of posed.glb (600 s for the build round) with every view of cameras.json. --agent astra (the default) runs GPT-6.2-Astra through the Codex
 CLI in Apptainer, and F holds OPENAI_API_KEY; --agent opus runs Claude Opus 5.5 through
 harpor.agent.claude_agent at xhigh effort, and --agent fable runs Claude Fable 5.2 through it at high
 effort (EFFORT; envs/sam3d needs anthropic==1.15.0), and F holds ANTHROPIC_API_KEY. The web app writes
@@ -48,7 +48,7 @@ from harpor.webapp import steps
 
 REDACTED = "[redacted API key]"
 AGENTS = {"astra": "codex", "opus": "claude", "fable": "claude"}  # the web app's name -> the controller's
-# The claude agent's effort per model. Opus runs at the xhigh of the Astra comparison runs. Fable runs at high,
+# The claude agent's effort per model. Opus runs at the xhigh of the GPT-6-Astra comparison runs. Fable runs at high,
 # Anthropic's advice for Fable 5.2: its xhigh turns run longer and use many more tokens, for uneven gains.
 EFFORT = {"opus": "xhigh", "fable": "high"}
 MODEL = {a: MODELS[a] for a, c in AGENTS.items() if c == "claude"}  # the claude agent's model (Codex has its own)

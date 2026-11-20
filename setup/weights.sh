@@ -1,20 +1,19 @@
 #!/bin/bash
-# The model weights, about 30 GB, under $HARPOR_ROOT (by default ~/harpor), after the envs are built. Each download is
-# skipped when its files are there. SAM 3 and SAM 3D Objects are gated: request access to facebook/sam3 and
-# facebook/sam-3d-objects on Hugging Face, then set HF_TOKEN to a Read token. The script keeps the token in
-# $HARPOR_ROOT/.cache/huggingface/token, where `hf auth login` would keep it, because the stages need it too.
+# The weights of the three models below, about 30 GB, under $HARPOR_ROOT (by default ~/harpor), after the envs are
+# built. Each download is skipped when its files are there. SAM 3 and SAM 3D Objects are gated: request access to
+# facebook/sam3 and facebook/sam-3d-objects on Hugging Face, then set HF_TOKEN to a Read token. The script keeps the
+# token in $HARPOR_ROOT/.cache/huggingface/token, where `hf auth login` would keep it, because the stages need it too.
 #
 #   SAM 3D Objects  facebook/sam-3d-objects               sam-3d-objects/checkpoints/hf (note 4)
 #   SAM 3           facebook/sam3                         the Hugging Face cache (note 3)
 #   DA3             depth-anything/DA3NESTED-GIANT-LARGE-1.1  the Hugging Face cache (note 4b)
-#   VoMP v1.1       nvidia/PhysicalAI-Simulation-VoMP-Model   VoMP/weights/vomp_1_1 (note 9)
 #
 # MoGe and DINOv2 are not here: SAM 3D downloads them into the caches on its first run.
-# In the docker image, sam-3d-objects/checkpoints, VoMP/weights and .cache are links into the data folder, so the
-# weights land there and not in the image.
+# In the docker image, sam-3d-objects/checkpoints and .cache are links into the data folder, so the weights land
+# there and not in the image.
 set -eo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-for e in sam3d sam3seg da3 vomp11; do
+for e in sam3d sam3seg da3; do
   [ -x "envs/$e/bin/python" ] || { echo "no $G/envs/$e: build the envs first (setup/install.sh)" >&2; exit 1; }
 done
 if [ -z "$HF_TOKEN" ] && [ ! -s "${HF_TOKEN_PATH:-$HF_HOME/token}" ]; then
@@ -45,11 +44,4 @@ echo "== SAM 3 $(date +%T)"
 
 echo "== DA3 $(date +%T)"
 "$G/envs/da3/bin/python" -c "from huggingface_hub import snapshot_download as s; print(s('depth-anything/DA3NESTED-GIANT-LARGE-1.1'))"
-
-echo "== VoMP $(date +%T)"
-mkdir -p VoMP/weights
-(cd VoMP && "$G/envs/vomp11/bin/python" -c "
-from huggingface_hub import snapshot_download as s
-print(s('nvidia/PhysicalAI-Simulation-VoMP-Model', allow_patterns=['vomp_1_1/*'], local_dir='weights'))")
-ls VoMP/weights/vomp_1_1/inference.json
 echo WEIGHTS_OK

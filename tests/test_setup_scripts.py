@@ -2,6 +2,7 @@
 real but offline: each tool that needs the network or a GPU is a stub that logs its call."""
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "setup"
 NOTES = {"install": ["7"], "web": ["7", "10"], "sam3d": ["4", "7"], "mvsam3d": ["4b", "7"], "sam3seg": ["3", "7"],
-         "vomp11": ["7", "9"], "mujoco": ["7", "9"], "agent": ["5", "7"], "weights": ["7"]}
+         "mujoco": ["7", "9"], "agent": ["5", "7"], "weights": ["7"]}
 CONTAINERS = ROOT / "containers"
 # One stub under every tool's name. Besides logging, it makes what the script's next step needs.
 STUB = r"""#!/bin/bash
@@ -21,7 +22,6 @@ case "$(basename "$0") $1" in
   "micromamba create") mkdir -p "$4/bin"; cp "$0" "$4/bin/python"; cp "$0" "$4/bin/pip" ;;
   "micromamba shell") echo 'micromamba() { export CONDA_PREFIX=$2 PATH=$2/bin:$PATH; }' ;;
   "python -m") mkdir -p "$3/bin"; cp "$0" "$3/bin/python"; cp "$0" "$3/bin/pip" ;;
-  "python -c") mkdir -p weights/vomp_1_1 ;;
   "nvidia-smi "*) [ -n "$GPUS" ] || { echo "No devices were found"; exit 6; }; printf '%s\n' $GPUS ;;
   "nproc "*) echo 7 ;;
 esac
@@ -76,7 +76,18 @@ def test_script_names_the_root_and_its_notes_and_the_readme_name_it(script):
 
 def test_no_doc_names_the_old_run_folders():
     docs = [ROOT / "README.md", *(ROOT / "docs").glob("*.md")]
-    assert [p.name for p in docs if re.search(r"runs/(mvsam3d|vomp11)_setup", p.read_text())] == []
+    assert [p.name for p in docs if "runs/mvsam3d_setup" in p.read_text()] == []
+
+
+def test_the_docs_name_only_files_that_exist():
+    """Every relative link in README.md and docs/*.md, and every file in the Files table of build_plan.md, is a file
+    of the repo. docs/research.md was removed, and its README link and table row had stayed."""
+    docs = [ROOT / "README.md", *(ROOT / "docs").glob("*.md")]
+    links = [(p, m) for p in docs for m in re.findall(r"\]\(([^)\s#]+)", p.read_text()) if not re.match(r"[a-z]+:", m)]
+    table = (ROOT / "docs" / "build_plan.md").read_text().split("### Files", 1)[1].split("\n## ", 1)[0]
+    files = re.findall(r"^\| `([^`]+)` \|", table, flags=re.M)
+    assert links and [f"{p.name}: {m}" for p, m in links if not (p.parent / m).exists()] == []
+    assert files and [f for f in files if not (ROOT / f).exists()] == []
 
 
 @pytest.mark.parametrize("script, env, made, pins", [
@@ -85,9 +96,6 @@ def test_no_doc_names_the_old_run_folders():
     ("sam3seg", "envs/sam3seg", [], ["python=3.12", "torch==2.14.1", "whl/cu130", "transformers==5.20.0"]),
     ("mvsam3d", "envs/da3", ["MV-SAM3D", "Depth-Anything-3"],
      ["abb04b5e8af5bc33b0265bdf19937e76bbb6bcdd", "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4", "torch==2.14.1"]),
-    ("vomp11", "envs/vomp11", ["VoMP/weights/vomp_1_1"],
-     ["641a22d958054b8f4644aaddd4b1cba2a0d45491", "python=3.11", "cuda-nvcc=12.1.105", "torch==2.4.0",
-      "spconv-cu121==2.3.8", "kaolin==0.18.0"]),
     ("mujoco", "envs/mujoco", [],
      ["python=3.11", "mujoco==4.0.0", "coacd==1.0.14", "trimesh==5.1.1", "usd-core==26.8", "numpy==2.4.6",
       "scipy==1.17.1", "pillow==12.3.0"]),
@@ -134,9 +142,18 @@ def test_micromamba_is_fetched_once_and_a_built_env_stays(run):
     assert p.returncode == 0 and not any("/curl " in c or " create " in c for c in again)
 
 
+@pytest.fixture
+def run_sam3d(run, tmp_path):
+    """run_sam3d(VARIABLE=value, ...) runs setup/sam3d.sh, the script that builds CUDA extensions with common.sh's
+    cuda_arch. The fixture's envs/sam3d stands for a built env elsewhere, so it goes first: the script then creates
+    the env, and its pip calls go to that env's pip."""
+    shutil.rmtree(tmp_path / "root" / "envs" / "sam3d")
+    return lambda **env: run("sam3d", **env)
+
+
 def builds(calls):
-    """The calls that compile something for the GPUs."""
-    return [c for c in calls if "/envs/vomp11/bin/pip install" in c]
+    """The pip installs of setup/sam3d.sh, which build the CUDA extensions for the GPUs."""
+    return [c for c in calls if "/envs/sam3d/bin/pip install" in c]
 
 
 @pytest.mark.parametrize("env, arch", [
@@ -145,22 +162,22 @@ def builds(calls):
     ({"GPUS": "8.6", "TORCH_CUDA_ARCH_LIST": "8.9;9.0"}, "8.9;9.0"),  # a cluster's mix, which this node cannot see
     ({"GPUS": "", "TORCH_CUDA_ARCH_LIST": "8.6"}, "8.6"),  # no need for a GPU on this machine
 ])
-def test_vomp11_takes_the_gpu_list_from_the_environment_or_else_the_gpus(run, env, arch):
-    p, calls = run("vomp11", **env)
+def test_sam3d_takes_the_gpu_list_from_the_environment_or_else_the_gpus(run_sam3d, env, arch):
+    p, calls = run_sam3d(**env)
     assert p.returncode == 0, p.stderr
     assert builds(calls) and all(f"arch={arch} " in c for c in builds(calls))
 
 
-def test_vomp11_stops_before_building_when_it_finds_no_gpu(run):
-    p, calls = run("vomp11", GPUS="")
+def test_sam3d_stops_before_building_when_it_finds_no_gpu(run_sam3d):
+    p, calls = run_sam3d(GPUS="")
     assert p.returncode != 0 and "set TORCH_CUDA_ARCH_LIST" in p.stderr
     assert not any(" create " in c or " install " in c for c in calls)
 
 
-def test_vomp11_builds_with_the_cores_it_has_unless_told(run):
-    _, calls = run("vomp11")
+def test_sam3d_builds_with_the_cores_it_has_unless_told(run_sam3d):
+    _, calls = run_sam3d()
     assert builds(calls) and all(" jobs=7 " in c for c in builds(calls))
-    _, calls = run("vomp11", MAX_JOBS="3")
+    _, calls = run_sam3d(MAX_JOBS="3")
     assert builds(calls) and all(" jobs=3 " in c for c in builds(calls))
 
 
@@ -176,13 +193,9 @@ def test_mujoco_script_says_where_it_came_from():
     assert "2026-11-01" in text and "First run as a recipe on 2026-11-08" in text and "file://" not in text
 
 
-def test_sam3d_builds_the_env_of_note_4_with_anthropic(run, tmp_path):
-    """The fixture's envs/sam3d stands for a built env elsewhere; here the script builds its own."""
-    import shutil
-
+def test_sam3d_builds_the_env_of_note_4_with_anthropic(run_sam3d, tmp_path):
     root = tmp_path / "root"
-    shutil.rmtree(root / "envs" / "sam3d")
-    p, calls = run("sam3d", GPUS="8.9 9.0")
+    p, calls = run_sam3d(GPUS="8.9 9.0")
     assert p.returncode == 0, p.stderr
     assert any("f91db411c50efee93d8db7aeb323885650f6f722" in c for c in calls)
     assert any(" create -y -p " in c and "environments/default.yml" in c for c in calls)
@@ -192,31 +205,28 @@ def test_sam3d_builds_the_env_of_note_4_with_anthropic(run, tmp_path):
     assert any(c.startswith(f"{root}/envs/sam3d/bin/python patching/hydra ") for c in calls)
 
 
-def test_a_gpu_newer_than_hopper_stops_the_build(run):
-    p, calls = run("vomp11", TORCH_CUDA_ARCH_LIST="9.0;12.0")
+def test_a_gpu_newer_than_hopper_stops_the_build(run_sam3d):
+    p, calls = run_sam3d(TORCH_CUDA_ARCH_LIST="9.0;12.0")
     assert p.returncode != 0 and "9.0 (Hopper) at most" in p.stderr
     assert not any(" create " in c or " install " in c for c in calls)
-    p, calls = run("sam3d", GPUS="10.0")
+    p, calls = run_sam3d(GPUS="10.0")
     assert p.returncode != 0 and "has 10.0" in p.stderr and not any(" install " in c for c in calls)
 
 
-def test_weights_needs_a_token_and_then_fetches_the_four_models(run, tmp_path):
+def test_weights_needs_a_token_and_then_fetches_the_three_models(run, tmp_path):
     root = tmp_path / "root"
-    for e in ("sam3seg", "da3", "vomp11"):
+    for e in ("sam3seg", "da3"):
         stub(root / "envs" / e / "bin" / "python")
     p, calls = run("weights")
     assert p.returncode != 0 and "set HF_TOKEN" in p.stderr and not any("snapshot_download" in c for c in calls)
-    # What the downloads leave, which the stubs do not write.
+    # What the SAM 3D download leaves, which the stubs do not write.
     (root / "sam-3d-objects" / "checkpoints" / "hf").mkdir(parents=True)
     (root / "sam-3d-objects" / "checkpoints" / "hf" / "pipeline.yaml").write_text("x")
-    (root / "VoMP" / "weights" / "vomp_1_1").mkdir(parents=True)
-    (root / "VoMP" / "weights" / "vomp_1_1" / "inference.json").write_text("{}")
     p, calls = run("weights", HF_TOKEN="hf_test")
     assert p.returncode == 0 and "WEIGHTS_OK" in p.stdout, p.stderr
     fetched = "\n".join(calls)  # a python -c of several lines logs several lines
     assert "facebook/sam-3d-objects" not in fetched  # its checkpoints are there
-    assert all(m in fetched for m in ("facebook/sam3", "depth-anything/DA3NESTED-GIANT-LARGE-1.1",
-                                      "nvidia/PhysicalAI-Simulation-VoMP-Model"))
+    assert all(m in fetched for m in ("facebook/sam3", "depth-anything/DA3NESTED-GIANT-LARGE-1.1"))
     assert "HF_TOKEN=hf_test" not in " ".join(calls)
     # The stages load the gated models with the token, so it stays in the cache, for this user only.
     token = root / ".cache" / "huggingface" / "token"
@@ -227,7 +237,7 @@ def test_install_runs_every_step_in_order_and_skips_on_request(run):
     p, calls = run("install", HARPOR_SKIP_AGENT="1", HARPOR_SKIP_WEIGHTS="1")
     assert p.returncode == 0 and "INSTALL_OK" in p.stdout, p.stderr
     steps = [line.split()[1] for line in p.stdout.splitlines() if line.startswith("==== ") and "INSTALL_OK" not in line]
-    assert steps == ["web", "sam3d", "mvsam3d", "sam3seg", "vomp11", "mujoco", "agent:", "weights:"]
+    assert steps == ["web", "sam3d", "mvsam3d", "sam3seg", "mujoco", "agent:", "weights:"]
     assert "skipped (HARPOR_SKIP_AGENT=1)" in p.stdout and "skipped (HARPOR_SKIP_WEIGHTS=1)" in p.stdout
 
 
@@ -242,7 +252,7 @@ def test_dockerfile_installs_the_agent_tools_of_the_apptainer_image():
 def test_dockerfile_links_point_into_the_data_folder_that_the_entrypoint_makes():
     dockerfile, entry = (CONTAINERS / "Dockerfile").read_text(), (CONTAINERS / "entrypoint.sh").read_text()
     targets = re.findall(r"ln -s /data/(\S+) ", dockerfile)
-    assert sorted(targets) == ["cache", "runs", "weights/sam-3d-objects", "weights/vomp"]
+    assert sorted(targets) == ["cache", "runs", "weights/sam-3d-objects"]
     made = re.search(r'mkdir -p "\$HARPOR_DATA"/\{([^}]*)\}', entry).group(1).split(",")
     assert set(targets) <= set(made)
     # The agent's containers find the helper client where Apptainer binds it (controller._mounts).

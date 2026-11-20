@@ -102,11 +102,13 @@ PLACEHOLDERS, MAX_PLACEHOLDERS = "placeholders.json", 12  # in the demos folder,
 # a placeholder's title is plain text on one line: no control character, line or paragraph separator, or bidi control
 CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 CARD_FACTS, SHORT = ("Size", "Mass"), 24  # the facts that a card shows first; else others of at most SHORT characters
-# app.js KIND_LABEL (job.json source kind), RAN (agent_result.agent) and MODEL_NAME (agent_result.model, when it is
-# not the agent's default); a test compares them.
+# app.js KIND_LABEL (job.json source kind), MODEL_NAME (agent_result.model: tools.MODELS, and gpt-6-astra, which the
+# jobs built before 2026-11-20 ran) and RAN (agent_result.agent, for a result without a known model id); a test
+# compares them.
 KIND = {"video": "video", "rosbag": "rosbag", "stray": "Stray capture"}
-RAN = {"codex": "GPT-6-Astra", "claude": "Claude Opus 5.5"}
-MODEL_NAME = {"claude-fable-5-2": "Claude Fable 5.2"}
+MODEL_NAME = {"gpt-6-astra": "GPT-6-Astra", "gpt-6.2-astra": "GPT-6.2-Astra", "claude-opus-5-5": "Claude Opus 5.5",
+              "claude-fable-5-2": "Claude Fable 5.2"}
+RAN = {"codex": "GPT-6.2-Astra", "claude": "Claude Opus 5.5"}
 
 
 class DemoError(Exception):
@@ -434,8 +436,9 @@ def page(src, shown, soon=()):
 
 def facts_of(J, job=None):
     """[[label, value]] of the Results tab's rows (app.js renderResults) that a demo shows, from the records in folder
-    J: Input (the source's kind and the views used; job.json, when there is one), Size (the upright extent), Mass and
-    the Agent. Never the input's name, a topic, a path or a LiDAR value."""
+    J: Input (the source's kind and the views used; job.json, when there is one), Size (the upright extent), Mass
+    (without the range that the Results tab adds for an estimate) and the Agent. Never the input's name, a topic, a
+    path or a LiDAR value."""
     J, out = Path(J), []
     sel = read_json(J / "selection.json") or {}
     n = len(sel.get("picks") or [])

@@ -51,9 +51,10 @@ from harpor.fileio import write_json
 
 BLENDER_SCRIPTS = Path(__file__).resolve().parent / "blender"
 # The agents' models, here because this module needs only the standard library: claude_agent, the
-# controller, harpor.agent.vlm and the web app's key check all read them. The claude agent runs
+# controller, harpor.agent.vlm and the web app's key check all read them. Codex runs CODEX_MODEL
+# (GPT-6.2-Astra; it was GPT-6-Astra, gpt-6-astra, until 2026-11-20). The claude agent runs
 # CLAUDE_MODEL (Claude Opus 5.5) by default, or FABLE_MODEL (Claude Fable 5.2).
-CODEX_MODEL, CLAUDE_MODEL, FABLE_MODEL = "gpt-6-astra", "claude-opus-5-5", "claude-fable-5-2"
+CODEX_MODEL, CLAUDE_MODEL, FABLE_MODEL = "gpt-6.2-astra", "claude-opus-5-5", "claude-fable-5-2"
 CLAUDE_MODELS = (CLAUDE_MODEL, FABLE_MODEL)  # the models that the claude agent takes
 # The web app's agents (steps.AGENTS, without "none") and the model of each one.
 MODELS = {"astra": CODEX_MODEL, "opus": CLAUDE_MODEL, "fable": FABLE_MODEL}

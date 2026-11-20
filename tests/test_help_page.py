@@ -7,7 +7,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from harpor.agent import controller, tools
-from harpor.physics import mjcf
+from harpor.physics import estimate, mjcf
 from harpor.stage_a import lidar_scale
 from harpor.webapp import agent_step, jobs, site, steps, turntable, video, views
 from harpor.webapp import lidar as lidar_stage
@@ -83,14 +83,19 @@ def test_help_page_holds_the_method_numbers():
     """Each section gives the rules and numbers of the code that it explains, read from the code, so a changed
     constant fails here: the notes that the Results and Downloads tabs once showed behind their info buttons, and the
     numbers that left the main UI (the input types, the upload limit, 2 to 12 views and the 0.25 s snap of a manual
-    pick). The stage table lists every stage with its GPU mark, the list of results.zip names every file that
-    jobs.package writes, and the calibration example reads."""
+    pick). The physics section gives the estimate stage's views, bounds and voxel grid (harpor.physics.estimate), the
+    default friction of an older job and the skip note of a job without a key. The stage table lists every stage with
+    its GPU mark, the list of results.zip names every file that jobs.package writes, and the calibration example
+    reads. The page names no removed stage: an older job's mass came from "the materials model that the app used
+    before"."""
     page = HELP.read_text()
     text = sections(page)
     num = lambda x: f"{x:g}"  # noqa: E731
     usd = lambda x: f"${x:.2f}".removesuffix(".00")  # noqa: E731  4.0 -> $4, 0.2 -> $0.20
     iou = num(steps.MIN_IOU)
-    friction = num(inspect.signature(mjcf.build).parameters["friction"].default)
+    friction = num(mjcf.DEFAULT_FRICTION)
+    big = lambda x: f"{x:,g}"  # noqa: E731  10000.0 -> 10,000
+    (mass_lo, mass_hi), (f_lo, f_hi) = map(big, estimate.MASS_RANGE_KG), map(big, estimate.FRICTION_RANGE)
     snap_s = num(inspect.signature(video.snap).parameters["window_s"].default)
     nviews = re.search(r'<input type="range" id="nviews" min="(\d+)" max="(\d+)"', (STATIC / "index.html").read_text())
     upload = re.search(r"^MAX_UPLOAD = (\d+) << 30$", (ROOT / "harpor" / "webapp" / "server.py").read_text(), re.M)
@@ -98,8 +103,9 @@ def test_help_page_holds_the_method_numbers():
     prices = [f"{usd(tools.PRICES[m][k])} {w}" for m in tools.CLAUDE_MODELS
               for k, w in (("input_tokens", "input"), ("output_tokens", "output"),
                            ("cache_read_input_tokens", "cache read"), ("cache_creation_input_tokens", "cache write"))]
-    size_err = 0.05  # mass goes with the size cubed
+    size_err = 0.05  # a solid object's mass goes with the size cubed, a hollow one's with the size squared
     mass_err = f"{size_err:.0%} size error gives about a {(1 + size_err) ** 3 - 1:.0%} mass error"
+    hollow_err = f"the same size error gives about a {(1 + size_err) ** 2 - 1:.0%} mass error"
     src = inspect.getsource(jobs.package)
     zipped = re.findall(r'\("([\w.]+\.(?:glb|json|mp4))", ', src)
     zipped += [d + "/" for d in re.findall(r'"(\w+)"', re.search(r"for d in \(([^)]*)\)", src)[1])]
@@ -109,8 +115,10 @@ def test_help_page_holds_the_method_numbers():
     assert jobs.KEY.pattern.startswith("[A-Za-z0-9_-]{")  # #agent: "one word of letters, digits, - and _"
     facts = {"capture": [*jobs.VIDEOS, *jobs.BAGS, *jobs.STRAY, "HDR off"],
              "add-job": [f"up to {upload[1]} GB"],
-             "status": [*steps.NAMES, "one at a time"],
+             "status": [*steps.NAMES, "one at a time", "The job's model estimates the mass and the friction",
+                        "The agent and estimate stages use the API key"],
              "settings": [f"within {snap_s} s", f"{nviews[1]} to {nviews[2]}", "view 0", "Make a 360 video",
+                          "estimates the mass and the friction",
                           f"{turntable.FRAMES / turntable.FPS:g} s", f"{turntable.ELEVATION_DEG}°"],
              "review": [f"under {views.MIN_AREA:.0%} of the image", f"below {num(views.MIN_CONSISTENCY)}",
                         f"closer than {num(views.MIN_SPACING_DEG)}°", "over a third"],
@@ -123,7 +131,8 @@ def test_help_page_holds_the_method_numbers():
                        "30 days", f"below {iou}", "skipped", *prices, "A ? means",
                        "refusal fallback", f"at most {tools.MAX_LIMITATIONS}", *tools.VERDICTS, "fallback_original", "checkpoint", "export", "API key",
                        "can reach the network", "no network access", "sk-ant-", "forgets the key", "key field",
-                       "letters, digits, - and _"],
+                       "letters, digits, - and _", "no mass, friction or simulation models",
+                       "A job built before the estimate stage keeps the mass and the models"],
              "lidar": ["median", "before MV-SAM3D", "Without LiDAR", f"under {L.MIN_POINTS} points",
                        f"over {L.MAX_IQR_REL:.0%}", f"more than {L.OUTLIER_MIN_REL:.0%}",
                        f"fewer than {L.MIN_VIEWS} views", f"over {L.MAX_SPREAD_REL:.0%}",
@@ -139,12 +148,27 @@ def test_help_page_holds_the_method_numbers():
                         "outside the mask"],
              "results": [f"Below {iou}", "view 0's camera frame", "aligned.glb", "larger than", "mean over the views",
                          "360 video", "reduced motion"],
-             "physics": ["64³", mass_err, "nearest predicted voxel", "one rigid body", "Pa", "kg/m³",
-                         "bottom of the object", "MuJoCo, USD and URDF", "VoMP v1.1", "Friction",
-                         f"{friction} by default"],
+             "physics": [f"up to {estimate.MAX_VIEWS} of the job's photos", "view 0 first", "same API key",
+                         "filled volume", "convex hull volume", "surface area", "from LiDAR", "solid or hollow",
+                         "a low and a high bound", f"from {mass_lo} to {mass_hi} kg", f"from {f_lo} to {f_hi}",
+                         f"at most {big(estimate.MAX_DENSITY)} kg/m³", "asks once more",
+                         "A second invalid answer fails the stage", f"note says {steps.NO_KEY_SKIP}.",
+                         "one rigid body", "Material", "Mass", "Center of mass", "Friction",
+                         f"{estimate.RESOLUTION} voxels along the mesh's longest side", "fills the whole volume",
+                         "voxels of the surface", "A solid object's mass", mass_err, "A hollow object's mass",
+                         hollow_err, "too large for thin or slender parts", "gives the voxel edge",
+                         "keeps the mass and the models that it had",
+                         "That mass came from the materials model that the app used before",
+                         "has no Material row",
+                         "center of the shape", "one heavy part", "bottom of the object", "No partner surface",
+                         "every collision surface and on the floor", "MuJoCo and USD", "The URDF holds no friction",
+                         f"the default friction, {friction}", "No object has been weighed", "likely too narrow"],
              "downloads": ["(package)", "API key", "the agent's result when the key was found in it",
                            "cameras' mean up", "one link", "view 0's camera frame",
-                           "mask IoU", "5th to 95th percentile", "physics judgment", "ok is false",
+                           "mask IoU", "ok is false", "When the agent is not None", "It holds no friction",
+                           "and in jobs built before the estimate stage",
+                           "the model's reason", "the number of tries", "has no estimate",
+                           "the older materials model's mass",
                            "uploaded calibration", "Stray capture", "aligned with the color camera", "view 0 first",
                            "null without LiDAR",
                            "excluded", "only in results.zip",
@@ -157,6 +181,7 @@ def test_help_page_holds_the_method_numbers():
     assert set(facts) <= set(text), set(facts) - set(text)
     for sid, want in facts.items():
         assert all(f in text[sid] for f in want), (sid, [f for f in want if f not in text[sid]])
+    assert "vomp" not in page.lower()
     # Every stage, in order, and the GPU mark on the ones that run on the GPU.
     stages = [r for s, r in parse(page).rows if s == "status" and r[0] in steps.NAMES]
     assert [r[0] for r in stages] == steps.NAMES

@@ -10,10 +10,10 @@ handles rigid objects only. The features for objects with moving parts were remo
 (note 11). It follows the
 two stages of GATOR (arXiv 2610.11215v1): Stage A generates a posed mesh from several views (here
 MV-SAM3D; we do not build GATOR's own generator), and Stage B is an LLM agent
-that repairs the mesh in Blender. VoMP predicts the materials on the MV-SAM3D mesh before the agent
-runs, and the final mass and inertia come from those predictions on the final mesh. The research
-focus from now on is the mass and the friction of rigid objects: how to estimate them, and how the
-agent can refine them. Today the mass comes from VoMP, and the friction is a fixed 0.6. The web app runs
+that repairs the mesh in Blender. After the mesh is turned upright, the job's model (the agent's model,
+with the same API key) estimates the mass and the friction from photos and the mesh's measurements
+(note 9). The research focus from now on is the mass and the friction of rigid objects: how to estimate
+them, and how the agent can refine them. The web app runs
 every stage on a Linux GPU machine, from the docker image or from envs that `setup/install.sh` builds, such as on a
 Slurm cluster (notes 7 and 10).
 
@@ -22,25 +22,27 @@ Slurm cluster (notes 7 and 10).
 - **Stage A:** MV-SAM3D with Depth Anything 3 cameras and depth (note 4b).
 - **Masks:** SAM 3 from a text prompt, through Hugging Face transformers rather than Meta's `sam3`
   package (note 3).
-- **Agent:** GPT-6-Astra through the Codex CLI (the paper's setup) by default, or Claude Opus 5.5 or
-  Claude Fable 5.2 through our own Messages API loop (note 5). The user picks one per job and brings its key.
+- **Agent:** GPT-6.2-Astra through the Codex CLI by default, or Claude Opus 5.5 or Claude Fable 5.2
+  through our own Messages API loop (note 5). The paper ran GPT-6-Astra through the Codex CLI. The user
+  picks one per job and brings its key.
 - **Web app:** one object per job, on the user's GPU machine (in docker, or in a Slurm job), reached through
   localhost or an SSH tunnel (note 10).
-- **Environments:** six micromamba envs and venvs and the agent's Apptainer image from `setup/install.sh` (note 7), in one docker image
+- **Environments:** five micromamba envs and venvs and the agent's Apptainer image from `setup/install.sh` (note 7), in one docker image
   (`containers/Dockerfile`) or built on the machine. The agent and Blender run in a sandbox: sibling docker
   containers of the same image, or Apptainer (note 5).
-- **GPUs:** NVIDIA, from Ampere to Hopper (compute capability 8.0 to 9.0). The torch versions of `envs/sam3d`
-  and `envs/vomp11` build for nothing newer, so Blackwell is not supported yet.
+- **GPUs:** NVIDIA, from Ampere to Hopper (compute capability 8.0 to 9.0). torch 2.5.1 in `envs/sam3d`
+  builds for nothing newer, so Blackwell is not supported yet.
 - **Licenses:** SAM 3D Objects, MV-SAM3D and SAM 3 use the SAM License, and the Depth Anything 3 model we
   use is CC BY-NC 4.0. So this version is research-only.
-- **Materials:** VoMP v1.1 on the MV-SAM3D mesh, before placement and the agent. Its predictions are
-  moved onto the final mesh for the mass and the inertia. VoMP does not predict friction, so the MJCF and
-  the USD use a fixed 0.6, and the URDF holds no friction (note 9).
-- **Physics check and repair rounds:** in a web-app job, the host checks each candidate that the agent
-  hands off. It compares the surface with the original (report only), settles the candidate under
-  gravity in MuJoCo with the VoMP materials from before refinement, and asks the agent's own model to
-  judge the frames against the photo. A failed judgment gives a repair round. A session has at most 3
-  builds and 1 planning round, and the host delivers the best stored candidate (note 5, after PhysAg3D).
+- **Mass and friction:** the job's model (GPT-6.2-Astra, Claude Opus 5.5 or Claude Fable 5.2) estimates
+  both in one request, from up to 4 photos and the measurements of the upright mesh. The mass is spread
+  evenly over the mesh's voxels for the COM and the inertia. The MJCF and the USD use the friction, and the
+  URDF holds none. A job without an agent has no key, so it gets no mass, friction or simulation models
+  (note 9).
+- **Host check and repair rounds:** in a web-app job, the host checks each candidate that the agent
+  hands off. It checks that the agent finished and compares the surface with the original (report
+  only). A failed check gives a repair round. A session has at most 3 builds and 1 planning round, and
+  the host delivers the best stored candidate (note 5, after PhysAg3D).
 - **Metric scale:** an optional LiDAR per job, from a rosbag topic or a Stray Scanner capture, sets the
   scale only (note 12).
 
@@ -50,8 +52,10 @@ What works (the notes hold the main results; git history holds the run logs):
 - The web app runs the whole pipeline from a video on PACE ICE, our Slurm cluster (note 10). A separate static demo gallery is available (`docs/public_site.md`).
 - Stage A: SAM 3 masks, Depth Anything 3 and MV-SAM3D with the pose fitted to the masks (notes 3
   and 4b).
-- Stage B: GPT-6-Astra and Claude Opus 5.5 refine meshes under the controller's deadline (note 5).
-- Physics: VoMP v1.1 materials and MJCF, USD and URDF models (note 9).
+- Stage B: GPT-6-Astra (the default agent until 2026-11-20) and Claude Opus 5.5 refined meshes under the
+  controller's deadline (note 5).
+- Physics: MJCF, USD and URDF models of one rigid body (note 9). The estimate stage that gives their mass
+  and friction is built, with tests on the Mac in which the model's answer is a stand-in.
 - The repair rounds and the surface check (note 5): built, with tests on the Mac in which Blender and
   the agent are stand-ins. The physics judge (a VLM that judged MuJoCo settling frames) was removed on
   2026-11-20.
@@ -60,8 +64,9 @@ What works (the notes hold the main results; git history holds the run logs):
 Not verified yet:
 - No rosbag job is recorded end to end.
 - No rigid job has run the repair rounds on ICE with a real agent.
-- No rigid refinement with Claude Fable 5.2 has run yet.
-- The masses are not checked against a scale, and no step estimates friction (note 9).
+- No rigid refinement with Claude Fable 5.2 or with GPT-6.2-Astra has run yet.
+- The estimate stage has not run with a real model. No mass is checked against a scale, and no friction
+  against a measurement (note 9).
 - No real rosbag with a LiDAR and no real Stray capture has run (note 12).
 - The 360 video has not run on ICE (note 10).
 - The docker image (`containers/Dockerfile`) has not been built yet, and the docker sandbox has run only in tests
@@ -74,7 +79,6 @@ Not verified yet:
 | `LICENSE` | MIT, for HARPOR's own code. Third-party models and the vendored web libraries keep their own licenses (the Licenses bullet above, and `harpor/webapp/static/vendor/licenses/`) |
 | `docs/build_plan.md` | This file: overview, design and build notes |
 | `docs/public_site.md` | The standalone static demo gallery |
-| `docs/research.md` | Research findings with sources: the paper and every results table, MV-SAM3D and SAM 3D, Blender, SAM 3, VoMP and the simulators |
 
 ## Component diagram
 
@@ -85,9 +89,9 @@ flowchart TB
     analyze["topics (a bag), frames, extract, masks (SAM 3), prep, da3 (Depth Anything 3)"]
     lidar["lidar: metric scale (optional, note 12)"]
     select["select: the views, then the review"]
-    stageA["sam3d (MV-SAM3D), vomp (VoMP materials), place (notes 2, 4b and 9)"]
-    agent["agent: GPT-6-Astra, Claude Opus 5.5 or Claude Fable 5.2 in Blender, with repair rounds (note 5)"]
-    physics["align, transfer materials, mjcf, usd, urdf (note 9)"]
+    stageA["sam3d (MV-SAM3D), place (notes 2 and 4b)"]
+    agent["agent: GPT-6.2-Astra, Claude Opus 5.5 or Claude Fable 5.2 in Blender, with repair rounds (note 5)"]
+    physics["align, estimate (mass and friction from the job's model), mjcf, usd, urdf (note 9)"]
     package["turntable (optional 360 video), then package: results.zip"]
   end
   input --> analyze --> lidar --> select --> stageA --> agent --> physics --> package
@@ -103,18 +107,19 @@ flowchart TB
 | MV-SAM3D | github.com/devinli123/MV-SAM3D (HEAD `abb04b5`) | SAM License | Stage A |
 | Depth Anything 3 | github.com/ByteDance-Seed/Depth-Anything-3, HF `depth-anything/DA3NESTED-GIANT-LARGE-1.1` | code Apache-2.0, weights CC BY-NC 4.0 | cameras and depth for MV-SAM3D |
 | SAM 3 | HF `facebook/sam3` through transformers 5.20.0 (`Sam3Model`) | SAM License, gated (access granted) | masks from a text prompt, when the dataset has none (note 3) |
-| GPT-6-Astra | OpenAI API, model `gpt-6-astra` | API key | the default agent (note 5) |
-| Codex CLI 0.162.1 | npm `@openai/codex@0.162.1` | Apache-2.0 | runs GPT-6-Astra |
+| GPT-6.2-Astra | OpenAI API, model `gpt-6.2-astra` | API key | the default agent (note 5); the estimate stage asks it through the Responses API (note 9) |
+| Codex CLI 0.171.0 | npm `@openai/codex@0.171.0` | Apache-2.0 | runs GPT-6.2-Astra |
 | Claude Opus 5.5 | Anthropic API, model `claude-opus-5-5` | API key | the alternative agent (note 5) |
 | Claude Fable 5.2 | Anthropic API, model `claude-fable-5-2` | API key, 30-day data retention | the second Claude agent (note 5) |
-| anthropic 1.15.0 | pip, in `envs/sam3d` and `envs/web` | MIT | runs Claude Opus 5.5 and Claude Fable 5.2 (`harpor/agent/claude_agent.py`), `harpor/agent/vlm.py` (unused since the physics judge was removed) and the web app's key check |
+| anthropic 1.15.0 | pip, in `envs/sam3d` and `envs/web` | MIT | runs Claude Opus 5.5 and Claude Fable 5.2 (`harpor/agent/claude_agent.py`), `harpor/agent/vlm.py` (the estimate stage's request, note 9) and the web app's key check |
 | Blender 5.2.2 LTS | blender.org | GPL | agent workspace and review renders |
-| trimesh, scipy | pip | open source | GLB handling, the surface check and the material transfer |
+| trimesh, scipy | pip | open source | GLB handling, the surface check and the estimate stage's voxels |
 | PyAV 19.0.1, rosbags 0.11.8 (with ruamel.yaml 0.19.1), FastAPI 0.143.2, uvicorn 0.54.0 | pip | BSD (the PyAV wheel bundles FFmpeg, LGPL), Apache-2.0, MIT, BSD | the web app: video and rosbag decoding, the calibration file (note 12), the server (note 10) |
 | Stray Scanner | iPhone app | free, open source | the iPhone LiDAR capture for the metric scale (note 12) |
 | model-viewer 4.4.0 | Google CDN locally, vendored copy on the public site (`site.py`) | Apache-2.0 | the web app's GLB viewers |
 
-`research.md` sections 2 to 4 give the details and sources.
+The research notes with the details and sources were in `docs/research.md`, which was removed. Commit f6e72c4 still
+has it.
 
 ## Notes
 
@@ -125,7 +130,7 @@ flowchart TB
   canonical frame to view 0's camera, in PyTorch3D camera axes and in the pointmap's units. To get W: undo the
   GLB rotation (`v = V @ A.T` with A = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]), apply scale, rotation
   (quaternion w, x, y, z) and translation as PyTorch3D row vectors, then multiply by (-1, -1, 1).
-  `research.md` section 2.5 has the code. It mirrors MV-SAM3D's `merge_glb_with_da3_aligned`.
+  `place.canonical_glb_to_w` (`harpor/stage_a/place.py`) has the code. It mirrors MV-SAM3D's `merge_glb_with_da3_aligned`.
 - The convention was checked on the ICE teddy smoke test (2026-10-14) under SAM 3D's own camera, with
   K fitted to `pointmap.npy`: the posed silhouette matches the mask with IoU 0.86, and the masked
   pointmap lies a median 1.7% of the mesh diagonal from the surface (54% within 2%).
@@ -156,13 +161,13 @@ flowchart TB
 
   ```bash
   module purge; G=$(readlink -f ~/scratch)/gator; export HF_HOME=$G/.cache/huggingface
-  cd $G/gator_clone && $G/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks \
+  cd $G/HARPOR && $G/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks \
     --scene DIR --prompt plate --prompt "coffee cup"
   # to fix one photo, rerun that prompt alone: --prompt plate --pick NAME=K --overwrite
   ```
 
   - The step uses transformers, not Meta's own `sam3` package, which needs a GPU to build the
-    model and does not declare all its dependencies (`research.md` section 4.1).
+    model and does not declare all its dependencies.
   - Instances are numbered by score, and the mask is instance 0. `--pick NAME=K` takes instance K
     in photo NAME, `NAME=K,L` takes the union of K and L, and `NAME=none` writes no mask (the
     object is not in that photo). `NAME=0` goes back to the top score. A rerun keeps the earlier
@@ -174,7 +179,7 @@ flowchart TB
     `<name>_mask.png` in the folder stays, and `prep` prefers it. The step warns when two prompts
     of one run give masks that overlap with IoU above 0.5.
   - The step adds one padding box (label -10) so that the prompt gets the CLS token that Meta's
-    code appends (`research.md` section 4.1).
+    code appends.
   - Setup, once: `bash setup/sam3seg.sh` builds `envs/sam3seg` (Python 3.12, torch 2.14.1+cu130,
     transformers 5.20.0), and `setup/weights.sh` downloads the weights into `$HF_HOME`. The token must
     belong to the Hugging Face account that has access to `facebook/sam3`. torch's cu130 build needs a
@@ -194,10 +199,10 @@ cluster, which a machine that clones the repo does not need. The GPU is needed o
 without one when `TORCH_CUDA_ARCH_LIST` is set, as the docker build does.
 
 1. **Copy the code.** From the repo root on the laptop, on the GT network or VPN:
-   `rsync -a --exclude .git --filter=':- .gitignore' ./ <user>@<login node>:scratch/gator/gator_clone/`
+   `rsync -a --exclude .git --filter=':- .gitignore' ./ <user>@<login node>:scratch/gator/HARPOR/`
    (the filter skips what `.gitignore` names: caches, `results/`, `site/` and the media files).
    A later sync of a changed tree (2026-11-11) adds `--delete --exclude .claude --exclude paper
-   --exclude docs/figures` and `--backup --backup-dir=<a folder outside gator_clone>`. The excludes keep
+   --exclude docs/figures` and `--backup --backup-dir=<a folder outside HARPOR>`. The excludes keep
    the worktrees off ICE and keep two folders that exist only there, and the backup keeps every file that
    `--delete` removes or the copy replaces.
 2. **Environment** (about 1 h). The recipe builds for both L40S (8.9) and H100/H200 (9.0):
@@ -255,7 +260,7 @@ without one when `TORCH_CUDA_ARCH_LIST` is set, as the docker build does.
      CPATH=$G/envs/sam3d/targets/x86_64-linux/include \
      LIBRARY_PATH=$G/envs/sam3d/targets/x86_64-linux/lib:$G/envs/sam3d/lib
    K=$G/sam-3d-objects/notebook/images/shutterstock_stylish_kidsroom_1640806567
-   cd $G/gator_clone && python -m harpor.stage_a.sam3d --sam3d-root $G/sam-3d-objects \
+   cd $G/HARPOR && python -m harpor.stage_a.sam3d --sam3d-root $G/sam-3d-objects \
      --image $K/image.png --mask $K/14.png --out $G/runs/smoke_kidsroom14
    ```
 
@@ -356,7 +361,7 @@ Views and proportions, tested on the box job 20261030-115120-5529a9 (one object,
 
 ### 5. Stage B: agent (`harpor/agent/`)
 
-The default agent is GPT-6-Astra through the Codex CLI (Decisions). Claude Opus 5.5 through our own
+The default agent is GPT-6.2-Astra through the Codex CLI (Decisions). Claude Opus 5.5 through our own
 Messages API loop is the alternative (`prepare_session(..., agent="claude")`; see the end of this
 note). Everything below that is not marked Claude applies to both.
 
@@ -374,18 +379,19 @@ apptainer exec --nv --containall --no-mount bind-paths \
   --pwd /work harpor-agent.sif \
   sh -c 'export CODEX_API_KEY="$OPENAI_API_KEY"; unset OPENAI_API_KEY; exec "$@"' codex \
   codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --strict-config \
-    -C /work -m gpt-6-astra -c 'model_reasoning_effort="xhigh"' --json -o /session/last_message.txt -
+    -C /work -m gpt-6.2-astra -c 'model_reasoning_effort="xhigh"' --json -o /session/last_message.txt -
 ```
 
 - `prepare_session` writes `session/codex_home/config.toml` from `harpor/agent/codex/config.toml`
   and copies `harpor/agent/codex/AGENTS.md` to `work/AGENTS.md`. `AGENTS.md` has the folder layout
   and the helper syntax only, because the paper's prompts name the helpers but not their
   arguments. It tells the agent to look at PNGs with `view_image`.
-- Facts from the Codex CLI 0.162.1 source: `codex exec` reads the key only from `CODEX_API_KEY`, so
-  the shell above copies it from `OPENAI_API_KEY`; by default Codex passes key variables to the
-  agent's commands and turns on live web search without a sandbox, so the config sets
-  `ignore_default_excludes = false` and `web_search = "disabled"`; gpt-6-astra defaults to low
-  effort, so `xhigh` is set explicitly (the paper's "extra-high").
+- Facts from the Codex CLI 0.162.1 source: `codex exec` reads the key only from `CODEX_API_KEY`
+  (checked again with 0.171.0 on ICE on 2026-11-20), so the shell above copies it from
+  `OPENAI_API_KEY`; by default Codex passes key variables to the agent's commands and turns on live
+  web search without a sandbox, so the config sets `ignore_default_excludes = false` and
+  `web_search = "disabled"`; gpt-6-astra defaults to low effort, so `xhigh` is set explicitly (the
+  paper's "extra-high"), and the config keeps it for gpt-6.2-astra.
 - `result.json` records the CLI exit code by name in `cli_exit`. Codex exits 1 on SIGINT, so a stop
   after `finish` shows as `error_or_interrupted`.
 - The helpers (`export_glb`, `review`, `checkpoint`, `finish`) run on the host, not in the agent's
@@ -486,7 +492,7 @@ apptainer exec --nv --containall --no-mount bind-paths \
   plus 8%, rendered at 768 px on the long side. `review.json` records the window. Orbit and detail
   views are packed side by side, up to the width of a photo row. On the teddy, the window was
   136 x 138 px of the 1008 px photo, and the mask IoU stayed 0.87.
-- Astra sessions on the teddy, the MV-SAM3D toy, the round table, the office chair and five tabletop
+- GPT-6-Astra sessions on the teddy, the MV-SAM3D toy, the round table, the office chair and five tabletop
   objects took 215 to 633 s of wall time. On the teddy, the extents changed by under 1.5%. Mean mask
   IoU moved by at most about 0.02.
 - Videos: `harpor/agent/blender/turntable.py` renders a 360-degree turntable of one GLB in frame W
@@ -503,8 +509,8 @@ prompt. `controller.has_rounds` is true when `control/rounds.json` exists, so a 
 controller runs without it (by hand or in a test) is one round.
 
 Until 2026-11-20 the rounds also ran a physics judge (`harpor/agent/physics_review.py` and
-`harpor/physics/supervise.py`): the host let each candidate settle for 3 s in MuJoCo with the VoMP
-materials, and the job's VLM judged the frames against the photo. It only judged geometry and could
+`harpor/physics/supervise.py`): the host let each candidate settle for 3 s in MuJoCo, and the job's VLM
+judged the frames against the photo. It only judged geometry and could
 not check mass or friction, so it was removed. Commit f6e72c4 still has it.
 
 Each round is a new agent process with its own tool server, budget and deadline, and with no memory of
@@ -628,8 +634,10 @@ under Apptainer. Tested with a fake docker command only (`tests/test_docker_sand
 
 #### Agent setup and pilot checks on ICE
 
-Files: `containers/harpor-agent.def` (Ubuntu 24.04, Node.js 24.21.0, Codex CLI 0.162.1, Blender
+Files: `containers/harpor-agent.def` (Ubuntu 24.04, Node.js 24.21.0, Codex CLI 0.171.0, Blender
 5.2.2 and Blender's X and GL libraries) and `harpor/agent/codex/config.toml`.
+The image on ICE was rebuilt on 2026-11-20 with Codex CLI 0.171.0, the first release with GPT-6.2-Astra in its
+model catalog, and the 0.162.1 image is kept as `sif/harpor-agent-codex0.162.1.sif`.
 ICE allows unprivileged `--fakeroot` builds (tested 2026-10-14). The ICE `apptainer.conf` binds
 `/scratch` and `/storage` into every container, so every container here runs with `--containall`
 and `--no-mount bind-paths`. That flag turns off every `bind path` in `apptainer.conf`, which keeps
@@ -642,7 +650,7 @@ read-only. The Claude shell (`--net --network none`) and the Blender containers 
    ```bash
    module purge; G=$(readlink -f ~/scratch)/gator; mkdir -p $G/sif
    export APPTAINER_TMPDIR=${TMPDIR:-/tmp} APPTAINER_CACHEDIR=${TMPDIR:-/tmp}/apptainer_cache
-   apptainer build --fakeroot $G/sif/harpor-agent.sif $G/gator_clone/containers/harpor-agent.def
+   apptainer build --fakeroot $G/sif/harpor-agent.sif $G/HARPOR/containers/harpor-agent.def
    ```
 2. **Check the sandbox and the GPU render.** The first line must show that `/storage` and
    `/scratch` do not exist inside, and the second must save a frame rendered with OptiX:
@@ -669,7 +677,7 @@ read-only. The Claude shell (`--net --network none`) and the Blender containers 
   check and fallback as Codex. `prepare_session` writes `control/agent.json` (agent, model
   and effort), and `run_container_session` starts the agent it names.
 - Requests: `claude-opus-5-5`, streamed, 64K max tokens, adaptive thinking with summaries, effort
-  `xhigh` from the controller and the web app (the effort of the Astra comparison runs; it was
+  `xhigh` from the controller and the web app (the effort of the GPT-6-Astra comparison runs; it was
   `high` until 2026-10-17; `claude_agent` run by hand still defaults to `high`, and Opus 5.5's own
   default is `medium`), server-side refusal fallback (`fallbacks: "default"`), and prompt caching on
   the system prompt and on the conversation. The history is append-only, because Opus 5.5 ties its
@@ -689,9 +697,9 @@ read-only. The Claude shell (`--net --network none`) and the Blender containers 
   on the host.
 - Every helper except `finish` ends its output with `time left: N s of the B s budget`, where B is
   the round's budget (600 s for a build, 450 s for a repair, 300 s for a replan) (both agents). The Claude manual's Measured times come from the Opus sessions of 2026-10-17.
-- Opus is faster than Astra on the same Stage A meshes, stops sooner and calls more results
+- Opus is faster than GPT-6-Astra on the same Stage A meshes, stops sooner and calls more results
   `complete`. In the photo-match comparison (removed, see commit 91003c9), the later Opus table sessions match or beat
-  Astra on several scores. The gap that remains is in how Opus finishes: it names leftover flaws as
+  GPT-6-Astra on several scores. The gap that remains is in how Opus finishes: it names leftover flaws as
   limitations and still says `complete`, and it does not confirm fixes with `--clay` or `--detail`.
   On the table, the time-left lines, the Measured times and effort `max` cut its unused time from 402
   to 421 s to a median of 280 s, while restating the verdict rule changed nothing. A `finish` check
@@ -725,12 +733,11 @@ The photo-match scores were removed. `harpor/eval/photo_match.py` is in commit 9
 | `envs/da3` (venv) | Depth Anything 3, torch 2.14.1+cu130 (note 4b) | Separate so DA3's dependencies cannot change `envs/sam3d`. Built by `setup/mvsam3d.sh` |
 | `envs/web` (micromamba) | Python 3.12, fastapi 0.143.2, uvicorn 0.54.0, av 19.0.1, rosbags 0.11.8, anthropic 1.15.0 (note 10) | The web app's server; every stage runs in its own env. Built by `setup/web.sh` |
 | `envs/sam3seg` (micromamba) | Python 3.12, torch 2.14.1+cu130, transformers 5.20.0 (note 3) | SAM 3 masks; transformers 5.20 needs torch 2.6 or newer, so it cannot go into `envs/sam3d`. Built by `setup/sam3seg.sh` |
-| `sif/harpor-agent.sif` (Apptainer) | Node.js 24.21.0, Codex CLI 0.162.1, Blender 5.2.2 | Built from `containers/harpor-agent.def` with `--fakeroot` by `setup/agent.sh` (note 5); run with `--nv` for Cycles OptiX. The docker image has these tools inside instead |
-| `envs/mujoco` (micromamba) | Python 3.11, mujoco 4.0.0 (3.16.0 until 2026-11-11), coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF, USD and URDF export, ; no pytest. Built by `setup/mujoco.sh` (first run as a recipe on 2026-11-08) |
-| `envs/vomp11` (micromamba) | VoMP v1.1 (641a22d) in `VoMP/`, Python 3.11, torch 2.4.0+cu121, bpy 4.2.0, kaolin 0.18.0, spconv-cu121 2.3.8 (note 9) | Built by `setup/vomp11.sh` |
+| `sif/harpor-agent.sif` (Apptainer) | Node.js 24.21.0, Codex CLI 0.171.0, Blender 5.2.2 | Built from `containers/harpor-agent.def` with `--fakeroot` by `setup/agent.sh` (note 5); run with `--nv` for Cycles OptiX. The docker image has these tools inside instead |
+| `envs/mujoco` (micromamba) | Python 3.11, mujoco 4.0.0 (3.16.0 until 2026-11-11), coacd 1.0.14, trimesh 5.1.1 (note 9) | MJCF, USD and URDF export; no pytest. Built by `setup/mujoco.sh` (first run as a recipe on 2026-11-08) |
 
 `bash setup/install.sh` builds all of them in order and then the weights: `setup/web.sh`, `setup/sam3d.sh`,
-`setup/mvsam3d.sh` (`envs/da3`), `setup/sam3seg.sh`, `setup/vomp11.sh`, `setup/mujoco.sh`, `setup/agent.sh` (the
+`setup/mvsam3d.sh` (`envs/da3`), `setup/sam3seg.sh`, `setup/mujoco.sh`, `setup/agent.sh` (the
 Apptainer image, skipped without apptainer or with `HARPOR_SKIP_AGENT=1`) and `setup/weights.sh` (skipped with
 `HARPOR_SKIP_WEIGHTS=1`). Each script also runs on its own, skips what is built, and works under `$HARPOR_ROOT`.
 `setup/common.sh`, which they all source, runs `module purge` only where the `module` command exists, fetches
@@ -743,15 +750,16 @@ and `facebook/sam-3d-objects` (`HF_TOKEN`). The whole install is about 90 GB.
 **The docker image.** `containers/Dockerfile` (Ubuntu 22.04) runs `setup/install.sh` with both skips and
 `TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"`, adds the agent's tools at the versions of `containers/harpor-agent.def`
 and the docker CLI, and copies the code last, to `/opt/harpor/code`, with `HARPOR_ROOT=/opt/harpor`. The data
-folder is mounted at `/data`: links in the image put `.cache`, `webapp_runs`, `sam-3d-objects/checkpoints` and
-`VoMP/weights` there, so the image holds no weights and no jobs. `containers/harpor-docker` starts it as the user,
+folder is mounted at `/data`: links in the image put `.cache`, `webapp_runs` and `sam-3d-objects/checkpoints`
+there, so the image holds no weights and no jobs. `containers/harpor-docker` starts it as the user,
 with the GPUs, the docker socket and the data folder (`HARPOR_DATA`, by default `~/harpor-data`); its commands are
 `check`, `weights`, `serve` and `run` (`containers/entrypoint.sh`).
 
 On 2026-11-08 a fresh `setup/install.sh` ran on an ICE L40S node (16 cores) into an empty root on the node's local
 disk, with `CUDA_VISIBLE_DEVICES=` and `TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"`, to stand in for the docker build.
 Every step passed in 34 minutes, the weights included: `envs/sam3d` took 20 minutes (most of it pytorch3d and gsplat
-for four GPU kinds), `envs/vomp11` 5, the Apptainer image 3 and the weights 1. Its torch, pytorch3d, kaolin,
+for four GPU kinds), the env of the materials model (removed on 2026-11-20, note 9) 5, the Apptainer image 3 and
+the weights 1. Its torch, pytorch3d, kaolin,
 flash_attn, gsplat, nvdiffrast and anthropic match the ICE envs. Unpinned packages came out newer by patch releases;
 trimesh came out 5.2.0, so `setup/sam3d.sh` now pins the 5.1.1 that HARPOR was tested with. `setup/mujoco.sh` ran as
 a recipe for the first time there. The install was then laid out as the image lays it out (the root and the code
@@ -767,30 +775,72 @@ semester. `~/.config/pip/pip.conf` (written by NVIDIA PyIndex) adds `pypi.ngc.nv
 not resolve, and pip retries it on every package, so the installs set `PIP_CONFIG_FILE=/dev/null` and
 leave the user's file as it is.
 
-### 9. Physical properties: VoMP v1.1 (`harpor/physics/`)
+### 9. Mass, friction and the simulation models (`harpor/physics/`)
 
-The job order is `sam3d → vomp → place → agent → align → mjcf → usd → urdf`. The `vomp` stage
-predicts on `run/canonical.glb`, the first MV-SAM3D mesh, through an opaque copy of it
-(`--opaque-input`), and writes `run/vomp/`. It runs once per job, before placement and the agent.
+The job order is `place → agent → align → estimate → mjcf → usd → urdf`. `align` turns the final mesh
+upright into `physics/aligned.glb`. `estimate` asks the job's model for the mass and the friction of the
+real object and writes `physics/summary.json`. `mjcf`, `usd` and `urdf` read both files, and each model
+they write is one rigid body. VoMP v1.1 gave the materials until 2026-11-20; commit f6e72c4 still has it.
+On a batch of eight objects (table, chair, pan, knife, fork, glass, coffee cup and plate) it gave almost
+every object about 4 GPa and 1,000 kg/m^3, a plastic, even the steel cutlery, the pan, the ceramics and
+the glass.
 
-`material_transfer.py` moves the predictions into the placed world frame W with the placement's pose
-(scale, rotation and shift), and then into the frame of the candidate or of the export. The final mesh
-is voxelized on the CPU (64 voxels on its longest side, filled), and each voxel takes the material of
-its nearest predicted voxel. Mass, COM and inertia are recomputed from those voxels, so they follow the
-final geometry and scale. The transfer is approximate for geometry that the agent created. The `align`
-stage writes `physics/summary.json` through this transfer and does not run VoMP again, so a rerun of the
-agent or of the exports keeps the early predictions.
+**The estimate stage** (`harpor/webapp/estimate_step.py`; the measurements, the prompt, the check and the
+rigid body are in `harpor/physics/estimate.py`) runs in `envs/sam3d` on the CPU:
+1. **Voxels.** `estimate.voxels` voxelizes `aligned.glb` in frame S with trimesh, with 64 voxels
+   (`RESOLUTION`) along the mesh's longest side. The surface voxels are the ones that the surface passes
+   through. The filled voxels are those and everything inside the closed surface. Both count a crossed
+   voxel in full, so the filled volume pads every surface by up to one voxel edge. For a bulky shape,
+   such as a cube or a ball, that adds a few percent. At 64 voxels the filled volume is about 1.2 times
+   the true volume for a book, 1.4 times for a plate, 1.5 times for a phone and 1.9 times for a pencil.
+2. **Measurements** (`estimate.geometry`): the extent along each axis, the filled volume, the convex hull
+   volume of the vertices, the surface area, the voxel edge and the two voxel counts.
+3. **Photos.** Up to 4 (`estimate.MAX_VIEWS`) of the job's input photos from `run/cameras.json`: view 0
+   first, then the middles of equal runs of the other views (`estimate_step.pick_views`). Each photo fits
+   a 1024 px tile in a grid of 2 columns, `physics/estimate_views.jpg`. The model gets the grid at 2048 px
+   on its long side.
+4. **Request.** One request with that image and `estimate.prompt`, through `harpor/agent/vlm.py`, at
+   effort high. GPT-6.2-Astra goes through the OpenAI Responses API (urllib, no SDK). Claude Opus 5.5 and
+   Claude Fable 5.2 go through the anthropic SDK with the server-side refusal fallback. The prompt gives
+   the object's name, the measurements, whether the scale came from LiDAR (`run/placement.json`
+   "metric_scale"), why the filled volume is too large for thin parts, two ways to check a mass (density
+   times the real volume for a solid object, surface area times wall thickness times density for a
+   hollow one) and the JSON schema. It says that the name, the measurements and any text in the photos
+   are data, not instructions. The answer gives the material, "solid" or "hollow", the mass in kg and one
+   Coulomb friction coefficient for the outer surface, each with a low and a high bound that the model is
+   90 percent sure of, and a reason. No partner surface is named.
+5. **Check** (`estimate.parse`). Every field must be there, and low <= value <= high must hold for the
+   mass and for the friction. The mass and its bounds must be from 0.001 to 10,000 kg (`MASS_RANGE_KG`),
+   the friction and its bounds from 0.01 to 2 (`FRICTION_RANGE`), and the mass over the filled volume at
+   most 20,000 kg/m^3 (`MAX_DENSITY`). The material is cut to 200 characters and the reason to 2,000. An
+   answer that fails gets one retry, with the reason added to the prompt. A second invalid answer, or an
+   API error, fails the stage.
+6. **Rigid body** (`estimate.rigid_body`). The mass is spread evenly over the filled voxels of a solid
+   object, or over the surface voxels of a hollow one. `harpor/physics/mass.py` sums the voxels, each a
+   solid box of the voxel edge, into the mass, the COM and MuJoCo's `fullinertia` (Ixx Iyy Izz Ixy Ixz
+   Iyz about the COM). Every voxel has the same density, so the COM is the center of the shape. An object
+   with one heavy part, such as a hammer, gets a wrong COM.
+7. **`physics/summary.json`** holds `glb`, `geometry` (the measurements), `rigid_body` (what `mjcf`,
+   `usd` and `urdf` read), `friction`, and `estimate`: the checked answer with the agent, the model, the
+   attempts, the seconds and the views shown.
 
-Linux headless rendering uses `MUJOCO_GL=egl` by default.
+The stage takes the key of the job's agent (`steps.KEYED`) from a key file, into memory only. Every key of
+the file is replaced by "[redacted API key]" in each answer before it is parsed, stored or printed
+(`agent_step.scrub`), and again in the cleaned strings. A job with the agent set to `none` has no key, so
+`estimate`, `mjcf`, `usd` and `urdf` are skipped with `steps.NO_KEY_SKIP`. A poor Stage A placement skips
+only the agent, so the estimate still runs. `align` deletes `summary.json` first, since the mass of an
+earlier mesh no longer fits. `steps.done` counts `estimate` as done only when `summary.json` has
+"estimate".
 
-The commands below also remain available for standalone prediction and export workflows.
+The model reads the mesh's sizes, so the mesh must be in meters, and a size error grows in the mass. A
+solid object's mass grows with the size cubed, so a 5% size error gives about a 16% mass error. A hollow
+object's mass grows with the size squared, so the same error gives about 10%. A solid object's inertia grows
+with the size to the fifth power, and a hollow object's with the fourth power. No object has been weighed, and no friction measured, to test the estimates.
 
 The agent's GLB is not ready for a simulator. MuJoCo 4.0.0, like 3.16.0, loads only STL, OBJ and MSH meshes and
-PNG textures, and it needs one mass and inertia per body. VoMP v1.1 takes the GLB directly and
-predicts Young's modulus E (Pa), Poisson's ratio nu and density rho (kg/m^3) per voxel of a 64^3
-grid. VoMP does not predict friction. Sources and the v1.1 changes are in `research.md` section 4.6.
+PNG textures, and it needs one mass and inertia per body. Linux headless rendering uses `MUJOCO_GL=egl` by default.
 
-Steps for one object:
+Steps for one object (the web app runs each as a stage, and each also runs by hand):
 1. **Align.** `python -m harpor.physics.align --glb IN.glb --out aligned.glb [--up pca|normals | --up-near X,Y,Z] [--x pca|footprint] [--opaque]`
    (in `envs/sam3d`). It writes a copy in frame S: z up, the footprint centred on the origin, the
    bottom at z = 0 and the long side on x. The BIN chunk is copied byte for byte, and the transform
@@ -801,17 +851,15 @@ Steps for one object:
    diagonal, which makes the bounding box and the voxels larger. `--up-near X,Y,Z` takes the
    object's own axis closest to a hint in W, such as a table plane fitted to view 0's depth; the
    hint only picks the axis, so an object whose pose is a little off still rests on its base.
-   `--opaque` drops transmission, volume and IOR from the materials,
-   because VoMP rejects transmissive ones (the glass).
-2. **Predict.** `cd $G/VoMP && python $G/gator_clone/harpor/physics/vomp_run.py --glb aligned.glb --out RUN`
-   (in `envs/vomp11`, on a GPU node). It calls `get_mesh_materials` with
-   `query_points="voxel_centers"` and `return_original_scale=True`, and writes `materials.npz`
-   (VoMP's `save_materials` format), `voxels.npz` (every occupied voxel with the nearest
-   prediction, the transform and the voxel edge) and `summary.json`.
-3. **Mass.** `summary.json` holds the mass, the COM and MuJoCo's `fullinertia` (Ixx Iyy Izz Ixy
-   Ixz Iyz about the COM), summed over all occupied voxels (`harpor/physics/mass.py`). VoMP's
-   prediction does not depend on size, but mass does, so the mesh must be in meters.
-4. **MJCF.** `python -m harpor.physics.mjcf --glb aligned.glb --summary summary.json --out DIR --name NAME`
+   `--opaque` drops transmission, volume and IOR from the materials. It was added for the materials
+   model that came before, which rejected transmissive materials (the glass). It stays for now, because
+   removing it would change `aligned.glb` and the 360 video. The web app adds it when the GLB has
+   transmission or alpha (`physics_auto.needs_opaque`).
+2. **Estimate.** `python -m harpor.webapp.estimate_step --job J --key-file F --agent astra|opus|fable`
+   (in `envs/sam3d`, from the repo root). F holds `OPENAI_API_KEY=...` for astra, or
+   `ANTHROPIC_API_KEY=...` for opus and fable. The stage reads a job folder: `physics/aligned.glb`,
+   `run/cameras.json` and its photos, `run/placement.json` and the object's name in `job.json`.
+3. **MJCF.** `python -m harpor.physics.mjcf --glb aligned.glb --summary summary.json --out DIR --name NAME`
    (in `envs/mujoco`). It writes `NAME.xml` (one free body with the `<inertial>` from
    `summary.json`, visual meshes that do not collide, and CoACD convex collision meshes),
    `scene.xml` (floor, light and the object; open it with `python -m mujoco.viewer --mjcf DIR/scene.xml`),
@@ -822,65 +870,52 @@ Steps for one object:
      (the test checks MuJoCo's texcoords against the glTF UVs).
    - Every mesh uses `inertia="shell"` (MuJoCo 3.3 or newer): MuJoCo computes each mesh's volume
      even when it carries no mass, and open meshes fail that check. All geoms have density 0.
-   - VoMP gives no friction. `--friction` (default 0.6) goes on the collision geoms and on the
-     scene floor, because MuJoCo uses the larger friction of two geoms with equal priority.
+   - The friction is `summary.json` "friction". It goes on the collision geoms and on the scene floor,
+     because MuJoCo uses the larger friction of two geoms with equal priority. A summary without it,
+     from a job built before the estimate stage, gets 0.6 (`mjcf.DEFAULT_FRICTION`). `--friction`
+     overrides both, and `mjcf.json` records the value used.
    - CoACD gets the welded mesh, a primitive with under 4 distinct vertices or no area is skipped,
      and the visual OBJs keep the glTF normals.
-5. **USD for Isaac Sim.** `python -m harpor.physics.usd --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
+4. **USD for Isaac Sim.** `python -m harpor.physics.usd --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
    (in `envs/mujoco`, which has usd-core 26.8). It writes `NAME.usd` (RigidBodyAPI and MassAPI on the
    default prim; the full inertia as `diagonalInertia` plus `principalAxes`, because MassAPI has no
    full-tensor attribute; UsdPreviewSurface visuals with base-colour and metallicRoughness textures;
    the MJCF's CoACD hulls as `convexHull` colliders with purpose `guide` and a friction material),
    `scene.usda` (PhysicsScene, ground, lights, the asset at the MJCF start height), `textures/` and
-   `usd.json`. Isaac Sim 6.x cannot open a GLB as a physics asset (`research.md` section 4.6).
+   `usd.json`. Isaac Sim 6.x cannot open a GLB as a physics asset.
+   - The friction is the one in `mjcf.json`, unless `--friction` gives another. The ground carries the
+     same value, because PhysX averages the friction of two materials by default.
    - The visuals read metallic and roughness from the metallicRoughness texture, and a primitive
      without a texture gets the mean vertex colour. omni.physx re-cooks hulls with more than 64
      polygons (most CoACD hulls) into hulls 0.3 to 4 mm smaller, so USD and MJCF colliders differ by
      that much. Normal and occlusion maps are not exported.
 
-6. **URDF.** `python -m harpor.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
+5. **URDF.** `python -m harpor.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
    (in `envs/mujoco`) writes `model.urdf` with one link, from the MJCF's visual meshes, textures, convex
    hulls and the inertial of `summary.json`, so the two models agree. It also writes `meshes/` and
    `urdf.json`. The link's frame is S.
 
-Every model is one rigid body. MJCF, USD and URDF all use the same mass, COM and inertia. MJCF and USD use the same friction (0.6
-unless `--friction` says otherwise). The URDF holds no friction value. No step estimates friction yet.
+Every model is one rigid body. MJCF, USD and URDF all use the same mass, COM and inertia. MJCF and USD use the
+same friction. The URDF holds no friction value.
 
-Setup traps (`setup/vomp11.sh` builds `envs/vomp11`, and `setup/mujoco.sh` builds `envs/mujoco`):
-- `setup/vomp11.sh` builds the CUDA extensions for the GPUs in `TORCH_CUDA_ARCH_LIST` (note 4). It takes
-  the list from the environment, or else from `nvidia-smi --query-gpu=compute_cap --format=csv,noheader`.
-  `nvidia-smi` lists only the GPUs of the machine that runs the script, so on a cluster with mixed GPUs
-  set the whole list by hand. On ICE, run `TORCH_CUDA_ARCH_LIST="8.9;9.0" bash setup/vomp11.sh`.
-- VoMP's `install_env.sh` installs the X and GL libraries with sudo apt. `setup/vomp11.sh` skips those
-  steps, so a machine without the libraries needs them first. ICE nodes have them.
+Setup trap (`setup/mujoco.sh` builds `envs/mujoco`):
 - `setup/mujoco.sh` was rebuilt on 2026-11-01 from the installed versions in `envs/mujoco`, and it first
   ran as a recipe on 2026-11-08 (note 7). It pins the packages that HARPOR imports, and pip picks their
   dependencies. Its last check drops a free box on a floor and fails when the box warns or does not come to rest on the floor. Run the script once with
   `HARPOR_ROOT` set to a scratch folder before you run it on the real root.
-- VoMP's `install_env.sh` asks for `spconv-cu120==2.3.8` with CUDA 12.1, but spconv-cu120 stops
-  at 2.3.6 on PyPI. We use `spconv-cu121==2.3.8`.
-- The renders use Cycles on the GPU with no CPU fallback, so step 2 must run on a GPU node.
-  A fresh output folder is needed for each run.
-
-Batch of eight objects (table, chair, pan, knife, fork, glass, coffee cup and plate):
-- VoMP v1.1 gives almost every object about 4 GPa and 1,000 kg/m^3, a plastic, including the steel
-  cutlery, the pan, the ceramics and the glass. v1.0 lands nearer the real materials for most of
-  these objects.
-- The masses are not reliable either way: the voxel volume of thin parts is too large, and the mesh
-  sizes were not checked against the real objects.
-- The batch models were never run in a simulator.
 
 ### 10. Web app (`harpor/webapp/`)
 
 The app takes one phone video, one rosbag or one Stray Scanner capture of one rigid object and runs
 the whole pipeline. The stages (`steps.NAMES`, in order) are `topics` (a bag only), `frames`, `extract`,
 `masks` (SAM 3), `prep`, `da3` (Depth Anything 3), `lidar` (the metric scale, optional, note 12),
-`select` (the views; the job can pause for review here), `sam3d` (MV-SAM3D), `vomp` (VoMP materials on
-the canonical mesh), `place` (the pose fit), `agent` (optional: GPT-6-Astra, Claude Opus 5.5 or Claude
-Fable 5.2 with repair rounds, note 5), `align` (upright, and the materials moved onto the final
-mesh), `mjcf`, `usd`, `urdf`, `turntable` (the 360 video, optional) and `package` (`results.zip`). The
-GPU stages are `masks`, `da3`, `sam3d`, `vomp`, `agent` and `turntable` (`steps.GPU`). Only a failure of
-`turntable` leaves the job usable (`steps.OPTIONAL`).
+`select` (the views; the job can pause for review here), `sam3d` (MV-SAM3D), `place` (the pose fit),
+`agent` (optional: GPT-6.2-Astra, Claude Opus 5.5 or Claude Fable 5.2 with repair rounds, note 5), `align`
+(the final mesh turned upright), `estimate` (the job's model gives the mass and the friction, note 9),
+`mjcf`, `usd`, `urdf`, `turntable` (the 360 video, optional) and `package` (`results.zip`). The GPU stages
+are `masks`, `da3`, `sam3d`, `agent` and `turntable` (`steps.GPU`). The agent and estimate stages take the
+API key (`steps.KEYED`). A job with the agent set to `none` skips `estimate`, `mjcf`, `usd` and `urdf`
+(`steps.NO_KEY_SKIP`). Only a failure of `turntable` leaves the job usable (`steps.OPTIONAL`).
 
 The routes (the `server.py` docstring gives each body and answer): `GET /`, `/help.html`, `/demos.html`,
 `/demos/{name}/{file}` and `/static/{name}`; `PUT /api/upload`; `GET /api/jobs`; `GET` and `DELETE
@@ -948,9 +983,10 @@ terminal command as a process of its own.
    `meta.json` "preview" record. When the encoder fails, the analysis goes on without a preview.
 3. Choose Auto (the app picks N views, default 6) or Manual (click the frames; each click snaps to
    the sharpest frame within 0.25 s). Type the object noun for SAM 3, and pick the agent:
-   GPT-6-Astra (asks for an OpenAI key), Claude Opus 5.5 or Claude Fable 5.2 (asks for an Anthropic
-   key, checked against that model with the `anthropic` SDK), or none (no key; the agent stage is skipped and physics uses the Stage A
-   mesh).
+   GPT-6.2-Astra (asks for an OpenAI key), Claude Opus 5.5 or Claude Fable 5.2 (asks for an Anthropic
+   key, checked against that model with the `anthropic` SDK), or none (no key; the agent stage is skipped,
+   align uses the Stage A mesh, and estimate, mjcf, usd and urdf are skipped). The same model and key
+   give the mass and the friction in the estimate stage.
    For a rosbag or a Stray capture, the box "Use LiDAR for metric scale" turns on the `lidar` stage
    (note 12). It is on by default for a Stray capture. For a bag, the user picks the LiDAR topic,
    sees how TF links it to the camera, and can upload a calibration file (`.yaml`, `.yml` or `.json`,
@@ -989,7 +1025,7 @@ terminal command as a process of its own.
 5. The review page shows the picks with their SAM 3 overlays, every candidate's status and a
    top-down ring of the cameras. The user can lock or exclude frames, choose another SAM 3
    instance or "not in frame", and set view 0. Then Build.
-6. MV-SAM3D, then `vomp` on the canonical mesh (note 9), then `place`.
+6. MV-SAM3D, then `place`.
 7. The agent runs if it is on and the mean mask IoU is at least 0.5. It refines `posed.glb` in rounds
    with the host's check: a build round of 600 s, and repair rounds while the check fails (note 5).
    When the agent is off or skipped, or gives no usable GLB, physics uses `posed.glb`. Physics also
@@ -997,8 +1033,8 @@ terminal command as a process of its own.
    (`physics_auto.pick_glb`, `controller.check_size`). `physics/up.json`
    "glb_rule" gives the reason. `results.zip` still holds the agent's GLB as `refined.glb`. `align` takes up from a plane fitted under the object in view 0's DA3 points, or
    from the mean camera up when no plane fits, uses `--x footprint`, and adds `--opaque` when the GLB
-   has transmission or alpha. Then the material transfer recomputes the final mass and inertia without
-   running VoMP again, then MJCF, USD and URDF, then the 360 video when the job asked for one (the
+   has transmission or alpha. Then `estimate` asks the job's model for the mass and the friction (note
+   9), then MJCF, USD and URDF, then the 360 video when the job asked for one (the
    `turntable` stage; a failure warns), then `results.zip`.
 8. The 360 video (`harpor/webapp/turntable.py`): the GLB that physics used
    (`physics/up.json` "glb"), turned upright with `aligned.json` "T_s_from_w", so it shows aligned.glb's
@@ -1014,11 +1050,17 @@ terminal command as a process of its own.
    The render has `RENDER_TIMEOUT_S`. The tests' stand-in jobs run the real stage with the fake Blender, whose frames are the GLB's
    outline. `tests/test_webapp_turntable.py` checks the upright turn, the binds, the render with the fake
    Blender, the encode, and `blender/turntable.py` itself on stand-ins for `bpy`. Not checked on ICE yet: the upright turn, the render time and the file size.
-   A job folder that an older version left for an articulated object still resumes. Its job.json keeps
-   "articulated", "parts" and the records of the removed stages, which nothing reads or runs. Its VoMP
-   record says skipped, so a retry from a later stage starts from vomp (`Runner.resume`). Its per-link
-   `physics/summary.json` and MJCF, and a USD or URDF with joints, do not count as done (`steps.done`), so
-   align and the exports run again and give one rigid body (`test_an_older_articulated_job_resumes_as_a_rigid_one`).
+   A job folder that an older version left still loads, lists and resumes. Its job.json keeps the
+   records of the stages that this version no longer has: the materials stage removed on 2026-11-20
+   (note 9) and, for an articulated object, "articulated", "parts" and the stages removed on 2026-11-11.
+   Nothing runs or shows them (`jobs.progress` lists `steps.NAMES` only). At every start of the server,
+   `Runner._recover` adds a skipped record of each newer stage, such as `estimate`. The old stages'
+   files stay in the job folder, though a run from select or earlier clears all of `run/`, as every
+   build does. A `physics/summary.json` from before the estimate stage has no
+   "estimate", so `steps.done` does not count `estimate` as done. A retry or resume that reaches it runs
+   it and asks for the key (`jobs.key_needed`, `test_a_resume_of_an_older_job_reads_the_key_for_estimate`).
+   A done older job keeps its mass and models. Its Results tab has no Material row, and its Friction row
+   gives the value that `mjcf.json` assumed.
 
 **UI** (`static/`, plain HTML, CSS and JS with no build step). What users see: `static/help.html`.
 - Tabs. A job page shows the header, the status line, the next step, the warnings,
@@ -1101,9 +1143,8 @@ terminal command as a process of its own.
 - Messages are live regions. All controls, frame cells and stage names included, work with the
   keyboard.
 - Agent rounds: the Results facts add the rows Rounds (each round's kind and outcome, and the round
-  whose candidate was delivered), Physics check (the judgment of the delivered candidate, from
-  `agent/evidence.json`) and Surface retained (`app.js` `roundRows`). A key that the result lacks gives
-  no row, so an old job shows fewer rows. The Downloads tab lists `evidence.json` under Records.
+  whose candidate was delivered) and Surface retained (`app.js` `roundRows`). A key that the result
+  lacks gives no row, so an old job shows fewer rows. The Downloads tab lists `evidence.json` under Records.
 - Metric scale from LiDAR (note 12):
   - The upload box takes a Stray Scanner export as a `.zip`, and the jobs list names its kind "Stray
     capture". A Stray job's Inputs tab shows the turn from gravity, the number of depth and
@@ -1131,11 +1172,11 @@ terminal command as a process of its own.
     shows "The app now finds the LiDAR scale in a new way, so this build's scale and masses are
     out of date." instead. It also shows the button "Run lidar and later stages again". The button asks
     first, since it replaces the results. It posts `/continue {from: "lidar"}` with the API key
-    field, since the agent stage runs again. It reruns lidar and every stage after it, GPU stages
+    field, since the agent and estimate stages run again. It reruns lidar and every stage after it, GPU stages
     included, and stops in review when "Review views before building" is on.
   - `POST /continue` checks two things before a run that clears stages. A run from select or earlier
     (or from lidar, when the scale is stale) runs every later stage again, so it needs the API key
-    when the agent stage is done: a finished job has dropped its key. A run that includes the lidar
+    for the agent and estimate stages (`steps.KEYED`): a finished job has dropped its key. A run that includes the lidar
     stage first checks that the bag is still on the server, the job's LiDAR topic, its TF link or
     calibration, and the intrinsics (the calibration's K, else the bag's camera_info)
     (`jobs.lidar_settings`),
@@ -1214,19 +1255,19 @@ terminal command as a process of its own.
 the agent's Codex container shares the docker network, so every request
 needs the login cookie (a random token), except the help page and its stylesheet, which hold no
 job data. The API key lives only in the server's memory. For the
-agent stage, it is written to a 0600 file
-in a 0700 folder under `/dev/shm` and deleted afterwards.
-It is never written to `job.json`, logs or argv. Files the controller lists in `key_found_in` are
-never served or zipped, and the key is scrubbed from the agent's result. The key travels unencrypted
+agent and estimate stages (`steps.KEYED`), it is written to a 0600 file
+in a 0700 folder under `/dev/shm` and deleted when the stage ends. The estimate stage gets it even when a poor
+Stage A placement skips the agent. It is never written to `job.json`, logs or argv. Files the controller lists
+in `key_found_in` are never served or zipped, and the key is scrubbed from the agent's result and from the
+estimate's answers (`agent_step.scrub`). The key travels unencrypted
 between the login node and the compute node.
 
 **Files.** Each job lives in `$G/webapp_runs/<job id>/`: `job.json`, the video, `frames/`
 (thumbnails, metrics and `preview.mp4`, the input's preview video), `scene/` (candidate frames
 and SAM 3 masks), `pool/` (prep and DA3 on
 the candidates), `selection.json`, `run/` (the MV-SAM3D run of the picks), `agent/`, `physics/`,
-`logs/` and `results.zip`. `run/vomp/` holds VoMP's predictions on the canonical mesh, and `physics/`
-holds `up.json`, `aligned.glb` with `aligned.json`, the transferred `summary.json` and `voxels.npz`, and
-`mjcf/`, `usd/` and `urdf/`. The agent's session is `agent/s/`, with `agent/result.json` and, for a
+`logs/` and `results.zip`. `physics/` holds `up.json`, `aligned.glb` with `aligned.json`, the estimate
+stage's `summary.json` and `estimate_views.jpg` (note 9), and `mjcf/`, `usd/` and `urdf/`. The agent's session is `agent/s/`, with `agent/result.json` and, for a
 session in rounds, `agent/evidence.json` (note 5). A rosbag job's `frames/` adds `stamps.json` (every frame's header
 stamp and log time in ns). A Stray job unpacks its zip into `video/stray/` (`export/` and
 `.unpacked.json`). A job with LiDAR adds `pool/lidar.json` (the scale, note 12) and `lidar/`:
@@ -1238,7 +1279,7 @@ holds the points of the views used. A job that asked for the 360 video adds `tur
 `results.zip` holds `posed.glb`, `aligned.glb`, `summary.json`, `mjcf/`, `usd/`, `urdf/`, `placement.json`
 and `selection.json`. It adds `refined.glb` and `agent_result.json` when the agent ran, `lidar.json` for
 a job with LiDAR, `turntable.mp4` for a job with the 360 video, and `evidence.json` for a session in
-rounds.
+rounds. A job with the agent set to `none` has no `summary.json`, `mjcf/`, `usd/` or `urdf/`.
 
 ### 11. Removed
 
@@ -1247,8 +1288,9 @@ The notes on articulated objects and soft parts were removed with those features
 ### 12. Metric scale from LiDAR (`harpor/stage_a/lidar_scale.py`, `harpor/webapp/lidar.py`)
 
 The reconstruction's size comes from Depth Anything 3 Nested. DA3 Nested estimates metric depth, but
-it does not measure it. VoMP's masses grow with the size cubed, and its inertias grow with the size
-to the fifth power. So a 5% size error gives about a 16% mass error and about a 28% inertia error.
+it does not measure it. The estimated mass of a solid object grows with the size cubed (note 9), and
+its inertia grows with the size to the fifth power. So a 5% size error gives about a 16% mass error and
+about a 28% inertia error.
 A job can now take an optional LiDAR. The LiDAR gives one metric scale factor `s`, and with `s`
 applied every stage after `select` works in meters. A job without LiDAR runs as before, and its
 `lidar` stage shows as skipped ("turned off: no LiDAR").

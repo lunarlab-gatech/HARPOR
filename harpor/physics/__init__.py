@@ -1,1 +1,2 @@
-"""Physical properties for agent GLBs: gravity alignment, VoMP materials and rigid-body mass (build_plan.md note 9)."""
+"""Physical properties for agent GLBs: gravity alignment, the model's mass and friction, and rigid-body mass
+properties (build_plan.md note 9)."""

@@ -1117,7 +1117,7 @@ def test_codex_session_layout_and_command(tmp_path):
     assert "view_image" in agents and "read_file" not in agents and "{" not in agents.split("## Helper commands")[0]
     assert 'model_reasoning_effort="xhigh"' in C.codex_command()
     conf = tomllib.loads(C.codex_config())
-    assert conf["model"] == "gpt-6-astra" and conf["model_reasoning_effort"] == "xhigh" and conf["web_search"] == "disabled"
+    assert conf["model"] == "gpt-6.2-astra" == C.CODEX_MODEL and conf["model_reasoning_effort"] == "xhigh" and conf["web_search"] == "disabled"
     assert conf["shell_environment_policy"]["ignore_default_excludes"] is False
 
 
@@ -1471,7 +1471,7 @@ def test_claude_session_layout_and_agent_record(tmp_path):
     assert (root / "session" / "prompt.txt").read_text(encoding="utf-8") == PROMPT
     assert C.agent_info(root)["effort"] == "max"
     codex = prepare(tmp_path / "codex").parent
-    assert C.agent_info(codex) == {"agent": "codex", "model": "gpt-6-astra", "effort": "xhigh"}
+    assert C.agent_info(codex) == {"agent": "codex", "model": "gpt-6.2-astra", "effort": "xhigh"}
     for bad, why in [({"agent": "gpt"}, "agent is codex or claude"), ({"agent": "claude", "effort": "extreme"}, "effort is one of"),
                      ({"effort": "high"}, "effort is a setting of the claude agent"),
                      ({"agent": "claude", "model": "claude-opus-5"}, "model is one of claude-opus-5-5, claude-fable-5-2"),

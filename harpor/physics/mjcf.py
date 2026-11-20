@@ -1,11 +1,11 @@
-"""Write a MuJoCo model (MJCF) for one aligned GLB and its VoMP rigid-body numbers (build_plan.md note 9).
+"""Write a MuJoCo model (MJCF) for one aligned GLB and its rigid-body numbers (build_plan.md note 9).
 
     python -m harpor.physics.mjcf --glb aligned.glb --summary summary.json --out DIR [--name chair]
-        [--friction 0.6] [--coacd-threshold 0.05]
+        [--friction F] [--coacd-threshold 0.05]
 
 Writes into DIR:
-  <name>.xml   the object: one body with a free joint, the VoMP inertial (mass, COM and fullinertia
-               from summary.json), visual meshes that do not collide, and convex collision meshes
+  <name>.xml   the object: one body with a free joint, the inertial of summary.json "rigid_body" (mass,
+               COM and fullinertia), visual meshes that do not collide, and convex collision meshes
   scene.xml    a floor, a light and the object, for the viewer:
                python -m mujoco.viewer --mjcf DIR/scene.xml
   assets/      visual_<k>.obj, texture_<k>.png and collision_<j>.obj
@@ -16,15 +16,16 @@ MuJoCo's z-up body frame is S, (x, y, z)_S = (x, -z, y)_glTF, and summary.json u
 MuJoCo reads only STL, OBJ and MSH meshes, only the first object of an OBJ and only PNG textures,
 so each glTF primitive becomes its own OBJ with its UVs and its base-colour texture as a PNG. Its OBJ
 decoder flips v (1 - v) on load, so the OBJ keeps the usual bottom-left UV origin, as trimesh stores it.
-build(..., textures=False) writes no PNG and no UVs, for a model that is only simulated (harpor.physics.supervise).
 A mesh geom collides as its convex hull, so the whole object is split into convex parts with CoACD.
 Every mesh asset uses inertia="shell" (MuJoCo 3.3 or newer), because MuJoCo computes each mesh's
 volume even when the mesh carries no mass, and open meshes (surfaces that are not closed) fail that check.
 All geoms have density 0: the body's mass and inertia come only from <inertial>.
-VoMP does not predict friction or restitution. --friction sets the sliding friction of every
-collision geom and of the floor in scene.xml. MuJoCo combines two geoms of equal priority by taking
-the larger friction, so in another scene the effective value is max(--friction, the partner's).
-Contact softness stays at MuJoCo's defaults.
+The friction is summary.json "friction", which the estimate stage writes (harpor.webapp.estimate_step:
+the job's model gives one value for the object). A summary without one, such as one written before
+the estimate stage existed, gets DEFAULT_FRICTION. --friction overrides both. The friction is the sliding friction of every
+collision geom and of the floor in scene.xml, and mjcf.json records the value used. MuJoCo combines
+two geoms of equal priority by taking the larger friction, so in another scene the effective value is
+max(this friction, the partner's). Restitution and contact softness stay at MuJoCo's defaults.
 """
 
 import argparse
@@ -36,6 +37,8 @@ from xml.sax.saxutils import quoteattr
 import numpy as np
 
 from harpor import frames
+
+DEFAULT_FRICTION = 0.6  # for a summary without "friction"
 
 
 def shared_visual(visual):
@@ -86,10 +89,9 @@ def write_obj(path, vertices, faces, uv=None, normals=None):
     Path(path).write_text("\n".join(lines) + "\n")
 
 
-def visual_parts(meshes, assets, textures=True):
-    """Write the visual OBJs and PNGs (no PNG or UVs without textures). Returns ([{name, mesh, texture, rgba,
-    faces}], [skipped]). A primitive with under 4 distinct vertices or no area cannot be a MuJoCo mesh and is
-    skipped."""
+def visual_parts(meshes, assets):
+    """Write the visual OBJs and PNGs. Returns ([{name, mesh, texture, rgba, faces}], [skipped]). A primitive with
+    under 4 distinct vertices or no area cannot be a MuJoCo mesh and is skipped."""
     parts, skipped = [], []
     for k, (name, m) in enumerate(meshes):
         if len(np.unique(m.vertices, axis=0)) < 4 or m.area < 1e-12:
@@ -105,7 +107,7 @@ def visual_parts(meshes, assets, textures=True):
         rgba = np.ones(4) if factor is None else np.asarray(factor, float).reshape(-1)[:4]
         if rgba.max() > 1:
             rgba = rgba / 255
-        has_tex = textures and tex is not None and uv is not None and len(uv) == len(m.vertices)
+        has_tex = tex is not None and uv is not None and len(uv) == len(m.vertices)
         write_obj(assets / f"visual_{k}.obj", m.vertices, m.faces, np.asarray(uv) if has_tex else None,
                   np.asarray(m.vertex_normals))
         if has_tex:
@@ -192,8 +194,9 @@ def scene_xml(name, friction):
 """
 
 
-def build(glb, summary, out, name, friction=0.6, threshold=0.05, decompose=convex_parts, textures=True):
-    """Write the model (see the module docstring) and mjcf.json."""
+def build(glb, summary, out, name, friction=None, threshold=0.05, decompose=convex_parts):
+    """Write the model (see the module docstring) and mjcf.json. friction None takes the summary's "friction", else
+    DEFAULT_FRICTION."""
     import trimesh
 
     out = Path(out)
@@ -201,8 +204,10 @@ def build(glb, summary, out, name, friction=0.6, threshold=0.05, decompose=conve
     assets.mkdir(parents=True, exist_ok=True)
     s = json.loads(Path(summary).read_text())
     rb = s["rigid_body"]
+    if friction is None:
+        friction = DEFAULT_FRICTION if s.get("friction") is None else float(s["friction"])
     meshes = load_s(glb)
-    visuals, skipped = visual_parts(meshes, assets, textures)
+    visuals, skipped = visual_parts(meshes, assets)
     V = np.concatenate([m.vertices for _, m in meshes])
     F = np.concatenate([m.faces + o for (_, m), o in zip(meshes, np.cumsum([0] + [len(m.vertices) for _, m in meshes]))])
     # Weld the UV-seam copies so that CoACD sees one connected surface. It still remeshes (and
@@ -246,7 +251,8 @@ def main():
     ap.add_argument("--summary", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--name", default="object")
-    ap.add_argument("--friction", type=float, default=0.6)
+    ap.add_argument("--friction", type=float,
+                    help=f'sliding friction (default: the summary\'s "friction", else {DEFAULT_FRICTION:g})')
     ap.add_argument("--coacd-threshold", type=float, default=0.05)
     a = ap.parse_args()
     if not re.fullmatch(r"[A-Za-z_][\w-]*", a.name) or a.name == "scene":
