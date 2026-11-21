@@ -40,29 +40,3 @@ def rigid(R, t):
 def transform_points(T, p):
     T = np.asarray(T)
     return np.asarray(p) @ T[:3, :3].T + T[:3, 3]
-
-
-def project(p_world, K, w2c):
-    """Project world points with an OpenCV camera. Returns pixel coordinates (N, 2) and depth (N,)."""
-    p_cam = transform_points(w2c, p_world)
-    z = p_cam[..., 2]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        uv = (p_cam[..., :2] / z[..., None]) * np.array([K[0, 0], K[1, 1]]) + np.array([K[0, 2], K[1, 2]])
-    return uv, z
-
-
-def crop_intrinsics(K, box, out_size):
-    """Intrinsics after cropping box = (x0, y0, x1, y1) and resizing it to out_size = (w, h).
-
-    Box edges are continuous pixel coordinates, so the crop covers [x0, x1) in edge units, where
-    pixel centers sit at integer coordinates.
-    """
-    x0, y0, x1, y1 = box
-    sx = out_size[0] / (x1 - x0)
-    sy = out_size[1] / (y1 - y0)
-    K2 = np.array(K, dtype=np.float64, copy=True)
-    K2[0, 0] *= sx
-    K2[1, 1] *= sy
-    K2[0, 2] = (K[0, 2] + 0.5 - x0) * sx - 0.5
-    K2[1, 2] = (K[1, 2] + 0.5 - y0) * sy - 0.5
-    return K2

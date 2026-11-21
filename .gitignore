@@ -19,9 +19,8 @@ venv/
 *.pem
 *.key
 
-# Static gallery output and hosting state
+# Static gallery output
 /site/
-.wrangler/
 
 # Things that live on ICE under $G, not in the repo: environments, the SIF, model weights,
 # caches, session runs and web-app jobs

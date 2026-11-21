@@ -711,7 +711,7 @@ def test_shell_env_has_helpers_and_no_keys(shell, tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_ORG_ID", "org-test")
     monkeypatch.setenv("BASH_ENV", str(tmp_path / "rc.sh"))
     (tmp_path / "rc.sh").write_text("echo sourced\n")
-    out, _ = shell.run("env | grep -c -e ^ANTHROPIC_ -e ^OPENAI_ -e ^CODEX_ -e BASH_ENV; command -v finish; echo $GATOR_SOCKET")
+    out, _ = shell.run("env | grep -c -e ^ANTHROPIC_ -e ^OPENAI_ -e ^CODEX_ -e BASH_ENV; command -v finish; echo $HARPOR_TOOL_SOCKET")
     count, finish, sock = out.splitlines()
     assert count == "0" and finish == str(A.AGENT_DIR / "bin" / "finish") and sock == str(tmp_path / "tools.sock")
 

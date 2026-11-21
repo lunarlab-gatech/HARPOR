@@ -287,7 +287,7 @@ class ContainerShell:
         if self.host:
             env["PATH"] = f"{AGENT_DIR / 'bin'}{os.pathsep}{env.get('PATH', os.defpath)}"
             if self.sock_dir:
-                env["GATOR_SOCKET"] = str(Path(self.sock_dir) / "tools.sock")
+                env["HARPOR_TOOL_SOCKET"] = str(Path(self.sock_dir) / "tools.sock")
         return env
 
     def start(self):
@@ -318,9 +318,9 @@ class ContainerShell:
             self.stop()
             self.start()
         token = os.urandom(8).hex()
-        end = re.compile(rb"\n__GATOR_" + token.encode() + rb"_END__ (\d+)\n")
+        end = re.compile(rb"\n__HARPOR_" + token.encode() + rb"_END__ (\d+)\n")
         # The marker is split by %s, so `set -x` echoing this line cannot fake it.
-        script = f"eval -- {shlex.quote(command)} < /dev/null\nprintf '\\n__GATOR_%s_END__ %s\\n' {token} \"$?\"\n"
+        script = f"eval -- {shlex.quote(command)} < /dev/null\nprintf '\\n__HARPOR_%s_END__ %s\\n' {token} \"$?\"\n"
         try:
             self.proc.stdin.write(script.encode())
             self.proc.stdin.flush()

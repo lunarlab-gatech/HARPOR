@@ -152,12 +152,12 @@ def command(stage, job, cfg, key_file=None):
                   "select": "harpor.webapp.views select", "package": "harpor.webapp.jobs package"}[stage]
         lines.append(run + f'$G/envs/web/bin/python -m {module} --job "$J"')
     elif stage == "masks":
-        # The rm removes the masks stage's marker, so sam3_masks keeps no earlier picks: only the job's overrides pick.
+        # The rm removes the masks stage's marker (sam3.json), so that a run that fails does not look done.
         # --prompt=NOUN in one word, so that a noun such as "-cup" is not read as an option.
         picks = "".join(f" --pick {q(f'{n}={k}')}" for n, k in sorted(job["overrides"].get("instance", {}).items()))
         lines += [f"export {SAM3_ENV}", f'rm -f "$J/scene/sam3_{job["slug"]}/sam3.json"',
                   run + '$G/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks --scene "$J/scene" '
-                        f"--prompt={q(job['prompt'])} --overwrite{picks}"]
+                        f"--prompt={q(job['prompt'])}{picks}"]
     elif stage == "vomp":
         # VoMP runs on the first generated mesh, before placement and agent edits.
         lines += ['rm -rf "$J/run/vomp"', VOMP_ACTIVATE, f"export {VOMP_ENV}",
@@ -285,8 +285,7 @@ def skip(stage, job_dir):
     """The reason to skip a stage, else None: topics for a video and a Stray Scanner capture, lidar without
     LiDAR, the agent when the job has none or on a poor Stage A placement, estimate, mjcf, usd and urdf when the
     job has no agent (NO_KEY_SKIP: the friction comes from the job's model), and turntable unless the job asks for
-    the 360 video. physics_auto also asks about the agent stage of a run folder without job.json: there only the
-    placement decides."""
+    the 360 video."""
     job = _json(Path(job_dir) / "job.json")
     if stage == "topics":
         return {"rosbag": None, "stray": "Stray Scanner capture"}.get(source(job)["kind"], "video input")
@@ -295,10 +294,10 @@ def skip(stage, job_dir):
     if stage == "turntable":
         return None if turntable(job) else "turned off"
     if stage in NO_KEY_SKIPPED:
-        return NO_KEY_SKIP if job and agent(job) == "none" else None
+        return NO_KEY_SKIP if agent(job) == "none" else None
     if stage != "agent":
         return None
-    if job and agent(job) == "none":
+    if agent(job) == "none":
         return "turned off: physics uses the Stage A mesh"
     iou = _json(Path(job_dir) / "run" / "placement.json").get("check", {}).get("mean_mask_iou")
     if iou is not None and iou < MIN_IOU:

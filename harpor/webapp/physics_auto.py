@@ -8,11 +8,7 @@ agent, unless it was skipped):
 align takes the GLB for physics (steps.next_glb: the agent's delivery, or run/posed.glb when the
 agent was skipped or delivered nothing usable; pick_glb also refuses a delivery whose size is not
 that of posed.glb, which the agent started from) and runs harpor.physics.align on it with --up-near
-at the up hint and --x footprint, plus --opaque when the GLB has transparent or transmissive
-materials (needs_opaque). --opaque was added for VoMP, which rejects such materials. VoMP now reads only
-its own opaque copy of the canonical mesh (the vomp stage's --opaque-input), so --opaque only keeps
-aligned.glb as it was, and it stays for now. It writes J/physics/up.json {hint, info, glb, glb_rule,
-opaque} and J/physics/aligned.glb with aligned.json. Then it moves the materials that VoMP predicted
+at the up hint. It writes J/physics/up.json {hint, info, glb, glb_rule} and J/physics/aligned.glb with aligned.json. Then it moves the materials that VoMP predicted
 on the canonical mesh onto the aligned GLB (harpor.physics.material_transfer.transfer_job), which
 writes J/physics/summary.json with the mass and inertia of the final geometry, and J/physics/voxels.npz.
 It deletes J/physics/summary.json first, since the mass and inertia of an earlier mesh no longer fit.
@@ -40,7 +36,6 @@ import numpy as np
 
 CAMERA_UP = np.array([0.0, -1.0, 0.0])
 MAX_TILT_DEG, MAX_TILT_WIDE_DEG = 45.0, 75.0  # plane normal to the reference up; past 45, half the points
-SEE_THROUGH = {"KHR_materials_transmission", "KHR_materials_volume", "KHR_materials_ior"}
 
 
 def plane_ransac(pts, threshold, iters=3000, seed=0, max_points=20000):
@@ -82,14 +77,14 @@ def up_hint(run_dir, seed=0):
     from scipy.ndimage import distance_transform_edt
 
     from harpor.stage_a.place import resize_mask
-    from harpor.stage_a.sam3d import load_mask
+    from harpor.stage_a.place import load_mask
 
     from harpor.stage_a.mvsam3d import natural
 
     run_dir = Path(run_dir)
     with np.load(run_dir / "da3_output.npz") as da:
         stems = [Path(str(f)).stem for f in da["image_files"]]
-        view0 = natural(stems)[0]  # "0" in a web-app job; a run made by hand names its photos itself (img1, ...)
+        view0 = natural(stems)[0]  # "0" in a web-app job
         i = stems.index(view0)
         P, conf, ref = da["pointmaps"][i], da["conf"][i], cameras_up(da["extrinsics"], i)
     h, w = P.shape[:2]
@@ -131,18 +126,6 @@ def up_hint(run_dir, seed=0):
     return n, {"source": "plane", **info}
 
 
-def needs_opaque(glb_path):
-    """True when a material of the GLB is transmissive, has volume or IOR, blends or is partly transparent."""
-    from harpor.physics.align import read_glb
-
-    doc, _ = read_glb(glb_path)
-    for m in doc.get("materials", []):
-        alpha = (m.get("pbrMetallicRoughness", {}).get("baseColorFactor") or [1, 1, 1, 1])[3]
-        if SEE_THROUGH & set(m.get("extensions", {})) or m.get("alphaMode") == "BLEND" or alpha < 1:
-            return True
-    return False
-
-
 def sim_name(prompt):
     """A name for MuJoCo and USD: lower case, [a-z0-9_], not starting with a digit, not scene or world."""
     s = re.sub(r"[^a-z0-9]+", "_", prompt.lower()).strip("_")
@@ -182,16 +165,14 @@ def align_job(job_dir):
     if not glb.exists():
         raise SystemExit(f"{glb} is missing; run the sam3d and place stages first")
     hint, info = up_hint(job_dir / "run")
-    opaque = needs_opaque(glb)
     out = job_dir / "physics"
     out.mkdir(exist_ok=True, mode=0o700)
-    up = {"hint": np.round(hint, 6).tolist(), "info": info, "glb": str(glb), "glb_rule": rule, "opaque": opaque}
+    up = {"hint": np.round(hint, 6).tolist(), "info": info, "glb": str(glb), "glb_rule": rule}
     (out / "up.json").write_text(json.dumps(up, indent=1))
     print(f"GLB: {glb} ({rule}); up hint {up['hint']} from the {info['source']}"
-          + (f" ({info['reason']})" if "reason" in info else "") + ("; made opaque" if opaque else ""))
+          + (f" ({info['reason']})" if "reason" in info else ""))
     # --up-near=... in one argument: argparse takes "-0.1,..." after a space for an option.
-    align.main(["--glb", str(glb), "--out", str(out / "aligned.glb"), "--up-near=" + ",".join(map(str, up["hint"])),
-                "--x", "footprint", *(["--opaque"] if opaque else [])])
+    align.main(["--glb", str(glb), "--out", str(out / "aligned.glb"), "--up-near=" + ",".join(map(str, up["hint"]))])
 
 
 def main(argv=None):

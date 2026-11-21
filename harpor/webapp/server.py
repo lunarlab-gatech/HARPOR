@@ -117,10 +117,8 @@ to the sharpest frame within 0.25 s (frames/pool.json "picks"). The overrides na
 
 The API key of the job's agent (OpenAI for astra, Anthropic for opus and fable) arrives in the start,
 overrides and continue bodies. It is checked with jobs.check_key before anything runs and then lives
-only in the runner's memory (jobs.py). A job with "agent": "none" takes no key. With "key_later": true and no api_key,
-start and continue go on without the key: the job asks for it when it reaches a stage that needs it
-(jobs.NO_KEY_LATER), and the answer's "key" says KEY_LATER. Bodies are parsed by hand, and FastAPI's
-telemetry is off.
+only in the runner's memory (jobs.py). A job with "agent": "none" takes no key. Bodies are parsed by hand, and
+FastAPI's telemetry is off.
 """
 
 import argparse
@@ -142,7 +140,7 @@ from harpor.fileio import config_dir, read_json, write_json
 from harpor.webapp import jobs, steps
 
 STATIC = Path(__file__).resolve().parent / "static"
-COOKIE = "gator_webapp"
+COOKIE = "harpor_webapp"
 MAX_UPLOAD = 20 << 30
 FREE_FACTOR = {"stray": 2.2}  # free space an upload needs, times its size (+ 2 GB); 1.2 for the other kinds
 # Path segments are words, so no "..", absolute path or backslash ever matches.
@@ -168,7 +166,6 @@ MAX_CALIBRATION = 64 << 10  # bytes of a calibration file
 CALIBRATION_SUFFIXES = (".yaml", ".yml", ".json")
 LIDAR_COUNTS = ("views", "views_with_points", "views_used", "outliers", "scattered", "few_points", "no_mask",
                 "no_samples")
-KEY_LATER = "no key yet: the job asks for it when it needs it"  # the answer to a body with key_later
 NO_TELEMETRY = {"tracing": False, "metrics": False, "logs": False, "operation_spans": False, "auto_configure": False}
 
 
@@ -185,16 +182,6 @@ def agent_of(b, job=None):
         return steps.agent({"agent": b.get("agent", "astra")})
     except ValueError:
         raise Bad(400, f"agent is {', '.join(steps.AGENTS)}") from None
-
-
-def key_later(b):
-    """True when a start or continue body says "key_later": true and holds no API key: the build
-    goes on without the key, and the job asks for it when a stage needs it (jobs.NO_KEY_LATER). A key in
-    the body wins. 400 when key_later is not true or false."""
-    later = b.get("key_later", False)
-    if type(later) is not bool:
-        raise Bad(400, "key_later is true or false")
-    return later and not b.get("api_key")
 
 
 
@@ -598,7 +585,7 @@ def make_app(cfg, token, key_dir=None):
             r = {**r, "reason": "left out: the agent's result held the API key", "limitations": []}
         keys = ("source", "verdict", "reason", "limitations", "exit")
         # turns, tokens and cost_usd are only in Claude's result, rounds and candidate only in one that ran in rounds
-        # (controller.run_session). An older result may lack the last three.
+        # (controller.run_session).
         extra = ("agent", "model", "turns", "tokens", "cost_usd", "counts", "rounds", "candidate", "surface")
         job["agent_result"] = {**{k: r.get(k) for k in keys}, **{k: r[k] for k in extra if k in r}} if r else None
         return job
@@ -671,7 +658,7 @@ def make_app(cfg, token, key_dir=None):
         turntable = b.get("turntable", False)
         if type(turntable) is not bool:
             raise Bad(400, "turntable is true or false")
-        agent, later = agent_of(b), key_later(b)  # astra when the body names none
+        agent = agent_of(b)  # astra when the body names none
         # A Stray job keeps its own setting (on when it was made) unless the body says otherwise.
         value = b.get("lidar") if "lidar" in b or steps.source(job)["kind"] != "stray" else steps.lidar(job)
         try:  # the LiDAR topic, its TF link (or the calibration) and the intrinsics
@@ -681,8 +668,6 @@ def make_app(cfg, token, key_dir=None):
         checked = {"sha256": (job.get("calibration") or {}).get("sha256")}  # submit_build refuses another one
         if agent == "none":
             key, msg = None, "no key: the agent is turned off"
-        elif later:  # the job asks for the key when it reaches a stage that needs it
-            key, msg = None, KEY_LATER
         else:
             key, msg = b.get("api_key"), check_key(b.get("api_key"), agent)
         runner_call(runner.submit_build, job_id, key, checked_calibration=checked, mode=mode,
@@ -826,26 +811,20 @@ def make_app(cfg, token, key_dir=None):
     async def overrides(job_id: str, request: Request):
         return await run_in_threadpool(set_overrides, job_id, await body(request))
 
-    def held_key(job_id, b, agent, later=False):
-        """The body's API key for agent (checked), else None; 400 when the server holds none for the job,
-        unless later (key_later: the job asks for the key when it needs it)."""
+    def held_key(job_id, b, agent):
+        """The body's API key for agent (checked), else None; 400 when the server holds none for the job."""
         key = (b.get("api_key") or None) if agent != "none" else None  # no key when the agent is off
         if key is not None:
             check_key(key, agent)
-        elif agent != "none" and not later and not runner.has_key(job_id, agent):
+        elif agent != "none" and not runner.has_key(job_id, agent):
             raise Bad(400, f"the server holds no {steps.PROVIDER[agent]} API key for this job (it restarted, the agent "
                            "changed, or the job finished, which drops the key); paste the key again")
         return key
 
-    def asks(job_id, agent, later):
-        """{"key": KEY_LATER} when a build went on with key_later and the runner holds no key for the
-        job's agent, else {}."""
-        return {"key": KEY_LATER} if later and agent != "none" and not runner.has_key(job_id, agent) else {}
-
     def continue_job(job_id, b):
         J = job_dir(job_id)
         job = idle(J)
-        first, agent, later = b.get("from") or "sam3d", agent_of(b, job), key_later(b)
+        first, agent = b.get("from") or "sam3d", agent_of(b, job)
         key = (b.get("api_key") or None) if agent != "none" else None  # no key when the agent is off
         if first == "frames":  # analyze the input again (it failed, was cancelled or the server stopped); no key
             if job["stages"]["frames"]["status"] == "done":
@@ -864,15 +843,12 @@ def make_app(cfg, token, key_dir=None):
         stale, checked = lidar_check(J, job, first)
         again = steps.NAMES.index(first) <= steps.NAMES.index(steps.REVIEW_AFTER) or stale
         if changed or again or jobs.key_needed(J, job, first):
-            key = held_key(job_id, b, agent, later)
+            key = held_key(job_id, b, agent)
         elif key is not None:
             check_key(key, agent)
-        else:
-            later = False  # the run runs no agent or estimate stage: no stage needs a key
-        first = runner_call(runner.resume, job_id, first, key, agent=agent, key_later=later,
-                            checked_calibration=checked)
+        first = runner_call(runner.resume, job_id, first, key, agent=agent, checked_calibration=checked)
         # from: the agent stage when the agent changed
-        return {"status": "queued", "from": first, **asks(job_id, agent, later)}
+        return {"status": "queued", "from": first}
 
     @app.post("/api/jobs/{job_id}/continue")
     async def continue_(job_id: str, request: Request):

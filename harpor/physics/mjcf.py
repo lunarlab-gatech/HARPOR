@@ -21,9 +21,8 @@ Every mesh asset uses inertia="shell" (MuJoCo 3.3 or newer), because MuJoCo comp
 volume even when the mesh carries no mass, and open meshes (surfaces that are not closed) fail that check.
 All geoms have density 0: the body's mass and inertia come only from <inertial>.
 VoMP does not predict friction or restitution. The friction is summary.json "friction", which the estimate
-stage adds (harpor.webapp.estimate_step: the job's model gives one value for the object). A summary without
-one gets DEFAULT_FRICTION: VoMP's alone, as align or vomp_run.py writes it, or one of a job built before the
-estimate stage. --friction overrides both. The friction is the sliding friction of every
+stage adds (harpor.webapp.estimate_step: the job's model gives one value for the object). --friction overrides it,
+and a summary without one (VoMP's alone) needs --friction. The friction is the sliding friction of every
 collision geom and of the floor in scene.xml, and mjcf.json records the value used. MuJoCo combines
 two geoms of equal priority by taking the larger friction, so in another scene the effective value is
 max(this friction, the partner's). Restitution and contact softness stay at MuJoCo's defaults.
@@ -39,7 +38,6 @@ import numpy as np
 
 from harpor import frames
 
-DEFAULT_FRICTION = 0.6  # for a summary without "friction"
 
 
 def shared_visual(visual):
@@ -196,8 +194,8 @@ def scene_xml(name, friction):
 
 
 def build(glb, summary, out, name, friction=None, threshold=0.05, decompose=convex_parts):
-    """Write the model (see the module docstring) and mjcf.json. friction None takes the summary's "friction", else
-    DEFAULT_FRICTION."""
+    """Write the model (see the module docstring) and mjcf.json. friction None takes the summary's "friction";
+    ValueError when it has none."""
     import trimesh
 
     out = Path(out)
@@ -206,7 +204,9 @@ def build(glb, summary, out, name, friction=None, threshold=0.05, decompose=conv
     s = json.loads(Path(summary).read_text())
     rb = s["rigid_body"]
     if friction is None:
-        friction = DEFAULT_FRICTION if s.get("friction") is None else float(s["friction"])
+        if s.get("friction") is None:
+            raise ValueError(f"{summary} has no friction: the estimate stage adds it, or give one")
+        friction = float(s["friction"])
     meshes = load_s(glb)
     visuals, skipped = visual_parts(meshes, assets)
     V = np.concatenate([m.vertices for _, m in meshes])
@@ -252,8 +252,7 @@ def main():
     ap.add_argument("--summary", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--name", default="object")
-    ap.add_argument("--friction", type=float,
-                    help=f'sliding friction (default: the summary\'s "friction", else {DEFAULT_FRICTION:g})')
+    ap.add_argument("--friction", type=float, help='sliding friction (default: the summary\'s "friction")')
     ap.add_argument("--coacd-threshold", type=float, default=0.05)
     a = ap.parse_args()
     if not re.fullmatch(r"[A-Za-z_][\w-]*", a.name) or a.name == "scene":

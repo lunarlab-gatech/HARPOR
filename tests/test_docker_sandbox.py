@@ -41,15 +41,15 @@ def test_docker_image_names_the_image_and_a_sif_none():
 
 def test_codex_container_in_docker(inside):
     root = Path("/data/runs/j1/agent/s")
-    cmd = C.apptainer_command(root, IMAGE, "/dev/shm/k/key.env", "/data/tmp/gator-x")
+    cmd = C.apptainer_command(root, IMAGE, "/dev/shm/k/key.env", "/data/tmp/harpor-x")
     assert cmd[:2 + len(C.DOCKER_RUN)] == [sys.executable, str(C.DOCKER_GUARD), *C.DOCKER_RUN]
     assert cmd[cmd.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}" and "-i" in cmd
     # The data folder's paths map to the host's; the helper client is in the image, and the DNS files are not bound.
     assert flags(cmd, "-v") == [f"{inside}/runs/j1/agent/s/work:/work", f"{inside}/runs/j1/agent/s/session:/session",
-                                f"{inside}/tmp/gator-x:/opt/gator/sock:ro"]
+                                f"{inside}/tmp/harpor-x:/opt/harpor-agent/sock:ro"]
     assert "--network" not in cmd and "--bind" not in cmd  # Codex needs the network
     assert flags(cmd, "-e") == ["HOME=/tmp", "TMPDIR=/tmp", "CODEX_HOME=/session/codex_home",
-                                "GATOR_SOCKET=/opt/gator/sock/tools.sock", "PREPEND_PATH=/opt/gator/bin"]
+                                "HARPOR_TOOL_SOCKET=/opt/harpor-agent/sock/tools.sock", "PREPEND_PATH=/opt/harpor-agent/bin"]
     assert cmd[cmd.index("--env-file") + 1] == "/dev/shm/k/key.env"
     assert cmd[-len(C.codex_command()) - len(C.CODEX_KEY_WRAPPER) - 3:] == \
         ["-w", "/work", "harpor:test", *C.CODEX_KEY_WRAPPER, *C.codex_command()]
@@ -57,7 +57,7 @@ def test_codex_container_in_docker(inside):
 
 def test_claude_shell_and_blender_in_docker_have_no_network_and_no_key(inside):
     root = Path("/data/runs/j1/agent/s")
-    shell = C.shell_command(root, IMAGE, "/data/tmp/gator-x")
+    shell = C.shell_command(root, IMAGE, "/data/tmp/harpor-x")
     assert shell[shell.index("--network") + 1] == "none" and "-i" in shell and "--env-file" not in shell
     assert not [v for v in flags(shell, "-v") if v.endswith(":/session")]
     assert shell[-4:] == ["harpor:test", "bash", "--noprofile", "--norc"]
@@ -88,7 +88,7 @@ def test_outside_a_container_every_path_is_bound_as_it_is(monkeypatch):
 
 
 def test_claude_command_keeps_the_docker_sandbox_name(tmp_path):
-    cmd = C.claude_command(tmp_path, IMAGE, "/tmp/gator-x", tmp_path / "k.env")
+    cmd = C.claude_command(tmp_path, IMAGE, "/tmp/harpor-x", tmp_path / "k.env")
     assert cmd[cmd.index("--sif") + 1] == IMAGE
 
 

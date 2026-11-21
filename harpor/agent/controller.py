@@ -3,8 +3,8 @@
 Prepares the session folder, runs the agent under a watchdog with a 900 s budget (BUDGET_S), serves the helper
 commands from the host, checks GLBs as paper A.4 describes and against the original's size, and picks the
 deliverable with the fallback order. A session with rounds (prepare_session rounds=True) runs in
-rounds, as PhysAg3D's repair loop does (paper A.3, A.4; run_rounds): a build, then repairs or one planning
-round (replan) while the host's check (harpor.agent.validate) finds something an agent can fix, each round with a new agent. Each build or repair keeps its pick as a candidate in
+rounds, as PhysAg3D's repair loop does (paper A.3, A.4; run_rounds): a build, then repairs while the host's
+check (harpor.agent.validate) finds something an agent can fix, each round with a new agent. Each build or repair keeps its pick as a candidate in
 control/candidates, and the session delivers the best of them (select_candidate, paper A.6). The agent is one
 of two, chosen per session in prepare_session and recorded in control/agent.json:
 
@@ -28,8 +28,7 @@ Session layout:
                       (store_candidate) and evidence.json (harpor.agent.evidence)
   root/work/          mounted as /work: AGENTS.md (codex only), input/, original/, candidate.blend,
                       exports/, reviews/, checkpoints/, run_budget.json, finish.json; in rounds also
-                      evidence/round_NN.json (the check of each build) and the plan.md of a planning
-                      round
+                      evidence/round_NN.json (the check of each build)
   root/session/       prompt.txt and stderr.log; for codex the CLI's event log codex.jsonl and
                       codex_home/ for CODEX_HOME, mounted as /session in its container; for claude
                       the agent's log claude.jsonl, its stdout claude_stdout.log and system.md, a copy
@@ -37,8 +36,8 @@ Session layout:
                       tool calls in result.json come from that log); in rounds, rounds/NN/ holds the
                       logs and prompt of each round but the last (start_round)
 
-Both containers also see the helper client at /opt/gator/bin and the tool server's socket folder at
-/opt/gator/sock, read-only. The Codex container also sees DNS_FILES, read-only. Neither container
+Both containers also see the helper client at /opt/harpor-agent/bin and the tool server's socket folder at
+/opt/harpor-agent/sock, read-only. The Codex container also sees DNS_FILES, read-only. Neither container
 sees root/control; the helpers' Blender container sees only its staging/ and, read-only, its
 exports/ (blender_command).
 """
@@ -69,18 +68,18 @@ from harpor.agent import evidence, prompts, surface, tools, validate
 from harpor.agent.server import ToolServer
 
 BUDGET_S = 900.0  # a build round's, for every agent; the paper's 600 s ran out in every GPT-6.2-Astra build of 2026-11-21
-MAX_BUILDS = 3  # paper A.4: the build and at most 2 repairs; a planning round (replan) is not a build
-ROUND_BUDGET_S = {"repair": 450.0, "replan": 300.0}  # a build takes the budget_s of the caller
+MAX_BUILDS = 3  # paper A.4: the build and at most 2 repairs
+REPAIR_BUDGET_S = 450.0  # a build takes the budget_s of the caller
 # What a round leaves in root/session, moved to session/rounds/NN/ when the next round starts (start_round).
 ROUND_FILES = ("codex.jsonl", "claude.jsonl", "stderr.log", "claude_stdout.log", "last_message.txt", "prompt.txt")
 # Of result.json's rounds: no why, a finding's text.
 FINDING_KEYS = ("code", "measured", "expected")
 # What a stored candidate's rank compares, in order (rank): a passing round comes first, ahead of paper A.6's order.
-RANK = ("round outcome pass", "surface not blocking", "source not an export", "version")
+RANK = ("round outcome pass", "source not an export", "version")
 AGENT_DIR = Path(__file__).resolve().parent
 REPO = AGENT_DIR.parents[1]  # claude_agent runs from here, as `python -m harpor.agent.claude_agent`
 CODEX_ENV = {"CODEX_HOME": "/session/codex_home"}
-HELPER_ENV = {"GATOR_SOCKET": "/opt/gator/sock/tools.sock", "PREPEND_PATH": "/opt/gator/bin"}
+HELPER_ENV = {"HARPOR_TOOL_SOCKET": "/opt/harpor-agent/sock/tools.sock", "PREPEND_PATH": "/opt/harpor-agent/bin"}
 CODEX_MODEL, CLAUDE_MODEL, EFFORTS = tools.CODEX_MODEL, tools.CLAUDE_MODEL, tools.EFFORTS
 CLAUDE_EFFORT = "xhigh"  # the effort of the GPT-6-Astra comparison runs; Opus 5.5's own default is medium, so it is always sent
 LOGS = {"codex": "codex.jsonl", "claude": "claude.jsonl"}  # each agent's event log, in root/session
@@ -133,7 +132,7 @@ def _bind(src, dst, ro=False):
 def _mounts(root, sock_dir, session=True):
     root = Path(root).resolve()
     return [_bind(root / "work", "/work"), *([_bind(root / "session", "/session")] if session else []),
-            _bind(AGENT_DIR / "bin", "/opt/gator/bin", ro=True), _bind(sock_dir, "/opt/gator/sock", ro=True)]
+            _bind(AGENT_DIR / "bin", "/opt/harpor-agent/bin", ro=True), _bind(sock_dir, "/opt/harpor-agent/sock", ro=True)]
 
 
 def docker_image(sif):
@@ -147,7 +146,7 @@ def _docker_source(src):
 
     Inside HARPOR's own container (HARPOR_HOST_DATA set, harpor-docker), the daemon sees the host's paths: a path
     under HARPOR_DATA (the data folder) maps to HARPOR_HOST_DATA, and a path in the repo is skipped, since the sibling
-    runs the same image with the repo at the same path (and /opt/gator/bin linked to its harpor/agent/bin). Any other
+    runs the same image with the repo at the same path (and /opt/harpor-agent/bin linked to its harpor/agent/bin). Any other
     path is not on the host, and a ValueError says so. Outside a container, every path is the daemon's own."""
     host = os.environ.get("HARPOR_HOST_DATA")
     if not host:
@@ -237,7 +236,7 @@ def blender_command(root, sif):
     control/exports, where the reviews render the host's copy (tools.export_glb). Every Blender run
     writes through the links that the agent puts in work/, so only staging/ is writable: no run can
     change the host's copies. Both are at their host paths. The tool server hands this command to the
-    helpers as GATOR_BLENDER."""
+    helpers as HARPOR_BLENDER."""
     work, control = (Path(root) / "work").resolve(), (Path(root) / "control").resolve()
     return sif_blender(sif, rw=[work, control / "staging"], ro=[control / "exports"], aliases=[(work, "/work")])
 
@@ -696,17 +695,11 @@ def has_rounds(root):
 
 
 def next_round(rounds):
-    """The next round's kind, or None. At most 3 builds and 1 replan; a replan is always followed by a
-    build and does not count as one (paper A.3, A.4). scope "none" means no agent action can help."""
+    """The next round's kind, "repair", or None: none after a pass, a scope of "none" (no agent action can help) or
+    MAX_BUILDS builds (paper A.4)."""
     last = rounds[-1]
-    if last["kind"] == "replan":
-        return "repair"
-    if last["outcome"] == "pass" or last["scope"] == "none":
+    if last["outcome"] == "pass" or last["scope"] == "none" or len(rounds) >= MAX_BUILDS:
         return None
-    if sum(r["kind"] != "replan" for r in rounds) >= MAX_BUILDS:
-        return None
-    if last["scope"] == "structural" and all(r["kind"] != "replan" for r in rounds):
-        return "replan"
     return "repair"
 
 
@@ -731,15 +724,15 @@ def start_round(root, n, prompt):
 
 
 def run_round(root, cmd, env, blender, sock_dir, n, kind, prompt, watchdog):
-    """Run round n, of kind build, repair or replan, and return run_agent's record. Round 1 runs in the
+    """Run round n, of kind build or repair, and return run_agent's record. Round 1 runs in the
     prepared session; a later one begins with start_round and prompt. The round_start event makes every
     round-scoped reader (tools.round_events) start here. The round has a tool server of its own, since
-    stop() is final. A build takes watchdog's budget_s, a repair or replan ROUND_BUDGET_S."""
+    stop() is final. A build takes watchdog's budget_s, a repair REPAIR_BUDGET_S."""
     root = Path(root)
     if n > 1:
         start_round(root, n, prompt)
     tools.log_event(root / "control", "round_start", round=n, kind=kind)
-    budget_s = watchdog.get("budget_s", BUDGET_S) if kind == "build" else ROUND_BUDGET_S[kind]
+    budget_s = watchdog.get("budget_s", BUDGET_S) if kind == "build" else REPAIR_BUDGET_S
     server = ToolServer(Path(sock_dir) / "tools.sock", root / "work", root / "control", blender).start()
     try:
         return run_agent(root, cmd, env, **{**watchdog, "budget_s": budget_s})
@@ -821,21 +814,17 @@ def check_round(root, n, kind):
             "sha256": cand["sha256"] if cand else final["sha256"], "report": final}
 
 
-def round_record(root, n, kind, run, end=None):
-    """A round of result.json: round, kind, budget_s, exit and wall_s, and for a build or repair (end:
-    check_round's) its candidate {version (in control/candidates, None when nothing was stored), source, verdict,
-    glb (where the round left it), sha256}, outcome, scope and findings, each with only FINDING_KEYS, so that no
-    finding's why reaches result.json."""
-    rec = {"round": n, "kind": kind, "budget_s": run["budget_s"], "exit": run["exit"], "wall_s": run["wall_s"],
-           "candidate": None, "outcome": None, "scope": None, "findings": []}
-    if end:
-        pick, report = end["pick"], end["report"]
-        if pick:
-            rec["candidate"] = {"version": end["version"], "source": pick["source"], "verdict": pick["verdict"],
-                                "glb": os.path.relpath(pick["glb"], root), "sha256": end["sha256"]}
-        rec.update(outcome=report["outcome"], scope=report["scope"],
-                   findings=[{k: f.get(k) for k in FINDING_KEYS} for f in report["findings"]])
-    return rec
+def round_record(root, n, kind, run, end):
+    """A round of result.json: round, kind, budget_s, exit and wall_s, and from end (check_round's) its candidate
+    {version (in control/candidates, None when nothing was stored), source, verdict, glb (where the round left it),
+    sha256}, or None without a pick, outcome, scope and findings, each with only FINDING_KEYS, so that no finding's
+    why reaches result.json."""
+    pick, report = end["pick"], end["report"]
+    candidate = pick and {"version": end["version"], "source": pick["source"], "verdict": pick["verdict"],
+                          "glb": os.path.relpath(pick["glb"], root), "sha256": end["sha256"]}
+    return {"round": n, "kind": kind, "budget_s": run["budget_s"], "exit": run["exit"], "wall_s": run["wall_s"],
+            "candidate": candidate or None, "outcome": report["outcome"], "scope": report["scope"],
+            "findings": [{k: f.get(k) for k in FINDING_KEYS} for f in report["findings"]]}
 
 
 def stored_candidates(root):
@@ -853,15 +842,12 @@ def passed(cand):
 def rank(cand):
     """A stored candidate's rank, highest first (RANK). A passing round always wins, ahead of paper A.6's order on
     purpose: that order would let a reviewed failure beat a later pass."""
-    report = cand.get("report") or {}
-    return (passed(cand), not (report.get("surface") or {}).get("blocks"), cand["source"] != "export", cand["version"])
+    return (passed(cand), cand["source"] != "export", cand["version"])
 
 
 def eligibility(root, cand):
     """None when a stored candidate may be delivered (paper A.6), else why not: its copy must still have its sha256,
-    pass check_glb and keep the original's size (check_size), and the surface check must not find most of the
-    original gone (surface_identity, which counts only while surface.ENFORCE is on, as every surface finding). A
-    surface that only blocks does not make a candidate ineligible: it ranks lower (rank)."""
+    pass check_glb and keep the original's size (check_size). The surface check's findings are report only."""
     root = Path(root)
     glb = root / cand["glb"]
     try:
@@ -869,12 +855,7 @@ def eligibility(root, cand):
             return "changed after it was stored"
     except OSError:
         return "missing or not a regular file"
-    why = check_glb(glb) or check_size(glb, root / "original.glb")
-    if why:
-        return why
-    lost = [f for f in (cand.get("report") or {}).get("findings") or []
-            if f["code"] == "surface_identity" and validate.counts(f)]
-    return f"surface_identity: {lost[0]['why']}" if lost else None
+    return check_glb(glb) or check_size(glb, root / "original.glb") or None
 
 
 def ranking(root):
@@ -966,10 +947,9 @@ def candidate_summary(chosen, selected):
 
 def run_rounds(root, cmd, env, blender, sock_dir, watchdog):
     """The rounds of a session with rounds (has_rounds; paper A.3, A.4): the build, then while
-    next_round says so a repair or a replan, each a new agent with a prompt (prompts.round_prompt, then
+    next_round says so a repair, each a new agent with a prompt (prompts.round_prompt, then
     prompts.GUIDANCE) that carries the feedback of the last check and the best stored candidate
-    (best_candidate); only the repair right after a replan is told to follow its /work/plan.md, which a later one
-    would take for a plan of its own check. Each build or repair ends with check_round, and every round with control/evidence.json (harpor.agent.evidence), so a
+    (best_candidate). Each build or repair ends with check_round, and every round with control/evidence.json (harpor.agent.evidence), so a
     session that stops keeps the evidence of the rounds that ran.
 
     A failure of the loop itself ends the loop but keeps the rounds that ran, since root/result.json is written
@@ -977,20 +957,18 @@ def run_rounds(root, cmd, env, blender, sock_dir, watchdog):
     SystemExit such as Cancel's always is. Returns (runs, rounds, ends): run_agent's records, result.json's
     rounds and check_round's {n: end}."""
     root = Path(root)
-    runs, rounds, ends, kind, prompt, last = [], [], {}, "build", None, None
+    runs, rounds, ends, kind, prompt = [], [], {}, "build", None
     try:
         while kind:
             n = len(runs) + 1
             runs.append(run_round(root, cmd, env, blender, sock_dir, n, kind, prompt, watchdog))
-            if kind != "replan":
-                ends[n], last = check_round(root, n, kind), n
-            rounds.append(round_record(root, n, kind, runs[-1], ends.get(n)))
+            ends[n] = check_round(root, n, kind)
+            rounds.append(round_record(root, n, kind, runs[-1], ends[n]))
             evidence.write(root, rounds, stored_candidates(root))
             kind = next_round(rounds)
             if kind:
-                prompt = prompts.round_prompt(kind, ROUND_BUDGET_S[kind], validate.feedback(ends[last]["report"]),
-                                              best_candidate(root), f"evidence/round_{last:02d}.json",
-                                              planned=rounds[-1]["kind"] == "replan") + prompts.GUIDANCE
+                prompt = prompts.round_prompt(REPAIR_BUDGET_S, validate.feedback(ends[n]["report"]),
+                                              best_candidate(root), f"evidence/round_{n:02d}.json") + prompts.GUIDANCE
     except SystemExit as e:
         if not isinstance(e.code, str) or not runs:
             raise
@@ -1082,7 +1060,7 @@ def run_container_session(root, sif, key_file, agent=None, **watchdog):
     info = agent_info(root)
     # A short path: Unix socket paths are limited to 107 bytes. In HARPOR's docker container TMPDIR is in the data
     # folder, which the sibling containers can see.
-    sock_dir = tempfile.mkdtemp(prefix="gator-")
+    sock_dir = tempfile.mkdtemp(prefix="harpor-")
     try:
         if info["agent"] == "claude":
             cmd = agent or claude_command(root, sif, sock_dir, key_file, info["effort"], model=info["model"])

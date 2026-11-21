@@ -1,7 +1,7 @@
 """Scripted stand-in for the Codex CLI agent, so tests drive every controller path (build_plan.md note 5).
 
 Run `python -m harpor.agent.fake_agent SCRIPT.json` with the work folder as the current directory and
-GATOR_SOCKET set to the tool server's socket. The script is a list of actions:
+HARPOR_TOOL_SOCKET set to the tool server's socket. The script is a list of actions:
 
   {"do": "edit", "kind": "good", "size": 1.0, "seconds": 0}   save candidate.blend, a JSON scene that
                                                              the fake Blender exports in `seconds`; the
@@ -36,7 +36,7 @@ import threading
 import time
 from pathlib import Path
 
-from harpor.agent.bin import gator_tool
+from harpor.agent.bin import harpor_tool
 
 
 def write_glb(path, kind="good", size=1.0):
@@ -142,14 +142,14 @@ def run(script):
         elif do == "tool":
             args = [s.replace("{receipt}", receipt or "") for s in a["args"]]
             print("$", *args, flush=True)
-            output, code = gator_tool.call(args)
+            output, code = harpor_tool.call(args)
             sys.stdout.write(output)
             if code:
                 print(f"exit {code}", flush=True)
             receipts = sorted(Path("reviews").glob("r*"))
             receipt = receipts[-1].name if receipts else None
         elif do == "tool_nowait":
-            threading.Thread(target=gator_tool.call, args=(a["args"],), daemon=True).start()
+            threading.Thread(target=harpor_tool.call, args=(a["args"],), daemon=True).start()
             time.sleep(1.0)
         elif do == "write":
             Path(a["path"]).parent.mkdir(parents=True, exist_ok=True)

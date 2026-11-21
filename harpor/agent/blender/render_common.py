@@ -98,14 +98,13 @@ def look_at(eye, target):
     return T
 
 
-def orbit_views(center, diag, n=6, fov=math.radians(40), azimuths=None):
-    """n views at even azimuths from the front (view 0's side), 25 degrees up; azimuths (degrees) replaces
-    the even ones."""
+def orbit_views(center, diag, n=6, fov=math.radians(40)):
+    """n views at even azimuths from the front (view 0's side), 25 degrees up."""
     f = PANEL / 2 / math.tan(fov / 2)
     r = 0.55 * diag / math.sin(fov / 2)
     K = [[f, 0, (PANEL - 1) / 2], [0, f, (PANEL - 1) / 2], [0, 0, 1]]
     el = math.radians(25)
-    angles = [math.radians(a) for a in azimuths] if azimuths is not None else [2 * math.pi * k / n for k in range(n)]
+    angles = [2 * math.pi * k / n for k in range(n)]
     views = []
     for k, a in enumerate(angles):
         eye = center + r * np.array([math.cos(el) * math.sin(a), -math.sin(el), -math.cos(el) * math.cos(a)])

@@ -116,8 +116,8 @@ def test_a_copy_retains_everything(tmp_path):
                            "flipped": 0.0, "deleted": 0.0, "unresolved": 0.0, "added": 0.0, "present": 1.0}
     assert r["native_area"] == pytest.approx(1.25) and r["caps_area"] == 0.0 and r["diagonal"] == pytest.approx(D)
     assert set(r) == {"diagonal", "native_area", "caps_area", "shares", "lost_regions", "materials", "findings",
-                      "blocks", "seconds"}  # one rigid surface: no per-link areas
-    assert (r["findings"], r["lost_regions"], r["materials"], r["blocks"]) == ([], [], [], False)
+                      "seconds"}  # one rigid surface: no per-link areas
+    assert (r["findings"], r["lost_regions"], r["materials"]) == ([], [], [])
 
 
 def test_deleted_faces_and_their_regions_in_w(tmp_path):
@@ -129,7 +129,7 @@ def test_deleted_faces_and_their_regions_in_w(tmp_path):
     r = compare(tmp_path, cand)
     assert r["shares"]["deleted"] == pytest.approx(120 * FACE, abs=8 * FACE)
     assert r["shares"]["retained"] == pytest.approx(1 - 120 * FACE, abs=1e-6)
-    assert codes(r) == ["surface_deleted"] and r["blocks"] is False  # ENFORCE is off
+    assert codes(r) == ["surface_deleted"]
     big, small = r["lost_regions"]
     assert big["share"] > small["share"] > 0
     w = frames.W_FROM_GLTF  # x stays, glTF z is -y in W
@@ -435,7 +435,7 @@ def run_session(tmp_path):
     original.parent.mkdir(parents=True)
     write_glb(original, "good", 1.0)
     C.prepare_session(tmp_path / "s", "p", [], source="s", metric=True, original=original)
-    with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
+    with tempfile.TemporaryDirectory(prefix="harpor-") as sock_dir:
         r = C.run_session(tmp_path / "s", [sys.executable, "-c", "pass"], blender=FAKE_BLENDER, sock_dir=sock_dir,
                           budget_s=20.0, poll_s=0.02, kill_after_s=0.5, finish_wait_s=0.5)
     assert r == json.loads((tmp_path / "s" / "result.json").read_text())
@@ -447,7 +447,7 @@ def test_a_refinement_session_reports_the_surface(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str(REPO))
     r = run_session(tmp_path)
     assert r["source"] == "fallback_original" and r["surface"]["shares"]["unresolved"] == 1.0
-    assert r["surface"]["findings"] == [] and r["surface"]["blocks"] is False
+    assert r["surface"]["findings"] == []
 
 
 def test_a_failed_comparison_does_not_stop_the_session(tmp_path, monkeypatch):

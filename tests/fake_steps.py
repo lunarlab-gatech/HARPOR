@@ -409,16 +409,14 @@ def vomp(J):
 
 
 def mjcf(J):
-    """A box body with the inertial and the friction of physics/summary.json (harpor.physics.mjcf.DEFAULT_FRICTION
-    without one), as the real build takes them."""
-    from harpor.physics.mjcf import DEFAULT_FRICTION
+    """A box body with the inertial and the friction of physics/summary.json, as the real build takes them."""
     from harpor.webapp.physics_auto import sim_name
 
     job = json.loads((J / "job.json").read_text())
     name, P = sim_name(job["prompt"]), J / "physics"
     summary = json.loads((P / "summary.json").read_text())
     rb = summary["rigid_body"]
-    friction = DEFAULT_FRICTION if summary.get("friction") is None else float(summary["friction"])
+    friction = float(summary["friction"])
     aligned = json.loads((P / "aligned.json").read_text())
     lo, hi = np.array(aligned["min_s"]), np.array(aligned["max_s"])
     shutil.rmtree(P / "mjcf", ignore_errors=True)
@@ -512,11 +510,11 @@ def urdf(J):
     link = {"name": name, "inertial": {k: rb[k] for k in ("mass", "com", "fullinertia")},
             "mesh": "meshes/link_0.obj", "collisions": ["meshes/link_0.obj"]}
     (out / "model.urdf").write_text(U.urdf_xml(name, link))
-    report = {"glb": str((P / "aligned.glb").resolve()), "name": name, "links": [link]}
+    report = {"glb": str((P / "aligned.glb").resolve()), "name": name, "link": link}
     pace(2)
     report.update(fake=True, checked=U.check(out))
     (out / "urdf.json").write_text(json.dumps(report, indent=1))
-    print(f"URDF (fake): {report['checked']['links']} links, {report['checked']['joints']} joints, {out / 'model.urdf'}")
+    print(f"URDF (fake): {report['checked']['links']} link, {out / 'model.urdf'}")
 
 
 def turntable(J):

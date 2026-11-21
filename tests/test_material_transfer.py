@@ -22,21 +22,20 @@ def prediction(center=(0, 0, 0), density=600):
             "youngs_modulus": np.array([2e9]), "poisson_ratio": np.array([0.3])}
 
 
-def test_prediction_coordinates_include_placement_and_alignment():
+def test_prediction_coordinates_include_the_placement():
     pose = {"rotation_wxyz": [0.5, 0.5, 0.5, 0.5], "translation": [1, 2, 3], "scale": [2, 3, 4]}
-    T = frames.rigid(np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]]), [2, 5, 7])
     points = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
     from harpor.stage_a.place import canonical_glb_to_w
-    expected = frames.transform_points(T, canonical_glb_to_w(frames.w_to_gltf(points), pose))
-    assert np.allclose(M.prediction_centers(points, pose, T), expected)
-    assert np.allclose(np.linalg.norm(M.prediction_centers(points, pose, T) -
-                                     M.prediction_centers([[0, 0, 0]], pose, T), axis=1), [2, 3, 4])
+    expected = canonical_glb_to_w(frames.w_to_gltf(points), pose)
+    assert np.allclose(M.prediction_centers(points, pose), expected)
+    assert np.allclose(np.linalg.norm(M.prediction_centers(points, pose) -
+                                     M.prediction_centers([[0, 0, 0]], pose), axis=1), [2, 3, 4])
 
 
 def test_final_geometry_recomputes_mass_and_inertia(tmp_path):
     small = box(tmp_path / "small.glb")
     big = box(tmp_path / "big.glb", (2, 2, 2), (3, 0, 0))
-    original, predictions = {"config": "test"}, {"": prediction()}
+    original, predictions = {"config": "test"}, prediction()
     a = M.transfer(small, tmp_path / "a", original, predictions, np.eye(4))["rigid_body"]
     b = M.transfer(big, tmp_path / "b", original, predictions, np.eye(4))["rigid_body"]
     assert b["mass"] == pytest.approx(a["mass"] * 8)

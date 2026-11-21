@@ -5,8 +5,7 @@
 
 render runs blender/turntable.py (build_plan.md note 5) on the GLB that physics used (physics/up.json "glb":
 the agent's GLB, else run/posed.glb), turned upright with physics/aligned.json "T_s_from_w".
-So the video shows the object and pose of aligned.glb, but with the GLB's own materials, since
-align may make aligned.glb opaque. Blender runs in the agent's SIF, in a container that sees only
+So the video shows the object and pose of aligned.glb, with the GLB's own materials. Blender runs in the agent's SIF, in a container that sees only
 J/turntable, the GLB (read-only) and the Blender scripts (read-only), for at most RENDER_TIMEOUT_S. It writes
 FRAMES PNG frames of SIDE px into J/turntable/frames: one turn, seen from ELEVATION_DEG above, with the long side
 toward the camera in frame 1. Then J/turntable/render.json. Blender's arguments are J/turntable/args.json, and
@@ -61,12 +60,12 @@ def source(job_dir):
     return glb.resolve(), UPRIGHT_TO_W @ T.astype(float), up.get("glb_rule")
 
 
-def blender_command(job_dir, glb, sif, folder="turntable"):
-    """Blender in the agent's SIF, in a container that sees only J/<folder> (read-write), the GLB and the Blender
+def blender_command(job_dir, glb, sif):
+    """Blender in the agent's SIF, in a container that sees only J/turntable (read-write), the GLB and the Blender
     scripts (read-only), each at its host path (controller.sif_blender)."""
     from harpor.agent import controller
 
-    return controller.sif_blender(sif, rw=[(Path(job_dir) / folder).resolve()], ro=[glb])
+    return controller.sif_blender(sif, rw=[(Path(job_dir) / "turntable").resolve()], ro=[glb])
 
 
 def _count(frames, stop, every=2.0, total=FRAMES):
@@ -146,8 +145,8 @@ def probe(mp4):
                 "seconds": round(seconds, 3)}
 
 
-def encode(job_dir, folder="turntable"):
-    """<folder>.mp4 from the frames in J/<folder>, then <folder>.json last (see the module docstring)."""
+def encode(job_dir):
+    """turntable.mp4 from the frames in J/turntable, then turntable.json last (see the module docstring)."""
     from fractions import Fraction
 
     import av
@@ -155,11 +154,11 @@ def encode(job_dir, folder="turntable"):
 
     from harpor.webapp import steps, video
 
-    out = Path(job_dir) / folder
+    out = Path(job_dir) / "turntable"
     rec, names = read_json(out / "render.json"), sorted((out / "frames").glob("*.png"))
     if not isinstance(rec, dict) or not names:
         raise SystemExit("no frames to encode: the render step did not finish")
-    t, tmp, mp4 = time.time(), out / f".tmp_{folder}.mp4", out / f"{folder}.mp4"
+    t, tmp, mp4 = time.time(), out / ".tmp_turntable.mp4", out / "turntable.mp4"
     with Image.open(names[0]) as im:
         w, h = im.size[0] - im.size[0] % 2, im.size[1] - im.size[1] % 2  # yuv420p needs even sides
     with av.open(str(tmp), "w", format="mp4", options={"movflags": "+faststart"}) as c:
@@ -180,10 +179,10 @@ def encode(job_dir, folder="turntable"):
     os.replace(tmp, mp4)
     shutil.rmtree(out / "frames")
     done = {**rec, **facts, "bytes": mp4.stat().st_size, "encode_s": round(time.time() - t, 1)}
-    write_json(out / f"{folder}.json", done, indent=1)
+    write_json(out / "turntable.json", done, indent=1)
     print("PROGRESS 1", flush=True)
     size = f"{done['bytes'] / 1e6:.1f} MB" if done["bytes"] >= 1e6 else f"{done['bytes'] / 1e3:.0f} KB"
-    print(f"{steps.OPTIONAL[folder]}: {done['frames']} frames, {w}x{h}, {done['seconds']:.1f} s, {size}", flush=True)
+    print(f"{steps.OPTIONAL['turntable']}: {done['frames']} frames, {w}x{h}, {done['seconds']:.1f} s, {size}", flush=True)
     return done
 
 

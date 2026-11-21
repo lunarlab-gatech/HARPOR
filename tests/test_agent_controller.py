@@ -31,7 +31,7 @@ from harpor.agent import controller as C
 from harpor.agent import prompts as PR
 from harpor.agent import tools as T
 from harpor.agent import validate as V
-from harpor.agent.bin import gator_tool
+from harpor.agent.bin import harpor_tool
 from harpor.agent.fake_agent import write_glb
 from harpor.agent.server import ToolServer
 
@@ -139,8 +139,8 @@ def prepare(root, **agent):
 def run_scripted(root, budget_s, script):
     prepare(root)
     (root / "script.json").write_text(json.dumps(script))
-    with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
-        env = {**os.environ, "PYTHONPATH": str(REPO), "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
+    with tempfile.TemporaryDirectory(prefix="harpor-") as sock_dir:
+        env = {**os.environ, "PYTHONPATH": str(REPO), "HARPOR_TOOL_SOCKET": os.path.join(sock_dir, "tools.sock")}
         cmd = [sys.executable, "-m", "harpor.agent.fake_agent", str(root / "script.json")]
         return C.run_session(root / "s", cmd, env, blender=FAKE_BLENDER, sock_dir=sock_dir, budget_s=budget_s, **FAST)
 
@@ -293,7 +293,7 @@ def test_a_group_of_finished_processes_is_no_error(tmp_path, monkeypatch):
 
     p = SimpleNamespace(pid=12345, send_signal=lambda sig: None, wait=lambda timeout=None: 0)
     work = prepare(tmp_path)
-    with tempfile.TemporaryDirectory(prefix="gator-") as d:
+    with tempfile.TemporaryDirectory(prefix="harpor-") as d:
         server = ToolServer(os.path.join(d, "tools.sock"), work, work.parent / "control", FAKE_BLENDER)
         monkeypatch.setattr(os, "killpg", refused)
         C._signal_group(p, signal.SIGINT)
@@ -330,8 +330,8 @@ def test_failed_helper_also_prints_time_left(tmp_path, monkeypatch):
     work = prepare(tmp_path)
     control = work.parent / "control"
     T.start_budget(work, control, time.time() - 100.0, 600.0)
-    monkeypatch.setenv("GATOR_WORK", str(work))
-    monkeypatch.setenv("GATOR_CONTROL", str(control))
+    monkeypatch.setenv("HARPOR_WORK", str(work))
+    monkeypatch.setenv("HARPOR_CONTROL", str(control))
     with pytest.raises(SystemExit) as e:
         T.main(["checkpoint", "--receipt", "r001-0123456789ab", "--defect", "lid gap"])
     first, last = e.value.code.split("\n")
@@ -670,15 +670,15 @@ def test_session_end_stops_a_running_helper(runs):
 
 def test_apptainer_command_keeps_control_out(tmp_path):
     root = tmp_path / "s"
-    cmd = C.apptainer_command(root, "/sif/agent.sif", "/home/u/key.env", "/tmp/gator-x")
+    cmd = C.apptainer_command(root, "/sif/agent.sif", "/home/u/key.env", "/tmp/harpor-x")
     binds = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--bind"]
     assert binds == [f"{root.resolve()}/work:/work", f"{root.resolve()}/session:/session",
-                     f"{C.AGENT_DIR}/bin:/opt/gator/bin:ro", "/tmp/gator-x:/opt/gator/sock:ro",
+                     f"{C.AGENT_DIR}/bin:/opt/harpor-agent/bin:ro", "/tmp/harpor-x:/opt/harpor-agent/sock:ro",
                      "/etc/resolv.conf:/etc/resolv.conf:ro", "/etc/hosts:/etc/hosts:ro"]
     assert cmd[:len(C.CONTAINER)] == C.CONTAINER and "--containall" in cmd and "control" not in " ".join(binds)
     envs = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--env"]
-    assert envs == ["CODEX_HOME=/session/codex_home", "GATOR_SOCKET=/opt/gator/sock/tools.sock",
-                    "PREPEND_PATH=/opt/gator/bin"]
+    assert envs == ["CODEX_HOME=/session/codex_home", "HARPOR_TOOL_SOCKET=/opt/harpor-agent/sock/tools.sock",
+                    "PREPEND_PATH=/opt/harpor-agent/bin"]
     assert cmd[cmd.index("--env-file") + 1] == "/home/u/key.env"
     assert cmd[-len(C.codex_command()) - 7:] == ["--pwd", "/work", "/sif/agent.sif", *C.CODEX_KEY_WRAPPER,
                                                  *C.codex_command()]
@@ -689,19 +689,19 @@ def test_apptainer_command_keeps_control_out(tmp_path):
     work, control = (root / "work").resolve(), (root / "control").resolve()
     assert blender[-2:] == ["/sif/agent.sif", "blender"] and f"{work}:{work}" in blender and f"{work}:/work" in blender
     # Of control/, the helpers' Blender writes only staging/, where export_glb.py writes, and sees exports/, the
-    # host's copies, read-only, and the tool server hands the helpers this command as GATOR_BLENDER.
+    # host's copies, read-only, and the tool server hands the helpers this command as HARPOR_BLENDER.
     assert [b for b in (blender[i + 1] for i, a in enumerate(blender) if a == "--bind") if str(control) in b] == \
         [f"{control}/staging:{control}/staging", f"{control}/exports:{control}/exports:ro"]
-    with tempfile.TemporaryDirectory(prefix="gator-") as d:
+    with tempfile.TemporaryDirectory(prefix="harpor-") as d:
         server = ToolServer(os.path.join(d, "tools.sock"), root / "work", root / "control", blender)
         server.stop()
-    assert shlex.split(server.env["GATOR_BLENDER"]) == blender
+    assert shlex.split(server.env["HARPOR_BLENDER"]) == blender
 
 
 def test_note_5_command_is_the_controllers(tmp_path):
     text = (Path(__file__).resolve().parents[1] / "docs" / "build_plan.md").read_text()
     block = text.split("### 5. Stage B", 1)[1].split("```bash\n", 1)[1].split("```", 1)[0]
-    root, sock, key, sif = tmp_path / "s", "/tmp/gator-x", "/home/u/.config/harpor/openai.env", "/sif/harpor-agent.sif"
+    root, sock, key, sif = tmp_path / "s", "/tmp/harpor-x", "/home/u/.config/harpor/openai.env", "/sif/harpor-agent.sif"
     doc = (block.replace("\\\n", " ").replace("<root>", str(root.resolve())).replace("<socket dir>", sock)
            .replace("~/.config/harpor/openai.env", key).replace(" harpor/agent/bin:", f" {C.AGENT_DIR}/bin:")
            .replace(" harpor-agent.sif", f" {sif}"))
@@ -718,9 +718,9 @@ def test_only_the_codex_container_binds_the_dns_files(tmp_path):
         return [cmd[i + 1] for i, a in enumerate(cmd) if a == "--bind"]
 
     assert C.CONTAINER == ["apptainer", "exec", "--nv", "--containall", "--no-mount", "bind-paths"]
-    codex = C.apptainer_command(root, "/sif/agent.sif", "/home/u/key.env", "/tmp/gator-x")
+    codex = C.apptainer_command(root, "/sif/agent.sif", "/home/u/key.env", "/tmp/harpor-x")
     assert binds(codex)[-2:] == ["/etc/resolv.conf:/etc/resolv.conf:ro", "/etc/hosts:/etc/hosts:ro"]
-    others = (C.shell_command(root, "/sif/agent.sif", "/tmp/gator-x"), C.blender_command(root, "/sif/agent.sif"),
+    others = (C.shell_command(root, "/sif/agent.sif", "/tmp/harpor-x"), C.blender_command(root, "/sif/agent.sif"),
               C.sif_blender("/sif/agent.sif", rw=["/data"], ro=["/in.glb"]))
     for cmd in others:
         assert cmd[:len(C.CONTAINER)] == C.CONTAINER and not [b for b in binds(cmd) if b.startswith("/etc/")]
@@ -733,24 +733,24 @@ def test_cli_exit_names():
 
 def test_tool_server_rejects_bad_requests(tmp_path):
     work = prepare(tmp_path)
-    with tempfile.TemporaryDirectory(prefix="gator-") as d:
+    with tempfile.TemporaryDirectory(prefix="harpor-") as d:
         path = os.path.join(d, "tools.sock")
         server = ToolServer(path, work, work.parent / "control", FAKE_BLENDER).start()
         try:
-            assert gator_tool.call(["rm", "-rf", "/"], path) == ("unknown command 'rm'; use one of export_glb, "
+            assert harpor_tool.call(["rm", "-rf", "/"], path) == ("unknown command 'rm'; use one of export_glb, "
                                                                  "review, checkpoint, finish\n", 2)
-            assert gator_tool.call([], path)[1] == 2
+            assert harpor_tool.call([], path)[1] == 2
             # review with --clay and its 4 detail views is the longest command line: 34 arguments
             longest = ["review", "--clay", *["--detail", *"0001001"] * 4]
-            assert len(longest) == 34 and "candidate.blend is missing" in gator_tool.call(longest, path)[0]
-            assert "argv must be a list of 1 to 64 strings" in gator_tool.call(["review"] * 65, path)[0]
+            assert len(longest) == 34 and "candidate.blend is missing" in harpor_tool.call(longest, path)[0]
+            assert "argv must be a list of 1 to 64 strings" in harpor_tool.call(["review"] * 65, path)[0]
             with socket.socket(socket.AF_UNIX) as s:
                 s.connect(path)
                 s.sendall(b"not json\n")
                 assert json.loads(b"".join(iter(lambda: s.recv(4096), b"")))["code"] == 2
-            output, code = gator_tool.call(["finish", "--receipt", "r9", "--verdict", "complete", "--reason", "x"], path)
+            output, code = harpor_tool.call(["finish", "--receipt", "r9", "--verdict", "complete", "--reason", "x"], path)
             assert code == 1 and "unknown review receipt 'r9'" in output
-            assert gator_tool.call(["review", "--bogus"], path)[1] == 2
+            assert harpor_tool.call(["review", "--bogus"], path)[1] == 2
         finally:
             server.stop()
         assert not os.path.exists(path)
@@ -787,7 +787,7 @@ def test_every_helper_command_has_its_client():
 
     for name in COMMANDS:
         path = C.AGENT_DIR / "bin" / name
-        assert path.read_text() == f'#!/bin/sh\nexec python3 "$(dirname "$0")/gator_tool.py" {name} "$@"\n'
+        assert path.read_text() == f'#!/bin/sh\nexec python3 "$(dirname "$0")/harpor_tool.py" {name} "$@"\n'
         assert path.stat().st_mode & 0o777 == 0o755, name
 
 
@@ -987,7 +987,7 @@ def test_helpers_give_blender_resolved_paths(tmp_path, monkeypatch):
     bound = [Path(blender[i + 1].split(":")[0]) for i, a in enumerate(blender) if a == "--bind"]
     seen, run = [], T._run
     monkeypatch.setattr(T, "_run", lambda cmd, log, timeout: seen.append(cmd) or run(cmd, log, timeout))
-    for k, v in (("GATOR_WORK", work), ("GATOR_CONTROL", control), ("GATOR_BLENDER", shlex.join(FAKE_BLENDER))):
+    for k, v in (("HARPOR_WORK", work), ("HARPOR_CONTROL", control), ("HARPOR_BLENDER", shlex.join(FAKE_BLENDER))):
         monkeypatch.setenv(k, str(v))
     T.main(["review"])
     paths = [Path(a) for cmd in seen for a in cmd[cmd.index("--") + 1:]]
@@ -1069,7 +1069,7 @@ def test_a_session_always_renders_its_previews(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str(REPO))
     work = prepare(tmp_path)
     (work / "original" / "previews" / "old.png").write_bytes(b"")
-    with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
+    with tempfile.TemporaryDirectory(prefix="harpor-") as sock_dir:
         r = C.run_session(work.parent, [sys.executable, "-c", "pass"], blender=FAKE_BLENDER, sock_dir=sock_dir,
                           budget_s=LONG, **FAST)
     assert r["previews_built"] is True and (work / "original" / "previews" / "sheet.png").is_file()
@@ -1236,10 +1236,9 @@ def all_files(root):
 
 def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     """A whole claude session through run_container_session: the real claude_agent CLI with a scripted
-    client and a host shell, the helpers over the socket, the deliverable, the log readers, and the
+    client and a host shell, the helpers over the socket, the deliverable, the log, and the
     key in no file but its own (outside the session folder)."""
     pytest.importorskip("anthropic")  # the Claude client
-    from harpor.agent import loop_trace
 
     monkeypatch.setenv("PYTHONPATH", str(REPO))
     root = prepare(tmp_path, agent="claude").parent
@@ -1292,85 +1291,6 @@ def test_claude_session_through_the_launcher(tmp_path, monkeypatch, capsys):
     start = next(e for e in T.read_jsonl(log) if e.get("type") == "start")
     assert (start["image_side"], start["system"]) == (2576, str(C.AGENT_DIR / "claude" / "SYSTEM.md"))
 
-    capsys.readouterr()
-    loop_trace.main([str(tmp_path)])
-    trace = capsys.readouterr().out
-    assert "== agent (claude), in order" in trace and "views: /work/original/previews/sheet.png [" in trace
-    assert "runs: finish --receipt" in trace and "ended: finished after 2 turns" in trace
-    assert "finish complete: fixed the handle" in trace and "claude-opus-5-5: 2 turns" in trace
-
-
-def test_loop_trace_of_a_codex_session(runs, tmp_path, capsys):
-    """The trace reads the agent from control/agent.json and takes no turntable arguments. A session folder without
-    that file is an error: it is not taken for a Codex session."""
-    from harpor.agent import loop_trace
-
-    root = runs["finish_refine"][0]
-    loop_trace.main([str(root.parent)])
-    trace = capsys.readouterr().out
-    assert "== agent (codex), in order" in trace and "finish complete: fixed the handle" in trace
-    with pytest.raises(SystemExit) as e:
-        loop_trace.main([str(root.parent), "--turntable-args", str(tmp_path / "args.json")])
-    assert e.value.code == 2 and not (tmp_path / "args.json").exists()
-    shutil.copytree(root, tmp_path / "s")
-    (tmp_path / "s" / "control" / "agent.json").unlink()
-    with pytest.raises(FileNotFoundError, match="agent.json"):
-        loop_trace.main([str(tmp_path)])
-
-
-def test_loop_trace_prints_the_agents_text_on_clean_lines(runs, tmp_path, capsys):
-    """A session from before the helpers cleaned the agent's text, with raw escapes in a finish event and in the
-    Codex log, which the Codex agent can write, still traces as lines without control characters."""
-    from harpor.agent import loop_trace
-
-    s = tmp_path / "s"
-    shutil.copytree(runs["dirty_text"][0], s)
-    with open(s / "control" / "events.jsonl", "a") as f:
-        f.write(json.dumps({"time": time.time(), "event": "finish", "verdict": "complete", "reason": DIRTY}) + "\n")
-    with open(s / "session" / "codex.jsonl", "a") as f:
-        for item in ({"type": "agent_message", "text": DIRTY}, {"type": "command_execution", "command": DIRTY,
-                                                                "exit_code": DIRTY}):
-            f.write(json.dumps({"type": "item.completed", "item": {"id": item["type"], **item}}) + "\n")
-    loop_trace.main([str(tmp_path)])
-    out = capsys.readouterr().out
-    assert f"  says: {CLEAN}\n" in out and f"  runs [exit {CLEAN}]: {CLEAN}\n" in out
-    assert out.count(f" finish complete: {CLEAN}\n") == 2  # the session's own, stored clean, and the raw one
-    assert next(x for x in out.splitlines() if " checkpoint checkpoints/001-" in x).endswith(f": {CLEAN}")
-    assert [c for c in out if not c.isprintable() and c != "\n"] == []
-
-
-def test_loop_trace_skips_what_the_agent_wrote_in_another_shape(runs, tmp_path):
-    """codex.jsonl and the review files in work/ are the agent's to write. A line that is not an object, an item that
-    is not one, an id that is a list, a review.json that is a list and a FIFO, which open() would wait on forever,
-    are skipped, and the host's records still print. The trace runs as the script of note 5, with a timeout."""
-    s = tmp_path / "s"
-    shutil.copytree(runs["finish_refine"][0], s)
-    with open(s / "session" / "codex.jsonl", "a") as f:
-        for line in ([1, 2], {"type": "item.completed", "item": "x"},
-                     {"type": "item.completed", "item": {"id": [1], "type": "agent_message", "text": "a list id"}}):
-            f.write(json.dumps(line) + "\n")
-    report = next((s / "work" / "reviews").glob("r001-*/review.json"))
-    report.unlink()
-    os.mkfifo(report)
-
-    def trace():
-        p = subprocess.run([sys.executable, str(REPO / "harpor" / "agent" / "loop_trace.py"), str(tmp_path)],
-                           capture_output=True, text=True, timeout=30)
-        assert p.returncode == 0, p.stderr
-        return p.stdout
-
-    out = trace()
-    assert "  says: a list id\n" in out and "finish complete: fixed the handle" in out
-    assert "review r001-" in out and "mask IoU" not in out
-    (s / "session" / "codex.jsonl").unlink()
-    os.mkfifo(s / "session" / "codex.jsonl")
-    with open(s / "control" / "events.jsonl", "a") as f:  # a review whose review.json is a list
-        f.write(json.dumps({"time": time.time(), "event": "review", "receipt": "r009-0123456789ab", "glb": "x"}) + "\n")
-    (s / "work" / "reviews" / "r009-0123456789ab").mkdir(parents=True)
-    (s / "work" / "reviews" / "r009-0123456789ab" / "review.json").write_text("[]")
-    out = trace()
-    assert "review r009-0123456789ab of x" in out and "mask IoU" not in out and "says:" not in out
-
 
 def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     """A claude session of Claude Fable 5.2 at effort low, through prepare_session and run_container_session: the shell
@@ -1389,7 +1309,7 @@ def test_claude_session_with_every_tool(tmp_path, monkeypatch):
     script = [
         {"content": [{"type": "thinking", "thinking": "Look around first.", "signature": "sig-1"},
                      bash("t1", "cd input && export STEP=one && pwd && env | grep -cE '^(ANTHROPIC|OPENAI|CODEX)_'; "
-                                "echo \"socket ${GATOR_SOCKET:+set}\"; command -v review"),
+                                "echo \"socket ${HARPOR_TOOL_SOCKET:+set}\"; command -v review"),
                      {"type": "tool_use", "id": "t2", "name": editor, "input": {"command": "view", "path": "/work/input/manifest.json"}},
                      bash("t3", 'echo "$STEP in $(basename "$PWD")"')],
          "stop_reason": "tool_use", "usage": usage(3000, 400, write=6000)},
@@ -1487,23 +1407,23 @@ def test_claude_session_layout_and_agent_record(tmp_path):
 
 def test_claude_shell_and_agent_commands(tmp_path):
     root = tmp_path / "s"
-    shell = C.shell_command(root, "/sif/agent.sif", "/tmp/gator-x")
-    codex = C.apptainer_command(root, "/sif/agent.sif", "/home/u/key.env", "/tmp/gator-x")
+    shell = C.shell_command(root, "/sif/agent.sif", "/tmp/harpor-x")
+    codex = C.apptainer_command(root, "/sif/agent.sif", "/home/u/key.env", "/tmp/harpor-x")
     n = len(C.CONTAINER)
     assert shell[:n] == C.CONTAINER and shell[n:n + 3] == ["--net", "--network", "none"]
     binds = [shell[i + 1] for i, a in enumerate(shell) if a == "--bind"]
     # Codex's binds without /session (claude_agent's log is there, and result.json trusts it) and without the DNS files.
     assert binds == [b for i, a in enumerate(codex) if a == "--bind" for b in [codex[i + 1]]
                      if ":/session" not in b and not b.startswith("/etc/")]
-    assert binds == [f"{root.resolve()}/work:/work", f"{C.AGENT_DIR}/bin:/opt/gator/bin:ro", "/tmp/gator-x:/opt/gator/sock:ro"]
+    assert binds == [f"{root.resolve()}/work:/work", f"{C.AGENT_DIR}/bin:/opt/harpor-agent/bin:ro", "/tmp/harpor-x:/opt/harpor-agent/sock:ro"]
     assert "control" not in " ".join(binds) and "session" not in " ".join(shell)
     envs = [shell[i + 1] for i, a in enumerate(shell) if a == "--env"]
-    assert envs == ["GATOR_SOCKET=/opt/gator/sock/tools.sock", "PREPEND_PATH=/opt/gator/bin"]
+    assert envs == ["HARPOR_TOOL_SOCKET=/opt/harpor-agent/sock/tools.sock", "PREPEND_PATH=/opt/harpor-agent/bin"]
     assert "--env-file" not in shell and "/home/u/key.env" not in shell
     assert shell[-6:] == ["--pwd", "/work", "/sif/agent.sif", "bash", "--noprofile", "--norc"]
-    cmd = C.claude_command("s", "agent.sif", "/tmp/gator-x", "key.env")
+    cmd = C.claude_command("s", "agent.sif", "/tmp/harpor-x", "key.env")
     assert cmd == [sys.executable, "-m", "harpor.agent.claude_agent", os.path.abspath("s"), "--sif", os.path.abspath("agent.sif"),
-                   "--sock-dir", "/tmp/gator-x", "--key-file", os.path.abspath("key.env"), "--model", "claude-opus-5-5",
+                   "--sock-dir", "/tmp/harpor-x", "--key-file", os.path.abspath("key.env"), "--model", "claude-opus-5-5",
                    "--effort", "xhigh"]
     assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "low")[-2:] == ["--effort", "low"]
     assert C.claude_command(root, "a.sif", "/tmp/x", "/k.env", "high", model="claude-fable-5-2")[-4:] == \
@@ -1632,7 +1552,7 @@ def test_tool_server_does_not_import_from_the_work_folder(tmp_path):
     (work / "harpor" / "agent").mkdir(parents=True)
     for f in ("harpor/__init__.py", "harpor/agent/__init__.py", "harpor/agent/tools.py"):
         (work / f).write_text(plant)
-    with tempfile.TemporaryDirectory(prefix="gator-") as d:
+    with tempfile.TemporaryDirectory(prefix="harpor-") as d:
         server = ToolServer(os.path.join(d, "tools.sock"), work, work.parent / "control", FAKE_BLENDER)
         try:
             output, code = server.run(["finish", "--receipt", "r9", "--verdict", "complete", "--reason", "x"])
@@ -1654,8 +1574,8 @@ def exported(k):
 
 
 # Every box that the rounds below hand off is the original scaled, so none of its faces is the original's, and the
-# surface check finds all of the original gone. Its findings are report only while surface.ENFORCE is off: they come
-# first in result.json's rounds and in the evidence, but decide no outcome or scope.
+# surface check finds all of the original gone. Its findings are report only: they come first in result.json's
+# rounds and in the evidence, but decide no outcome or scope.
 LOST = [{"code": "surface_identity", "measured": 0.0, "expected": "at least 0.5"},
         {"code": "surface_deleted", "measured": 1.0, "expected": "at most 0.02"}]
 SURFACE = [f["code"] for f in LOST]
@@ -1683,8 +1603,8 @@ def run_in_rounds(root, rounds, budget_s=LONG):
     work = prepare(root)
     mark_rounds(work.parent)
     (root / "script.json").write_text(json.dumps({"rounds": rounds}))
-    with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
-        env = {**os.environ, "PYTHONPATH": str(REPO), "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
+    with tempfile.TemporaryDirectory(prefix="harpor-") as sock_dir:
+        env = {**os.environ, "PYTHONPATH": str(REPO), "HARPOR_TOOL_SOCKET": os.path.join(sock_dir, "tools.sock")}
         cmd = [sys.executable, "-m", "harpor.agent.fake_agent", str(root / "script.json")]
         return C.run_session(work.parent, cmd, env, blender=FAKE_BLENDER, sock_dir=sock_dir, budget_s=budget_s, **FAST)
 
@@ -1727,13 +1647,13 @@ def test_a_session_with_rounds_runs_in_rounds(round_runs):
     assert (ev["object"], ev["diagonal_m"], ev["rounds"]) == ("sensor depth", pytest.approx(ORIGINAL_SIZE * 3 ** 0.5),
                                                               r["rounds"])
     assert ev["selected"] == {"version": 1, "verdict": "complete", "why": "the only eligible candidate",
-                              "rank": [{"version": 1, "rank": [True, True, True, 1]}], "ineligible": []}
+                              "rank": [{"version": 1, "rank": [True, True, 1]}], "ineligible": []}
     (c,) = ev["candidates"]
     assert (c["glb"], c["from"], c["sha256"], c["source"], c["agent_verdict"], c["outcome"]) == (
         glb, "work/exports/001.glb", sha, "finish", "complete", "pass")
     assert "physics_review" not in c
     assert (r["surface"]["shares"]["present"], r["surface"]["shares"]["deleted"]) == (0.0, pytest.approx(1.0))
-    assert [x["code"] for x in r["surface"]["findings"]] == SURFACE and r["surface"]["blocks"] is False
+    assert [x["code"] for x in r["surface"]["findings"]] == SURFACE
     assert r["timings"]["budget_s"] == LONG
     assert r["counts"] == {"exports": 1, "reviews": 1, "checkpoints": 0}
     events = T.read_events(control)
@@ -1753,7 +1673,7 @@ def test_a_local_failure_gets_a_repair_round(round_runs):
     root, r = round_runs["rounds_repair"]
     session, work = root / "session", root / "work"
     assert [(x["round"], x["kind"], x["budget_s"], x["outcome"], x["scope"]) for x in r["rounds"]] == [
-        (1, "build", LONG, "fail", "local"), (2, "repair", C.ROUND_BUDGET_S["repair"], "pass", "none")]
+        (1, "build", LONG, "fail", "local"), (2, "repair", C.REPAIR_BUDGET_S, "pass", "none")]
     first = r["rounds"][0]
     assert first["findings"] == [*LOST, {"code": "not_finished", "measured": "needs_review", "expected": "complete"}]
     assert (first["candidate"]["source"], first["candidate"]["glb"]) == ("export", "work/exports/001.glb")
@@ -1765,7 +1685,7 @@ def test_a_local_failure_gets_a_repair_round(round_runs):
     assert t["budget_s"] == LONG + 450.0 and t["wall_s"] == pytest.approx(sum(x["wall_s"] for x in r["rounds"]))
     evidence = json.loads((work / "evidence" / "round_01.json").read_text())
     best = {"glb": "exports/001.glb", "round": 1, "passed": False}
-    prompt = PR.round_prompt("repair", 450.0, V.feedback(evidence), best, "evidence/round_01.json") + PR.GUIDANCE
+    prompt = PR.round_prompt(450.0, V.feedback(evidence), best, "evidence/round_01.json") + PR.GUIDANCE
     assert (work / "prompt_seen.txt").read_text(encoding="utf-8") == prompt
     assert (session / "prompt.txt").read_text(encoding="utf-8") == prompt
     assert prompt.startswith(PR.load()) and "450 second budget" in prompt and "not_finished" in prompt
@@ -1798,22 +1718,6 @@ def test_the_rounds_stop_after_three_builds(round_runs):
     assert sorted(p.name for p in (root / "session" / "rounds").iterdir()) == ["01", "02"]
 
 
-def test_loop_trace_shows_the_last_round(round_runs, capsys):
-    """budget.json is the last round's, so the trace shows that round's events on its clock, and the rounds of the
-    result."""
-    from harpor.agent import loop_trace
-
-    root, r = round_runs["rounds_repair"]
-    loop_trace.main([str(root.parent)])
-    trace = capsys.readouterr().out
-    assert "== round 2 of 2 (repair); earlier rounds' logs are in session/rounds/\n" in trace
-    host = trace.split("== host records")[1].split("== result")[0]
-    assert "export 1 started" not in host and "export 2 started" in host and "finish complete" in host
-    assert not re.search(r"^\s+-\d+ s ", host, re.M)
-    assert "   round 1 (build): exited, outcome fail, scope local\n" in trace
-    assert "   round 2 (repair): exited, outcome pass, scope none\n" in trace
-
-
 def test_an_earlier_candidate_wins_when_a_repair_regresses(round_runs, tmp_path):
     """Round 1 finishes as needs_review; round 2 only exports, and round 3 hands off nothing, so it stores no
     candidate. No round passed, so the session delivers round 1's finished candidate over round 2's newer export, as
@@ -1837,7 +1741,7 @@ def test_an_earlier_candidate_wins_when_a_repair_regresses(round_runs, tmp_path)
     evidence = json.loads((work / "evidence" / "round_02.json").read_text())
     best = {"glb": "exports/001.glb", "round": 1, "passed": False}
     assert (work / "prompt_seen.txt").read_text(encoding="utf-8") == PR.round_prompt(
-        "repair", 450.0, V.feedback(evidence), best, "evidence/round_02.json") + PR.GUIDANCE
+        450.0, V.feedback(evidence), best, "evidence/round_02.json") + PR.GUIDANCE
     ev = json.loads((control / "evidence.json").read_text())
     assert (ev["selected"]["version"], [x["version"] for x in ev["selected"]["rank"]]) == (1, [1, 2])
     job = tmp_path / "job"
@@ -1857,46 +1761,10 @@ def test_a_pass_beats_an_earlier_reviewed_failure(round_runs):
     one, two = (json.loads((root / "control" / "candidates" / v / "report.json").read_text()) for v in ("v01", "v02"))
     assert one["sha256"] == two["sha256"] and (one["agent_verdict"], two["agent_verdict"]) == ("needs_review", "complete")
     assert (one["report"]["cached"], two["report"]["cached"]) == (False, True)
-    assert C.rank(one)[1:3] == C.rank(two)[1:3]
+    assert C.rank(one)[1] == C.rank(two)[1]
     assert (r["source"], r["verdict"], r["glb"], r["reason"]) == (
         "finish", "complete", "control/candidates/v02/candidate.glb", "fixed the handle")
     assert r["candidate"]["why"] == "first of 2 eligible candidates; it beats v01 on round outcome pass"
-
-
-def test_a_structural_failure_gets_one_planning_round(tmp_path, monkeypatch):
-    """With surface.ENFORCE on, a build that loses the original's surface (surface_identity) fails as structural: a
-    planning round of 300 s follows, in which every helper is refused, so it logs no event and stores no candidate;
-    the build's finish does not end it, and it writes plan.md. The repair after it is told to follow the plan, and its
-    box keeps the original's surface, so it passes."""
-    from harpor.agent import surface
-
-    monkeypatch.setattr(surface, "ENFORCE", True)
-    plan = [READ_PROMPT, EXPORT, finish("needs_review"), {"do": "sleep", "seconds": 1.0},
-            {"do": "write", "path": "plan.md", "text": "keep the original's faces\n"}]
-    r = run_in_rounds(tmp_path, [[edit(1.2), REVIEW, finish("complete")], plan,
-                                 [READ_PROMPT, edit(ORIGINAL_SIZE), REVIEW, finish("complete")]])
-    root = tmp_path / "s"
-    session, work, control = root / "session", root / "work", root / "control"
-    assert [(x["round"], x["kind"], x["budget_s"], x["outcome"], x["scope"]) for x in r["rounds"]] == [
-        (1, "build", LONG, "fail", "structural"), (2, "replan", 300.0, None, None), (3, "repair", 450.0, "pass", "none")]
-    assert "surface_identity" in codes(r["rounds"][0])
-    planning = r["rounds"][1]
-    assert (planning["exit"], planning["candidate"], planning["findings"]) == ("exited", None, [])
-    assert planning["wall_s"] > 1.0 and (work / "plan.md").read_text() == "keep the original's faces\n"
-    log = (session / "rounds" / "02" / "codex.jsonl").read_text()
-    for cmd in ("export_glb", "finish"):
-        assert f"{cmd} refused: this is a planning round" in log
-    starts = [e["kind"] for e in T.read_events(control) if e["event"] == "round_start"]
-    assert starts == ["build", "replan", "repair"] and not (work / "evidence" / "round_02.json").exists()
-    evidence = json.loads((work / "evidence" / "round_01.json").read_text())
-    feedback = V.feedback(evidence)  # v01 lost the surface, so it is not eligible and no best candidate is named
-    assert (session / "rounds" / "02" / "prompt.txt").read_text(encoding="utf-8") == PR.round_prompt(
-        "replan", 300.0, feedback, None, "evidence/round_01.json") + PR.GUIDANCE
-    seen = (work / "prompt_seen.txt").read_text(encoding="utf-8")  # round 3's
-    assert seen == PR.round_prompt("repair", 450.0, feedback, None, "evidence/round_01.json", planned=True) + PR.GUIDANCE
-    assert PR.PLAN in seen and r["timings"]["budget_s"] == LONG + 300.0 + 450.0
-    assert (r["source"], r["verdict"], r["glb"]) == ("finish", "complete", "control/candidates/v02/candidate.glb")
-    assert edge(root / r["glb"]) == ORIGINAL_SIZE
 
 
 def test_an_unchanged_verdict_is_stored_and_can_pass(round_runs):
@@ -1909,20 +1777,18 @@ def test_an_unchanged_verdict_is_stored_and_can_pass(round_runs):
     assert r["sha256"] == sha
 
 
-def stored(version, outcome="fail", sha="a", blocks=False, source="finish"):
+def stored(version, outcome="fail", sha="a", source="finish"):
     """A stored candidate's record of sha256 "a" whose report is of the bytes sha."""
     return {"version": version, "round": version, "sha256": "a", "source": source,
-            "report": {"sha256": sha, "outcome": outcome, "scope": "none", "surface": {"blocks": blocks},
-                       "findings": []}}
+            "report": {"sha256": sha, "outcome": outcome, "scope": "none", "surface": {}, "findings": []}}
 
 
 def test_a_passing_round_ranks_first():
-    """rank: a passing round beats a newer failure, which paper A.6's order would not ensure; then a surface that
-    does not block, a source other than an uninspected export, and the newer version. A pass counts only with a
-    report of the candidate's own bytes."""
-    assert C.RANK == ("round outcome pass", "surface not blocking", "source not an export", "version")
+    """rank: a passing round beats a newer failure, which paper A.6's order would not ensure; then a source other
+    than an uninspected export, and the newer version. A pass counts only with a report of the candidate's own
+    bytes."""
+    assert C.RANK == ("round outcome pass", "source not an export", "version")
     assert C.rank(stored(1, "pass")) > C.rank(stored(2)) > C.rank(stored(1))
-    assert C.rank(stored(1)) > C.rank(stored(2, blocks=True))
     assert C.rank(stored(1, source="checkpoint")) > C.rank(stored(2, source="export"))
     assert C.passed(stored(1, "pass")) and not C.passed(stored(1, "pass", sha="b"))
     ranked = sorted([stored(1), stored(2, "pass"), stored(3, source="export")], key=C.rank, reverse=True)
@@ -1943,11 +1809,11 @@ def store(root, n, report, kind="good", size=ORIGINAL_SIZE, verdict="needs_revie
     return c
 
 
-def test_select_candidate_delivers_the_best_eligible_candidate(tmp_path, monkeypatch):
-    """A stored candidate that is not a valid GLB, has another size, changed after it was stored or (only while
-    surface.ENFORCE is on) lost most of the original is not eligible (paper A.6). The best of the others is
-    delivered from its read-only copy: with the agent's words when its round passed, else needs_review with the
-    host's. With none eligible the session falls back to the original, unless the last round's verdict was
+def test_select_candidate_delivers_the_best_eligible_candidate(tmp_path):
+    """A stored candidate that is not a valid GLB, has another size or changed after it was stored is not eligible
+    (paper A.6). A surface finding, even most of the original gone, does not make it ineligible. The best of the
+    others is delivered from its read-only copy: with the agent's words when its round passed, else needs_review with
+    the host's. With none eligible the session falls back to the original, unless the last round's verdict was
     unchanged."""
     root = prepare(tmp_path).parent
     gone = {"code": "surface_identity", "measured": 0.3, "expected": "at least 0.5",
@@ -1961,8 +1827,8 @@ def test_select_candidate_delivers_the_best_eligible_candidate(tmp_path, monkeyp
     assert pick == {"source": "finish", "glb": root / "control" / "candidates" / "v01" / "candidate.glb",
                     "verdict": "complete", "reason": "the agent's reason", "limitations": ["the agent's limitation"]}
     assert chosen == first and C.check_glb(pick["glb"]) is None
-    assert selected["rank"] == [{"version": 1, "rank": [True, True, True, 1]},
-                                {"version": 4, "rank": [False, True, True, 4]}]
+    assert selected["rank"] == [{"version": 1, "rank": [True, True, 1]},
+                                {"version": 4, "rank": [False, True, 4]}]
     assert [(x["from"], x["glb"], x["why"].split(":")[0]) for x in selected["ineligible"]] == [
         ("candidate v02", "control/candidates/v02/candidate.glb", "unparsable"),
         ("candidate v03", "control/candidates/v03/candidate.glb", "wrong size")]
@@ -1974,11 +1840,12 @@ def test_select_candidate_delivers_the_best_eligible_candidate(tmp_path, monkeyp
         "needs_review", root / "control" / "candidates" / "v04" / "candidate.glb", 4)
     assert pick["reason"] == "the host's check of candidate v04 (round 4) did not pass; open: not_finished"
     assert pick["limitations"] == ["not_finished"] and selected["ineligible"][0]["why"] == "changed after it was stored"
-    monkeypatch.setattr("harpor.agent.surface.ENFORCE", True)
+    v04 = root / "control" / "candidates" / "v04" / "candidate.glb"  # with v04 changed too, none is eligible
+    v04.chmod(0o644)
+    v04.write_bytes(v04.read_bytes() + b"\0")
     pick, chosen, selected = C.select_candidate(root)
     assert (pick, chosen) == (C.original_pick(root), None)
-    assert (selected["why"], selected["ineligible"][-1]["why"]) == (
-        "no stored candidate is eligible", "surface_identity: most of the native area is gone")
+    assert selected["why"] == "no stored candidate is eligible"
     last = {"source": "finish", "verdict": "unchanged", "glb": root / "original.glb", "reason": "nothing to do",
             "limitations": []}
     assert C.select_candidate(root, last)[0] == last
@@ -2044,7 +1911,7 @@ import os, signal, sys
 from harpor.agent import controller, tools
 signal.signal(signal.SIGTERM, tools._on_sigterm)  # as harpor.webapp.agent_step runs the stage
 root, script, sock_dir = sys.argv[1:]
-env = {**os.environ, "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
+env = {**os.environ, "HARPOR_TOOL_SOCKET": os.path.join(sock_dir, "tools.sock")}
 controller.run_session(root, [sys.executable, "-m", "harpor.agent.fake_agent", script], env,
                        blender=[sys.executable, "-m", "harpor.agent.fake_agent", "--blender"], sock_dir=sock_dir,
                        budget_s=20.0, poll_s=0.02, kill_after_s=0.5, finish_wait_s=0.5)
@@ -2061,7 +1928,7 @@ def test_cancel_ends_a_session_in_its_second_round(tmp_path):
     script.write_text(json.dumps({"rounds": [exported(0), [{"do": "sleep", "seconds": 60}]]}))
     (tmp_path / "cancel.py").write_text(CANCEL)
     env = {**os.environ, "PYTHONPATH": str(REPO)}
-    with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
+    with tempfile.TemporaryDirectory(prefix="harpor-") as sock_dir:
         p = subprocess.Popen([sys.executable, str(tmp_path / "cancel.py"), str(root), str(script), sock_dir], env=env)
         try:
             end = time.time() + 60.0
@@ -2115,67 +1982,30 @@ def test_the_budget_view_keeps_the_round_and_counts_only_its_time(tmp_path):
 
 
 def test_next_round_follows_the_papers_budget():
-    """At most 3 builds (the build and 2 repairs) and 1 replan, which a build always follows; a pass or scope none
-    ends the rounds. The worst case is 4 rounds."""
+    """At most 3 builds (the build and 2 repairs); a pass or scope none ends the rounds."""
     def r(kind, outcome=None, scope=None):
         return {"kind": kind, "outcome": outcome, "scope": scope}
 
-    local, structural = r("build", "fail", "local"), r("build", "fail", "structural")
-    assert (C.MAX_BUILDS, C.ROUND_BUDGET_S) == (3, {"repair": 450.0, "replan": 300.0})
+    local = r("build", "fail", "local")
+    assert (C.MAX_BUILDS, C.REPAIR_BUDGET_S) == (3, 450.0)
     assert C.next_round([r("build", "pass", "none")]) is None and C.next_round([r("build", "fail", "none")]) is None
-    assert C.next_round([local]) == "repair" and C.next_round([structural]) == "replan"
-    assert C.next_round([structural, r("replan")]) == "repair"
-    assert C.next_round([structural, r("replan"), r("repair", "fail", "structural")]) == "repair"  # one replan only
-    assert C.next_round([local, r("repair", "fail", "structural")]) == "replan"
-    assert C.next_round([local, r("repair", "fail", "structural"), r("replan")]) == "repair"
-    assert C.next_round([local, r("repair", "fail", "structural"), r("replan"), r("repair", "fail", "local")]) is None
-    assert C.next_round([local, r("repair", "fail", "local"), r("repair", "fail", "structural")]) is None
+    assert C.next_round([local]) == "repair" and C.next_round([local, r("repair", "fail", "local")]) == "repair"
+    assert C.next_round([local, r("repair", "fail", "local"), r("repair", "fail", "local")]) is None
 
 
 def test_round_prompts_carry_the_whole_task():
     """A new agent knows only its prompt: a repair is the refinement prompt, then the round's budget, the evidence,
-    the best candidate and the check's feedback; a replan is a short planning prompt that names the evidence and
-    /work/plan.md, with the feedback."""
+    the best candidate and the check's feedback."""
     feedback = 'candidate sha256 0123456789ab: outcome fail, scope local\n- local not_finished: {"x": 1}\n'
     best = {"glb": "exports/002.glb", "round": 1, "passed": False}
-    repair = PR.round_prompt("repair", 450.0, feedback, best, "evidence/round_01.json")
+    repair = PR.round_prompt(450.0, feedback, best, "evidence/round_01.json")
     assert repair.startswith(PR.load()) and repair.endswith(feedback)
     flat = " ".join(repair.split())
     for fact in ("repair round with a 450 second budget", "evidence/round_01.json",
                  "/work/exports/002.glb, from round 1; its check did not pass", "finish complete"):
         assert fact in flat
-    # Only the repair right after a planning round follows its plan, which came from the same check.
-    planned = PR.round_prompt("repair", 450.0, feedback, best, "evidence/round_01.json", planned=True)
-    assert "plan.md" not in repair and PR.PLAN in planned and planned.replace(PR.PLAN, "") == repair
-    replan = PR.round_prompt("replan", 300.0, feedback, None, "evidence/round_02.json")
-    assert replan.startswith("This is a planning round with 300 seconds.") and PR.load()[:200] not in replan
-    assert "evidence/round_02.json" in replan and "/work/plan.md" in replan and replan.endswith(feedback)
+    assert "plan.md" not in repair
     assert "No round has handed off a valid candidate yet" in PR._best(None)
-
-
-def test_a_planning_round_refuses_every_helper(tmp_path, monkeypatch):
-    """One check in tools.main: a replan makes no export, receipt or off-clock time, so its budget holds and no
-    fourth build can be handed off through a later finish. All but finish end with the time left."""
-    from harpor.agent.server import COMMANDS
-
-    work = prepare(tmp_path)
-    control = work.parent / "control"
-    T.log_event(control, "round_start", round=2, kind="replan")
-    T.start_budget(work, control, time.time(), 300.0)
-    monkeypatch.setenv("GATOR_WORK", str(work))
-    monkeypatch.setenv("GATOR_CONTROL", str(control))
-    receipt = "r001-0123456789ab"
-    args = {"checkpoint": ["--receipt", receipt, "--defect", "x"],
-            "finish": ["--receipt", receipt, "--verdict", "complete", "--reason", "x"]}
-    before = T.read_events(control)
-    for cmd in COMMANDS:
-        with pytest.raises(SystemExit) as e:
-            T.main([cmd, *args.get(cmd, [])])
-        first, *rest = e.value.code.split("\n")
-        assert first == (f"{cmd} refused: this is a planning round, in which no helper runs; write your plan to "
-                         "/work/plan.md and stop")
-        assert rest == [] if cmd == "finish" else (len(rest) == 1 and rest[0].startswith("time left: "))
-    assert T.read_events(control) == before and not any((work / "exports").iterdir())
 
 
 def test_start_round_moves_links_and_does_not_follow_them(tmp_path):

@@ -79,7 +79,7 @@ def all_files(root):
 
 
 def test_commands_have_the_ice_environment():
-    scripts = {s: steps.command(s, JOB, ICE, key_file="/dev/shm/gator-webapp-1/k.env") for s in steps.NAMES
+    scripts = {s: steps.command(s, JOB, ICE, key_file="/dev/shm/harpor-webapp-1/k.env") for s in steps.NAMES
                if s not in ("mjcf", "usd", "urdf")}
     for s, (argv, cwd, env) in scripts.items():
         assert argv[:2] == ["bash", "-c"] and cwd == "/storage/ice1/5/0/ali497/gator/HARPOR"
@@ -92,25 +92,24 @@ def test_commands_have_the_ice_environment():
     sc = {s: v[0][2] for s, v in scripts.items()}
     assert sc["masks"].endswith("\nexport HF_HOME=$G/.cache/huggingface\nrm -f \"$J/scene/sam3_coffee_cup/sam3.json\"\n"
                                 "cd $C && $G/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks --scene "
-                                "\"$J/scene\" --prompt='coffee cup' --overwrite --pick f00012=1 --pick f00020=none")
+                                "\"$J/scene\" --prompt='coffee cup' --pick f00012=1 --pick f00020=none")
     assert sc["prep"].endswith('cd $C && $G/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d prep '
                                '--scene "$J/scene" --mask-prompt sam3_coffee_cup --out "$J/pool"')
     assert sc["da3"].endswith('$G/envs/da3/bin/python -m harpor.stage_a.mvsam3d da3 --da3-root $G/Depth-Anything-3 --out "$J/pool"')
     assert sc["sam3d"].endswith("$G/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d sam3d --mv-root $G/MV-SAM3D "
                                 '--sam3d-root $G/sam-3d-objects --out "$J/run"')
     assert sc["agent"].endswith('-m harpor.webapp.agent_step --job "$J" --sif $G/sif/harpor-agent.sif '
-                                "--key-file /dev/shm/gator-webapp-1/k.env --agent astra")
-    assert not any("GATOR_MUJOCO" in text for text in sc.values())  # the agent's rounds no longer run MuJoCo
-    opus = steps.command("agent", {**JOB, "agent": "opus"}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
+                                "--key-file /dev/shm/harpor-webapp-1/k.env --agent astra")
+    opus = steps.command("agent", {**JOB, "agent": "opus"}, ICE, key_file="/dev/shm/harpor-webapp-1/k.env")[0][2]
     assert opus == sc["agent"][:-len("astra")] + "opus"
     # The estimate stage: the job's model in envs/sam3d, with the same key file and agent.
     assert sc["align"].endswith(f'\nexport {STAGE_A}\ncd $C && $G/envs/sam3d/bin/python -m harpor.webapp.physics_auto '
                                 'align --job "$J"')
     assert sc["estimate"].endswith(f'\nexport {STAGE_A}\ncd $C && $G/envs/sam3d/bin/python -m '
-                                   'harpor.webapp.estimate_step --job "$J" --key-file /dev/shm/gator-webapp-1/k.env '
+                                   'harpor.webapp.estimate_step --job "$J" --key-file /dev/shm/harpor-webapp-1/k.env '
                                    '--agent astra')
     for a in ("opus", "fable"):
-        est = steps.command("estimate", {**JOB, "agent": a}, ICE, key_file="/dev/shm/gator-webapp-1/k.env")[0][2]
+        est = steps.command("estimate", {**JOB, "agent": a}, ICE, key_file="/dev/shm/harpor-webapp-1/k.env")[0][2]
         assert est == sc["estimate"][:-len("astra")] + a
     assert "\n".join(VOMP) in sc["vomp"] and sc["vomp"].endswith(
         'cd $G/VoMP && python $C/harpor/physics/vomp_run.py --glb "$J/run/canonical.glb" --out "$J/run/vomp" --opaque-input')
@@ -144,7 +143,7 @@ def test_commands_have_the_ice_environment():
         assert "--key-file" not in fake_steps.command(s, JOB, ICE)[0][2], s
     for s in ("agent", "estimate"):  # a job without an agent skips both (steps.skip), and has no key to give them
         assert steps.command(s, {**JOB, "agent": "none"}, ICE)[0][2] == sc[s].replace(
-            " --key-file /dev/shm/gator-webapp-1/k.env --agent astra", ""), s
+            " --key-file /dev/shm/harpor-webapp-1/k.env --agent astra", ""), s
 
 
 
@@ -154,11 +153,11 @@ def test_masks_command_takes_a_noun_that_starts_with_a_dash(monkeypatch):
     from harpor.stage_a import sam3_masks
 
     ran = []
-    monkeypatch.setattr(sam3_masks, "run", lambda scene, prompts, picks, threshold, overwrite: ran.append(prompts))
+    monkeypatch.setattr(sam3_masks, "run", lambda scene, prompt, picks: ran.append(prompt))
     for noun in ("-cup", "--mug", "coffee cup"):
         script = steps.command("masks", {**JOB, "prompt": noun}, ICE)[0][2]
         sam3_masks.main(shlex.split(script.split("-m harpor.stage_a.sam3_masks ", 1)[1]))
-        assert ran[-1] == [noun]
+        assert ran[-1] == noun
 
 
 def test_stages_run_from_the_config_code(tmp_path):
@@ -242,7 +241,7 @@ def test_stage_scripts_set_their_environment(tmp_path, monkeypatch):
     # The masks stage: SAM 3 in envs/sam3seg with HF_HOME only, not the Stage A environment of envs/sam3d.
     env, (ran, pwd) = run("masks")
     assert ran == f"ran {G}/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks --scene {J}/scene " \
-                  "--prompt=coffee cup --overwrite --pick f00012=1 --pick f00020=none" and pwd == f"pwd {G}/HARPOR"
+                  "--prompt=coffee cup --pick f00012=1 --pick f00020=none" and pwd == f"pwd {G}/HARPOR"
     assert env["HF_HOME"] == f"{G}/.cache/huggingface" and env["CONDA_PREFIX"] != f"{G}/envs/sam3d"
     assert env["PATH0"] != f"{G}/envs/sam3d/bin" and env["TORCH_EXTENSIONS_DIR"] != f"{G}/.cache/torch_extensions"
 
@@ -274,7 +273,6 @@ def test_estimate_stage_order():
 def test_config_from_env_takes_only_harpor_root(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("HARPOR_ROOT", raising=False)
-    monkeypatch.setenv("GATOR_ROOT", str(tmp_path / "old"))
     monkeypatch.delenv("HARPOR_SANDBOX", raising=False)
     cfg = steps.config_from_env()
     assert cfg.G == tmp_path / "harpor" and cfg.sandbox is None
@@ -393,8 +391,6 @@ def test_the_agent_and_estimate_stages_take_the_key(tmp_path):
     for agent in ("astra", "opus", "fable"):
         (J / "job.json").write_text(json.dumps({**job, "agent": agent}))
         assert not any(steps.skip(s, J) for s in ("agent", "estimate", "mjcf", "usd", "urdf")), agent
-    (J / "job.json").unlink()  # a run folder without job.json (physics_auto asks about it): nothing is turned off
-    assert not any(steps.skip(s, J) for s in ("estimate", "mjcf", "usd", "urdf"))
     (J / "job.json").write_text(json.dumps(job))
     (J / "run").mkdir()
     (J / "run" / "placement.json").write_text(json.dumps({"check": {"mean_mask_iou": 0.31}}))
@@ -931,8 +927,8 @@ def test_runner_warns_when_the_360_video_fails(make_runner, monkeypatch):
 
 
 def test_a_job_without_vomps_output_runs_vomp_only_when_align_runs(make_runner, monkeypatch):
-    """A job folder whose VoMP output is missing (steps.done("vomp") is false), as commit c229be7 or a version before
-    2026-11-06 left it, with align, the estimate and the exports done. align is the only stage that reads VoMP's
+    """A job folder whose VoMP output is missing (steps.done("vomp") is false), as a failed VoMP run leaves it, with
+    align, the estimate and the exports done. align is the only stage that reads VoMP's
     output. A retry from mjcf does not run align, so it runs no VoMP and needs no key, and the job keeps its physics.
     A done job's Retry from turntable runs only turntable and package, so results.zip is made again, with no key. A
     run that runs align (here align failed, so nothing after it ran) starts from vomp (Runner.resume), and the
@@ -994,8 +990,7 @@ def test_a_job_without_vomps_output_runs_vomp_only_when_align_runs(make_runner, 
 
 
 def test_a_run_after_align_whose_outputs_are_gone_starts_from_align(make_runner, monkeypatch):
-    """align's record says done but its outputs are gone, as in a folder of commit c229be7 whose estimate failed after
-    its align deleted summary.json. The page's Retry starts from estimate, the first stage whose record is not done.
+    """align's record says done but its outputs are gone (here summary.json was deleted). The page's Retry starts from estimate, the first stage whose record is not done.
     Runner.resume starts the run from align instead, since every later stage reads align's outputs, and from vomp
     when VoMP's output is missing too. The estimate runs after align, so the retry needs the key."""
     runner, cfg = make_runner()
@@ -1077,9 +1072,8 @@ def test_runner_key_file_lives_only_during_the_keyed_stages(make_runner, tmp_pat
 
 def test_runner_gives_the_key_to_estimate_after_a_skipped_agent(make_runner, tmp_path, monkeypatch):
     """A poor Stage A placement skips the agent stage, which leaves the key unused: the runner holds it for the whole
-    build, so estimate gets it. A job that resumes from estimate while the runner holds no key (forget_key, or a
-    restart) waits in review at estimate with NO_KEY, or with NO_KEY_LATER after a resume with key_later, and runs
-    once the key is given."""
+    build, so estimate gets it. A job that resumes from estimate after a restart, so that the runner holds no key,
+    waits in review at estimate with NO_KEY, and runs once the key is given."""
     runner, cfg = make_runner()
     probe = "import os, stat, sys; f = sys.argv[1]; print('key file', oct(stat.S_IMODE(os.stat(f).st_mode)), " \
             "open(f).read().split('=')[0])"
@@ -1107,16 +1101,11 @@ def test_runner_gives_the_key_to_estimate_after_a_skipped_agent(make_runner, tmp
     assert runner.has_key(job_id, "astra")  # a failed build keeps the key for its retry
 
     (J / "fail_estimate").unlink()
-    assert runner.forget_key(job_id)
+    runner, _ = make_runner()  # a restart: no key
     assert runner.resume(job_id, "estimate") == "estimate"
     job = wait(J, "review")
     assert job["warnings"] == [jobs.NO_KEY["astra"]] and job["key_ok"] is False
     assert job["stages"]["estimate"]["note"] == "waiting for the OpenAI API key" and not (J / "done_estimate").exists()
-    runner.resume(job_id, "estimate", key_later=True)
-    assert wait(J, "review")["warnings"] == [jobs.NO_KEY_LATER["astra"]]
-    runner, _ = make_runner()  # a restart: still no key
-    runner.resume(job_id, "estimate")
-    assert wait(J, "review")["warnings"] == [jobs.NO_KEY["astra"]]
     runner.resume(job_id, "estimate", api_key=KEY)
     job = wait(J, "done")
     assert [job["stages"][s]["status"] for s in ("agent", "align", "estimate", "mjcf", "usd", "urdf", "package")] == [
@@ -1432,40 +1421,11 @@ def test_restart_fails_interrupted_jobs(make_runner):
     assert {s["name"]: s["seconds"] for s in jobs.progress(J)}["da3"] == 30.0  # not still counting
 
 
-def test_restart_gives_an_older_job_the_newer_stages(make_runner):
-    """A job folder of an earlier version has no record of the newer stages, which load does not make up (it stays
-    strict). Every start of the server adds each one, skipped, so that a done job still looks done and progress finds
-    every stage; a job that ran is also failed, and its stages keep their records. The record of a stage that this
-    version no longer has (here softvideo) stays in job.json and is not shown."""
-    runner, cfg = make_runner()
-    done_id, done = ready_job(cfg)
-    ran_id, ran = ready_job(cfg)
-    gone = {**jobs.STAGE, "status": "done"}
-    for J, status in ((done, "done"), (ran, "running")):
-        job = jobs.load(J)
-        job["stages"] = {**{s: {**jobs.STAGE, "status": "done"} for s in steps.NAMES if s != "lidar"}, "softvideo": gone}
-        jobs.save(J, {**job, "status": status})
-    jobs.update_stage(ran, "turntable", status="running", started=time.time() - 5)
-    with pytest.raises(KeyError, match="lidar"):
-        jobs.progress(done)
-    make_runner()
-    older = {**jobs.STAGE, "status": "skipped", "note": "older than this stage"}
-    job = jobs.load(done)
-    assert job["status"] == "done" and job["stages"]["lidar"] == older and job["stages"]["softvideo"] == gone
-    assert all(job["stages"][s]["status"] == "done" for s in steps.NAMES if s != "lidar")
-    assert [s["name"] for s in jobs.progress(done)] == steps.NAMES
-    job = jobs.load(ran)
-    assert job["status"] == "failed" and job["stages"]["lidar"] == older and job["stages"]["softvideo"] == gone
-    assert job["stages"]["turntable"]["note"] == "the server stopped" and job["stages"]["package"]["status"] == "done"
-    make_runner()  # once there, the record stays as it is
-    assert jobs.load(done)["stages"]["lidar"] == older
-
-
 def test_key_needed_counts_the_keyed_stages_that_the_run_runs(tmp_path):
     """jobs.key_needed: a keyed stage needs the key when a run from first runs it. Runner._build runs it unless its
     record is done and its outputs are there, and a skipped one runs again unless steps.skip still gives a reason. So
-    the estimate record that _recover gives an older job folder (skipped, OLDER) needs the key, from a start at or
-    before estimate. A stage before the start does not run. A run that runs align runs the estimate after it, since
+    a skipped estimate record needs the key, from a start at or before estimate. A stage before the start does not
+    run. A run that runs align runs the estimate after it, since
     align writes the summary again without it. Such a run starts from vomp when it starts later and VoMP's output is
     missing, so a failed agent stage runs too. A run that does not run align, such as a retry of the 360 video,
     needs no VoMP output and no key. A job without an agent never needs the key."""
@@ -1494,8 +1454,7 @@ def test_key_needed_counts_the_keyed_stages_that_the_run_runs(tmp_path):
     assert needs("align") and needs("sam3d") and needs("estimate") and needs("turntable")
     assert not needs("estimate", model="none")
     (J / "physics" / "aligned.json").write_text("{}")
-    # An older job that failed at align: its summary is VoMP's alone, with no estimate, and its estimate record is
-    # skipped.
+    # A job that failed at align: its summary is VoMP's alone, with no estimate, and its estimate record is skipped.
     summary.write_text(json.dumps({"rigid_body": {"mass": 1.0}}))
     assert needs("align", estimate="skipped", align="failed") and needs("sam3d", estimate="skipped")
     assert not needs("mjcf", estimate="skipped") and not needs("turntable", estimate="skipped")
@@ -1532,28 +1491,6 @@ def until(check, timeout=30):
     while not check():
         assert time.time() - t0 < timeout, "timed out"
         time.sleep(0.05)
-
-
-def test_runner_queued_lists_the_builds_that_wait(make_runner, monkeypatch):
-    runner, cfg = make_runner()
-    stub_stages(monkeypatch, hold=("extract",))
-    (a, Ja), (b, Jb), (c, Jc) = (ready_job(cfg, auto_continue=True) for _ in range(3))
-    assert runner.queued() == []
-    for job_id in (a, b, c):
-        runner.submit_build(job_id, None, agent="none")
-    wait(Ja, "running")
-    q = runner.queued()
-    assert q == [(b, "extract"), (c, "extract")]  # the running build is not in it
-    q.clear()  # a copy
-    assert runner.queued() == [(b, "extract"), (c, "extract")]
-    runner.cancel(c)
-    assert runner.queued() == [(b, "extract")] and jobs.load(Jc)["status"] == "cancelled"
-    for J in (Ja, Jb):
-        (J / "go_extract").touch()
-    assert wait(Jb, "done")["status"] == "done" and wait(Ja, "done") and runner.queued() == []
-    runner.resume(b, "package")
-    assert runner.queued() in ([(b, "package")], [])  # [] once the worker took it
-    wait(Jb, "done")
 
 
 def test_runner_json_keeps_a_second_server_off_the_runs_folder(make_runner, monkeypatch):
@@ -1641,44 +1578,21 @@ def test_holder_alive_asks_slurm_about_another_host(monkeypatch, capsys):
     assert jobs.holder_alive({**other, "slurm_job": "1234567 -o %all"}) is False and len(calls) == n
 
 
-def test_runner_forget_key(make_runner, monkeypatch):
-    runner, cfg = make_runner()
-    stub_stages(monkeypatch)
-    job_id, J = ready_job(cfg)
-    runner.submit_build(job_id, KEY)  # it stops in review after select
-    job = wait(J, "review")
-    assert job["key_ok"] is True and runner.has_key(job_id, "astra")
-    assert runner.forget_key(job_id) is True
-    assert not runner.has_key(job_id) and jobs.load(J)["key_ok"] is False
-    assert not any(runner.forget_key(x) for x in (job_id, "../" + job_id, None))
-    runner.resume(job_id, "sam3d")
-    job = wait(J, "review")
-    assert job["warnings"] == [jobs.NO_KEY["astra"]] and job["stages"]["agent"]["status"] == "pending"
-
-
-def test_runner_builds_without_a_key_and_asks_for_it_later(make_runner, monkeypatch, tmp_path):
+def test_runner_builds_without_a_key_and_asks_for_it(make_runner, monkeypatch, tmp_path):
     """submit_build with api_key None queues the build without a key; the job waits in review at the first
-    stage that needs it, with NO_KEY_LATER. resume with key_later says the same; resume without it says the
-    server lost the key (NO_KEY). A key given wins."""
+    stage that needs it, with NO_KEY. A key given in resume lets it go on."""
     runner, cfg = make_runner()
     stub_stages(monkeypatch)
-    assert jobs.NO_KEY_LATER == {"astra": "The job needs the OpenAI API key now; paste it and press Build.",
-                                 "opus": "The job needs the Anthropic API key now; paste it and press Build.",
-                                 "fable": "The job needs the Anthropic API key now; paste it and press Build."}
     job_id, J = ready_job(cfg, auto_continue=True)
     runner.submit_build(job_id, None, agent="opus")
     assert jobs.load(J)["key_ok"] is False and not runner.has_key(job_id)
     job = wait(J, "review")
-    assert job["warnings"] == [jobs.NO_KEY_LATER["opus"]] and job["key_ok"] is False and "key_later" not in job
+    assert job["warnings"] == [jobs.NO_KEY["opus"]] and job["key_ok"] is False
     assert job["stages"]["agent"]["note"] == "waiting for the Anthropic API key"
     assert job["stages"]["place"]["status"] == "done" and not (J / "done_agent").exists()
-    runner.resume(job_id, "sam3d", key_later=True)
-    assert wait(J, "review")["warnings"] == [jobs.NO_KEY_LATER["opus"]]
-    runner.resume(job_id, "sam3d")
-    assert wait(J, "review")["warnings"] == [jobs.NO_KEY["opus"]]
-    runner.resume(job_id, "sam3d", api_key=OPUS_KEY, key_later=True)
+    runner.resume(job_id, "sam3d", api_key=OPUS_KEY)
     job = wait(J, "done")
-    assert job["stages"]["agent"]["status"] == "done" and "key_later" not in job
+    assert job["stages"]["agent"]["status"] == "done"
 
     # A Start without a key drops the key held for the job; an empty key is still refused.
     job_id, J = ready_job(cfg)
@@ -1781,7 +1695,7 @@ def test_agent_step_runs_a_fresh_refinement_session(tmp_path, monkeypatch):
     def container(root, sif, key_file, budget_s):  # the controller's own session, with an agent that exits at once
         calls.append((Path(root), sif, key_file, budget_s))
         r = C.run_session(root, [sys.executable, "-c", "pass"], blender=FAKE_BLENDER,
-                          sock_dir=tempfile.mkdtemp(prefix="gator-"))
+                          sock_dir=tempfile.mkdtemp(prefix="harpor-"))
         r["key_found_in"] = C.find_key(root, key_file)
         write_json(Path(root) / "result.json", r)
         return r
@@ -1813,9 +1727,9 @@ def test_agent_step_prints_the_agents_text_on_clean_lines(tmp_path, monkeypatch,
 
     def container(root, sif, key_file, budget_s):
         r = C.run_session(root, [sys.executable, "-c", "pass"], blender=FAKE_BLENDER,
-                          sock_dir=tempfile.mkdtemp(prefix="gator-"))
+                          sock_dir=tempfile.mkdtemp(prefix="harpor-"))
         r.update(reason=DIRTY, limitations=[DIRTY, "plain text, é and ü"], key_found_in=[],
-                 rejected=[{"from": "finish", "glb": "work/exports/001.glb", "why": f"bad joints: {DIRTY}"}])
+                 rejected=[{"from": "finish", "glb": "work/exports/001.glb", "why": f"unparsable: {DIRTY}"}])
         write_json(Path(root) / "result.json", r)
         return r
 
@@ -1824,7 +1738,7 @@ def test_agent_step_prints_the_agents_text_on_clean_lines(tmp_path, monkeypatch,
     agent_step.run(J, "/sif/agent.sif", J / "key.env")
     out = capsys.readouterr().out
     assert (f"  reason: {CLEAN}\n  limitation: {CLEAN}\n  limitation: plain text, é and ü\n"
-            f"  rejected finish work/exports/001.glb: bad joints: {CLEAN}\n") in out
+            f"  rejected finish work/exports/001.glb: unparsable: {CLEAN}\n") in out
     assert [c for c in out if not c.isprintable() and c != "\n"] == []
 
 
@@ -1840,10 +1754,10 @@ def test_agent_step_redacts_a_key_that_cleaning_joins(tmp_path, monkeypatch, cap
 
     def container(root, sif, key_file, budget_s):
         r = C.run_session(root, [sys.executable, "-c", "pass"], blender=FAKE_BLENDER,
-                          sock_dir=tempfile.mkdtemp(prefix="gator-"))
+                          sock_dir=tempfile.mkdtemp(prefix="harpor-"))
         r.update(reason=f"done {KEY[:9]}\x1b{KEY[9:]}", limitations=[f"{KEY[:12]}​{KEY[12:]}"], key_found_in=[],
                  rejected=[{"from": "export", "glb": "work/exports/001.glb",
-                            "why": f"bad joints: the joints have 2 roots (c, {KEY[:20]}\x07{KEY[20:]})"}])
+                            "why": f"unparsable: the GLB names (c, {KEY[:20]}\x07{KEY[20:]})"}])
         write_json(Path(root) / "result.json", r)
         return r
 
@@ -1853,7 +1767,7 @@ def test_agent_step_redacts_a_key_that_cleaning_joins(tmp_path, monkeypatch, cap
     out = capsys.readouterr().out
     assert KEY not in out and KEY[9:] not in out
     assert ("  reason: done [redacted API key]\n  limitation: [redacted API key]\n  rejected export work/exports/001.glb: "
-            "bad joints: the joints have 2 roots (c, [redacted API key])\n") in out
+            "unparsable: the GLB names (c, [redacted API key])\n") in out
 
 
 def test_agent_step_names_the_jobs_real_input(tmp_path, monkeypatch):
@@ -1886,7 +1800,7 @@ def test_agent_step_runs_a_claude_session_for_opus(tmp_path, monkeypatch, capsys
     def container(root, sif, key_file, budget_s):  # the controller's own session; the agent writes its end line
         script = f"import json, sys; open(sys.argv[1], 'a').write(json.dumps({end!r}) + chr(10))"
         r = C.run_session(root, [sys.executable, "-c", script, str(Path(root) / "session" / "claude.jsonl")],
-                          blender=FAKE_BLENDER, sock_dir=tempfile.mkdtemp(prefix="gator-"))
+                          blender=FAKE_BLENDER, sock_dir=tempfile.mkdtemp(prefix="harpor-"))
         r["key_found_in"] = C.find_key(root, key_file)
         write_json(Path(root) / "result.json", r)
         return r
@@ -1995,8 +1909,8 @@ def test_agent_step_publishes_the_evidence_of_its_rounds(tmp_path, monkeypatch, 
     fast = {"poll_s": 0.02, "kill_after_s": 0.5, "finish_wait_s": 0.5}
 
     def container(root, sif, key_file, budget_s):  # the controller's own session with the fake agent's rounds
-        with tempfile.TemporaryDirectory(prefix="gator-") as sock_dir:
-            env = {**os.environ, "PYTHONPATH": str(ROOT), "GATOR_SOCKET": os.path.join(sock_dir, "tools.sock")}
+        with tempfile.TemporaryDirectory(prefix="harpor-") as sock_dir:
+            env = {**os.environ, "PYTHONPATH": str(ROOT), "HARPOR_TOOL_SOCKET": os.path.join(sock_dir, "tools.sock")}
             r = C.run_session(root, [sys.executable, "-m", "harpor.agent.fake_agent", str(script)], env,
                               blender=FAKE_BLENDER, sock_dir=sock_dir, budget_s=20.0, **fast)
         r["key_found_in"] = C.find_key(root, key_file)
@@ -2126,7 +2040,7 @@ def test_agent_step_sigterm_stops_the_agent(tmp_path):
         AGENT = [sys.executable, "-c", "import os, time; f = open('agent.pid', 'w'); f.write(str(os.getpid())); "
                  "f.close(); time.sleep(120)"]
         C.run_container_session = lambda root, sif, key_file, budget_s: C.run_session(
-            root, AGENT, blender={FAKE_BLENDER!r}, sock_dir=tempfile.mkdtemp(prefix="gator-"))
+            root, AGENT, blender={FAKE_BLENDER!r}, sock_dir=tempfile.mkdtemp(prefix="harpor-"))
         agent_step.main(sys.argv[1:])
         """)
     p = subprocess.Popen([sys.executable, "-c", wrapper, "--job", str(J), "--sif", "x.sif", "--key-file", str(J / "key.env")],
@@ -2232,7 +2146,7 @@ def test_fake_build_end_to_end(make_runner, tmp_path):
             "agent_result.json", "mjcf/mjcf.json", "mjcf/wooden_box.xml", "mjcf/scene.xml", "usd/usd.json",
             "urdf/model.urdf", "urdf/urdf.json"} <= names
     urdf = json.loads((J / "physics" / "urdf" / "urdf.json").read_text())
-    assert urdf["checked"]["links"] == 1 and urdf["checked"]["joints"] == 0 and urdf["checked"]["missing"] == []
+    assert urdf["checked"]["links"] == 1 and urdf["checked"]["missing"] == []
     assert all(s["seconds"] is not None for s in jobs.progress(J) if s["name"] not in skipped)
     assert not list(runner.key_dir.iterdir())
     assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))

@@ -1,8 +1,8 @@
 """Pose and mask helpers for Stage A (build_plan.md note 2).
 
 canonical_glb_to_w moves a SAM 3D canonical GLB into frame W (OpenCV camera axes) with the pose
-that SAM 3D returns. harpor.stage_a.mvsam3d uses these helpers to place its mesh, and silhouette and
-resize_mask also serve the mask code.
+that SAM 3D returns. harpor.stage_a.mvsam3d uses these helpers to place its mesh, and load_mask, silhouette
+and resize_mask also serve the mask code.
 """
 
 import numpy as np
@@ -58,3 +58,9 @@ def resize_mask(mask, out_wh):
 
     return np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize(out_wh, Image.NEAREST)) > 0
 
+
+def load_mask(path):
+    """Object pixels of a mask PNG, as sam3_masks and mvsam3d prep write it (L mode, 0/255): above 127."""
+    from PIL import Image
+
+    return np.array(Image.open(path).convert("L")) > 127

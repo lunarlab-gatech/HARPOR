@@ -14,10 +14,9 @@ This folder is `/work`, the only folder you can write to.
 - `exports/`, `reviews/` and `checkpoints/`: written by the helpers.
 - `run_budget.json`: the deadline as Unix seconds (`deadline`, compare with `date +%s`) and as ISO
   time. Time spent in `export_glb` does not count, and the deadline moves by that time, up to 600 s
-  in total. In a session with rounds it also gives the `round` (1 to 4) and its
-  `kind` (`build`, `repair` or `replan`).
+  in total. In a session with rounds it also gives the `round` (1 to 3) and its
+  `kind` (`build` or `repair`).
 - `evidence/round_NN.json` (sessions with rounds): the host's check of the candidate of round NN.
-- `plan.md`: the plan that a planning round writes.
 
 Shell commands run in `/work`. Blender 5.2 runs headless:
 `blender -b candidate.blend --python-exit-code 1 --python edit.py` (the exit-code flag must come
@@ -26,11 +25,10 @@ before `--python`, or a failing script still exits 0). Save the scene with
 
 ## Rounds
 
-A session with rounds runs up to four of them, each with a new agent that knows only its prompt
+A session with rounds runs up to three of them, each with a new agent that knows only its prompt
 and this folder. The first round builds. After each build the host compares the candidate's surface
 with the original's and checks the hand-off. While it finds
-something to fix, a repair round follows (at most two), or once a planning round (`replan`), which
-only writes `plan.md` and in which every helper is refused. Each round has its own budget and
+something to fix, a repair round follows (at most two). Each round has its own budget and
 deadline. `candidate.blend` and the other files carry over from one round to the next. The host
 keeps the hand-off of every build and repair and delivers the best of them, so a worse repair does
 not replace an earlier one; a hand-off whose round did not pass the host's check is delivered as

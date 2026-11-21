@@ -118,7 +118,7 @@ def build(out=OUT, static=STATIC, demo_dir=None, no_demos=False):
     out = Path(out)
     site = files(static, demo_dir)
     if out.exists():
-        if any(out.iterdir()) and not ((out / ".nojekyll").is_file() and ((out / ".harpor-gallery").is_file() or (out / "static" / "config.js").is_file())):
+        if any(out.iterdir()) and not ((out / ".nojekyll").is_file() and (out / ".harpor-gallery").is_file()):
             raise SiteError(f"{out} is not an earlier build of the site; choose another --out")
         page = out / "demos.html"
         cards = page.is_file() and 'class="democard' in page.read_text(errors="replace")

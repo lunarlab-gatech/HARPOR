@@ -18,11 +18,8 @@ implemented in the controller and `tools.py`.
 
 A web-app job runs the session in rounds (`controller.run_rounds`): after each build or repair,
 the host checks the candidate against the original (`harpor.agent.validate`). Each round is a new agent with no memory of the others, so
-`round_prompt(kind, budget_s, feedback, best, evidence)` gives it the whole task:
-
-- repair: the refinement prompt, then a short paragraph with the round's budget, the best candidate
-  so far and the host's feedback (`harpor.agent.validate.feedback`); only the repair right after a
-  planning round gets `PLAN`, the sentence that tells it to follow `/work/plan.md`
-- replan: a short planning prompt alone; its agent writes `/work/plan.md`, and every helper is refused
+`round_prompt(budget_s, feedback, best, evidence)` gives a repair round the whole task: the
+refinement prompt, then a short paragraph with the round's budget, the best candidate so far and
+the host's feedback (`harpor.agent.validate.feedback`).
 
 `GUIDANCE` is appended to the first prompt and to every round prompt.

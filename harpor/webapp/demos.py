@@ -35,8 +35,7 @@ add makes a demo from a finished job folder, on the machine that holds the job: 
 (turntable/turntable.mp4, else --video), physics/aligned.glb (else --glb), results.zip packed again with every key
 shape and machine path taken out of its text (a binary member that holds one stops add), and the facts of the
 Results tab (facts_of). It refuses a job that is not done, a rosbag job without --public-bag (the only rosbags so far
-are private, and a bag's name can look harmless), and anything that looks private. From a run folder (no job.json),
---video and --glb are needed, and the facts come from the job-layout records that are there. It writes
+are private, and a bag's name can look harmless), and anything that looks private. It writes
 <out>/.<name>.tmp, checks it with load, then renames it to <out>/<name>; an existing demo stays unless --force.
 check runs load and placeholders on a demos folder.
 """
@@ -102,13 +101,9 @@ PLACEHOLDERS, MAX_PLACEHOLDERS = "placeholders.json", 12  # in the demos folder,
 # a placeholder's title is plain text on one line: no control character, line or paragraph separator, or bidi control
 CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 CARD_FACTS, SHORT = ("Size", "Mass"), 24  # the facts that a card shows first; else others of at most SHORT characters
-# app.js KIND_LABEL (job.json source kind), MODEL_NAME (agent_result.model: tools.MODELS, and gpt-6-astra, which the
-# jobs built before 2026-11-20 ran) and RAN (agent_result.agent, for a result without a known model id); a test
-# compares them.
+# app.js KIND_LABEL (job.json source kind) and MODEL_NAME (agent_result.model: tools.MODELS); a test compares them.
 KIND = {"video": "video", "rosbag": "rosbag", "stray": "Stray capture"}
-MODEL_NAME = {"gpt-6-astra": "GPT-6-Astra", "gpt-6.2-astra": "GPT-6.2-Astra", "claude-opus-5-5": "Claude Opus 5.5",
-              "claude-fable-5-2": "Claude Fable 5.2"}
-RAN = {"codex": "GPT-6.2-Astra", "claude": "Claude Opus 5.5"}
+MODEL_NAME = {"gpt-6.2-astra": "GPT-6.2-Astra", "claude-opus-5-5": "Claude Opus 5.5", "claude-fable-5-2": "Claude Fable 5.2"}
 
 
 class DemoError(Exception):
@@ -454,7 +449,7 @@ def facts_of(J, job=None):
     if job and steps.agent(job) == "none":
         out.append(["Agent", "off"])
     elif isinstance(r, dict) and r.get("agent"):
-        out.append(["Agent", MODEL_NAME.get(r.get("model")) or RAN.get(r["agent"], r["agent"])])
+        out.append(["Agent", MODEL_NAME.get(r.get("model")) or r.get("model") or r["agent"]])
     return out
 
 
@@ -496,8 +491,7 @@ def check_video(path):
 
 def add(source, out, name=None, title=None, video=None, glb=None, zip_=None, facts=(), order=0, force=False,
         public_bag=False):
-    """Make the demo <out>/<name> from a finished job folder or a run folder (the module docstring); returns the
-    Demo. facts: (label, value) pairs that add or replace a fact, or remove it when value is empty."""
+    """Make the demo <out>/<name> from a finished job folder (the module docstring); returns the Demo. facts: (label, value) pairs that add or replace a fact, or remove it when value is empty."""
     from harpor.webapp import server
 
     src = Path(source).expanduser().resolve()
@@ -509,30 +503,26 @@ def add(source, out, name=None, title=None, video=None, glb=None, zip_=None, fac
             private((src / rel).read_text(errors="replace"), rel)
     pick = lambda p:(Path(p).expanduser() if Path(p).expanduser().is_absolute() else src / p).resolve()  # noqa: E731
     job = read_json(src / "job.json") if (src / "job.json").is_file() else None
-    if job is not None:
-        if not isinstance(job, dict) or job.get("status") != "done":
-            raise DemoError(f"the job is {job.get('status') if isinstance(job, dict) else 'unreadable'}, not done")
-        s = steps.source(job)
-        for what, text in (("the input's name", (job.get("video") or {}).get("name")), ("the prompt", job.get("prompt")),
-                           ("the source", s.get("kind")), ("the camera topic", s.get("topic"))):
-            if text:
-                private(text, what)
-        if s["kind"] == "rosbag" and not public_bag:
-            raise DemoError("a rosbag job: the rosbags so far hold private scenes; add --public-bag when this one "
-                            "does not")
-        mp4 = pick(video) if video else server.resolve(src, VIDEO)
-        if mp4 is None:
-            raise DemoError("the job has no 360 video; start it with Make a 360 video on, or give --video PATH")
-        model = pick(glb) if glb else server.resolve(src, MODEL)
-        if model is None:
-            raise DemoError(f"the job has no {MODEL}; give --glb PATH")
-        zipped = pick(zip_) if zip_ else server.resolve(src, "results.zip")
-        name, title = name or slug(job.get("prompt") or ""), title or str(job.get("prompt") or "")[:MAX_TITLE]
-    else:
-        if not video or not glb:
-            raise DemoError(f"{src} has no job.json: give --video and --glb")
-        mp4, model, zipped = pick(video), pick(glb), pick(zip_) if zip_ else None
-        name, title = name or slug(src.name), title or src.name.replace("_", " ")[:MAX_TITLE]
+    if job is None:
+        raise DemoError(f"{src} has no job.json: give a finished job folder")
+    if not isinstance(job, dict) or job.get("status") != "done":
+        raise DemoError(f"the job is {job.get('status') if isinstance(job, dict) else 'unreadable'}, not done")
+    s = steps.source(job)
+    for what, text in (("the input's name", (job.get("video") or {}).get("name")), ("the prompt", job.get("prompt")),
+                       ("the source", s.get("kind")), ("the camera topic", s.get("topic"))):
+        if text:
+            private(text, what)
+    if s["kind"] == "rosbag" and not public_bag:
+        raise DemoError("a rosbag job: the rosbags so far hold private scenes; add --public-bag when this one "
+                        "does not")
+    mp4 = pick(video) if video else server.resolve(src, VIDEO)
+    if mp4 is None:
+        raise DemoError("the job has no 360 video; start it with Make a 360 video on, or give --video PATH")
+    model = pick(glb) if glb else server.resolve(src, MODEL)
+    if model is None:
+        raise DemoError(f"the job has no {MODEL}; give --glb PATH")
+    zipped = pick(zip_) if zip_ else server.resolve(src, "results.zip")
+    name, title = name or slug(job.get("prompt") or ""), title or str(job.get("prompt") or "")[:MAX_TITLE]
     title = title[:1].upper() + title[1:]
     if not name or not NAME.fullmatch(name):
         raise DemoError(f"the name {name!r} is a-z, 0-9 and -, at most 40 characters: give --name")
@@ -606,8 +596,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m harpor.webapp.demos", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    a = sub.add_parser("add", help="make a demo from a finished job folder, or from a run folder with --video and --glb")
-    a.add_argument("source", metavar="SOURCE", help="a finished job folder, or a run folder")
+    a = sub.add_parser("add", help="make a demo from a finished job folder")
+    a.add_argument("source", metavar="SOURCE", help="a finished job folder")
     a.add_argument("--name", help="the demo's folder name (default: the prompt, such as office-chair)")
     a.add_argument("--title", help="the demo's title (default: the prompt)")
     a.add_argument("--video", metavar="MP4", help=f"the 360 video (default: the job's {VIDEO})")

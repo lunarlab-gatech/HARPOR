@@ -13,7 +13,7 @@ Four steps write into one run folder, each in its own process:
          -> canonical.glb, splat.ply, pose.json (canonical -> view 0's camera, PyTorch3D axes)
   place  fits the mesh to the masks of all views: first its scale (MV-SAM3D's own scale was 11% too
          large on its example), then shift, size and a small rotation (its position was 17 cm off on
-         the round table); --fit none skips this. Then -> posed.glb in frame W (view 0's OpenCV camera, DA3
+         the round table). Then -> posed.glb in frame W (view 0's OpenCV camera, DA3
          units, or meters when select applied a LiDAR scale),
          cameras.json (every view's K at the image size and w2c relative to view 0, for the agent's manifest), placement.json (the fit, mask IoU per view, view 0 depth check) and
          overlay_<name>.png
@@ -21,7 +21,7 @@ Four steps write into one run folder, each in its own process:
     python -m harpor.stage_a.mvsam3d prep --scene DIR --mask-prompt NAME --out RUN [--max-side 1024]
     envs/da3/bin/python -m harpor.stage_a.mvsam3d da3 --da3-root Depth-Anything-3 --out RUN
     python -m harpor.stage_a.mvsam3d sam3d --mv-root MV-SAM3D --sam3d-root sam-3d-objects --out RUN
-    python -m harpor.stage_a.mvsam3d place --out RUN [--fit pose|none]
+    python -m harpor.stage_a.mvsam3d place --out RUN
 
 DA3's world frame is its chosen reference view, not view 0, so cameras are always taken relative to
 view 0. View 0 is the first name in natural order, as in MV-SAM3D's loader.
@@ -67,7 +67,7 @@ def prep(scene, mask_prompt, out, max_side):
     """
     from PIL import Image
 
-    from harpor.stage_a.sam3d import load_mask
+    from harpor.stage_a.place import load_mask
 
     scene, out = Path(scene), Path(out)
     for d in ("input/images", "input/object", "masks"):
@@ -75,9 +75,8 @@ def prep(scene, mask_prompt, out, max_side):
     images = scene_images(scene)
     pairs = []
     for name, path in images.items():
-        cands = [scene / mask_prompt / f"{name}{s}" for s in ("_mask.png", ".png")]
-        mask_path = next((c for c in cands if c.exists()), None)
-        if mask_path is not None:
+        mask_path = scene / mask_prompt / f"{name}.png"
+        if mask_path.exists():
             pairs.append((name, Image.open(path).convert("RGB"), mask_path))
     if len(pairs) < 2:
         raise SystemExit(f"{len(pairs)} views with a mask found; MV-SAM3D needs at least 2")
@@ -161,8 +160,9 @@ def sam3d(mv_root, sam3d_root, out, seed):
     t0 = time.time()
     inf = Inference(str(Path(sam3d_root) / "checkpoints" / "hf" / "pipeline.yaml"), compile=False)
     pipe = inf._pipeline
-    # As in sam3d.py: bake a texture with nvdiffrast, and render the Gaussians for the bake with gsplat,
-    # because the default inria backend is not installed.
+    # SAM 3D's notebook/inference.py forces pytorch3d and turns texture baking off, so its GLB has vertex colours
+    # only (issues #75, #146). Bake a texture with nvdiffrast instead, and render the Gaussians for the bake with
+    # gsplat, because the default inria backend (diff_gaussian_rasterization) is not installed.
     pipe.rendering_engine = "nvdiffrast"
     render_frames = render_utils.render_frames
     render_utils.render_frames = lambda s, e, k, options={}, **kw: render_frames(
@@ -409,10 +409,9 @@ def fit_pose(x_w, faces, cams, masks, size=384, max_evals=400, shift_limit=0.25,
     return (float(np.exp(p[0])), rotation_from_vector(p[4:]), p[1:4] * diag, p[4:].copy()), c, ious(p0), ious(p), len(seen), at_bound
 
 
-def place(out, samples=300000, fit="pose", min_gain=0.005):
-    """fit: "pose" (scale, then shift, size and a small rotation) or "none"."""
-    if fit not in ("pose", "none"):
-        raise ValueError(f"fit must be pose or none, not {fit!r}")
+def place(out, samples=300000, min_gain=0.005):
+    """Fit the mesh to the masks (scale, then shift, size and a small rotation) and write posed.glb, cameras.json and
+    placement.json; see the module docstring."""
     import trimesh
     from PIL import Image
     from scipy.ndimage import binary_erosion
@@ -431,39 +430,37 @@ def place(out, samples=300000, fit="pose", min_gain=0.005):
     # Fit the size to the masks of all views; keep MV-SAM3D's pose when the fit gains too little.
     pose = {k: pose_raw[k] for k in ("rotation_wxyz", "translation", "scale")}
     x_w = canonical_glb_to_w(mesh.vertices, pose)
-    scale_fit, pose_fit = {"applied": False, "scale": 1.0}, {"applied": False}
-    if fit == "pose":
-        k, center, before, after, at_limit = fit_scale(x_w, mesh.faces, cams, masks)
-        applied = bool(after.mean() - before.mean() >= min_gain)
-        scale_fit = {"applied": applied, "scale": k if applied else 1.0, "candidate_scale": k, "center_W": center.tolist(),
-                     "mean_iou_before": round(float(before.mean()), 4), "candidate_mean_iou": round(float(after.mean()), 4),
-                     "min_gain": min_gain, "at_limit": at_limit, "fit_px": 384,
-                     "search": "0.05 steps over 0.7 to 1.3, grown while the best is at an edge (0.3 to 3.0), then 0.01 and 0.0025"}
-        if before.max() == 0:
-            scale_fit["warning"] = "the mesh overlaps no mask at scale 1"
-        elif at_limit:
-            scale_fit["warning"] = "the fitted scale stopped at a search limit"
-        if applied:
-            pose = scaled_pose(pose, k, center)
-            x_w = canonical_glb_to_w(mesh.vertices, pose)
-        print("scale fit:", json.dumps(scale_fit))
-        (k, R_w, shift, rvec), center, before, after, evals, at_bound = fit_pose(x_w, mesh.faces, cams, masks)
-        applied = bool(after.mean() - before.mean() >= min_gain)
-        cand = {"scale": round(k, 4), "shift_W": np.round(shift, 4).tolist(), "rotation_deg": np.round(rvec, 2).tolist()}
-        pose_fit = {"applied": applied, **(cand if applied else {"scale": 1.0, "shift_W": [0.0] * 3, "rotation_deg": [0.0] * 3}),
-                    **{"candidate_" + key: v for key, v in cand.items()}, "center_W": center.tolist(),
-                    "mean_iou_before": round(float(before.mean()), 4), "candidate_mean_iou": round(float(after.mean()), 4),
-                    "min_gain": min_gain, "evaluations": evals, "at_bound": at_bound, "fit_px": 384,
-                    "search": "coordinate descent on log scale, shift (box diagonals) and rotation (degrees) about the box "
-                              "center, first with the rotation held at 0 and a scale about view 0's camera tried first in "
-                              "each sweep, then with the rotation free (kept if it gains 0.005); steps 0.05/0.05/5 halving "
-                              "while at or above 0.003/0.003/0.3; bounds 0.5 to 2 x, 0.25 diag, 20 deg"}
-        if at_bound:
-            pose_fit["warning"] = "the fitted pose sits on a search bound"
-        if applied:
-            pose = similar_pose(pose, k, R_w, shift, center)
-            x_w = canonical_glb_to_w(mesh.vertices, pose)
-        print("pose fit:", json.dumps(pose_fit))
+    k, center, before, after, at_limit = fit_scale(x_w, mesh.faces, cams, masks)
+    applied = bool(after.mean() - before.mean() >= min_gain)
+    scale_fit = {"applied": applied, "scale": k if applied else 1.0, "candidate_scale": k, "center_W": center.tolist(),
+                 "mean_iou_before": round(float(before.mean()), 4), "candidate_mean_iou": round(float(after.mean()), 4),
+                 "min_gain": min_gain, "at_limit": at_limit, "fit_px": 384,
+                 "search": "0.05 steps over 0.7 to 1.3, grown while the best is at an edge (0.3 to 3.0), then 0.01 and 0.0025"}
+    if before.max() == 0:
+        scale_fit["warning"] = "the mesh overlaps no mask at scale 1"
+    elif at_limit:
+        scale_fit["warning"] = "the fitted scale stopped at a search limit"
+    if applied:
+        pose = scaled_pose(pose, k, center)
+        x_w = canonical_glb_to_w(mesh.vertices, pose)
+    print("scale fit:", json.dumps(scale_fit))
+    (k, R_w, shift, rvec), center, before, after, evals, at_bound = fit_pose(x_w, mesh.faces, cams, masks)
+    applied = bool(after.mean() - before.mean() >= min_gain)
+    cand = {"scale": round(k, 4), "shift_W": np.round(shift, 4).tolist(), "rotation_deg": np.round(rvec, 2).tolist()}
+    pose_fit = {"applied": applied, **(cand if applied else {"scale": 1.0, "shift_W": [0.0] * 3, "rotation_deg": [0.0] * 3}),
+                **{"candidate_" + key: v for key, v in cand.items()}, "center_W": center.tolist(),
+                "mean_iou_before": round(float(before.mean()), 4), "candidate_mean_iou": round(float(after.mean()), 4),
+                "min_gain": min_gain, "evaluations": evals, "at_bound": at_bound, "fit_px": 384,
+                "search": "coordinate descent on log scale, shift (box diagonals) and rotation (degrees) about the box "
+                          "center, first with the rotation held at 0 and a scale about view 0's camera tried first in "
+                          "each sweep, then with the rotation free (kept if it gains 0.005); steps 0.05/0.05/5 halving "
+                          "while at or above 0.003/0.003/0.3; bounds 0.5 to 2 x, 0.25 diag, 20 deg"}
+    if at_bound:
+        pose_fit["warning"] = "the fitted pose sits on a search bound"
+    if applied:
+        pose = similar_pose(pose, k, R_w, shift, center)
+        x_w = canonical_glb_to_w(mesh.vertices, pose)
+    print("pose fit:", json.dumps(pose_fit))
 
     trimesh.Trimesh(frames.w_to_gltf(x_w), mesh.faces, visual=mesh.visual, process=False).export(out / "posed.glb")
     diag = float(np.linalg.norm(np.ptp(x_w, 0)))
@@ -514,7 +511,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="step", required=True)
     p = sub.add_parser("prep")
     p.add_argument("--scene", required=True, help="folder with images/ and a mask folder")
-    p.add_argument("--mask-prompt", required=True, help="mask folder name; masks are <name>_mask.png or <name>.png")
+    p.add_argument("--mask-prompt", required=True, help="mask folder name; masks are <name>.png")
     p.add_argument("--out", required=True)
     p.add_argument("--max-side", type=int, default=1024)
     d = sub.add_parser("da3")
@@ -529,8 +526,6 @@ def main(argv=None):
     s.add_argument("--seed", type=int, default=42)
     pl = sub.add_parser("place")
     pl.add_argument("--out", required=True)
-    pl.add_argument("--fit", choices=("pose", "none"), default="pose",
-                    help="pose: scale, then shift, size and a small rotation (default); none")
     a = ap.parse_args(argv)
     if a.step == "prep":
         prep(a.scene, a.mask_prompt, a.out, a.max_side)
@@ -539,7 +534,7 @@ def main(argv=None):
     elif a.step == "sam3d":
         sam3d(a.mv_root, a.sam3d_root, a.out, a.seed)
     else:
-        place(a.out, fit=a.fit)
+        place(a.out)
 
 
 if __name__ == "__main__":

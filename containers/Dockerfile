@@ -40,13 +40,13 @@ RUN curl -fsSL https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz |
       | tar -xz -C /usr/local/bin --strip-components=1 docker/docker
 
 # What the stages write goes to the data folder through these links: caches (Hugging Face, torch, the nvdiffrast
-# build), the weights that setup/weights.sh puts inside the clones, and the jobs. /opt/gator/bin is where the agent's
+# build), the weights that setup/weights.sh puts inside the clones, and the jobs. /opt/harpor-agent/bin is where the agent's
 # containers find the helper client, which Apptainer binds there.
 RUN ln -s /data/cache /opt/harpor/.cache \
     && rm -rf /opt/harpor/sam-3d-objects/checkpoints && ln -s /data/weights/sam-3d-objects /opt/harpor/sam-3d-objects/checkpoints \
     && rm -rf /opt/harpor/VoMP/weights && ln -s /data/weights/vomp /opt/harpor/VoMP/weights \
     && ln -s /data/runs /opt/harpor/webapp_runs \
-    && mkdir -p /opt/gator && ln -s /opt/harpor/code/harpor/agent/bin /opt/gator/bin
+    && mkdir -p /opt/harpor-agent && ln -s /opt/harpor/code/harpor/agent/bin /opt/harpor-agent/bin
 
 COPY . /opt/harpor/code/
 

@@ -9,7 +9,7 @@ object {"output": text, "code": exit code} back.
 The helper runs from the repository, not from the work folder: `python -m` puts its starting folder
 first on sys.path, so a json.py (or a harpor/ package) that the agent writes into /work would
 otherwise run on the host, outside the agent's container. PYTHONSAFEPATH=1 (Python 3.11 and later)
-keeps that folder off sys.path as well. The helpers take every path relative to GATOR_WORK.
+keeps that folder off sys.path as well. The helpers take every path relative to HARPOR_WORK.
 """
 
 import contextlib
@@ -44,8 +44,8 @@ def parse_request(line):
 class ToolServer:
     def __init__(self, socket_path, work, control, blender):
         self.socket_path, self.work = str(socket_path), str(work)
-        self.env = {**os.environ, "PYTHONPATH": str(REPO), "PYTHONSAFEPATH": "1", "GATOR_WORK": str(work),
-                    "GATOR_CONTROL": str(control), "GATOR_BLENDER": shlex.join(blender)}
+        self.env = {**os.environ, "PYTHONPATH": str(REPO), "PYTHONSAFEPATH": "1", "HARPOR_WORK": str(work),
+                    "HARPOR_CONTROL": str(control), "HARPOR_BLENDER": shlex.join(blender)}
         self._lock = threading.Lock()
         self._proc, self._stopping, self._thread = None, False, None
         server = self

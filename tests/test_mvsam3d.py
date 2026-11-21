@@ -12,9 +12,9 @@ def scene(tmp_path, names=("10", "2", "1"), size=(400, 300)):
     (tmp_path / "scene" / "toy").mkdir()
     for i, n in enumerate(names):
         Image.new("RGB", size, (i * 40, 100, 200)).save(tmp_path / "scene" / "images" / f"{n}.png")
-        m = np.zeros((size[1], size[0], 4), np.uint8)
-        m[100:200, 150:250, 3] = 255
-        Image.fromarray(m, "RGBA").save(tmp_path / "scene" / "toy" / f"{n}_mask.png")
+        m = np.zeros((size[1], size[0]), np.uint8)
+        m[100:200, 150:250] = 255
+        Image.fromarray(m, "L").save(tmp_path / "scene" / "toy" / f"{n}.png")
     return tmp_path / "scene"
 
 
@@ -130,29 +130,14 @@ def test_scaled_pose_reproduces_the_fitted_mesh():
     assert np.allclose(canonical_glb_to_w(V, M.scaled_pose(pose, 0.9, c)), c + 0.9 * (x - c))
 
 
-def test_load_mask_reads_alpha_and_opaque_exports(tmp_path):
-    from harpor.stage_a.sam3d import load_mask
+def test_load_mask_reads_an_l_mode_mask(tmp_path):
+    from harpor.stage_a.place import load_mask
 
     obj = np.zeros((40, 50), bool)
     obj[10:30, 15:35] = True
-    gray = np.where(obj, 255, 0).astype(np.uint8)
-    edge = gray.copy()
-    edge[9, 15:35] = 160  # an anti-aliased edge row, more than half covered
-    edge[30, 15:35] = 60  # less than half covered
-    cases = {
-        "alpha": np.dstack([np.full((40, 50, 3), 255, np.uint8), gray]),  # RGBA, the object in alpha
-        "opaque_rgba": np.dstack([edge, edge, edge, np.full((40, 50), 255, np.uint8)]),  # SAM 3 demo export
-        "rgb": np.dstack([gray, gray, gray]),
-        "gray": gray,
-        "binary": obj.astype(np.uint8),
-    }
-    for name, a in cases.items():
-        Image.fromarray(a).save(tmp_path / f"{name}.png")
-        m = load_mask(tmp_path / f"{name}.png")
-        want = obj.copy()
-        if name == "opaque_rgba":
-            want[9, 15:35] = True
-        assert m.shape == (40, 50) and (m == want).all(), name
+    Image.fromarray(np.where(obj, 255, 0).astype(np.uint8), "L").save(tmp_path / "m.png")
+    m = load_mask(tmp_path / "m.png")
+    assert m.shape == (40, 50) and (m == obj).all()
 
 
 def test_matrix_to_quat_inverts_quat_to_matrix():
@@ -249,13 +234,6 @@ def test_fit_pose_keeps_a_far_small_mesh_off_the_bounds():
     assert np.abs(np.ptp(x_fit, 0) / np.ptp(x_true, 0) - 1).max() < 0.01
 
 
-def test_place_rejects_an_unknown_fit(tmp_path):
-    import pytest as _pytest
-
-    with _pytest.raises(ValueError):
-        M.place(tmp_path, fit="Pose")
-
-
 def fake_mv_sam3d(monkeypatch, mv_root):
     """Stand-ins for torch and the MV-SAM3D modules that sam3d() imports, so that it runs without a GPU. The
     pipeline returns a box and a fixed pose."""
@@ -340,12 +318,12 @@ def test_place_records_the_metric_scale(tmp_path):
                   extrinsics=np.stack([T[:3] for T in E]).astype(np.float32), intrinsics=np.stack([K, K]).astype(np.float32),
                   image_files=np.array([str(out / "input" / "images" / f"{i}.png") for i in range(2)]))
     np.savez(out / "da3_output.npz", **arrays)
-    M.place(out, samples=2000, fit="none")
+    M.place(out, samples=2000)
     p = json.loads((out / "placement.json").read_text())
     assert p["metric_scale"] is None and p["units"] == "DA3 units (meters)" and p["check"]["mean_mask_iou"] > 0.9
     assert p["frame_W"].endswith("in DA3 units (meters)")
     np.savez(out / "da3_output.npz", **arrays, metric_scale=np.float64(1.25))  # select applied a LiDAR scale
-    M.place(out, samples=2000, fit="none")
+    M.place(out, samples=2000)
     p = json.loads((out / "placement.json").read_text())
     assert p["metric_scale"] == 1.25 and p["units"] == "meters (LiDAR scale applied in select)"
     assert p["frame_W"].endswith("in meters (LiDAR scale applied in select)")  # the same units in both places

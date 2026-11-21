@@ -40,19 +40,14 @@ points coloured by r / s on the
 prep image, to spot calibration and timing errors. estimate(points_out=...) also gives each view's
 points with their rows in the samples ("index"), so the lidar stage can show which points the scale
 used. read_calibration() reads the LiDAR-camera calibration file (YAML or JSON).
-
-    python -m harpor.stage_a.lidar_scale estimate --pool P --samples S.npz --out F [--check DIR]
 """
 
-import argparse
 import json
 import re
 import time
 from pathlib import Path
 
 import numpy as np
-
-from harpor.fileio import write_json
 
 SCALED = ("depth", "pointmaps", "pointmaps_sam3d")  # scaled whole; the extrinsics' translation column too
 # Of pool/lidar.json, by the samples' source (job.json "lidar" "kind"). steps.done("lidar") takes only a record of its
@@ -676,10 +671,7 @@ def combine(views, weight_cap=WEIGHT_CAP, outlier_mads=OUTLIER_MADS, outlier_min
 
 
 def load_samples(samples):
-    """{name: (N, 3) float array} from a mapping or an .npz path; any other shape is an error."""
-    if isinstance(samples, (str, Path)):
-        with np.load(samples) as f:
-            samples = {k: f[k] for k in f.files}
+    """{name: (N, 3) float array} from a mapping; any other shape is an error."""
     out = {}
     for name, a in samples.items():
         a = np.asarray(a, float)
@@ -691,7 +683,7 @@ def load_samples(samples):
 
 def estimate(pool_dir, samples, check_dir=None, points_out=None, source="rosbag", rays=None, **overrides):
     """The lidar.json record of a pool (mvsam3d prep and da3 ran on it) and the LiDAR samples
-    ({pool name: (N, 3) [u, v, z]} or an .npz). overrides change thresholds by name (thresholds()).
+    ({pool name: (N, 3) [u, v, z]}). overrides change thresholds by name (thresholds()).
     With check_dir, writes check_dir/<name>.jpg for every view. A dict points_out gets {view name:
     view_ratio's points, with the view's DA3 depth and crop, so the lidar stage need not read them again}. source,
     the samples' kind, picks the causes that a failed check names (CAUSES).
@@ -709,9 +701,9 @@ def estimate(pool_dir, samples, check_dir=None, points_out=None, source="rosbag"
     crops = {v["name"]: v["crop"] for v in json.loads((pool_dir / "prep.json").read_text())["views"]}
     with np.load(pool_dir / "da3_output.npz") as da:
         depth = da["depth"]
-        conf = da["conf"] if "conf" in da.files else np.ones_like(depth)
+        conf = da["conf"]
         stem = {Path(str(f)).stem: i for i, f in enumerate(da["image_files"])}
-        process_res = int(da["process_res"]) if "process_res" in da.files else None
+        process_res = int(da["process_res"])
     views, points = [], {}
     for n in view_names(pool_dir):
         if n not in stem:
@@ -1019,25 +1011,3 @@ def read_calibration(text, name="calibration.yaml"):
         size = [int(a[0]), int(a[1])]
     return {"T_cam_lidar": T.tolist(), "camera_axes": axes, "time_offset_s": offset, "K": K, "D": D,
             "distortion_model": model, "image_size": size, "given_as": key}
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    e = sub.add_parser("estimate", help="the metric scale of a pool from LiDAR samples")
-    e.add_argument("--pool", required=True, help="pool folder (mvsam3d prep and da3 ran on it)")
-    e.add_argument("--samples", required=True, help=".npz with an (N, 3) [u, v, z] array per pool frame name")
-    e.add_argument("--out", required=True, help="the lidar.json record")
-    e.add_argument("--check", help="folder for the check images")
-    a = ap.parse_args(argv)
-    rec = estimate(a.pool, a.samples, a.check)
-    write_json(a.out, rec, indent=1)
-    lines = summary(rec)
-    print("\n".join(lines[:-1]))
-    if not rec["ok"]:
-        raise SystemExit(lines[-1])
-    print(lines[-1])
-
-
-if __name__ == "__main__":
-    main()

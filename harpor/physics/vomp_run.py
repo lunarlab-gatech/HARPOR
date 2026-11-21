@@ -30,9 +30,9 @@ from harpor.physics.mass import mass_properties  # noqa: E402
 FIELDS = (("youngs_modulus_pa", "youngs_modulus"), ("poisson_ratio", "poisson_ratio"), ("density_kg_m3", "density"))
 
 
-def run_glb(model, glb, out, config, load_s=None):
-    """VoMP on one GLB into out (work/, materials.npz, voxels.npz, summary.json). Returns the summary.
-    Its seconds hold load only when load_s is given (the single run)."""
+def run_glb(model, glb, out, config, load_s):
+    """VoMP on one GLB into out (work/, materials.npz, voxels.npz, summary.json). Returns the summary. load_s: the
+    seconds that loading the model took."""
     import torch
     from scipy.spatial import cKDTree
     from vomp.inference.utils import denormalize_coords, save_materials
@@ -69,7 +69,7 @@ def run_glb(model, glb, out, config, load_s=None):
         "p05_p95": {k: np.percentile(v, [5, 95]).tolist() for k, v in
                     (("youngs_modulus_pa", E), ("poisson_ratio", nu), ("density_kg_m3", rho))},
         "rigid_body": mass_properties(occupied, rho[idx], h),
-        "seconds": {"predict": t2 - t1} if load_s is None else {"load": load_s, "predict": t2 - t1},
+        "seconds": {"load": load_s, "predict": t2 - t1},
         "gpu_peak_gb": torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else None,
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=1))

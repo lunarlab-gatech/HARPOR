@@ -43,8 +43,8 @@ Slurm cluster (notes 7 and 10).
   friction and no simulation models, but it keeps VoMP's mass and materials (note 9).
 - **Host check and repair rounds:** in a web-app job, the host checks each candidate that the agent
   hands off. It checks that the agent finished and compares the surface with the original (report
-  only). A failed check gives a repair round. A session has at most 3 builds and 1 planning round, and
-  the host delivers the best stored candidate (note 5, after PhysAg3D).
+  only). A failed check gives a repair round. A session has at most 3 builds, and the host delivers
+  the best stored candidate (note 5, after PhysAg3D).
 - **Metric scale:** an optional LiDAR per job, from a rosbag topic or a Stray Scanner capture, sets the
   scale only (note 12).
 
@@ -147,39 +147,33 @@ has it.
 ### 3. Inputs (`harpor/stage_a/`)
 
 - A scene folder holds `images/` with the photos (PNG or JPG) and one mask folder per object. The
-  mask of photo `<name>` is `<folder>/<name>_mask.png` or `<folder>/<name>.png`, at the photo's
-  size; `prep` tries `_mask.png` first. Single-view `sam3d.py` takes one photo and one mask path.
+  mask of photo `<name>` is `<folder>/<name>.png`, at the photo's size.
 - Every step reads photos as stored, without the EXIF rotation, so masks line up pixel for pixel.
-- `load_mask` (`sam3d.py`) takes the object from the alpha channel when alpha varies (SAM 3D's and
-  MV-SAM3D's RGBA masks). Otherwise it takes the brightest channel above 127 (above 0 for a 0/1
-  mask), as in the SAM 3 web demo's opaque white-on-black export.
+- `load_mask` (`place.py`) reads a mask as `sam3_masks` and `prep` write it (L mode, 0/255): above 127 is the
+  object.
 - **SAM 3 masks** (`harpor/stage_a/sam3_masks.py`, env `envs/sam3seg`) make the masks from a text
-  prompt. Each prompt gets a folder `DIR/sam3_<prompt>/` with `<name>.png` (L mode, 0/255) for
+  prompt. The prompt gets a folder `DIR/sam3_<prompt>/` with `<name>.png` (L mode, 0/255) for
   every photo where SAM 3 finds the object, one `sam3.json` (every instance's score, box and pixel
   count) and `check/<name>.jpg` for every photo (the mask in green, other instances outlined in
   red). In the folder name, the prompt is in lower case, and each run of characters other than
   letters and digits becomes one `_` ("Coffee cup" gives `sam3_coffee_cup`). Then run
-  `mvsam3d prep --mask-prompt sam3_<prompt>`, or `sam3d.py --mask DIR/sam3_<prompt>/<name>.png`.
+  `mvsam3d prep --mask-prompt sam3_<prompt>`.
 
   ```bash
   module purge; G=$(readlink -f ~/scratch)/gator; export HF_HOME=$G/.cache/huggingface
   cd $G/HARPOR && $G/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks \
-    --scene DIR --prompt plate --prompt "coffee cup"
-  # to fix one photo, rerun that prompt alone: --prompt plate --pick NAME=K --overwrite
+    --scene DIR --prompt plate
+  # to fix one photo, rerun with a pick: --prompt plate --pick NAME=K
   ```
 
   - The step uses transformers, not Meta's own `sam3` package, which needs a GPU to build the
     model and does not declare all its dependencies.
   - Instances are numbered by score, and the mask is instance 0. `--pick NAME=K` takes instance K
     in photo NAME, `NAME=K,L` takes the union of K and L, and `NAME=none` writes no mask (the
-    object is not in that photo). `NAME=0` goes back to the top score. A rerun keeps the earlier
-    picks of the photos its `--pick` does not name; an earlier pick of an instance that is gone
-    falls back to the top score with a warning. A photo with no instance above `--threshold` (0.5)
-    gets no mask file, so `prep` skips it.
-  - The step replaces an earlier run's files only with `--overwrite` and only after every photo is
-    done; each file is written under a temporary name and then renamed. A hand-made
-    `<name>_mask.png` in the folder stays, and `prep` prefers it. The step warns when two prompts
-    of one run give masks that overlap with IoU above 0.5.
+    object is not in that photo). `NAME=0` is the top score. A photo with no instance above the
+    threshold (0.5) gets no mask file, so `prep` skips it.
+  - The step replaces an earlier run's files only after every photo is done; each file is written
+    under a temporary name and then renamed.
   - The step adds one padding box (label -10) so that the prompt gets the CLS token that Meta's
     code appends.
   - Setup, once: `bash setup/sam3seg.sh` builds `envs/sam3seg` (Python 3.12, torch 2.14.1+cu130,
@@ -192,7 +186,7 @@ has it.
     code finds none above 0.3), and "saucer" finds the same object at 0.97. When a photo gets no
     mask, try another noun first.
 
-### 4. Stage A: SAM 3D Objects on ICE (`harpor/stage_a/sam3d.py`)
+### 4. Stage A: the SAM 3D Objects environment on ICE
 
 `bash setup/sam3d.sh` builds the env of step 2 (with anthropic 1.15.0 for note 5 added), and `setup/weights.sh`
 downloads the weights of step 3. The steps below record the first build, on ICE (2026-10-14), under
@@ -252,7 +246,9 @@ without one when `TORCH_CUDA_ARCH_LIST` is set, as the docker build does.
    mv checkpoints/hf-download/checkpoints checkpoints/hf && rm -rf checkpoints/hf-download
    ```
 4. **Run** on one photo (smoke test: the repo's kids-room image, mask 14). Start from a clean
-   shell, because nvdiffrast compiles C++ on its first run:
+   shell, because nvdiffrast compiles C++ on its first run. The single-view script this smoke test
+   used, `harpor/stage_a/sam3d.py`, was removed on 2026-11-21 (git history has it); the pipeline runs
+   SAM 3D through MV-SAM3D (note 4b), which makes the same two changes below:
 
    ```bash
    module purge; G=$(readlink -f ~/scratch)/gator
@@ -269,15 +265,14 @@ without one when `TORCH_CUDA_ARCH_LIST` is set, as the docker build does.
 What the run needs and why:
 - `notebook/inference.py` reads `CONDA_PREFIX` at import, so it must be set.
 - The wrapper in `notebook/inference.py` turns texture baking off and writes vertex colours only.
-  `sam3d.py` calls `_pipeline.run` with mesh postprocessing and baking on and sets
-  `rendering_engine = "nvdiffrast"`.
+  `mvsam3d.py` sets `rendering_engine = "nvdiffrast"` so that the bake makes a texture.
 - nvdiffrast compiles its plugin on first use. It needs `CPATH` and `LIBRARY_PATH` pointing at the
   conda CUDA headers and libraries (on lunarL40S it failed with "cuda_runtime.h: No such file"
   without them). `TORCH_EXTENSIONS_DIR` keeps the build out of the 30 GB home. nvdiffrast clears
   `TORCH_CUDA_ARCH_LIST` before this build, so torch builds for the visible GPUs with PTX, and the
   stages do not set the variable.
 - The bake renders 100 views of the Gaussians with backend `inria`, whose
-  `diff_gaussian_rasterization` SAM 3D does not install. `sam3d.py` switches it to the `gsplat`
+  `diff_gaussian_rasterization` SAM 3D does not install. `mvsam3d.py` switches it to the `gsplat`
   backend.
 - The first run downloads MoGe and DINOv2 into the caches.
 - Outputs: `canonical.glb` (unit box, y up, 1024 px texture), `splat.ply`, `pose.json` and
@@ -313,8 +308,8 @@ toy, with masks. `STEPS="sam3d place"` reruns only those steps.
   from DA3's 504 px to the image size.
 - `sam3d` calls `pipe.run_multi_view` with MV-SAM3D's entropy weighting (the settings in its
   README), texture baking, the nvdiffrast engine and the gsplat bake backend, as in note 4.
-- `place` fits the mesh to the masks of all views (see below): `--fit pose` (default)
-  fits the scale and then shift, size and a small rotation; `--fit none` keeps MV-SAM3D's pose.
+- `place` fits the mesh to the masks of all views (see below): the scale, and then shift, size and a
+  small rotation.
   It then writes `posed.glb` in frame W
   (view 0's OpenCV camera, DA3 meters, or LiDAR-scaled meters when the web app's `select` applied a
   LiDAR scale, note 12),
@@ -374,10 +369,10 @@ the ICE node, with `session/prompt.txt` on stdin and the JSONL events in `sessio
 ```bash
 apptainer exec --nv --containall --no-mount bind-paths \
   --bind <root>/work:/work --bind <root>/session:/session \
-  --bind harpor/agent/bin:/opt/gator/bin:ro --bind <socket dir>:/opt/gator/sock:ro \
+  --bind harpor/agent/bin:/opt/harpor-agent/bin:ro --bind <socket dir>:/opt/harpor-agent/sock:ro \
   --bind /etc/resolv.conf:/etc/resolv.conf:ro --bind /etc/hosts:/etc/hosts:ro \
   --env-file ~/.config/harpor/openai.env --env CODEX_HOME=/session/codex_home \
-  --env GATOR_SOCKET=/opt/gator/sock/tools.sock --env PREPEND_PATH=/opt/gator/bin \
+  --env HARPOR_TOOL_SOCKET=/opt/harpor-agent/sock/tools.sock --env PREPEND_PATH=/opt/harpor-agent/bin \
   --pwd /work harpor-agent.sif \
   sh -c 'export CODEX_API_KEY="$OPENAI_API_KEY"; unset OPENAI_API_KEY; exec "$@"' codex \
   codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --strict-config \
@@ -414,8 +409,8 @@ apptainer exec --nv --containall --no-mount bind-paths \
   lists one under `rejected`, and the fallback order goes on. Blender for the helpers runs in a second container that sees only the work
   folder (at its host path and at `/work`), `control/staging` and `control/exports` (read-only), both
   at their host paths, and the Blender scripts, with auto-run of scripts in the `.blend` off. The
-  tool server passes this command to the helpers as `GATOR_BLENDER`. The helpers resolve
-  `GATOR_WORK` and `GATOR_CONTROL` as this command binds them, so a session root reached through a
+  tool server passes this command to the helpers as `HARPOR_BLENDER`. The helpers resolve
+  `HARPOR_WORK` and `HARPOR_CONTROL` as this command binds them, so a session root reached through a
   symlink (such as `~/scratch` on ICE) still works. When the session ends, the server stops and
   kills a running helper and its Blender before the deliverable is picked.
 - Exports. `blender/export_glb.py` writes the GLB, imports it again to check it and only then
@@ -445,11 +440,10 @@ apptainer exec --nv --containall --no-mount bind-paths \
   one line of printable text (`tools.printable`). Tabs and line breaks become spaces. Control
   characters (ESC with them, so no OSC 52 clipboard write, OSC 0 title or CSI sequence), format
   characters such as bidi overrides, surrogates and unassigned code points are dropped. Letters of any
-  script stay. `agent_step.py`, `run.py`, `loop_trace.py` and the stdout of `claude_agent.py` clean the
+  script stay. `agent_step.py`, `run.py` and the stdout of `claude_agent.py` clean the
   agent's text again when they print it, so an older result prints cleanly too. `agent_step.py`
   replaces the keys again after that cleaning, since a key split by a dropped character is whole
-  only then. `loop_trace.py` skips lines and review files of another shape, and reads the files that
-  the agent can write without following a link or opening a FIFO. `session/claude.jsonl` is ASCII:
+  only then. `session/claude.jsonl` is ASCII:
   JSON escapes the model's control, bidi and zero-width characters. The tool server already caps
   each argument at 4096 characters.
 - The helpers run on the host but act on a folder the agent controls, so they never follow
@@ -500,8 +494,7 @@ apptainer exec --nv --containall --no-mount bind-paths \
 - Videos: `harpor/agent/blender/turntable.py` renders a 360-degree turntable of one GLB in frame W
   into the PNG frames of `frames_dir`. The asset's optional `matrix` (4x4, row-major) maps the GLB's
   Blender world into W first, and `elevation` lifts the camera (degrees above the horizontal). The web
-  app's 360 video encodes these frames (note 10). `python3 harpor/agent/loop_trace.py RUN_DIR` prints
-  a session's loop in order.
+  app's 360 video encodes these frames (note 10).
 
 #### Rounds
 
@@ -522,22 +515,16 @@ then (`tools.round_events`). So a `finish` of round 1 does not end round 2, for 
 one change in `claude_agent.py`). `run_budget.json` adds `round` and `kind`. When a round starts, the
 last round's logs and `prompt.txt` move to `session/rounds/NN/`. Then `session/prompt.txt`,
 `work/AGENTS.md` and `codex_home/config.toml` are written again, so an edit that an agent made to them
-does not reach the next agent. `loop_trace.py` prints the last round and says which one it is.
+does not reach the next agent.
 
 The kinds of round (`controller.run_rounds`):
 - build: 900 s (`agent_step.BUDGET_S` and `controller.BUDGET_S`), with the refinement prompt. The paper gives
   600 s; on 2026-11-21 every GPT-6.2-Astra build round ran out the 600 s, so every agent gets 900 s.
 - repair: 450 s. The prompt is the refinement prompt, then the text of `prompts.round_prompt` with the
   last check's feedback, the path of its report and the best stored candidate so far, then `GUIDANCE`.
-- replan: 300 s. The agent reads the last report, writes `/work/plan.md` and stops. `tools.main` refuses
-  every helper in this round, so it makes no export, receipt or off-clock time. The host never reads
-  `plan.md`.
 
 `next_round` picks the next round. There is none after a passing round or a round of scope none. A
-session has at most 3 builds (the build and 2 repairs) and 1 replan, and a replan is not a build. A
-replan comes once, after a structural round, while builds are left, and a repair always follows it.
-Any other failure gets a repair. The only structural finding is `surface_identity`, which counts only
-while `surface.ENFORCE` is on. So with today's settings no replan runs, and the agent time is at most
+session has at most 3 builds (the build and 2 repairs), so the agent time is at most
 900 + 450 + 450 = 1800 s. Each build or repair can add up to 600 s off the clock for exports.
 
 After each build or repair, `check_round` runs these steps on the host:
@@ -555,25 +542,18 @@ After each build or repair, `check_round` runs these steps on the host:
    still ends the session.
 
 The report goes to `work/evidence/round_NN.json` for the next agent and into the candidate's
-`report.json`. `validate.feedback` turns it into at most 6000 characters for the next prompt, structural
-findings first. The agent's text appears in it only as JSON, which `json.dumps` keeps
+`report.json`. `validate.feedback` turns it into at most 6000 characters for the next prompt, report-only
+findings last. The agent's text appears in it only as JSON, which `json.dumps` keeps
 ASCII.
 
-`validate.SCOPE` gives each finding a scope (PhysAg3D, section A.3):
-
-| Scope | Findings |
-|---|---|
-| structural | `surface_identity` |
-| local | `no_candidate`, `not_finished`, `surface_uv`, `surface_material`, `surface_deleted`, `surface_flipped`, `surface_error`, `validation_error` |
-
-A round is structural with a structural finding, else local with a local one, else none. Surface
-findings count only while `surface.ENFORCE` is on, and it is off. A round passes when no finding that
-counts is left, so with `surface.ENFORCE` off a pass needs only the agent's `complete` or `unchanged`.
+Only `no_candidate`, `not_finished` and `validation_error` count. Surface findings (`surface_*`) are report
+only. A round's scope is local when a finding counts, else none. A round passes when no finding that counts is
+left, so a pass needs only the agent's `complete` or `unchanged` and a valid GLB.
 
 *Candidates and selection.* At the end, `select_candidate` delivers the best eligible stored candidate.
-A candidate is eligible when its copy still has its sha256, passes `check_glb` and `check_size`, and has
-no `surface_identity` finding that counts. The rank, highest first, is `controller.RANK`: the round
-passed, the surface does not block, the GLB did not come from an export, and then the later version. So
+A candidate is eligible when its copy still has its sha256 and passes `check_glb` and `check_size`. The
+rank, highest first, is `controller.RANK`: the round passed, the GLB did not come from an export, and then
+the later version. So
 a passing round always wins, even over a later failure. When the chosen candidate's round passed, the
 result keeps the agent's verdict, reason and limitations. Otherwise the verdict is `needs_review`, and
 the host writes the reason (the open finding codes) and the limitations, without the agent's text. With
@@ -584,7 +564,7 @@ unchanged. `source` keeps its value, so physics finds the GLB as before.
 `network_commands` and the Claude usage cover every round. It adds `rounds` (round, kind, budget_s,
 exit, wall_s, candidate, outcome, scope, and findings with only code, measured and expected) and
 `candidate` (the stored candidate delivered, and why). Every session, with rounds or not, adds
-`surface`, the surface check of its deliverable, which never blocks.
+`surface`, the surface check of its deliverable, which is report only.
 
 *Evidence* (`harpor/agent/evidence.py`). `control/evidence.json` is written after every round and once
 more with the choice, so a session that stops keeps it. It holds `version`, `object`, `diagonal_m`,
@@ -606,9 +586,10 @@ and are not native. Added faces never block. Materials compare their factors and
 in 16 x 16 tiles, and a mean difference above 6/255 in a tile is a change. The limits, as shares of the
 native area, are: deleted above 2% (`surface_deleted`), other UVs above 1% (`surface_uv`), another
 material above 1% (`surface_material`), flipped above 1% (`surface_flipped`), and present under 50%
-(`surface_identity`). The limits come from reasoning, not from paired data. So `surface.ENFORCE` is
-False, and every surface finding is report-only. It shows in the report and in the feedback, and it
-decides nothing.
+(`surface_identity`). The limits come from reasoning, not from paired data, so every surface finding is
+report only. It shows in the report and in the feedback, and it decides nothing. Until 2026-11-21 a switch,
+`surface.ENFORCE` (off), could make them count, with a planning round (`replan`) after a `surface_identity`
+finding. Neither ever ran, and both were removed; git history has them.
 
 *Tested so far.* On the Mac the tests drive the rounds with `harpor.agent.fake_agent` in place of
 Blender and the agent. No rigid job has run the rounds on ICE with a real agent and real Blender.
@@ -621,14 +602,14 @@ argument (`--sif` of the stages) is an Apptainer SIF, `$G/sif/harpor-agent.sif`,
 `docker:IMAGE` (`HARPOR_SANDBOX`, set by the docker image). Both give each container the same view:
 
 - only the binds of the call, at the same paths: `/work` and `/session` of the session, the helper client at
-  `/opt/gator/bin` and the tool server's socket folder at `/opt/gator/sock`, or a job's folders for Blender;
+  `/opt/harpor-agent/bin` and the tool server's socket folder at `/opt/harpor-agent/sock`, or a job's folders for Blender;
 - no API key except in the Codex container (`--env-file`), and no network in the Claude shell;
 - the GPU, for Blender's Cycles OptiX.
 
 In docker, HARPOR runs in its own container, which has the host's docker socket, and starts each sandbox as a
 sibling container of the same image (`docker run --rm --init --gpus all --user UID:GID`). The docker daemon reads
 bind paths on the host, so a path under `/data`, the data folder, maps to `HARPOR_HOST_DATA`, the folder's path on
-the host; a path in the repo is not bound, because the sibling has the same image (and `/opt/gator/bin` links to
+the host; a path in the repo is not bound, because the sibling has the same image (and `/opt/harpor-agent/bin` links to
 `harpor/agent/bin`); any other path is refused. TMPDIR is in the data folder, so the socket folder is shared too.
 Blender's docker containers also have no network. A killed `docker run` does not stop its container, so every
 `docker run` goes through `harpor/agent/docker_guard.py`, whose guardian, in a session of its own, removes the
@@ -699,7 +680,7 @@ read-only. The Claude shell (`--net --network none`) and the Blender containers 
   `PYTHONSAFEPATH=1`, so a `.py` file the agent writes in `/work` cannot replace a module that runs
   on the host.
 - Every helper except `finish` ends its output with `time left: N s of the B s budget`, where B is
-  the round's budget (900 s for a build, 450 s for a repair, 300 s for a replan) (both agents). The Claude manual's Measured times come from the Opus sessions of 2026-10-17.
+  the round's budget (900 s for a build, 450 s for a repair) (both agents). The Claude manual's Measured times come from the Opus sessions of 2026-10-17.
 - Opus is faster than GPT-6-Astra on the same Stage A meshes, stops sooner and calls more results
   `complete`. In the photo-match comparison (removed, see commit 91003c9), the later Opus table sessions match or beat
   GPT-6-Astra on several scores. The gap that remains is in how Opus finishes: it names leftover flaws as
@@ -839,19 +820,15 @@ grid. VoMP does not predict friction.
 Steps for one object, by hand. In the web app, the vomp stage runs step 2 on `run/canonical.glb`, the align
 stage runs step 1 and then the transfer above (which gives step 3), and the estimate, mjcf, usd and urdf stages
 run steps 4 to 7:
-1. **Align.** `python -m harpor.physics.align --glb IN.glb --out aligned.glb [--up pca|normals | --up-near X,Y,Z] [--x pca|footprint] [--opaque]`
+1. **Align.** `python -m harpor.physics.align --glb IN.glb --out aligned.glb --up-near X,Y,Z`
    (in `envs/sam3d`). It writes a copy in frame S: z up, the footprint centred on the origin, the
    bottom at z = 0 and the long side on x. The BIN chunk is copied byte for byte, and the transform
-   sits in one new root node. `--up pca` takes the thinnest principal axis of the surface (flat
-   objects such as the fork, the knife and the plate). `--up normals` takes the dominant
-   near-horizontal plane (the pan, the table and the chair). `--x footprint` takes the long side of
-   the minimum-area footprint rectangle; on a near-square footprint the PCA axis can lie on a
-   diagonal, which makes the bounding box and the voxels larger. `--up-near X,Y,Z` takes the
-   object's own axis closest to a hint in W, such as a table plane fitted to view 0's depth; the
-   hint only picks the axis, so an object whose pose is a little off still rests on its base.
-   `--opaque` drops transmission, volume and IOR from the materials, because VoMP rejects transmissive
-   ones (the glass). The web app adds it when the GLB has transmission or alpha
-   (`physics_auto.needs_opaque`).
+   sits in one new root node. Up is the object's own axis closest to the hint X,Y,Z in W, such as a
+   table plane fitted to view 0's depth: one of the three principal axes of the surface, or the
+   dominant near-horizontal plane. The hint only picks the axis, so an object whose pose is a little
+   off still rests on its base. x is the long side of the minimum-area footprint rectangle; on a
+   near-square footprint the PCA axis could lie on a diagonal, which makes the bounding box and the
+   voxels larger. The materials stay as they are.
 2. **Predict.** `cd $G/VoMP && python $G/HARPOR/harpor/physics/vomp_run.py --glb aligned.glb --out RUN`
    (in `envs/vomp11`, on a GPU node). It calls `get_mesh_materials` with
    `query_points="voxel_centers"` and `return_original_scale=True`, and writes `materials.npz`
@@ -878,9 +855,8 @@ run steps 4 to 7:
      even when it carries no mass, and open meshes fail that check. All geoms have density 0.
    - VoMP gives no friction. The friction is `summary.json` "friction", which the estimate stage adds.
      It goes on the collision geoms and on the scene floor, because MuJoCo uses the larger friction of
-     two geoms with equal priority. A summary without it (VoMP's alone, or one from a job built before
-     the estimate stage) gets 0.6 (`mjcf.DEFAULT_FRICTION`). `--friction` overrides both, and `mjcf.json`
-     records the value used.
+     two geoms with equal priority. `--friction` overrides it, and a summary without it (VoMP's alone)
+     needs `--friction`. `mjcf.json` records the value used.
    - CoACD gets the welded mesh, a primitive with under 4 distinct vertices or no area is skipped,
      and the visual OBJs keep the glTF normals.
 6. **USD for Isaac Sim.** `python -m harpor.physics.usd --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME`
@@ -949,7 +925,7 @@ The routes (the `server.py` docstring gives each body and answer): `GET /`, `/he
 `POST /start`, `GET /selection`, `PUT` and `DELETE /calibration`, `POST /overrides`, `POST /continue`,
 `POST /cancel`, `GET /events` (server-sent events) and `GET` or `HEAD /file/{path}`. The start body
 takes `mode`, `prompt`, `n_views`, `picks`, `view0`, `auto_continue`, `agent` (astra, opus, fable or
-none), `api_key`, `key_later`, `lidar` and `turntable`.
+none), `api_key`, `lidar` and `turntable`.
 
 The terminal command `python -m harpor.webapp.run INPUT [--prompt NOUN] [settings]`, or `--resume ID`,
 runs a job without a browser through the same routes. Its settings are `--camera-topic`,
@@ -1058,8 +1034,7 @@ terminal command as a process of its own.
    uses `posed.glb` when the agent's GLB does not keep the size of the GLB it started from
    (`physics_auto.pick_glb`, `controller.check_size`). `physics/up.json`
    "glb_rule" gives the reason. `results.zip` still holds the agent's GLB as `refined.glb`. `align` takes up from a plane fitted under the object in view 0's DA3 points, or
-   from the mean camera up when no plane fits, uses `--x footprint`, and adds `--opaque` when the GLB
-   has transmission or alpha. Then the material transfer recomputes the final mass and inertia without
+   from the mean camera up when no plane fits. Then the material transfer recomputes the final mass and inertia without
    running VoMP again, then `estimate` asks the job's model for the friction (note 9), then MJCF, USD and
    URDF, then the 360 video when the job asked for one (the `turntable` stage; a failure warns), then
    `results.zip`.
@@ -1077,31 +1052,18 @@ terminal command as a process of its own.
    The render has `RENDER_TIMEOUT_S`. The tests' stand-in jobs run the real stage with the fake Blender, whose frames are the GLB's
    outline. `tests/test_webapp_turntable.py` checks the upright turn, the binds, the render with the fake
    Blender, the encode, and `blender/turntable.py` itself on stand-ins for `bpy`. Not checked on ICE yet: the upright turn, the render time and the file size.
-   A job folder that an older version left still loads, lists and resumes. Its job.json keeps the
-   records of the stages that this version no longer has: for an articulated object, "articulated",
-   "parts" and the stages removed on 2026-11-11. Nothing runs or shows them (`jobs.progress` lists
-   `steps.NAMES` only). At every start of the server, `Runner._recover` adds a skipped record of each
-   newer stage, such as `estimate`. The old stages' files stay in the job folder, though a run from
-   select or earlier clears all of `run/`, as every build does. A run from after `align` whose align outputs
-   are gone starts from `align`, since every later stage reads them: a folder of commit c229be7 whose
-   estimate failed after its align deleted `summary.json` would otherwise fail at estimate on every Retry
+   A job folder must hold a record of every stage in `steps.NAMES`. Folders made by an older version of
+   HARPOR (with fewer stages) are not supported since 2026-11-21: build them again. A run from after `align`
+   whose align outputs are gone starts from `align`, since every later stage reads them
    (`test_a_run_after_align_whose_outputs_are_gone_starts_from_align`). align is the only stage that reads VoMP's
    output (`run/vomp/summary.json`). A run from after `vomp` that runs align (its record is not done or its
-   outputs are gone, or another agent runs) while that output is missing starts from `vomp`
-   (`Runner.resume`, `jobs.align_runs`). VoMP failed, or the folder comes from a version without that
-   output: VoMP ran after align before 2026-11-06, and commit c229be7 had no VoMP. A run that runs align
-   also runs the estimate after it, since align writes `summary.json` again without the estimate, so it
-   needs the key (`jobs.key_needed`). A run that does not run align, such as a done job's Retry from
-   turntable, runs no VoMP and needs no key, and the job keeps its physics and models
-   (`test_a_job_without_vomps_output_runs_vomp_only_when_align_runs`,
-   `test_a_retry_of_the_360_video_without_vomps_output_needs_no_key`). One exception: a c229be7 job without an
-   agent has no `summary.json`, so even its Retry from turntable starts from align and then from `vomp`, and
-   the job gets VoMP's mass. The rule for an optional stage looks
-   at the stage that was asked for, so that Retry still makes `results.zip` again. A `physics/summary.json`
-   from before the estimate stage has no "estimate", so `steps.done` does not count `estimate` as done. A
-   retry or resume that reaches it runs it and asks for the key (`jobs.key_needed`,
-   `test_a_resume_of_an_older_job_reads_the_key_for_estimate`). A done older job keeps its mass and models
-   until it is built again. Its Friction row gives the value that `mjcf.json` assumed.
+   outputs are gone, or another agent runs) while that output is missing, because VoMP failed, starts from
+   `vomp` (`Runner.resume`, `jobs.align_runs`). A run that runs align also runs the estimate after it, since
+   align writes `summary.json` again without the estimate, so it needs the key (`jobs.key_needed`). A run that
+   does not run align, such as a done job's Retry from turntable, runs no VoMP and needs no key, and the job
+   keeps its physics and models (`test_a_job_without_vomps_output_runs_vomp_only_when_align_runs`,
+   `test_a_retry_of_the_360_video_without_vomps_output_needs_no_key`). The rule for an optional stage looks
+   at the stage that was asked for, so that Retry still makes `results.zip` again.
 
 **UI** (`static/`, plain HTML, CSS and JS with no build step). What users see: `static/help.html`.
 - Tabs. A job page shows the header, the status line, the next step, the warnings,
@@ -1802,9 +1764,9 @@ not turn them. For a Stray capture, `stray.depth_points` has already turned them
 
    The texts are `lidar_scale.CAUSES`. The stage passes its source kind to `estimate(..., source=)`. A Stray capture's depth is aligned with the color camera and paired with its frame by name, so its reasons name no time window and no `T_cam_lidar`.
 
-   `lidar_scale estimate`, run alone, also reports when no sample's frame name is a pool view (the
-   samples were made for another pool). That reason replaces the coverage reason. The stage never
-   sees this case, because it passes only the pool views' samples.
+   `lidar_scale.estimate` also reports when no sample's frame name is a pool view (the samples were
+   made for another pool). That reason replaces the coverage reason. The stage never sees this case,
+   because it passes only the pool views' samples.
 
    When the samples cannot be made at all, the record has `ok: false` and the reason, but no views
    and no check images. Examples are no TF link and no calibration, no intrinsics, no scans within
@@ -1852,8 +1814,8 @@ the job's current calibration (see the last bullet), it is the stage's done mark
   older estimator. Version 2 came with the time window and time base of `CACHE_VERSION` 4, the 9 cm
   z-buffer term, the trim, the scatter rule on the used points and the weight cap. Version 3 came with
   the rays (Estimator, step 6), which only a bag has. A Stray capture's scale did not change, so its
-  version stays 2, and its done jobs stay current. `lidar_scale estimate` gives the version of the
-  estimator that ran: 3 with rays, else 2, so a scale found without rays (the CLI has none) never
+  version stays 2, and its done jobs stay current. `lidar_scale.estimate` gives the version of the
+  estimator that ran: 3 with rays, else 2, so a scale found without rays never
   counts as a bag's current one. A record of an older version, or one without a
   version, runs the lidar stage again. GET /api/jobs/{id} gives this value as
   `lidar_current` once the lidar stage is done. It is null before that and for a job without LiDAR.
@@ -1910,7 +1872,6 @@ the job's current calibration (see the last bullet), it is the stage's done mark
 1. **Stage:** `python -m harpor.webapp.lidar scale --job "$J"` gathers the samples (from the cache
    first), runs the estimate, writes the check images and then `pool/lidar.json`, and prints one line
    per view. It exits 1 with the reason when the record is not ok.
-2. **Estimate alone:** `python -m harpor.stage_a.lidar_scale estimate --pool P --samples S.npz --out F [--check DIR]`.
 
 **Web app:** note 10.
 

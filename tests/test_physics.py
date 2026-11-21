@@ -26,7 +26,9 @@ def test_flat_up_frame_recovers_a_tilted_slab():
     w_from_world = Rotation.from_euler("x", 90 + 20, degrees=True).as_matrix() @ Rotation.from_euler(
         "z", 30, degrees=True).as_matrix()
     v_w = v @ w_from_world.T + [0.2, 0.4, 3.0]
-    T, eig = up_frame(v_w, f)
+    up, axis, _ = up_near(v_w, f, [0, -1, 0])  # the camera's up
+    assert axis in ("pca-thin", "normals")  # both find the slab's broad face
+    T, eig = up_frame(v_w, f, up)
     up_w = w_from_world @ [0, 0, 1]
     assert np.allclose(T[2, :3], up_w, atol=1e-9) and up_w[1] < 0  # camera down is +y in W
     p = frames.transform_points(T, v_w)
@@ -70,7 +72,7 @@ def test_footprint_x_puts_the_long_side_on_x():
     w_from_world = Rotation.from_euler("x", 90 + 15, degrees=True).as_matrix() @ Rotation.from_euler(
         "z", 40, degrees=True).as_matrix()
     v_w = v @ w_from_world.T
-    T, _ = up_frame(v_w, f, w_from_world @ [0, 0, 1], x_rule="footprint")
+    T, _ = up_frame(v_w, f, w_from_world @ [0, 0, 1])
     p = frames.transform_points(T, v_w)
     assert np.allclose(p.max(0) - p.min(0), [0.94, 0.74, 0.52], atol=1e-9)
 
@@ -145,7 +147,7 @@ def test_mjcf_round_trip_through_mujoco(tmp_path):
     g = trimesh.Trimesh(frames.w_to_gltf(box.vertices), box.faces, visual=vis, process=False)
     trimesh.Scene(g).export(tmp_path / "box.glb")
     rb = {"mass": 12.0, "com": [0.01, -0.02, 0.25], "fullinertia": [0.9, 1.5, 2.0, 0.05, -0.02, 0.01]}
-    (tmp_path / "summary.json").write_text(json.dumps({"config": "test", "rigid_body": rb}))
+    (tmp_path / "summary.json").write_text(json.dumps({"config": "test", "rigid_body": rb, "friction": 0.6}))
 
     report = build(tmp_path / "box.glb", tmp_path / "summary.json", tmp_path / "mjcf", "box", decompose=hull_parts)
     c = check(tmp_path / "mjcf", "box")
@@ -191,7 +193,7 @@ def test_usd_round_trip(tmp_path):
         baseColorTexture=img, metallicRoughnessTexture=mr, metallicFactor=0.5))
     trimesh.Scene(trimesh.Trimesh(frames.w_to_gltf(box.vertices), box.faces, visual=vis, process=False)).export(tmp_path / "box.glb")
     rb = {"mass": 12.0, "com": [0.01, -0.02, 0.25], "fullinertia": [0.9, 1.5, 2.0, 0.05, -0.02, 0.01]}
-    (tmp_path / "summary.json").write_text(json.dumps({"rigid_body": rb}))
+    (tmp_path / "summary.json").write_text(json.dumps({"rigid_body": rb, "friction": 0.6}))
 
     build_mjcf(tmp_path / "box.glb", tmp_path / "summary.json", tmp_path / "mjcf", "box", decompose=hull_parts)
     build(tmp_path / "box.glb", tmp_path / "summary.json", tmp_path / "mjcf", tmp_path / "usd", "box")
@@ -267,7 +269,7 @@ def body_and_lid(tmp_path):
         rho.append(np.full(len(c), density))
     scene.export(tmp_path / "object.glb")
     rb = mass_properties(np.concatenate(centers), np.concatenate(rho), 0.02)
-    (tmp_path / "summary.json").write_text(json.dumps({"config": "test", "rigid_body": rb,
+    (tmp_path / "summary.json").write_text(json.dumps({"config": "test", "rigid_body": rb, "friction": 0.6,
                                                        "median": {"density_kg_m3": 600.0}}))
     return tmp_path / "object.glb", tmp_path / "summary.json"
 
@@ -295,8 +297,8 @@ def test_align_turns_a_posed_object_into_s_and_keeps_its_bytes(tmp_path):
     D = np.array(rep["T_s_from_w"]) @ T_ws  # S to S: the identity, or a half turn about z
     assert np.allclose(D[2], [0, 0, 1, 0], atol=1e-9) and np.allclose(D[:3, 3], 0, atol=1e-9)
     assert np.allclose(np.abs(D[:3, :3]), np.eye(3), atol=1e-9) and np.isclose(np.linalg.det(D[:3, :3]), 1)
-    assert rep["up_rule"] == "near" and rep["up_near"]["angle_deg"] < 1e-6 and np.allclose(rep["up_in_w"], up_w)
-    assert np.isclose(rep["camera_tilt_deg"], 20) and not rep["opaque"]
+    assert rep["up_near"]["angle_deg"] < 1e-6 and np.allclose(rep["up_in_w"], up_w)
+    assert np.isclose(rep["camera_tilt_deg"], 20)
     assert np.allclose(rep["extent_s"], [0.6, 0.4, 0.34]) and np.allclose(rep["min_s"], [-0.3, -0.2, 0], atol=1e-9)
 
     out_doc, out_binary = read_glb(tmp_path / "aligned.glb")
@@ -335,15 +337,15 @@ def test_mjcf_command_line_compiles_the_model_and_refuses_a_bad_name(tmp_path, m
 
 
 def test_mjcf_takes_the_summarys_friction(tmp_path, monkeypatch):
-    """build takes summary.json "friction" (the estimate stage's) for every collision geom and the floor, and
-    DEFAULT_FRICTION for a summary without one, such as VoMP's alone, before the estimate stage adds the friction. A
-    friction given to build, or --friction on the command line, overrides both. mjcf.json records the value used."""
+    """build takes summary.json "friction" (the estimate stage's) for every collision geom and the floor. A friction
+    given to build, or --friction on the command line, overrides it, and a summary without one (VoMP's alone) needs
+    it. mjcf.json records the value used."""
     mujoco = pytest.importorskip("mujoco")
     from harpor.physics import mjcf
 
     glb, summary = body_and_lid(tmp_path)
     s = json.loads(summary.read_text())
-    assert mjcf.DEFAULT_FRICTION == 0.6 and inspect.signature(mjcf.build).parameters["friction"].default is None
+    assert inspect.signature(mjcf.build).parameters["friction"].default is None
 
     def friction(out):  # the sliding friction of the collision geoms and of the floor, as MuJoCo compiles them
         m = mujoco.MjModel.from_xml_path(str(out / "scene.xml"))
@@ -358,9 +360,9 @@ def test_mjcf_takes_the_summarys_friction(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "estimated" / "mjcf.json").read_text())["friction"] == 0.35
     report = mjcf.build(glb, summary, tmp_path / "given", "chest", 0.9, decompose=hull_parts)
     assert report["friction"] == 0.9 and friction(tmp_path / "given") == [0.9]
-    summary.write_text(json.dumps(s))  # no "friction"
-    report = mjcf.build(glb, summary, tmp_path / "default", "chest", decompose=hull_parts)
-    assert report["friction"] == mjcf.DEFAULT_FRICTION and friction(tmp_path / "default") == [0.6]
+    summary.write_text(json.dumps({k: v for k, v in s.items() if k != "friction"}))
+    with pytest.raises(ValueError, match="has no friction"):
+        mjcf.build(glb, summary, tmp_path / "none", "chest", decompose=hull_parts)
 
     build = mjcf.build
     monkeypatch.setattr(mjcf, "build", lambda *a, **k: build(*a, decompose=hull_parts, **k))  # no CoACD here
@@ -425,4 +427,4 @@ def test_vomp_run_glb_gives_each_occupied_voxel_its_nearest_prediction(tmp_path,
 
     Model.voxels = np.zeros((0, 3))
     with pytest.raises(ValueError, match="gives no occupied voxel"):
-        run_glb(Model(), tmp_path / "in.glb", tmp_path / "empty", "test.json")
+        run_glb(Model(), tmp_path / "in.glb", tmp_path / "empty", "test.json", load_s=0.0)

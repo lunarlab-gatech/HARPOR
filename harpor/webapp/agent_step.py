@@ -19,7 +19,7 @@ J/agent/result.json is written and before anything is printed (stdout is the sta
 web app serves). The agent's reason and limitations, and the reasons of rejected GLBs, which can name
 the agent's links, are printed as one line without control characters (tools.printable), with the keys
 replaced again after that cleaning: a key split by a control character that it drops is whole only
-then. The helpers already store the agent's text that way; this also cleans an older result.
+then. The helpers already store the agent's text that way.
 
 The session runs in rounds (controller.run_rounds): the host checks each round's candidate against the original
 (harpor.agent.validate), and a failed check feeds a repair round. The session's evidence, root/control/evidence.json (harpor.agent.evidence), holds the
@@ -52,7 +52,7 @@ AGENTS = {"astra": "codex", "opus": "claude", "fable": "claude"}  # the web app'
 # Anthropic's advice for Fable 5.2: its xhigh turns run longer and use many more tokens, for uneven gains.
 EFFORT = {"opus": "xhigh", "fable": "high"}
 MODEL = {a: MODELS[a] for a, c in AGENTS.items() if c == "claude"}  # the claude agent's model (Codex has its own)
-BUDGET_S = 900.0  # the build round's, = controller.BUDGET_S; a repair or replan has controller.ROUND_BUDGET_S
+BUDGET_S = 900.0  # the build round's, = controller.BUDGET_S; a repair has controller.REPAIR_BUDGET_S
 
 
 def scrub(x, key):
@@ -94,7 +94,7 @@ def print_rounds(r):
     """Print the rounds of a result r in rounds and the stored candidate that it delivered."""
     for x in r["rounds"]:
         c = x["candidate"] or {}
-        got = f"{x['outcome']}, scope {x['scope']}" if x["outcome"] else "no check"
+        got = f"{x['outcome']}, scope {x['scope']}"
         if isinstance(c.get("version"), int):
             got += f", candidate v{c['version']:02d} ({c['verdict']})"
         found = list(dict.fromkeys(f["code"] for f in x["findings"]))

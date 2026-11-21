@@ -3,11 +3,9 @@ atomic replace, and the private files of ~/.config/harpor. Standard library only
 different envs.
 """
 
-import contextlib
 import json
 import os
 import stat
-import tempfile
 from pathlib import Path
 
 
@@ -56,12 +54,9 @@ def config_dir():
     return Path.home() / ".config" / "harpor"
 
 
-def private_folder(folder, make=False):
-    """Refuses (SystemExit) a folder that is not this user's, or that group or others may open. make: make it
-    with mode 0700 when it is missing."""
+def private_folder(folder):
+    """Refuses (SystemExit) a folder that is not this user's, or that group or others may open."""
     folder = Path(folder)
-    if make and not os.path.lexists(folder):
-        folder.mkdir(mode=0o700, parents=True)
     try:
         st = os.lstat(folder)
     except FileNotFoundError:
@@ -88,23 +83,3 @@ def read_private(path):
         if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
             raise SystemExit(bad)
         return f.read()
-
-
-def write_private(path, data):
-    """data (bytes) into path with mode 0600: a temp file in the same folder, then os.replace, so a reader
-    never sees half a file. Makes the folder with mode 0700 when it is missing, and refuses one that others
-    may open."""
-    path = Path(path)
-    private_folder(path.parent, make=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")  # mode 0600
-    try:
-        with os.fdopen(fd, "wb") as f:
-            os.fchmod(f.fileno(), 0o600)
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise

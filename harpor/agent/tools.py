@@ -12,7 +12,7 @@ the time budget (OFF_CLOCK).
 
 A session with rounds runs them with controller.run_rounds, each with a new agent. The
 round_start event begins one, and the deadline, the finish that ends a round and its deliverable come
-from the events since then (round_events). In a planning round (kind replan) every helper is refused.
+from the events since then (round_events).
 
 These helpers run on the host but act on a folder the agent controls. So they read and write work/
 without following symlinks: folders must be real folders, new files are created exclusively, and
@@ -26,7 +26,7 @@ finish and the controller check the agent's copy against the logged sha256. Agen
 reason and limitations of finish and the defect of checkpoint, is kept as one line of printable characters
 (printable).
 
-Environment: GATOR_WORK, GATOR_CONTROL (default: work/../control; both are resolved) and GATOR_BLENDER
+Environment: HARPOR_WORK, HARPOR_CONTROL (default: work/../control; both are resolved) and HARPOR_BLENDER
 (default blender, split like a shell).
 """
 
@@ -52,7 +52,7 @@ from harpor.fileio import write_json
 BLENDER_SCRIPTS = Path(__file__).resolve().parent / "blender"
 # The agents' models, here because this module needs only the standard library: claude_agent, the
 # controller, harpor.agent.vlm and the web app's key check all read them. Codex runs CODEX_MODEL
-# (GPT-6.2-Astra; it was GPT-6-Astra, gpt-6-astra, until 2026-11-20). The claude agent runs
+# (GPT-6.2-Astra). The claude agent runs
 # CLAUDE_MODEL (Claude Opus 5.5) by default, or FABLE_MODEL (Claude Fable 5.2).
 CODEX_MODEL, CLAUDE_MODEL, FABLE_MODEL = "gpt-6.2-astra", "claude-opus-5-5", "claude-fable-5-2"
 CLAUDE_MODELS = (CLAUDE_MODEL, FABLE_MODEL)  # the models that the claude agent takes
@@ -258,7 +258,7 @@ def round_events(control):
 
 
 def round_info(control):
-    """{round, kind} of the last round_start (kind build, repair or replan), else {}."""
+    """{round, kind} of the last round_start (kind build or repair), else {}."""
     e = next((e for e in reversed(read_events(control)) if e.get("event") == "round_start"), None)
     return {"round": e.get("round"), "kind": e.get("kind")} if e else {}
 
@@ -549,13 +549,6 @@ def _time_left_line(work, control):
     return f"time left: {left:.0f} s of the {budget_s:.0f} s budget"
 
 
-def _fmt(x):
-    """A number or a list of numbers, short; anything else as repr."""
-    if isinstance(x, (list, tuple)):
-        return "(" + ", ".join(_fmt(v) for v in x) + ")"
-    return f"{x:.4g}" if isinstance(x, (int, float)) and not isinstance(x, bool) else repr(x)
-
-
 def _command(a, work, control, blender):
     """Run one parsed helper command and print its result."""
     if a.cmd == "export_glb":
@@ -594,7 +587,7 @@ def _command(a, work, control, blender):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="gator-tools", description="GATOR agent helpers (build_plan.md note 5).")
+    p = argparse.ArgumentParser(prog="harpor-tools", description="HARPOR agent helpers (build_plan.md note 5).")
     sub = p.add_subparsers(dest="cmd", required=True)
     e = sub.add_parser("export_glb", help="export the saved .blend to a GLB, outside the time budget")
     e.add_argument("--blend", help="a .blend inside /work; default /work/candidate.blend")
@@ -614,14 +607,11 @@ def main(argv=None):
     a = p.parse_args(argv)
     # Resolved, as controller.blender_command binds them: Blender's container has no path through a symlink, such as
     # a home folder's link to a scratch file system.
-    work = Path(os.environ.get("GATOR_WORK", "/work")).resolve()
-    control = Path(os.environ.get("GATOR_CONTROL", work.parent / "control")).resolve()
-    blender = shlex.split(os.environ.get("GATOR_BLENDER", "blender"))
+    work = Path(os.environ.get("HARPOR_WORK", "/work")).resolve()
+    control = Path(os.environ.get("HARPOR_CONTROL", work.parent / "control")).resolve()
+    blender = shlex.split(os.environ.get("HARPOR_BLENDER", "blender"))
 
     try:
-        if round_info(control).get("kind") == "replan":  # no export, receipt or off-clock time in a planning round
-            sys.exit(f"{a.cmd} refused: this is a planning round, in which no helper runs; write your plan to "
-                     "/work/plan.md and stop")
         _command(a, work, control, blender)
     except SystemExit as e:
         # A failed helper other than finish also ends with the time left; argparse and SIGTERM exits do not.

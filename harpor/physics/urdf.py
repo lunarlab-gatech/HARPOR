@@ -20,7 +20,6 @@ from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
 
-
 def _shift(token, ov, ot, on):
     """An OBJ face corner (v, v/vt, v//vn or v/vt/vn) with its indices moved by the offsets."""
     return "/".join(str(int(p) + o) if p else "" for p, o in zip(token.split("/"), (ov, ot, on)))
@@ -94,13 +93,13 @@ def build(glb, summary, mjcf_dir, out, name):
             "collisions": [f"meshes/{h}" for h in hulls]}
     (out / "model.urdf").write_text(urdf_xml(name, link))
     report = {"glb": str(Path(glb).resolve()), "summary": str(Path(summary).resolve()), "mjcf": str(mjcf_dir.resolve()),
-              "name": name, "links": [link]}
+              "name": name, "link": link}
     (out / "urdf.json").write_text(json.dumps(report, indent=1))
     return report
 
 
 def check(out):
-    """Parse model.urdf: link and joint counts, and every mesh, material and texture file there.
+    """Parse model.urdf: the link count, and every mesh, material and texture file there.
     Loads it with yourdfpy too when that is installed."""
     out = Path(out)
     robot = ET.parse(out / "model.urdf").getroot()
@@ -114,17 +113,14 @@ def check(out):
                 for m in mtl.read_text().splitlines() if mtl.is_file() else []:
                     if m.startswith("map_Kd "):
                         needed.append(str((mtl.parent / m.split(None, 1)[1]).relative_to(out)))
-    joints = robot.findall("joint")
-    result = {"links": len(robot.findall("link")), "joints": len(joints),
-              "joint_types": {j.get("name"): j.get("type") for j in joints}, "meshes": len(files),
+    result = {"links": len(robot.findall("link")), "meshes": len(files),
               "missing": sorted({f for f in needed if not (out / f).is_file()}), "yourdfpy": None}
     try:
         import yourdfpy
     except ImportError:
         return result
     u = yourdfpy.URDF.load(str(out / "model.urdf"))
-    result["yourdfpy"] = {"version": getattr(yourdfpy, "__version__", None), "links": len(u.link_map),
-                          "actuated_joints": len(u.actuated_joint_names)}
+    result["yourdfpy"] = {"version": getattr(yourdfpy, "__version__", None), "links": len(u.link_map)}
     return result
 
 

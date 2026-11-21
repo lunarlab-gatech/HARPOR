@@ -75,11 +75,6 @@ def test_script_names_the_root_and_its_notes_and_the_readme_name_it(script):
     assert all(f"setup/{script}.sh" in note(n) for n in NOTES[script])
 
 
-def test_no_doc_names_the_old_run_folders():
-    docs = [ROOT / "README.md", *(ROOT / "docs").glob("*.md")]
-    assert [p.name for p in docs if re.search(r"runs/(mvsam3d|vomp11)_setup", p.read_text())] == []
-
-
 def test_the_docs_name_only_files_that_exist():
     """Every relative link in README.md and docs/*.md, and every file in the Files table of build_plan.md, is a file
     of the repo. docs/research.md was removed, and its README link and table row had stayed."""
@@ -113,14 +108,6 @@ def test_script_builds_under_harpor_root_without_a_module_command(run, tmp_path,
     pips = [c for c in calls if "/pip " in c]
     assert pips and all(c.startswith(f"{root / env}/bin/pip ") for c in pips)
     assert all("conf=/dev/null" in c and f"hf={root}/.cache/huggingface" in c for c in pips)
-
-
-def test_mujoco_removes_a_3x_mujoco_before_it_installs_4(run):
-    # The stub python succeeds at every -c, so the version check takes the env's mujoco for a 3.x one.
-    p, calls = run("mujoco")
-    assert p.returncode == 0, p.stderr
-    pips = [c.split(" | ")[0] for c in calls if "/envs/mujoco/bin/pip " in c]
-    assert pips[0].endswith("/envs/mujoco/bin/pip uninstall -y mujoco") and "mujoco==4.0.0" in pips[1]
 
 
 def test_the_default_root_is_the_one_the_app_reads(run, tmp_path, monkeypatch):
@@ -273,7 +260,7 @@ def test_dockerfile_links_point_into_the_data_folder_that_the_entrypoint_makes()
     made = re.search(r'mkdir -p "\$HARPOR_DATA"/\{([^}]*)\}', entry).group(1).split(",")
     assert set(targets) <= set(made)
     # The agent's containers find the helper client where Apptainer binds it (controller._mounts).
-    assert "ln -s /opt/harpor/code/harpor/agent/bin /opt/gator/bin" in dockerfile
+    assert "ln -s /opt/harpor/code/harpor/agent/bin /opt/harpor-agent/bin" in dockerfile
     assert "HARPOR_DATA=/data" in dockerfile and "TMPDIR=/data/tmp" in dockerfile
 
 

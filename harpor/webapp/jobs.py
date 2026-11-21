@@ -35,20 +35,13 @@ job.json "turntable" (false at first) asks for the 360 video: the turntable stag
 (steps.py) renders it after urdf. It is optional (steps.OPTIONAL): when it fails, the job gets a warning
 and the build goes on to package.
 
-A job folder of an earlier version may lack the record of a newer stage: Runner._recover adds it, skipped, at
-every start of the server. Its records of stages that this version no longer has stay in job.json and are not run
-or shown (progress lists steps.NAMES only). Their files stay in the job folder, except that a run from select or
-earlier deletes all of run/, as it does for every build.
-
 The API key stays in the runner's memory, with the agent it was checked for, for the whole build: it is
 dropped when the job is done or cancelled. For the stages that take it (steps.needs_key: the agent and
-estimate stages) it is written to /dev/shm/gator-webapp-<uid>/<job_id>.env (folder 0700, file 0600,
+estimate stages) it is written to /dev/shm/harpor-webapp-<uid>/<job_id>.env (folder 0700, file 0600,
 OPENAI_API_KEY=<key> for astra, ANTHROPIC_API_KEY=<key> for opus and fable) and deleted when the stage
 ends. An agent stage that is skipped (a poor Stage A placement) does not use the key, so estimate still
 gets it. A server that restarts has no key, and a change of agent drops the key held for the other one,
-so a job that reaches such a stage then waits in "review" until the key is given again (NO_KEY). A build
-may also be queued without the key on purpose (submit_build with api_key None, resume with key_later): it
-then waits there with NO_KEY_LATER.
+so a job that reaches such a stage then waits in "review" until the key is given again (NO_KEY).
 
 One Runner runs the jobs of a runs folder. It writes RUNS/.runner.json (pid, host, Slurm job), and a
 second Runner on that folder refuses to start while the first one's server is known to run (Runner._claim,
@@ -102,10 +95,8 @@ DERIVED = {"frames": ("frames/meta.json", "frames/thumbs", "frames/stamps.json",
            "extract": ("frames/pool.json", "scene", "pool"), "lidar": ("pool/lidar.json", "lidar/check", "lidar/cloud"),
            "select": ("selection.json", "run"), "vomp": ("run/vomp",), "agent": ("agent",), "align": ("physics",),
            "estimate": ("physics/estimate_views.jpg",), "turntable": ("turntable",), "package": ("results.zip",)}
-OLDER = "older than this stage"  # the note of a stage that a job folder of an earlier version has no record of
 NO_KEY = {a: f"The server no longer holds the {p} API key (it restarted); paste the key again and press Build."
           for a, p in steps.PROVIDER.items()}
-NO_KEY_LATER = {a: f"The job needs the {p} API key now; paste it and press Build." for a, p in steps.PROVIDER.items()}
 RUNNER_FILE = ".runner.json"  # in the runs folder: the server whose Runner runs its jobs (Runner._claim)
 # squeue states of a Slurm job whose server may still run (holder_alive)
 SLURM_ALIVE = ("RUNNING", "COMPLETING", "CONFIGURING", "SUSPENDED", "STOPPED", "SIGNALING")
@@ -319,8 +310,7 @@ def key_needed(job_dir, job, first):
     steps.needs_key) and runs it. Runner._build runs each stage from its start on unless the stage's record is
     "done" and steps.done finds its outputs. So a keyed stage needs the key when it is pending, failed or
     cancelled, or done without its outputs. A skipped keyed stage runs again too, and needs the key unless
-    steps.skip still gives a reason (a poor Stage A placement skips the agent again). That includes the estimate
-    stage of a job folder of an earlier version, which _recover records as skipped (OLDER) although it runs.
+    steps.skip still gives a reason (a poor Stage A placement skips the agent again).
     A run that runs align (align_runs) also runs the estimate stage, since align writes summary.json again without
     the estimate. Runner.resume moves a start after align to align when align's outputs are gone, and a start after
     vomp to vomp when such a run finds VoMP's output missing, so the stages count from there. The server's continue
@@ -409,7 +399,7 @@ def check_anthropic_key(key, model=OPUS):
 
 def default_key_dir():
     base = "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()  # macOS has no /dev/shm
-    return Path(base) / f"gator-webapp-{os.getuid()}"
+    return Path(base) / f"harpor-webapp-{os.getuid()}"
 
 
 def _signal_group(pgid, sig):
@@ -474,7 +464,6 @@ class Runner:
         self.cfg, self.runs = cfg, Path(cfg.runs)
         self.key_dir = Path(key_dir) if key_dir else default_key_dir()
         self._keys, self._procs, self._cancelled, self._queue, self._uploads = {}, {}, {}, [], set()
-        self._later = set()  # jobs whose key comes later
         self._cv = threading.Condition(_LOCK)
         self.runs.mkdir(parents=True, exist_ok=True)
         self._claim()  # before _recover, which would fail the running jobs of another server
@@ -559,22 +548,6 @@ class Runner:
         with self._cv:
             return job_id in self._keys and agent in (None, self._keys[job_id][0])
 
-    def forget_key(self, job_id):
-        """Drop the key held for the job; job.json key_ok turns false. Returns True when one was held. A
-        stage that already has its key file keeps it until it ends; a later stage that needs the key
-        waits in review for it."""
-        with self._cv:
-            held, J = self._keys.pop(job_id, None) is not None, self.runs / str(job_id)
-            if held and ID.fullmatch(str(job_id)) and (J / "job.json").is_file():
-                update(J, key_ok=False)
-            return held
-
-    def queued(self):
-        """The builds that wait, oldest first, as [(job_id, the stage each starts from)]: a copy, taken
-        under the lock. The running build is not in it."""
-        with self._cv:
-            return [(job_id, first) for job_id, first, _ in self._queue]
-
     def delete(self, job_id):
         """Delete the job folder and the key held for it, unless the job is uploading, analyzing, queued
         or running."""
@@ -583,7 +556,6 @@ class Runner:
             self._idle(job_id, load(J))
             self._keys.pop(job_id, None)
             self._cancelled.pop(job_id, None)
-            self._later.discard(job_id)
             shutil.rmtree(J)
 
     def submit_build(self, job_id, api_key, checked_calibration=None, **settings):
@@ -596,7 +568,7 @@ class Runner:
         another tab changed since then is refused, since the check ran on the other one. turntable is true or
         false; the server checks its type, as it does for mode and n_views. api_key is the key of the job's model,
         which the agent and estimate stages take, unless the agent is "none". None queues the build without a key (a
-        key held for the job is dropped, key_ok is false): the job waits in review with NO_KEY_LATER when it reaches a
+        key held for the job is dropped, key_ok is false): the job waits in review with NO_KEY when it reaches a
         stage that needs the key. An earlier build's outputs are deleted first."""
         from harpor.stage_a.sam3_masks import slug
 
@@ -619,9 +591,8 @@ class Runner:
             agent = steps.agent(job)
             if agent != "none" and api_key is not None:
                 self._take_key(job_id, api_key, agent)
-            else:  # no agent, or the key comes later
+            else:  # no agent, or no key
                 self._keys.pop(job_id, None)
-            self._key_later(job_id, agent != "none" and api_key is None)
             _clear(J, BUILD)
             self._cancelled.pop(job_id, None)
             update(J, **settings, status="queued", slug=s, stages={**job["stages"], **{b: dict(STAGE) for b in BUILD}},
@@ -629,11 +600,9 @@ class Runner:
             self._queue.append((job_id, "extract", not job.get("auto_continue")))
             self._cv.notify()
 
-    def resume(self, job_id, from_stage, api_key=None, key_later=False, checked_calibration=None, **fields):
+    def resume(self, job_id, from_stage, api_key=None, checked_calibration=None, **fields):
         """Queue the stages from from_stage on; api_key replaces the key held for the job, and fields
-        (overrides, view0, agent) are written to job.json first, under the same lock. key_later, without
-        api_key: the key was left out on purpose, so a job without one that reaches a stage that needs
-        it waits in review with NO_KEY_LATER instead of NO_KEY.
+        (overrides, view0, agent) are written to job.json first, under the same lock.
 
         From a stage up to select (the user changed an instance or the picks): the stages from there
         rerun, except da3, which reruns only when prep made a view it has not seen; the outputs of
@@ -645,16 +614,11 @@ class Runner:
         it and every stage after it run again, since package zipped its old output. Returns the stage
         the run starts from: from_stage, or an earlier stage that one of the rules below moves it to.
 
-        A run from after align whose align outputs are gone (steps.done; such as a folder of commit c229be7 whose
-        estimate failed after its align deleted summary.json) starts from align, since every later stage reads them.
-        A run from after vomp that runs align (align_runs, or another agent, which clears align) while VoMP's
-        output (run/vomp/summary.json) is missing starts from vomp, since align reads it: VoMP failed, or the job
-        folder comes from a version without that output (VoMP after align before 2026-11-06, or no VoMP in commit
-        c229be7). A run that does not run align, such as a done job's Retry of its 360 video, leaves VoMP and the
-        physics as they are, so an older job keeps its mass and models until it is built again. One exception: a
-        c229be7 job without an agent has no summary.json, so the align rule above moves even its 360-video Retry
-        to align and then to vomp, and the job gets VoMP's mass. The rule for an optional stage looks at the stage
-        that the caller asked for.
+        A run from after align whose align outputs are gone (steps.done) starts from align, since every later stage
+        reads them. A run from after vomp that runs align (align_runs, or another agent, which clears align) while
+        VoMP's output (run/vomp/summary.json) is missing, because VoMP failed, starts from vomp, since align reads
+        it. A run that does not run align, such as a done job's Retry of its 360 video, leaves VoMP and the physics
+        as they are. The rule for an optional stage looks at the stage that the caller asked for.
 
         A job with LiDAR whose lidar stage is not done (it failed or was cancelled, the calibration was
         uploaded or deleted since it ran, or an older estimator made its record: steps.done) starts from
@@ -707,7 +671,6 @@ class Runner:
                 self._take_key(job_id, api_key, agent)
             elif changed:
                 self._keys.pop(job_id, None)
-            self._key_later(job_id, key_later and not api_key)
             self._cancelled.pop(job_id, None)
             update(J, **fields, status="queued", stages=stages, current=None, error=None, warnings=[],
                    key_ok=self._key_for(job_id, agent) is not None)
@@ -770,10 +733,6 @@ class Runner:
                 "started": stamp(), "id": self._id}
         write_json(f, info, private=True, indent=1)
 
-    def _key_later(self, job_id, later):
-        """Remember whether the newest build or resume of the job left its key for later (NO_KEY_LATER)."""
-        (self._later.add if later else self._later.discard)(job_id)
-
     def _idle(self, job_id, job):
         if job_id in self._uploads:
             raise ValueError(f"job {job_id} is still uploading")
@@ -807,18 +766,11 @@ class Runner:
         return path
 
     def _recover(self):
-        """Jobs that were running when an earlier server stopped are failed; no job holds a key. A job folder of an
-        earlier version gets a record of each stage it has none of, skipped (OLDER), so that a done job does not look
-        unfinished and progress and _build find every stage; load stays strict."""
+        """Jobs that were running when an earlier server stopped are failed; no job holds a key."""
         for f in sorted(self.runs.glob("*/job.json")):
             with contextlib.suppress(OSError, ValueError, KeyError):
                 job = load(f.parent)
                 fields = {"key_ok": False}
-                older = {s: {**STAGE, "status": "skipped", "note": OLDER} for s in steps.NAMES
-                         if s not in job["stages"]}
-                if older:
-                    job["stages"].update(older)
-                    fields["stages"] = job["stages"]
                 if job["status"] in ACTIVE:
                     for name, st in job["stages"].items():
                         if st["status"] == "running":  # it ended about when its log last changed
@@ -912,11 +864,10 @@ class Runner:
         if steps.needs_key(stage, job):
             agent = steps.agent(job)
             with self._cv:
-                key, later = self._key_for(job_id, agent), job_id in self._later
+                key = self._key_for(job_id, agent)
             if key is None:
                 update_stage(J, stage, note=f"waiting for the {steps.PROVIDER[agent]} API key")
-                self._status(job_id, "review", current=None, key_ok=False,
-                             warnings=[(NO_KEY_LATER if later else NO_KEY)[agent]])
+                self._status(job_id, "review", current=None, key_ok=False, warnings=[NO_KEY[agent]])
                 return "review"
             key_file = self._write_key(job_id, agent, key)
         log_path = J / "logs" / f"{stage}.log"

@@ -8,11 +8,6 @@
 set -exo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 [ -d envs/mujoco ] || tools/micromamba create -y -p "$G/envs/mujoco" -c conda-forge python=3.11 pip
-# MuJoCo 4.0 split the package into mujoco, mujoco-core and mujoco-studio. The 4.0.0 release notes say to uninstall a
-# 3.x mujoco first, because an upgrade in place can remove files that moved into mujoco-core.
-if "$G/envs/mujoco/bin/python" -c "import mujoco, sys; sys.exit(int(mujoco.__version__.split('.')[0]) >= 4)" 2>/dev/null; then
-  "$G/envs/mujoco/bin/pip" uninstall -y mujoco
-fi
 "$G/envs/mujoco/bin/pip" install mujoco==4.0.0 coacd==1.0.14 trimesh==5.1.1 usd-core==26.8 numpy==2.4.6 scipy==1.17.1 pillow==12.3.0
 "$G/envs/mujoco/bin/python" -c "import coacd, mujoco, numpy, PIL, pxr, scipy, trimesh
 print('mujoco', mujoco.__version__, 'trimesh', trimesh.__version__, 'numpy', numpy.__version__, 'scipy', scipy.__version__)"

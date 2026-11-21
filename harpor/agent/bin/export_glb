@@ -1,2 +1,2 @@
 #!/bin/sh
-exec python3 "$(dirname "$0")/gator_tool.py" export_glb "$@"
+exec python3 "$(dirname "$0")/harpor_tool.py" export_glb "$@"

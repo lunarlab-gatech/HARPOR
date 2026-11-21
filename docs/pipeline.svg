@@ -143,7 +143,6 @@
   <text class="bt" x="152" y="718">Repair round</text>
   <text class="bs c" x="206" y="744">a new agent gets the findings</text>
   <text class="bs c" x="206" y="764">at most 3 builds</text>
-  <text class="bs c" x="206" y="784">and 1 planning round</text>
   <path class="flow" d="M206,690 V611" marker-end="url(#ah)"/>
   <text class="xs halo" x="216" y="655" stroke="#f6f1fc">next round</text>
 

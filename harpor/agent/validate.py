@@ -5,9 +5,8 @@ It reads the GLB once without following a symlink, hashes it and copies it to co
 and compares that copy with original, root/original.glb (harpor.agent.surface.compare). A failure of the comparison
 is surface_error. The report is cached at control/validate/<sha16>/report.json unless a step failed.
 
-The outcome is pass when no finding counts. Surface findings count only while
-surface.ENFORCE is on; until then they are reported and decide nothing. scope (SCOPE, paper A.3) is structural with a
-structural finding, else local with a local one, else none: none means no agent action can help.
+The outcome is pass when no finding counts. Surface findings are reported and decide nothing (report only). scope is
+local when a finding counts, else none.
 
 round_report(control, report, pick, errors) is the report of a round of the session: it adds what the round's pick
 says, no_candidate or not_finished, so the round's outcome is pass only when the agent's verdict is complete or
@@ -24,12 +23,8 @@ from harpor.agent import surface, tools
 from harpor.fileio import read_json, write_json
 
 MAX_FEEDBACK, MAX_TEXT = 6000, 300  # characters of feedback, and of one text in it before quoting
-LOCAL, STRUCTURAL, NONE = "local", "structural", "none"
-SCOPE = {  # paper A.3: local repairs, structural replanning, or nothing an agent can do
-    "no_candidate": LOCAL, "not_finished": LOCAL, "surface_uv": LOCAL, "surface_material": LOCAL,
-    "surface_deleted": LOCAL, "surface_flipped": LOCAL, "surface_error": LOCAL, "validation_error": LOCAL,
-    "surface_identity": STRUCTURAL}
-LABELS = (STRUCTURAL, LOCAL, NONE, "report only")  # the order of findings in feedback
+LOCAL, NONE, REPORT_ONLY = "local", "none", "report only"
+LABELS = (LOCAL, REPORT_ONLY)  # the order of findings in feedback
 FINISHED = ("complete", "unchanged")  # the verdicts of a round that handed off
 
 
@@ -48,14 +43,13 @@ def checks(report):
 
 
 def counts(f):
-    """Whether a finding decides anything: surface findings only while surface.ENFORCE is on."""
-    return surface.ENFORCE or not f["code"].startswith("surface_")
+    """Whether a finding decides anything: surface findings never do."""
+    return not f["code"].startswith("surface_")
 
 
 def scope(findings):
     """The scope of a set of findings (see the module docstring)."""
-    kinds = {SCOPE.get(f["code"], LOCAL) for f in findings if counts(f)}
-    return next((k for k in (STRUCTURAL, LOCAL) if k in kinds), NONE)
+    return LOCAL if any(counts(f) for f in findings) else NONE
 
 
 def outcome(findings):
@@ -119,12 +113,12 @@ def round_report(control, report, pick, errors=()):
 
 
 def label(f):
-    """A finding's scope (SCOPE), or "report only" for a surface finding while surface.ENFORCE is off."""
-    return SCOPE.get(f["code"], LOCAL) if counts(f) else "report only"
+    """A finding's label: local, or report only for a surface finding."""
+    return LOCAL if counts(f) else REPORT_ONLY
 
 
 def ranked(findings):
-    """findings in the order of LABELS, structural first, each label in its own order."""
+    """findings in the order of LABELS, each label in its own order."""
     return sorted(findings, key=lambda f: LABELS.index(label(f)))
 
 
@@ -155,14 +149,14 @@ def _cap(lines, limit=MAX_FEEDBACK):
 
 
 def feedback(report):
-    """The report as text for the agent's next prompt: its outcome and scope; every finding, structural ones first,
+    """The report as text for the agent's next prompt: its outcome and scope; every finding, report-only ones last,
     with its measured and expected values; and the boxes of the surface that is gone. At most MAX_FEEDBACK
-    characters, and the same text for the same report. The VLM's and the agent's text appear only as JSON (_json),
-    which json.dumps keeps ASCII."""
+    characters, and the same text for the same report. The agent's text appears only as JSON (_json), which
+    json.dumps keeps ASCII."""
     found = ranked(report["findings"])
     head = f"candidate sha256 {report['sha256'][:12]}" if report["sha256"] else "no candidate checked"
     lines = [f"{head}: outcome {report['outcome']}, scope {report['scope']}",
-             f"findings ({len(found)}), structural first:" if found else "findings: none"]
+             f"findings ({len(found)}), report-only ones last:" if found else "findings: none"]
     lines += [f"- {label(f)} {f['code']}: measured {_json(f['measured'])}, expected {_json(f['expected'])}; "
               f"{_json(f['why'])}" for f in found]
     regions = report["surface"].get("lost_regions") or []

@@ -335,7 +335,7 @@ class Run:
 
     def finished(self):
         r = self.call("GET", "")["agent_result"]
-        if r:  # the agent wrote the reason: one line without control characters, also from an older result
+        if r:  # the agent wrote the reason: one line without control characters
             say(f"agent: {printable(r.get('verdict'))}: {printable(r.get('reason'))}")
         say(f"results: {self.J / 'results.zip'}")
         return DONE

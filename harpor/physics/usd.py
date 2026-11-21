@@ -22,8 +22,7 @@ friction (MJCF_DIR/mjcf.json), so the two models agree, except that omni.physx r
 The stage is z up, 1 m and 1 kg per unit, the frame S of harpor.physics.align and summary.json, so
 Isaac Sim's Metrics Assembler has nothing to convert. PhysX averages two materials' friction by
 default, so the ground carries the same value. VoMP gives no friction or restitution. F is the MJCF's
-friction unless --friction gives it: the estimate stage's value in summary.json, or
-harpor.physics.mjcf.DEFAULT_FRICTION for a summary without one. Restitution 0 is an assumption.
+friction unless --friction gives it. Restitution 0 is an assumption.
 """
 
 import argparse

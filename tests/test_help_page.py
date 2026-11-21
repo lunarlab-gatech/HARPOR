@@ -7,7 +7,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from harpor.agent import controller, tools
-from harpor.physics import estimate, material_transfer, mjcf
+from harpor.physics import estimate, material_transfer
 from harpor.stage_a import lidar_scale
 from harpor.webapp import agent_step, jobs, site, steps, turntable, video, views
 from harpor.webapp import lidar as lidar_stage
@@ -84,7 +84,7 @@ def test_help_page_holds_the_method_numbers():
     constant fails here: the notes that the Results and Downloads tabs once showed behind their info buttons, and the
     numbers that left the main UI (the input types, the upload limit, 2 to 12 views and the 0.25 s snap of a manual
     pick). The physics section gives VoMP's grid and material rows, the estimate stage's views and friction bounds
-    (harpor.physics.estimate), the default friction of an older job and the skip note of a job without a key. The
+    (harpor.physics.estimate) and the skip note of a job without a key. The
     stage table lists every stage with its GPU mark, the list of results.zip names every file that jobs.package
     writes, and the calibration example reads. Nothing says that the model gives the mass: VoMP does."""
     page = HELP.read_text()
@@ -92,7 +92,6 @@ def test_help_page_holds_the_method_numbers():
     num = lambda x: f"{x:g}"  # noqa: E731
     usd = lambda x: f"${x:.2f}".removesuffix(".00")  # noqa: E731  4.0 -> $4, 0.2 -> $0.20
     iou = num(steps.MIN_IOU)
-    friction = num(mjcf.DEFAULT_FRICTION)
     f_lo, f_hi = (f"{x:g}" for x in estimate.FRICTION_RANGE)
     # The voxels of the final mesh that hold VoMP's materials. "64³" is VoMP's own grid (vomp_run.py).
     grid = inspect.signature(material_transfer.occupied_voxels).parameters["resolution"].default
@@ -123,16 +122,14 @@ def test_help_page_holds_the_method_numbers():
              "review": [f"under {views.MIN_AREA:.0%} of the image", f"below {num(views.MIN_CONSISTENCY)}",
                         f"closer than {num(views.MIN_SPACING_DEG)}°", "over a third"],
              "agent": [f"{num(agent_step.BUDGET_S)} s to edit", f"up to {num(tools.MAX_EXCLUDED_S)} s",
-                       f"{num(controller.ROUND_BUDGET_S['repair'])} s for a repair",
-                       f"{num(controller.ROUND_BUDGET_S['replan'])} s to plan", f"up to {controller.MAX_BUILDS - 1} repairs",
+                       f"{num(controller.REPAIR_BUDGET_S)} s for a repair", f"up to {controller.MAX_BUILDS - 1} repairs",
                        "Rounds", "needs review",
-                       "Surface retained", "report only", "blocks delivery",
+                       "Surface retained", "report only",
                        f"{controller.CLAUDE_EFFORT} effort", f"{agent_step.EFFORT['fable']} effort", "Claude Fable 5.2",
                        "30 days", f"below {iou}", "skipped", *prices, "A ? means",
                        "refusal fallback", f"at most {tools.MAX_LIMITATIONS}", *tools.VERDICTS, "fallback_original", "checkpoint", "export", "API key",
                        "can reach the network", "no network access", "sk-ant-", "forgets the key", "key field",
-                       "letters, digits, - and _", "VoMP's mass and materials, but no friction",
-                       "A job built before the estimate stage keeps the models"],
+                       "letters, digits, - and _", "VoMP's mass and materials, but no friction"],
              "lidar": ["median", "before MV-SAM3D", "Without LiDAR", f"under {L.MIN_POINTS} points",
                        f"over {L.MAX_IQR_REL:.0%}", f"more than {L.OUTLIER_MIN_REL:.0%}",
                        f"fewer than {L.MIN_VIEWS} views", f"over {L.MAX_SPREAD_REL:.0%}",
@@ -153,18 +150,18 @@ def test_help_page_holds_the_method_numbers():
                          "view 0 first", "same API key", "the size of the mesh", "outer surface",
                          "a low and a high bound", "The model gives no mass", f"from {f_lo} to {f_hi}",
                          "asks once more", "A second invalid answer fails the stage", f"note says {steps.NO_KEY_SKIP}.",
-                         "VoMP's mass and materials", "keeps the models that it had", "one rigid body",
+                         "VoMP's mass and materials", "one rigid body",
                          "Mass", "Center of mass", "Young's modulus (median)", "Poisson ratio (median)",
                          "Density (median)", "Friction", f"{grid} voxels along its longest side", mass_err,
                          "counts as solid", "Pa", "kg/m³", "VoMP v1.1", "bottom of the object",
                          "the surface material that the model named", "No partner surface",
                          "every collision surface and on the floor", "MuJoCo and USD", "The URDF holds no friction",
-                         f"the default friction, {friction}", "has no Friction row", "medians of VoMP's prediction",
+                         "has no Friction row", "medians of VoMP's prediction",
                          "No object has been weighed", "likely too narrow"],
              "downloads": ["(package)", "API key", "the agent's result when the key was found in it",
                            "cameras' mean up", "one link", "view 0's camera frame",
                            "mask IoU", "ok is false", "When the agent is not None", "It holds no friction",
-                           "and in jobs built before the estimate stage", "5th to 95th percentile",
+                           "5th to 95th percentile",
                            "The align stage writes it", "The estimate stage adds the friction",
                            "the model's reason", "the number of tries", "has no estimate in it",
                            "VoMP does not read this file",
@@ -199,7 +196,6 @@ def test_help_page_gives_the_rank_and_the_time_off_the_clock():
     helpers whose time does not count (tools.OFF_CLOCK), with the cap that holds in each round."""
     text = sections(HELP.read_text())["agent"]
     words = {"round outcome pass": "a mesh whose check passed wins",
-             "surface not blocking": "surface findings do not block",
              "source not an export": "did not come from an export", "version": "then the later one"}
     assert tuple(words) == controller.RANK
     at = [text.index(w) for w in words.values()]

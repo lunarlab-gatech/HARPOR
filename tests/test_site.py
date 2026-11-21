@@ -22,7 +22,7 @@ def test_gallery_build_and_links(tmp_path):
     written = site.build(out, demo_dir=folder)
     assert (out / 'index.html').read_bytes() == (out / 'demos.html').read_bytes()
     assert any(name.startswith('demos/') for name in written)
-    assert 'static/app.js' not in written and 'static/config.js' not in written
+    assert 'static/app.js' not in written
     for page in ('index.html', 'demos.html', 'help.html'):
         text = (out / page).read_text()
         assert 'supabase' not in text.lower() and 'harpor-signin' not in text
@@ -56,16 +56,6 @@ def test_refuses_unrelated_directory(tmp_path):
     with pytest.raises(site.SiteError, match='not an earlier build'):
         site.build(tmp_path)
     assert (tmp_path / 'keep.txt').read_text() == 'keep'
-
-
-def test_replaces_old_platform_build(tmp_path):
-    (tmp_path / '.nojekyll').touch()
-    (tmp_path / 'static').mkdir()
-    (tmp_path / 'static/config.js').write_text('old cloud configuration')
-    (tmp_path / 'privacy.html').write_text('old platform privacy')
-    site.build(tmp_path)
-    assert not (tmp_path / 'static/config.js').exists()
-    assert not (tmp_path / 'privacy.html').exists()
 
 
 def test_vendor_integrity(tmp_path):

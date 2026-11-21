@@ -60,7 +60,7 @@ class Term:
 
 @pytest.fixture
 def term(tmp_path, monkeypatch, capsys, fake_stages):
-    monkeypatch.setattr(jobs, "default_key_dir", lambda: tmp_path / "shm" / "gator-webapp-1")
+    monkeypatch.setattr(jobs, "default_key_dir", lambda: tmp_path / "shm" / "harpor-webapp-1")
     monkeypatch.setattr(run, "POLL_S", 0.05)
     return Term(tmp_path, capsys)
 
@@ -423,25 +423,6 @@ def test_a_resume_after_a_failed_estimate_reads_the_key(term, monkeypatch):
     assert stage_times(J)["agent"] == before["agent"] and OPUS not in out  # the agent stage stays done
     with zipfile.ZipFile(J / "results.zip") as z:
         assert {"mjcf/mjcf.json", "summary.json"} <= set(z.namelist())
-
-
-def test_a_resume_of_an_older_job_reads_the_key_for_estimate(term, monkeypatch):
-    """A job folder from before the estimate stage has no record of it, and the command's Runner adds one, skipped
-    (jobs.OLDER). The run still runs that stage, so a resume of an older job that failed at align reads the key.
-    Before, the resume never read it, and the job stopped at estimate for the key on every resume."""
-    key = term.key_file()
-    fail_once(monkeypatch, "align", "echo 'no mesh'; exit 1")
-    code, out = term(term.video(), "--prompt", "box", "--n-views", 3, "--agent", "opus", "--key-file", key)
-    J = term.folder(out)
-    assert code == run.FAILED and "the job failed: align: exit 1: no mesh" in out, out
-    old = jobs.load(J)
-    del old["stages"]["estimate"]  # as a job folder of the version before the estimate stage
-    jobs.save(J, old)
-    code, out = term.exact(printed(out))
-    job = jobs.load(J)
-    assert code == run.DONE and "estimate: done" in out and "waiting for the" not in out, out
-    assert (job["stages"]["estimate"]["status"], job["stages"]["mjcf"]["status"]) == ("done", "done")
-    assert OPUS not in out
 
 
 @pytest.mark.parametrize("text, mode, reason", [

@@ -7,7 +7,6 @@ import trimesh
 from PIL import Image
 
 from harpor import frames
-from harpor.physics.align import read_glb, write_glb
 from harpor.webapp import physics_auto as A
 
 H, W = 120, 160
@@ -46,9 +45,11 @@ def plane_view(up=UP, height=0.6):
 
 
 def write_run(run, P, mask, view1=np.eye(3), names=("0", "1")):
-    """A run of views 0 and 1; view1 is view 1's camera-to-W rotation (view 0's is the identity). names: what the
-    two views are called (a run made by hand names its photos itself)."""
+    """A run of views 0 and 1 in a job folder (run's parent, with a job.json of agent astra); view1 is view 1's
+    camera-to-W rotation (view 0's is the identity). names: what the two views are called."""
     (run / "masks").mkdir(parents=True)
+    if not (run.parent / "job.json").exists():
+        (run.parent / "job.json").write_text(json.dumps({"agent": "astra"}))
     Image.fromarray((mask * 255).astype(np.uint8)).resize((2 * W, 2 * H), Image.NEAREST).save(
         run / "masks" / f"{names[0]}.png")
     files = [str(run / "input" / "images" / f"{n}.png") for n in names[::-1]]  # view 0 second in DA3's order
@@ -126,23 +127,6 @@ def test_up_hint_falls_back_to_the_cameras_up(tmp_path):
     assert "empty" in A.up_hint(tmp_path / "empty")[1]["reason"]
 
 
-def test_needs_opaque(tmp_path):
-    g = box_glb(tmp_path / "box.glb")
-    assert not A.needs_opaque(g)
-    assert A.needs_opaque(box_glb(tmp_path / "half.glb", alpha=128))
-    doc, binary = read_glb(g)
-    for patch in ({"extensions": {"KHR_materials_transmission": {"transmissionFactor": 1.0}}},
-                  {"extensions": {"KHR_materials_ior": {"ior": 1.5}}}, {"alphaMode": "BLEND"}):
-        d = json.loads(json.dumps(doc))
-        d["materials"][0].update(patch)
-        write_glb(tmp_path / "p.glb", d, binary)
-        assert A.needs_opaque(tmp_path / "p.glb"), patch
-    d = json.loads(json.dumps(doc))
-    d["materials"][0]["alphaMode"] = "MASK"
-    write_glb(tmp_path / "p.glb", d, binary)
-    assert not A.needs_opaque(tmp_path / "p.glb")
-
-
 def test_sim_name():
     cases = {"coffee cup": "coffee_cup", " Coffee  Cup! ": "coffee_cup", "3d printer": "obj_3d_printer",
              "scene": "obj_scene", "World": "obj_world", "  ": "obj", "café mug": "caf_mug", "x-ray": "x_ray"}
@@ -158,10 +142,10 @@ def test_align_job_picks_the_glb_and_aligns_it(tmp_path, capsys):
     A.align_job(j)
     up = json.loads((j / "physics" / "up.json").read_text())
     assert up["glb"] == str(j / "run" / "posed.glb") and up["glb_rule"] == "no agent result"
-    assert up["info"]["source"] == "plane" and not up["opaque"]
+    assert up["info"]["source"] == "plane" and "opaque" not in up
     rep = json.loads((j / "physics" / "aligned.json").read_text())
-    assert rep["up_near"]["axis"] in ("pca-thin", "normals") and rep["up_near"]["angle_deg"] < 1 and rep["x_rule"] == "footprint"
-    assert np.allclose(rep["extent_s"], [0.3, 0.2, 0.1], atol=1e-3) and not rep["opaque"]
+    assert rep["up_near"]["axis"] in ("pca-thin", "normals") and rep["up_near"]["angle_deg"] < 1
+    assert np.allclose(rep["extent_s"], [0.3, 0.2, 0.1], atol=1e-3)
 
     # The agent's delivery wins, unless placement was too poor for the agent to run.
     (j / "agent" / "s" / "work" / "exports").mkdir(parents=True)
@@ -170,9 +154,8 @@ def test_align_job_picks_the_glb_and_aligns_it(tmp_path, capsys):
     (j / "agent" / "result.json").write_text(json.dumps(result))
     A.align_job(j)
     up = json.loads((j / "physics" / "up.json").read_text())
-    assert up["glb"] == str(j / "agent" / "s" / "work" / "exports" / "001.glb") and up["opaque"]
+    assert up["glb"] == str(j / "agent" / "s" / "work" / "exports" / "001.glb")
     assert "finish GLB, verdict complete" in up["glb_rule"]
-    assert json.loads((j / "physics" / "aligned.json").read_text())["opaque"]
     for r in ({**result, "verdict": "fallback_original"}, {**result, "glb": None}, {**result, "glb": "../../run/posed.glb"},
               {"verdict": "needs_review", "glb": None}):
         (j / "agent" / "result.json").write_text(json.dumps(r))

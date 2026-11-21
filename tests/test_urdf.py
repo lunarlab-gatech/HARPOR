@@ -24,8 +24,8 @@ def test_urdf_of_a_textured_two_part_object(tmp_path):
     mj = build_mjcf(glb, summary, tmp_path / "mjcf", "chest", decompose=hull_parts)
     report = build(glb, summary, tmp_path / "mjcf", tmp_path / "urdf", "chest")
     c = check(tmp_path / "urdf")
-    assert (c["links"], c["joints"], c["joint_types"], c["meshes"], c["missing"]) == (1, 0, {}, 2, [])
-    (link,) = report["links"]
+    assert (c["links"], c["meshes"], c["missing"]) == (1, 2, [])
+    link = report["link"]
     assert (report["name"], link["name"], link["mesh"], link["collisions"]) == (
         "chest", "chest", "meshes/link_0.obj", ["meshes/collision_0.obj"])
     assert link["inertial"] == {k: rb[k] for k in ("mass", "com", "fullinertia")}
@@ -60,11 +60,11 @@ def test_urdf_of_a_rigid_box(tmp_path):
     box.apply_translation([0, 0, 0.25])
     trimesh.Scene(trimesh.Trimesh(frames.w_to_gltf(box.vertices), box.faces)).export(tmp_path / "box.glb")
     rb = {"mass": 12.0, "com": [0.01, -0.02, 0.25], "fullinertia": [0.9, 1.5, 2.0, 0.05, -0.02, 0.01]}
-    (tmp_path / "summary.json").write_text(json.dumps({"rigid_body": rb}))
+    (tmp_path / "summary.json").write_text(json.dumps({"rigid_body": rb, "friction": 0.6}))
     build_mjcf(tmp_path / "box.glb", tmp_path / "summary.json", tmp_path / "mjcf", "box", decompose=hull_parts)
     build(tmp_path / "box.glb", tmp_path / "summary.json", tmp_path / "mjcf", tmp_path / "urdf", "box")
     c = check(tmp_path / "urdf")
-    assert (c["links"], c["joints"], c["meshes"], c["missing"]) == (1, 0, 2, [])
+    assert (c["links"], c["meshes"], c["missing"]) == (1, 2, [])
     link = ET.parse(tmp_path / "urdf" / "model.urdf").getroot().find("link[@name='box']")
     assert link.find("inertial/inertia").get("ixy") == "0.05" and link.find("inertial/origin").get("xyz") == "0.01 -0.02 0.25"
     assert link.find("collision/geometry/mesh").get("filename") == "meshes/collision_0.obj"

@@ -46,13 +46,13 @@ check_glb refuses it, since a small GLB can hold one.
 
 Findings (LIMITS, shares of the native area): deleted above 0.02 is surface_deleted, uv_changed above 0.01
 surface_uv, material_changed above 0.01 surface_material, flipped above 0.01 surface_flipped, and present below
-IDENTITY surface_identity. The limits come from reasoning, not from paired data. ENFORCE = False keeps them
-report-only (blocks is then always False) until a real run calibrates them.
+IDENTITY surface_identity. The limits come from reasoning, not from paired data, so the findings are report only
+(harpor.agent.validate): they decide nothing.
 
 The report holds diagonal, native_area, caps_area, shares {retained, modified, uv_changed, material_changed,
 flipped, deleted, unresolved, added, present}, lost_regions [{min, max, share}] (up to REGIONS boxes in W around the
 largest connected sets of deleted faces), materials [{original, candidate, why, share}] of the pairs that differ,
-findings [{code, measured, expected, why}], blocks and seconds.
+findings [{code, measured, expected, why}] and seconds.
 
 It runs on the host in envs/sam3d, with numpy, scipy and trimesh, which it imports only when it runs.
 """
@@ -84,7 +84,6 @@ LIMITS = {"deleted": (0.02, "surface_deleted", "deleted"), "uv_changed": (0.01, 
           "flipped": (0.01, "surface_flipped", "facing the other way")}  # share: (limit, finding, what it is)
 IDENTITY = 0.5  # the smallest present share
 REGIONS = 5
-ENFORCE = False
 
 
 @dataclass
@@ -344,7 +343,7 @@ def _compare(glb, original):
     return {"diagonal": diag, "native_area": float(f"{total:.6g}"), "caps_area": float(f"{area[~native].sum():.6g}"),
             "shares": shares,
             "lost_regions": lost_regions(points, ids, deleted, area, total), "materials": materials,
-            "findings": found, "blocks": ENFORCE and bool(found), "seconds": round(time.time() - t0, 2)}
+            "findings": found, "seconds": round(time.time() - t0, 2)}
 
 
 def compare(glb, original):

@@ -876,16 +876,13 @@ def test_check_image_shows_points_off_the_mask_in_colour(tmp_path):
     assert (white > 200).all() and a[100, 100].max() < 90  # the background is dimmed
 
 
-def test_estimate_fails_with_too_few_views_and_the_cli_says_why(tmp_path, capsys):
+def test_estimate_fails_with_too_few_views_and_the_summary_says_why(tmp_path):
     pool, samples = lidar_pool(tmp_path, few=(2,), no_samples=(3, 4, 5, 6, 7))
-    np.savez(tmp_path / "samples.npz", **samples)
-    with pytest.raises(SystemExit, match="LiDAR points cover the object in only 2 of 8 views"):
-        L.main(["estimate", "--pool", str(pool), "--samples", str(tmp_path / "samples.npz"), "--out", str(tmp_path / "lidar.json"),
-                "--check", str(tmp_path / "check")])
-    rec = json.loads((tmp_path / "lidar.json").read_text())
+    rec = L.estimate(pool, samples, tmp_path / "check")
     assert not rec["ok"] and [v["status"] for v in rec["views"]] == ["used", "used", "few_points"] + ["no_samples"] * 5
+    assert "LiDAR points cover the object in only 2 of 8 views" in rec["reason"]
     assert len(list((tmp_path / "check").glob("*.jpg"))) == 8
-    assert re.search(r"f00020: few_points, \d of 10 points\n", capsys.readouterr().out)
+    assert re.search(r"f00020: few_points, \d of 10 points$", "\n".join(L.summary(rec)), re.M)
 
 
 def test_estimate_fails_when_views_disagree(tmp_path):

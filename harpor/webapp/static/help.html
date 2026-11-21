@@ -306,8 +306,7 @@
     use it.</li>
 
   <li>None runs no agent and needs no key. Without a key, the job has VoMP's mass and materials, but no friction
-    estimate and no simulation models: see <a href="#physics">Mass, materials and friction</a>. A job built before
-    the estimate stage keeps the models that it had, also with the agent set to None.</li>
+    estimate and no simulation models: see <a href="#physics">Mass, materials and friction</a>.</li>
 
 </ul>
 <p>GPT-6.2-Astra and Claude Opus 5.5 run at xhigh effort. Claude Fable 5.2 runs at high effort, because at xhigh its
@@ -320,10 +319,9 @@
   surface with the original's.</p>
 <p>The agent works in rounds, each with a new agent that gets the last check's findings. The first round builds, in
   the 900 s above. When the check fails and the agent can fix the flaw, a repair round follows, with 450 s for a
-  repair, up to 2 repairs. When the flaw needs a new plan, a planning round with 300 s to plan comes before the next
-  repair. It writes a plan and builds nothing. The job delivers the best mesh of the rounds: a mesh whose check passed wins,
-  then one whose surface findings do not block, then one that did not come from an export, then the later one. A mesh
-  whose check did not pass is delivered as needs review.</p>
+  repair, up to 2 repairs. The surface comparison is reported but does not fail the check. The job delivers the best
+  mesh of the rounds: a mesh whose check passed wins, then one that did not come from an export, then the later one. A
+  mesh whose check did not pass is delivered as needs review.</p>
 
 <h3>GPT-6.2-Astra and the network</h3>
 <p>GPT-6.2-Astra runs the Codex CLI in a container that can reach the network. Text in your video or images, such as a
@@ -358,15 +356,15 @@
   <dd>A flaw that the agent says is still in its result, written when it called finish. The agent can list at most
     3.</dd>
   <dt>Rounds</dt>
-  <dd>For a session in rounds: how many ran, each with its kind (build, repair or replan) and the outcome of its
-    check, pass or fail, and the round whose GLB the job delivered. A replan round has no check. <b>no candidate
+  <dd>For a session in rounds: how many ran, each with its kind (build or repair) and the outcome of its
+    check, pass or fail, and the round whose GLB the job delivered. <b>no candidate
     delivered</b> means that no round left a GLB that the app could deliver.</dd>
   <dt>Surface retained</dt>
   <dd>How much of the original surface (the posed mesh) the agent's GLB keeps: the share still
     there, the share as it was (the same UVs, material and facing) and the share changed (cut, remeshed, or with
     other UVs or material). A face without UVs in the original cannot be checked for those. The names of any surface
-    findings follow. <b>report only</b> means that they decide nothing, as long as the app's limits for them are not
-    set from real runs. <b>blocks delivery</b> means that they rank the GLB below one whose surface does not block.</dd>
+    findings follow. <b>report only</b> means that they decide nothing, since the app's limits for them are not set
+    from real runs.</dd>
   <dt>Agent tokens</dt>
   <dd>For the Claude models: the tokens of the whole session, from its log: new input, output, cache reads and cache
     writes. A turn is one reply of the model.</dd>
@@ -591,8 +589,7 @@ time_offset_s: 0.0</pre>
   reason and asks once more. A second invalid answer fails the stage.</p>
 <p>A job with the agent set to None has no API key. Its estimate, mjcf, usd and urdf stages are skipped, and their
   note says turned off: the friction needs the job's model and API key. Such a job has VoMP's mass and materials,
-  but no MuJoCo, USD or URDF model. A job built before the estimate stage keeps the models that it had, also with
-  the agent set to None.</p>
+  but no MuJoCo, USD or URDF model.</p>
 <p>The physics models hold the object as one rigid body. The Results tab gives these rows:</p>
 <dl>
   <dt>Mass</dt>
@@ -613,9 +610,8 @@ time_offset_s: 0.0</pre>
   <dt>Friction</dt>
   <dd>One friction value for the whole object, the surface material that the model named, the low and high bound,
     and the model that estimated it. No partner surface is named. The MuJoCo and USD models use the value on every
-    collision surface and on the floor of their scenes. The URDF holds no friction. A job built before the estimate
-    stage has no estimate, so its models use the default friction, 0.6, and the row says assumed. A job with the
-    agent set to None that was built since the estimate stage has no Friction row.</dd>
+    collision surface and on the floor of their scenes. The URDF holds no friction. A job with the agent set to None
+    has no Friction row.</dd>
 </dl>
 <p>The three material rows are medians of VoMP's prediction over the object's voxels. No object has been weighed, and
   no friction measured, to test these numbers. The friction bounds that the model gives are likely too narrow.</p>
@@ -634,11 +630,10 @@ time_offset_s: 0.0</pre>
   <thead><tr><th>In results.zip</th><th>What it is</th><th>When the job has it</th></tr></thead>
   <tbody>
     <tr><td><code>mjcf/</code></td><td>The MuJoCo (MJCF) model with its meshes.</td><td>When the agent is not
-      None, and in jobs built before the estimate stage.</td></tr>
-    <tr><td><code>usd/</code></td><td>The USD model with its meshes.</td><td>When the agent is not None, and in jobs
-      built before the estimate stage.</td></tr>
-    <tr><td><code>urdf/</code></td><td>model.urdf with its meshes in urdf/meshes.</td><td>In jobs built since the app
-      made URDF models: when the agent is not None, and in jobs built before the estimate stage.</td></tr>
+      None.</td></tr>
+    <tr><td><code>usd/</code></td><td>The USD model with its meshes.</td><td>When the agent is not None.</td></tr>
+    <tr><td><code>urdf/</code></td><td>model.urdf with its meshes in urdf/meshes.</td><td>When the agent is not
+      None.</td></tr>
     <tr><td><code>posed.glb</code>, <code>aligned.glb</code></td><td>The meshes below.</td><td>Always.</td></tr>
     <tr><td><code>turntable.mp4</code></td><td>The 360 video below.</td><td>When you asked for one.</td></tr>
     <tr><td><code>refined.glb</code></td><td>The agent's GLB.</td><td>When the agent ran.</td></tr>
@@ -663,8 +658,8 @@ time_offset_s: 0.0</pre>
   <dt><code>aligned.glb</code></dt>
   <dd>The GLB that physics used, turned upright, with the bottom at 0, the footprint centered on the origin and the
     long side on x (z up in MuJoCo, y up in glTF). Up is the object's own axis closest to the up of the table or floor
-    under it in view 0, or to the cameras' mean up when no plane fits there. Materials that let light through are made
-    opaque. VoMP does not read this file: it reads its own opaque copy of the first mesh.</dd>
+    under it in view 0, or to the cameras' mean up when no plane fits there. VoMP does not read this file: it reads its
+    own opaque copy of the first mesh.</dd>
 </dl>
 
 <h3>Video</h3>
@@ -692,7 +687,7 @@ time_offset_s: 0.0</pre>
     Young's modulus, Poisson ratio and density, and the mass, center of mass and inertia of the rigid body. The
     estimate stage adds the friction and the model's answer: the surface material, the friction with its bounds and
     the model's reason, then the model, the number of tries, the time and the photos that the model saw. A job with
-    the agent set to None, or built before the estimate stage, has no estimate in it.</dd>
+    the agent set to None has no estimate in it.</dd>
   <dt><code>lidar.json</code></dt>
   <dd>The record of the lidar stage: the metric scale, each view's scale, point count and status, how the views were
     combined, the LiDAR source, and the link to the camera (for a rosbag the TF chain or the uploaded calibration; a
@@ -733,7 +728,7 @@ time_offset_s: 0.0</pre>
   <dd>On a failed or cancelled job. It continues from the first stage that is not done, and its label names that
     stage, such as Retry from sam3d. Read input again means that the input was not read yet. After a change of the calibration, or an update that
     changes how the app finds the scale, Retry starts from lidar. A Retry that runs the align stage again starts
-    from vomp when the job has no VoMP output, for example when VoMP failed or an older version built the job. A
+    from vomp when the job has no VoMP output because VoMP failed. A
     done job whose 360 video failed shows Retry from
     turntable. It makes the video again and then results.zip. A done job whose scale is out of date shows Run lidar
     and later stages again: see <a href="#lidar">Metric scale and LiDAR</a>.</dd>

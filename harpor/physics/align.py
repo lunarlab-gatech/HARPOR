@@ -5,25 +5,20 @@ renders with Blender +Z as image-up, and MuJoCo expects +Z up. This module write
 in frame S: z up, the footprint centred on the origin, the bottom at z = 0 and the longest horizontal
 side on x. In glTF axes S is y up, which Blender's stock importer turns back into z up.
 
-Up comes from one of two rules (--up), each signed against W's +y (the camera's down), which assumes
-the camera was roughly level:
-- pca: the thinnest principal axis of the mesh surface (exact second moment of its triangles). It
-  holds for flat objects that rest on their broad face, such as a plate, a knife or a fork.
-- normals: the area-weighted mean normal of the near-horizontal faces, refined to the dominant
-  plane. It holds when one horizontal plane dominates, such as a patch of floor under the object.
---up-near X,Y,Z instead takes whichever of the object's own axes (the three principal axes and the
-normals rule) lies closest to a hint in W, such as the table plane fitted to view 0's depth that the
-objects of one photo set share. The object keeps its own up, so a mesh whose pose is a little off still
-rests on its base, and the hint only settles which axis that is (a squat cup, a tall glass).
-x comes from one of two rules (--x): pca, the major axis of the surface projected onto the
-horizontal plane, or footprint, the long side of the minimum-area rectangle around the vertices
-seen from above. Use footprint for near-square or open objects, where the PCA axis
-can land on a diagonal, which also makes the bounding box and VoMP's voxels larger.
+Up is whichever of the object's own axes lies closest to the hint --up-near X,Y,Z in W, such as the
+support plane fitted to view 0's depth (harpor.webapp.physics_auto). The candidates are the three
+principal axes of the mesh surface (exact second moment of its triangles) and the normals rule: the
+area-weighted mean normal of the near-horizontal faces, refined to the dominant plane. Up is signed
+against W's +y (the camera's down). The object keeps its own up, so a mesh whose pose is a little off still
+rests on its base, and the hint only settles which axis that is.
+x is the long side of the minimum-area rectangle around the vertices seen from above (the footprint). The
+PCA axis of the surface could land on a diagonal of a near-square or open object, which also makes the
+bounding box and VoMP's voxels larger.
 
 The GLB is not re-exported: the BIN chunk is copied byte for byte and the scene's root nodes go under
 one new node that holds the transform, so textures and materials stay exactly as the agent left them.
 
-    python -m harpor.physics.align --glb IN.glb --out OUT.glb [--up pca|normals | --up-near X,Y,Z] [--x pca|footprint] [--opaque]
+    python -m harpor.physics.align --glb IN.glb --out OUT.glb --up-near X,Y,Z
 writes OUT.glb and OUT.json (T_s_from_w, up in W, the camera tilt and the extents in S).
 --opaque also removes transmission, volume and IOR extensions and makes every material opaque, because
 VoMP rejects transmissive or partly transparent materials (the glass). The geometry is unchanged.
@@ -97,9 +92,9 @@ def up_near(vertices_w, faces, hint):
     return u, k, ang[k]
 
 
-def up_frame(vertices_w, faces, up=None, down_w=(0.0, 1.0, 0.0), x_rule="pca"):
-    """4x4 T_s_from_w (see the module docstring) and the surface PCA eigenvalues (ascending).
-    up=None takes the thinnest principal axis (the pca rule)."""
+def up_frame(vertices_w, faces, up, down_w=(0.0, 1.0, 0.0)):
+    """4x4 T_s_from_w (see the module docstring) for the up direction up in W, and the surface PCA eigenvalues
+    (ascending)."""
     tri, _, area = _triangles(vertices_w, faces)
     wt = area / area.sum()
     s = tri.sum(1)
@@ -107,17 +102,14 @@ def up_frame(vertices_w, faces, up=None, down_w=(0.0, 1.0, 0.0), x_rule="pca"):
     # Exact second moment of a uniform triangle: (aa' + bb' + cc' + ss') / 12 with s = a + b + c.
     second = np.einsum("t,tij->ij", wt, np.einsum("tvi,tvj->tij", tri, tri) + s[:, :, None] * s[:, None, :]) / 12
     C = second - np.outer(mu, mu)
-    w, V = np.linalg.eigh(C)
-    if up is None:
-        up = V[:, 0]
+    w = np.linalg.eigvalsh(C)
     up = np.asarray(up, float) / np.linalg.norm(up)
     up = up if up @ np.asarray(down_w) < 0 else -up
     P = np.eye(3) - np.outer(up, up)
     x = np.linalg.eigh(P @ C @ P)[1][:, 2]
-    R = np.stack([x, np.cross(up, x), up])
-    if x_rule == "footprint":
-        a = footprint_yaw(vertices_w @ R[:2].T)
-        R = np.array([[np.cos(a), -np.sin(a), 0], [np.sin(a), np.cos(a), 0], [0, 0, 1]]) @ R
+    R = np.stack([x, np.cross(up, x), up])  # the PCA x, which the footprint then turns about up
+    a = footprint_yaw(vertices_w @ R[:2].T)
+    R = np.array([[np.cos(a), -np.sin(a), 0], [np.sin(a), np.cos(a), 0], [0, 0, 1]]) @ R
     p = vertices_w @ R.T
     lo, hi = p.min(0), p.max(0)
     t = -np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]])
@@ -206,31 +198,19 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--glb", required=True)
     ap.add_argument("--out", required=True, help="output .glb; the report goes next to it as .json")
-    ap.add_argument("--up", choices=["pca", "normals"], default="pca")
-    ap.add_argument("--up-near", help="hint X,Y,Z in W: take the object axis closest to it; overrides --up")
-    ap.add_argument("--x", choices=["pca", "footprint"], default="pca")
-    ap.add_argument("--opaque", action="store_true")
+    ap.add_argument("--up-near", required=True, help="hint X,Y,Z in W: take the object axis closest to it")
     a = ap.parse_args(argv)
     doc, binary = read_glb(a.glb)
     v, f = load_w(a.glb)
-    near = None
-    if a.up_near:
-        up, axis, angle = up_near(v, f, [float(c) for c in a.up_near.split(",")])
-        near = {"hint": a.up_near, "axis": axis, "angle_deg": angle}
-    else:
-        up = up_from_normals(v, f) if a.up == "normals" else None
-    T, eig = up_frame(v, f, up, x_rule=a.x)
-    doc = make_opaque(doc) if a.opaque else doc
+    up, axis, angle = up_near(v, f, [float(c) for c in a.up_near.split(",")])
+    T, eig = up_frame(v, f, up)
     doc = wrap_scene(doc, gltf_matrix(T))
     write_glb(a.out, doc, binary)
     vs, _ = load_w(a.out)  # the glTF -> W map is also Blender's import, so these are S coordinates
     up = T[2, :3]
     report = {
         "source": str(Path(a.glb).resolve()),
-        "up_rule": "near" if a.up_near else a.up,
-        "up_near": near,
-        "x_rule": a.x,
-        "opaque": a.opaque,
+        "up_near": {"hint": a.up_near, "axis": axis, "angle_deg": angle},
         "T_s_from_w": T.tolist(),
         "up_in_w": up.tolist(),
         "camera_tilt_deg": float(np.degrees(np.arccos(np.clip(-up[1], -1, 1)))),

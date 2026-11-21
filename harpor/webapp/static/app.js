@@ -14,19 +14,15 @@ const OPTIONAL = ["turntable"];  // steps.OPTIONAL: when it fails, the job still
 const AGENTS = { astra: { key: "OpenAI API key", placeholder: "sk-..." },
   opus: { key: "Anthropic API key", placeholder: "sk-ant-..." }, fable: { key: "Anthropic API key", placeholder: "sk-ant-..." },
   none: { key: null, placeholder: "" } };
-// A model id (agent_result.model, summary.json estimate.model) and its name: tools.MODELS, and gpt-6-astra, which
-// the jobs built before 2026-11-20 ran.
-const MODEL_NAME = { "gpt-6-astra": "GPT-6-Astra", "gpt-6.2-astra": "GPT-6.2-Astra", "claude-opus-5-5": "Claude Opus 5.5",
+// A model id (agent_result.model, summary.json estimate.model) and its name: tools.MODELS.
+const MODEL_NAME = { "gpt-6.2-astra": "GPT-6.2-Astra", "claude-opus-5-5": "Claude Opus 5.5",
   "claude-fable-5-2": "Claude Fable 5.2" };
-const RAN = { codex: "GPT-6.2-Astra", claude: "Claude Opus 5.5" };  // agent_result.agent, for a result without a known model id
-const ranBy = (a) => MODEL_NAME[a.model] || RAN[a.agent];  // the model that ran the agent stage
+const ranBy = (a) => MODEL_NAME[a.model] || a.model || "?";  // the model that ran the agent stage; another id as it is
 // What each stage does, shown muted next to its name.
 const STAGE_LABEL = { topics: "camera topics", frames: "frame analysis", extract: "extract frames", masks: "SAM 3 masks",
   prep: "prepare views", da3: "depth (Depth Anything 3)", lidar: "metric scale (LiDAR)", select: "view selection",
   sam3d: "mesh (MV-SAM3D)", place: "pose and scale", agent: "agent refinement", align: "align upright", vomp: "materials (VoMP)",
   estimate: "friction", mjcf: "MuJoCo model", usd: "USD", urdf: "URDF", turntable: "360 video", package: "results.zip" };
-// A stage's label; a stage of an older job that this version no longer has gets none.
-const stageLabel = (name) => STAGE_LABEL[name] || "";
 const VERDICT = { needs_review: "needs review" };  // agent_result.verdict as the page shows it; the others as they are
 const LIST_STATUS = { review: "needs review" };  // badge text in the jobs list; the others are the status
 const NEEDS_YOU = ["review", "ready", "choose_topic", "failed"];  // the list marks these rows
@@ -61,19 +57,7 @@ const staleBy = () => !V.job ? "unknown" : V.job.kind === "stray" ? "estimator"
 // The Retry button's label of a done job whose scale is stale.
 const RERUN_LIDAR = "Run lidar and later stages again";
 const KIND_LABEL = { video: "video", rosbag: "rosbag", stray: "Stray capture" };  // job.json source kind, in the jobs list
-// Local server transport; factories keep the UI usable in the DOM test harness.
-const T = {
-  fetch: (url, opts) => fetch(url, opts),
-  url: (path) => path,
-  xhr: () => new XMLHttpRequest(),
-  events: (url) => new EventSource(url),
-  live: ACTIVE,
-  noJobs: "No jobs yet.",
-  liveLog: "live log",
-  offline: "Cannot reach the server. Is the SSH tunnel up?",
-  unauthorized: "Not logged in. Open the ?token= link the server printed.",
-};
-const OFFLINE = T.offline;
+const OFFLINE = "Cannot reach the server. Is the SSH tunnel up?";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 // The job page's tabs by their name in the hash (#/job/<id>/<name>), with the id of each one's panel. The tab buttons
 // are #tab-<name>.
@@ -133,7 +117,7 @@ const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter((x) => x 
 const badge = (t, text) => h("span", { class: "badge " + t }, text || t.replace("_", " "));
 const fmt = (sec) => sec < 60 ? sec.toFixed(1) + " s" : sec < 3600 ? Math.floor(sec / 60) + " min " + Math.floor(sec % 60) + " s"
   : Math.floor(sec / 3600) + " h " + Math.floor((sec % 3600) / 60) + " min";
-const file = (p, dl) => T.url(`/api/jobs/${V.id}/file/${p}`, dl);
+const file = (p) => `/api/jobs/${V.id}/file/${p}`;
 const shortTime = (t) => {  // "2026-10-17T21:02:50" -> "Oct 17 21:02", without Date (the server's clock and zone)
   const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)/.exec(t || "");
   return m ? `${MONTHS[+m[2] - 1]} ${+m[3]} ${m[4]}:${m[5]}` : t || "";
@@ -150,10 +134,10 @@ function say(el, text, info) {  // a message line: red for a problem, muted for 
 
 async function api(path, opts) {
   let r;
-  try { r = await T.fetch(path, opts); } catch (e) { online(false); throw new Error(OFFLINE); }
+  try { r = await fetch(path, opts); } catch (e) { online(false); throw new Error(OFFLINE); }
   online(true);
   const j = await r.json().catch(() => ({}));
-  if (r.status === 401) throw new Error(T.unauthorized);
+  if (r.status === 401) throw new Error("Not logged in. Open the ?token= link the server printed.");
   if (!r.ok) throw new Error(j.detail || `${r.status} ${r.statusText}`);
   return j;
 }
@@ -227,12 +211,12 @@ function renderJobs(rows) {
   listKey = rows ? JSON.stringify(rows) : null;
   if (rows && !rows.length) {
     $("#jobs tbody").replaceChildren(h("tr", { class: "empty" },
-      h("td", { colspan: 6 }, T.noJobs)));
+      h("td", { colspan: 6 }, "No jobs yet.")));
     return;
   }
   const hint = (j) => KIND_LABEL[j.kind] || j.kind || "";
   $("#jobs tbody").replaceChildren(...(rows || []).map((j) => h("tr", { class: NEEDS_YOU.includes(j.status) ? "act" : null },
-    h("td", { class: "thumb" }, h("img", { src: T.url(`/api/jobs/${j.id}/thumb/0`), alt: "", loading: "lazy",
+    h("td", { class: "thumb" }, h("img", { src: `/api/jobs/${j.id}/thumb/0`, alt: "", loading: "lazy",
       onerror: (e) => e.target.replaceWith(h("span", { class: "noimg" })) })),
     h("td", { class: "input" }, h("a", { href: "#/job/" + j.id }, j.video), hint(j) ? h("div", { class: "hint" }, hint(j)) : null),
     h("td", { class: "obj" }, j.prompt || ""),
@@ -273,7 +257,7 @@ function upload(f) {
     say($("#upmsg"), `${f.name}: file type not supported.`);
     return;
   }
-  const xhr = upXhr = T.xhr(), prog = $("#upprog"), t0 = Date.now();
+  const xhr = upXhr = new XMLHttpRequest(), prog = $("#upprog"), t0 = Date.now();
   const done = () => {
     upXhr = null;
     prog.hidden = $("#upcancel").hidden = true;
@@ -337,7 +321,7 @@ async function refresh() {
   const job = V.job = await api(`/api/jobs/${V.id}`);
   fill($("#jtitle"), job.video.name, job.prompt ? [" ", h("span", { class: "jobobj" }, job.prompt)] : null);
   $("#jid").textContent = "job " + job.id;
-  if (T.live.includes(job.status)) openStream();
+  if (ACTIVE.includes(job.status)) openStream();
   // A stale scale (another calibration, or an older estimator): Retry then starts from lidar (retryFrom), also on a
   // done job.
   V.scaleStale = ["failed", "cancelled", "done"].includes(job.status) && scaleStale(job);
@@ -537,7 +521,7 @@ function renderState(st, follow) {
   // "Running: mesh (MV-SAM3D)": the stage's label, or its name when it has none.
   const cur = st.current;
   const sum = { analyzing: cur === "topics" ? "Listing topics" : "Reading input", choose_topic: "Choose topic", ready: "Ready",
-    queued: "Waiting for GPU", running: cur ? "Running: " + (stageLabel(cur) || cur) : "Running",
+    queued: "Waiting for GPU", running: cur ? "Running: " + (STAGE_LABEL[cur] || cur) : "Running",
     review: "Needs review",
     done: "Done", failed: "Failed", cancelled: "Cancelled", uploaded: "Uploaded" }[st.status] || st.status;
   const overall = ["queued", "running"].includes(st.status) ? h("div", { class: "overall" },
@@ -585,7 +569,7 @@ function renderState(st, follow) {
     h("div", { class: "nm" }, live ? h("span", { class: "name" }, x.name)
       : h("button", { type: "button", class: "name link", "data-stage": x.name, "aria-controls": "log", "aria-pressed": String(x.name === V.logStage),
         onclick: () => showLog(x.name) }, x.name),
-    h("span", { class: "label" }, stageLabel(x.name))),
+    h("span", { class: "label" }, STAGE_LABEL[x.name])),
     h("span", { class: "gpu" }, x.gpu ? "GPU" : ""),
     badge(x.status),  // a stage that is turned off says so in its note ("turned off")
     h("span", { class: "secs", "data-started": x.started || null, "data-ended": x.ended || null },
@@ -658,12 +642,12 @@ function showRun() {  // the Log tab opens: the log where it was left, the clock
 }
 function openStream() {
   if (V.es) return;
-  const id = V.id, es = V.es = T.events(`/api/jobs/${id}/events`);
+  const id = V.id, es = V.es = new EventSource(`/api/jobs/${id}/events`);
   $("#logname").textContent = "live log (connecting)";
   V.logStage = null;
   V.logAtEnd = true;
   $("#rawlog").hidden = true;
-  es.onopen = () => { if (V.id === id) $("#logname").textContent = T.liveLog; };
+  es.onopen = () => { if (V.id === id) $("#logname").textContent = "live log"; };
   es.onerror = () => {
     if (V.id === id) $("#logname").textContent = es.readyState === 2 ? "live log lost: reload the page" : "live log (reconnecting)";
   };
@@ -703,7 +687,7 @@ function closeStream() {
 }
 async function showLog(stage) {
   if (V.es) return;  // the live log is showing
-  const r = await T.fetch(file(`logs/${stage}.log`));
+  const r = await fetch(file(`logs/${stage}.log`));
   $("#log").textContent = r.ok ? quiet(await r.text()).slice(-200000) : `no log of ${stage} yet`;
   $("#logname").textContent = `log of ${stage}`;
   V.logStage = stage;
@@ -981,7 +965,7 @@ function renderFrames() {
   const fi = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.i;
   $("#grid").replaceChildren(...(manual ? m.thumbs : m.candidates).map((i) => {
     const picked = manual && shown.has(i), k = shown.get(i), at = m.times[i].toFixed(2) + " s";
-    const kids = [h("img", { src: T.url(`/api/jobs/${V.id}/thumb/${i}`), loading: "lazy", alt: manual ? "" : "frame " + i, style: ratio }),
+    const kids = [h("img", { src: `/api/jobs/${V.id}/thumb/${i}`, loading: "lazy", alt: manual ? "" : "frame " + i, style: ratio }),
       picked ? h("b", {}, String(k + 1) + (V.picks[k] === V.view0 ? " ★" : "")) : null, h("span", {}, at)];
     const cls = "cell" + (cand.has(i) ? " cand" : "") + (picked ? " pick" : "");
     return manual ? h("button", { type: "button", class: cls, "data-i": i, "aria-pressed": String(picked), "aria-label": `frame ${i} at ${at}` }, ...kids)
@@ -1030,13 +1014,13 @@ $("#startform").onsubmit = async (e) => {
   }
   if (V.job && V.job.files && (V.job.files.includes("run/posed.glb") || V.job.files.includes("results.zip")) &&
       !confirm("Build again? This replaces the current results.")) return;
-  const agent = chosenAgent(), keyed = agent !== "none", typed = keyed;
+  const agent = chosenAgent(), keyed = agent !== "none";
   $("#start").disabled = true;
   say($("#startmsg"), keyed ? "checking the key" : "", true);
   try {
     await post(`/api/jobs/${V.id}/start`, { mode: mode(), prompt: $("#prompt").value, n_views: +$("#nviews").value,
       picks: manual ? V.picks : [], view0: manual ? V.view0 : null, auto_continue: !$("#pause").checked,
-      agent, api_key: typed ? $("#key").value : null, lidar,
+      agent, api_key: keyed ? $("#key").value : null, lidar,
       turntable: $("#turntable").checked === true });
     $("#key").value = "";
     say($("#startmsg"), "", true);
@@ -1301,8 +1285,7 @@ $("#build").onclick = () => act([$("#build"), $("#reselect")], $("#revmsg"), "ch
 
 // ---- 5. results ----
 
-// model-viewer comes from a module script: a CDN on the tunnel page, the site's own copy on the public site. When that
-// script does not load, a viewer would say "loading" for ever, so it waits for the element at most MV_WAIT_MS.
+// model-viewer comes from a module script on a CDN. When that script does not load, a viewer would say "loading" for ever, so it waits for the element at most MV_WAIT_MS.
 const MV_WAIT_MS = 10000;
 function mvDefined() {  // true once <model-viewer> is defined; false when it is not after MV_WAIT_MS
   const ce = window.customElements;
@@ -1313,7 +1296,7 @@ function mvDefined() {  // true once <model-viewer> is defined; false when it is
 }
 async function renderResults(job) {
   renderSpin(job);
-  const has = (p) => job.files.includes(p), json = async (p) => has(p) ? (await T.fetch(file(p))).json() : null;
+  const has = (p) => job.files.includes(p), json = async (p) => has(p) ? (await fetch(file(p))).json() : null;
   const cm = (x) => (100 * x).toFixed(0);
   // A viewer: until its mesh shows, the box says "Loading the mesh" (model-viewer's poster slot, which it hides then)
   // and the caption "loading" where the size goes. The caption says it to a screen reader, so the box's text is hidden.
@@ -1323,7 +1306,7 @@ async function renderResults(job) {
     const failed = () => {
       cap.textContent = title;
       fig.replaceChildren(cap, h("p", { class: "msg" }, `Could not show ${name}: `,
-        h("a", { href: file(p, name), download: name }, "download it"), "."));
+        h("a", { href: file(p), download: name }, "download it"), "."));
     };
     fig.append(h("model-viewer", { src: file(p), "camera-controls": true, "environment-image": "neutral", "shadow-intensity": "1",
       "interaction-prompt": "none", alt: title,
@@ -1342,8 +1325,8 @@ async function renderResults(job) {
   $("#resultsbody").classList.toggle("onefig", !refined);  // a wide screen puts the facts beside it
   // With the agent off there is no agent viewer; the Agent row of the facts says so.
   fill($("#viewers"), viewer("run/posed.glb", "Posed mesh"), refined);
-  const [place, phys, mj, lid] = await Promise.all([json("run/placement.json"), json("physics/summary.json"),
-    json("physics/mjcf/mjcf.json"), json("pool/lidar.json")]);
+  const [place, phys, lid] = await Promise.all([json("run/placement.json"), json("physics/summary.json"),
+    json("pool/lidar.json")]);
   // [label, value]: what each one means is in help.html.
   const rows = [], num = (x, d = 3) => x == null ? "?" : Number(x).toPrecision(d);
   // A position in m, to the mm. Rounding first turns float noise such as -1.51e-18 into 0.000, not -0.000.
@@ -1365,9 +1348,7 @@ async function renderResults(job) {
     }
   }
   // summary.json holds VoMP's mass and materials (align), and the estimate stage adds the model's friction (estimate).
-  // A summary without an estimate gets the friction that mjcf.json assumed when mjcf ran (a job built before that
-  // stage, with or without an agent). A job without an agent that was built since then skips mjcf, so it has no
-  // mjcf.json and no Friction row.
+  // A job without an agent has no estimate and no Friction row.
   const est = phys && phys.estimate && typeof phys.estimate === "object" ? phys.estimate : null;
   const short = (x) => x == null ? "?" : String(Number(Number(x).toPrecision(3)));  // 0.5, not 0.500
   if (phys) {
@@ -1379,7 +1360,7 @@ async function renderResults(job) {
   if (est) {
     rows.push(["Friction", `${short(est.friction)} for ${est.material} (range ${short(est.friction_low)} to ` +
       `${short(est.friction_high)}, estimated by ${MODEL_NAME[est.model] || est.model || "?"})`]);  // another id shows as it is
-  } else if (mj && typeof mj.friction === "number") rows.push(["Friction", `${mj.friction} (assumed, the same on every surface)`]);
+  }
   $("#facts2").replaceChildren(h("dl", {}, ...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])));
 }
 // The "Metric scale" row: placement.json metric_scale (select applied it), with lidar.json's source, views and spread.
@@ -1394,7 +1375,7 @@ function metricScale(place, rec, job) {
   return `×${m.toFixed(3)} from LiDAR` + (shown.length ? ` (${shown.join(", ")})` : "");
 }
 // The rows of a session in rounds (controller.run_session) and of the surface check: the rounds and how much of the
-// original's surface the result keeps. A key that the result lacks gives no row: old jobs may have none of them.
+// original's surface the result keeps. A key that the result lacks gives no row.
 function roundRows(a) {
   const rows = [], rounds = Array.isArray(a.rounds) ? a.rounds.filter((r) => r && typeof r === "object") : [];
   if (rounds.length) rows.push(["Rounds", roundsText(rounds, a.candidate)]);
@@ -1416,7 +1397,7 @@ function surfaceText(sf) {
   const codes = [...new Set(found.map((f) => f && f.code).filter(Boolean))];
   return `${pct(sh.present)} kept: ${pct(sh.retained)} as it was, ${pct(sh.modified)} changed`
     + (sh.unresolved > 0 ? `, ${pct(sh.unresolved)} without UVs to check` : "")
-    + (codes.length ? `; ${codes.join(", ")} (${sf.blocks ? "blocks delivery" : "report only"})` : "");
+    + (codes.length ? `; ${codes.join(", ")} (report only)` : "");
 }
 // ---- 5a. the Downloads tab: the job's files by group ----
 
@@ -1447,7 +1428,7 @@ function renderDownloads(job) {
   const has = (p) => files.includes(p);
   const groups = DOWNLOADS.map(([title, rows]) => [title, rows.filter(([p]) => has(p))]).filter(([, rows]) => rows.length);
   const row = ([p, name]) => h("li", { class: "dlrow" },
-    h("a", { href: file(p, `${job.id}_${name}`), download: `${job.id}_${name}`, class: p === "results.zip" ? "dl primary" : "dl" }, name),
+    h("a", { href: file(p), download: `${job.id}_${name}`, class: p === "results.zip" ? "dl primary" : "dl" }, name),
     typeof sizes[p] === "number" ? h("span", { class: "dlsize" }, fileSize(sizes[p])) : null);
   const note = groups.length && !has("results.zip") ? filesNote(job.status) : null;
   fill($("#downloadsbody"), note ? h("p", { class: "dlnote" }, note) : null, groups.map(([title, rows]) => {
@@ -1935,7 +1916,7 @@ async function cloudShow(C, i) {
   const { path: p, save: name, label } = C.shown.get(i);
   const offer = () => {
     C.onCanvas = false;
-    fill(C.body, h("p", { class: "msg" }, NO_GL, h("a", { href: file(p, name), download: name }, "download them"), "."));
+    fill(C.body, h("p", { class: "msg" }, NO_GL, h("a", { href: file(p), download: name }, "download them"), "."));
   };
   if (!C.gl) return offer();
   C.canvas.setAttribute("aria-label", "LiDAR points of " + label);
@@ -1946,7 +1927,7 @@ async function cloudShow(C, i) {
   cloudLegend(C, null);
   if (!C.sized) return;
   if (!C.data.has(i)) {
-    C.data.set(i, T.fetch(file(p)).then((r) => {
+    C.data.set(i, fetch(file(p)).then((r) => {
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
       return r.arrayBuffer();
     }).then(readCloud));
@@ -1992,36 +1973,34 @@ function cloudLegend(C, data) {
 
 // ---- 5d. the videos of the object (Results tab) ----
 
-// The videos above the viewers, each as [its slot in V, its file, its stage, its caption, its name for a screen
-// reader]: the turntable stage's 360 video, when the job asked for one and its render worked. A slot holds the video,
+// The turntable stage's 360 video above the viewers, when the job asked for one and its render worked: the video,
 // the key of its draw, its figure and whether it plays when the tab shows (V.spin, V.spinKey, V.spinFig, V.spinOn).
 const SPIN = "turntable/turntable.mp4";
-const VIDEOS = [["spin", SPIN, "turntable", "360 video", (what) => `360 video of the ${what}`]];
-function clearSpin() {  // another job opens, or a new build hides the results: the old videos go
-  for (const [slot] of VIDEOS) V[slot] = V[slot + "Key"] = V[slot + "Fig"] = null;
+function clearSpin() {  // another job opens, or a new build hides the results: the old video goes
+  V.spin = V.spinKey = V.spinFig = null;
   fill($("#spin"));
 }
-// One video: muted, looping, with controls that pause it; it does not start by itself when the system asks for reduced
-// motion. It is drawn once per file, so a refresh or a new signed URL does not start it again. When it cannot play,
-// the caption stays and a line offers the file, as for a viewer. Returns true when its figure changed.
-function drawVideo(job, [slot, p, stage, title, label]) {
-  if (!job.files.includes(p)) {
-    const had = !!V[slot + "Fig"];
-    V[slot] = V[slot + "Key"] = V[slot + "Fig"] = null;
+// Muted, looping, with controls that pause it; it does not start by itself when the system asks for reduced motion.
+// It is drawn once per file, so a refresh does not start it again. When it cannot play, the caption stays and a line
+// offers the file, as for a viewer. Returns true when its figure changed.
+function drawVideo(job) {
+  if (!job.files.includes(SPIN)) {
+    const had = !!V.spinFig;
+    V.spin = V.spinKey = V.spinFig = null;
     return had;
   }
-  const key = JSON.stringify([job.id, (job.stages[stage] || {}).ended, (job.sizes || {})[p]]);
-  if (key === V[slot + "Key"]) return false;
-  V[slot + "Key"] = key;
-  V[slot + "On"] = !reducedMotion();
-  const name = `${job.id}_${p.split("/").pop()}`, cap = h("figcaption", {}, title);
-  const fig = V[slot + "Fig"] = h("figure", { class: "spinfig" }, cap);
-  const video = V[slot] = h("video", { src: file(p), autoplay: V[slot + "On"], muted: true, loop: true, playsinline: true,
-    controls: true, preload: "auto", "aria-label": label(job.prompt || "object"),
+  const key = JSON.stringify([job.id, (job.stages.turntable || {}).ended, (job.sizes || {})[SPIN]]);
+  if (key === V.spinKey) return false;
+  V.spinKey = key;
+  V.spinOn = !reducedMotion();
+  const name = `${job.id}_turntable.mp4`, cap = h("figcaption", {}, "360 video");
+  const fig = V.spinFig = h("figure", { class: "spinfig" }, cap);
+  const video = V.spin = h("video", { src: file(SPIN), autoplay: V.spinOn, muted: true, loop: true, playsinline: true,
+    controls: true, preload: "auto", "aria-label": `360 video of the ${job.prompt || "object"}`,
     onerror: () => {
-      if (V[slot] === video) V[slot] = null;
+      if (V.spin === video) V.spin = null;
       fig.replaceChildren(cap, h("p", { class: "msg" }, "Could not play the video: ",
-        h("a", { href: file(p, name), download: name }, "download it"), "."));
+        h("a", { href: file(SPIN), download: name }, "download it"), "."));
     } });
   video.muted = true;  // the attribute only sets the default
   if (V.tab && V.tab !== "results") video.pause();  // drawn while another tab shows: no start there
@@ -2029,22 +2008,17 @@ function drawVideo(job, [slot, p, stage, title, label]) {
   return true;
 }
 function renderSpin(job) {
-  const changed = VIDEOS.map((v) => drawVideo(job, v));  // each one, so that neither misses its draw
-  if (changed.some(Boolean)) fill($("#spin"), VIDEOS.map(([slot]) => V[slot + "Fig"]));
+  if (drawVideo(job)) fill($("#spin"), V.spinFig);
 }
-// The videos play only while the Results tab shows. Each stops when the tab hides, and plays again when the tab shows
+// The video plays only while the Results tab shows. It stops when the tab hides, and plays again when the tab shows
 // if it played when the tab hid (V.spinOn), or at first unless the system asks for reduced motion.
 function spinTab(name) {
-  if (name === V.tab) return;
-  for (const [slot] of VIDEOS) {
-    const v = V[slot];
-    if (!v) continue;
-    if (name === "results") {
-      if (V[slot + "On"]) Promise.resolve(v.play()).catch(() => {});  // a browser may refuse it: the controls still start it
-    } else {
-      if (V.tab === "results") V[slot + "On"] = !v.paused;
-      v.pause();
-    }
+  if (name === V.tab || !V.spin) return;
+  if (name === "results") {
+    if (V.spinOn) Promise.resolve(V.spin.play()).catch(() => {});  // a browser may refuse it: the controls still start it
+  } else {
+    if (V.tab === "results") V.spinOn = !V.spin.paused;
+    V.spin.pause();
   }
 }
 

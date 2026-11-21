@@ -2,7 +2,6 @@
 
 import json
 import os
-import re
 from pathlib import Path
 
 import numpy as np
@@ -13,8 +12,6 @@ from harpor import frames
 from harpor.agent import surface as S
 from harpor.agent import tools as T
 from harpor.agent import validate as V
-
-REPO = Path(__file__).resolve().parents[1]
 
 
 def write_box(glb, bounds=((-0.1, -0.1, -0.1), (0.1, 0.1, 0.1))):
@@ -72,7 +69,7 @@ def test_the_report_is_cached_unless_the_surface_check_failed(tmp_path, monkeypa
         m.setattr(S, "compare", lambda *a: {"error": "ValueError: no faces"})
         r = V.check(glb, control, original)
     assert [f["code"] for f in r["findings"]] == ["surface_error"] and not cache.exists()
-    assert r["scope"] == "none" and r["outcome"] == "pass"  # report only while surface.ENFORCE is off
+    assert r["scope"] == "none" and r["outcome"] == "pass"  # surface findings are report only
     first = V.check(glb, control, original)
     assert cache.exists() and not first["cached"]
     monkeypatch.setattr(S, "compare", lambda *a: pytest.fail("a cached report compares nothing"))
@@ -80,25 +77,22 @@ def test_the_report_is_cached_unless_the_surface_check_failed(tmp_path, monkeypa
     assert again["cached"] and {**again, "cached": False} == first
 
 
-def test_surface_findings_count_only_when_enforced(monkeypatch):
+def test_surface_findings_are_report_only():
     lost = {"code": "surface_identity", "measured": 0.3, "expected": "at least 0.5",
             "why": "under half of the native surface is still present"}
     report = {"surface": {"findings": [lost]}, "errors": []}
     found = V.checks(report)
     assert [f["code"] for f in found] == ["surface_identity"]
     assert V.outcome(found) == "pass" and V.scope(found) == "none" and V.label(found[0]) == "report only"
-    monkeypatch.setattr(S, "ENFORCE", True)
-    assert V.outcome(found) == "fail" and V.scope(found) == "structural" and V.label(found[0]) == "structural"
 
 
-def test_findings_decide_scope_and_outcome(monkeypatch):
+def test_findings_decide_scope_and_outcome():
     local = V.finding("not_finished", why="the round ended without finish")
     lost = V.finding("surface_identity", why="under half of the native surface is still present")
     assert (V.scope([local]), V.outcome([local])) == ("local", "fail")
     assert (V.scope([]), V.outcome([])) == ("none", "pass")
-    monkeypatch.setattr(S, "ENFORCE", True)
-    assert V.scope([local, lost]) == "structural"
-    assert [f["code"] for f in V.ranked([local, lost])] == ["surface_identity", "not_finished"]
+    assert (V.scope([local, lost]), V.outcome([local, lost])) == ("local", "fail")
+    assert [f["code"] for f in V.ranked([lost, local])] == ["not_finished", "surface_identity"]
 
 
 def test_a_round_passes_only_when_the_agent_finished():
@@ -116,14 +110,6 @@ def test_a_round_passes_only_when_the_agent_finished():
     nothing = V.round_report(None, None, {"source": "finish", "verdict": "complete"}, errors=["store: OSError: full"])
     assert [x["code"] for x in nothing["findings"]] == ["validation_error"] and nothing["outcome"] == "fail"
     assert nothing["sha256"] is None
-
-
-def test_scope_holds_every_code_the_checks_give():
-    codes = set(re.findall(r'finding\("(\w+)"', (REPO / "harpor/agent/validate.py").read_text()))
-    codes |= {code for _, code, _ in S.LIMITS.values()} | {"surface_identity"}
-    assert {"no_candidate", "not_finished", "surface_error"} <= codes
-    assert codes <= set(V.SCOPE)
-    assert "none" not in V.SCOPE.values()
 
 
 def test_feedback_quotes_agent_text_and_keeps_to_6000_characters():

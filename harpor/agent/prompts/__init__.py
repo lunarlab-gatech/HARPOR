@@ -7,13 +7,11 @@ FILE = "refinement_prompt.md"
 WORK = ("The Codex CLI runs in the work folder itself, mounted at /work, so the paper's work/ prefix "
         "would point to /work/work.")
 BUDGET = ("HARPOR gives a build round 900 s (controller.BUDGET_S), not the paper's 600 s. The deadline in "
-          "run_budget.json stays the authority, also for a repair or replan with its own budget.")
+          "run_budget.json stays the authority, also for a repair with its own budget.")
 CHANGES = [
     ("Read work/run_budget.json at launch.", "Read /work/run_budget.json at launch.", WORK),
     ("The full ten-minute (600-second) work", "The full fifteen-minute (900-second) work", BUDGET),
 ]
-# The sentence of the repair right after a planning round, and only there: that plan came from the same check.
-PLAN = " The planning round before this one wrote /work/plan.md from the same check: follow it."
 # Added to the first prompt of a session with rounds and to every round prompt (controller.prepare_session, run_rounds).
 GUIDANCE = """
 This session runs in rounds. After each build or repair the host checks the candidate against the
@@ -45,21 +43,14 @@ def _best(best):
             "start an empty scene, import that GLB, pack the images and save the scene as /work/candidate.blend.")
 
 
-def round_prompt(kind, budget_s, feedback, best, evidence, planned=False):
-    """The prompt of a round after the first, kind 'repair' or 'replan' (controller.run_rounds). Each round is a new
-    agent with no memory of the others, so the prompt carries the whole task: a repair is the refinement prompt and
-    the host's feedback; a replan writes a plan and stops.
+def round_prompt(budget_s, feedback, best, evidence):
+    """The prompt of a repair round, a round after the first (controller.run_rounds). Each round is a new agent with
+    no memory of the others, so the prompt carries the whole task: the refinement prompt and the host's feedback.
 
     feedback: harpor.agent.validate.feedback of the last build or repair; best: the best candidate so far in work/
-    (_best); evidence: the work/ path of the last check's report; planned: the round before this repair was a
-    planning round, whose plan (PLAN) came from the same check. A later repair has the feedback of a newer check, so
-    it is not sent to that plan.
+    (_best); evidence: the work/ path of the last check's report.
     """
-    if kind == "replan":
-        return (f"This is a planning round with {budget_s:.0f} seconds. Do not edit the mesh or call helpers. "
-                f"Inspect {evidence} and write a concrete repair plan to /work/plan.md. "
-                "Preserve the object's photographed shape and scale.\n" + feedback)
     return (load() + f"\nThis is a repair round with a {budget_s:.0f} second budget. The deadline in "
             "run_budget.json takes precedence. Continue from candidate.blend. Inspect the host's check "
             f"in {evidence}, fix the reported defects, then review and finish complete (or unchanged "
-            "if no repair is supported)." + (PLAN if planned else "") + "\n" + _best(best) + "\nHost feedback:\n" + feedback)
+            "if no repair is supported).\n" + _best(best) + "\nHost feedback:\n" + feedback)

@@ -11,7 +11,6 @@ import sys
 import zipfile
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 pytest.importorskip("fastapi")
@@ -154,10 +153,9 @@ def test_demo_facts_are_rows_of_the_results_tab(job):
 
 
 def test_demo_agent_fact_names_the_model_that_ran(tmp_path):
-    """The Agent fact names the model of agent/result.json: a job built with gpt-6-astra (before 2026-11-20) keeps
-    GPT-6-Astra, a new job shows GPT-6.2-Astra, and a result without a known model id gets its agent's name."""
+    """The Agent fact names the model of agent/result.json; another model id shows as it is."""
     (tmp_path / "agent").mkdir()
-    for model, name in (("gpt-6-astra", "GPT-6-Astra"), ("gpt-6.2-astra", "GPT-6.2-Astra"), (None, "GPT-6.2-Astra"),
+    for model, name in (("gpt-6.2-astra", "GPT-6.2-Astra"), ("gpt-7", "gpt-7"),
                         ("claude-fable-5-2", "Claude Fable 5.2"), ("claude-opus-5-5", "Claude Opus 5.5")):
         agent = "codex" if model is None or model.startswith("gpt") else "claude"
         (tmp_path / "agent" / "result.json").write_text(json.dumps({"agent": agent, "model": model}))
@@ -198,38 +196,6 @@ def test_add_refuses_private_data(job, tmp_path):
     shutil.rmtree((novideo := copy("h")) / "turntable")
     with pytest.raises(demos.DemoError, match="the job has no 360 video; start it with Make a 360 video on"):
         demos.add(novideo, tmp_path / "x")
-
-
-def test_add_from_a_run_folder(job, tmp_path):
-    """A run folder (no job.json) needs --video and --glb; the facts come from the records that are there."""
-    J = job[0]
-    run = tmp_path / "chair_real"
-    shutil.copytree(J / "physics", run / "physics")
-    shutil.copy(J / "turntable" / "turntable.mp4", run / "spin.mp4")
-    with pytest.raises(demos.DemoError, match="has no job.json: give --video and --glb"):
-        demos.add(run, tmp_path / "demos", video="spin.mp4")
-    (run / "selection.json").write_text(json.dumps({"input": "table.MOV"}))  # the records count too
-    with pytest.raises(demos.DemoError, match=re.escape("selection.json: looks private (matches 'table.mov')")):
-        demos.add(run, tmp_path / "demos", video="spin.mp4", glb="physics/aligned.glb")
-    (run / "selection.json").unlink()
-    x = demos.add(run, tmp_path / "demos", video="spin.mp4", glb=str(run / "physics" / "aligned.glb"))
-    assert (x.name, x.title, x.downloads) == ("chair-real", "Chair real", ("aligned.glb", "turntable.mp4"))
-    assert dict(x.facts)["Size"].endswith(" cm") and "Input" not in dict(x.facts)
-    with pytest.raises(demos.DemoError, match="cannot read"):
-        demos.add(run, tmp_path / "demos", video="physics/aligned.glb", glb="physics/aligned.glb", name="bad")
-    import av
-
-    with av.open(str(run / "old.mp4"), "w", format="mp4") as c:  # MPEG-4 Part 2, which not every browser plays
-        s = c.add_stream("mpeg4", rate=24)
-        s.width, s.height, s.pix_fmt = 64, 64, "yuv420p"
-        for i in range(4):
-            for pk in s.encode(av.VideoFrame.from_ndarray(np.full((64, 64, 3), 40 * i, np.uint8), format="rgb24")):
-                c.mux(pk)
-        for pk in s.encode():
-            c.mux(pk)
-    with pytest.raises(demos.DemoError, match=r"old.mp4 is mpeg4 in yuv420p; a demo's video is h264 in yuv420p"):
-        demos.add(run, tmp_path / "demos", video="old.mp4", glb="physics/aligned.glb", name="bad")
-    assert sorted(p.name for p in (tmp_path / "demos").iterdir()) == ["chair-real"]
 
 
 def test_load_rules(tmp_path, monkeypatch):
@@ -497,13 +463,13 @@ def test_demos_js_plays_the_open_demo():
 
 
 def test_mirrors_of_app_js():
-    """KIND, RAN and MODEL_NAME are app.js's KIND_LABEL, RAN and MODEL_NAME, and size_text is its fileSize. MODEL_NAME
-    names every model of tools.MODELS."""
+    """KIND and MODEL_NAME are app.js's KIND_LABEL and MODEL_NAME, and size_text is its fileSize. MODEL_NAME names
+    every model of tools.MODELS."""
     app = (server.STATIC / "app.js").read_text()
-    for name, mirror in (("KIND_LABEL", demos.KIND), ("RAN", demos.RAN), ("MODEL_NAME", demos.MODEL_NAME)):
+    for name, mirror in (("KIND_LABEL", demos.KIND), ("MODEL_NAME", demos.MODEL_NAME)):
         body = re.search(rf"const {name} = \{{(.*?)\}};", app, re.S)[1]
         assert dict(re.findall(r'"?([\w.-]+)"?: "([^"]*)"', body)) == mirror, name
-    assert set(tools.MODELS.values()) < set(demos.MODEL_NAME)
+    assert set(tools.MODELS.values()) == set(demos.MODEL_NAME)
     if shutil.which("node") is None:
         pytest.skip("no node")
     code = "\n".join(re.search(rf"^const {n} = .*;$", app, re.M)[0] for n in ("size", "fileSize"))
