@@ -30,7 +30,7 @@
     <li><a href="#lidar">Metric scale and LiDAR</a></li>
     <li><a href="#inputs">Inputs tab</a></li>
     <li><a href="#results">Results</a></li>
-    <li><a href="#physics">Mass and friction</a></li>
+    <li><a href="#physics">Mass, materials and friction</a></li>
     <li><a href="#downloads">Downloads</a></li>
     <li><a href="#demos">Demos</a></li>
     <li><a href="#retry">Retry, cancel and build again</a></li>
@@ -44,14 +44,15 @@
   object is one rigid body. You get:</p>
 <ul>
   <li>meshes of the object, as it stood in the capture and turned upright;</li>
-  <li>its material, mass and friction;</li>
+  <li>its mass, materials and friction;</li>
   <li>MuJoCo, USD and URDF models.</li>
 </ul>
 <p>Each job builds one object from one capture. The build picks sharp frames, masks the object with SAM 3, estimates
-  depth with Depth Anything 3 (DA3), chooses the views, makes a mesh with MV-SAM3D and fits it to the masks. An agent
-  then refines the mesh's geometry and appearance. After the mesh is turned upright, the job's model estimates the
-  mass and the friction from photos and the mesh's measurements. <a href="#status">Job status and the log</a> lists
-  every stage.</p>
+  depth with Depth Anything 3 (DA3), chooses the views, makes a mesh with MV-SAM3D and fits it to the masks. VoMP
+  predicts the materials right after the mesh is made, before the agent edits it. An agent then refines the mesh's
+  geometry and appearance. After the mesh is turned upright, the app moves VoMP's materials onto it for the mass, and
+  the job's model estimates the friction from photos. <a href="#status">Job status and the log</a> lists every
+  stage.</p>
 </section>
 
 
@@ -133,11 +134,12 @@
     <tr><td><code>lidar</code></td><td>Finds the metric scale from LiDAR.</td><td></td></tr>
     <tr><td><code>select</code></td><td>Chooses the views.</td><td></td></tr>
     <tr><td><code>sam3d</code></td><td>Makes the mesh with MV-SAM3D.</td><td>GPU</td></tr>
+    <tr><td><code>vomp</code></td><td>Predicts the object's materials with VoMP.</td><td>GPU</td></tr>
     <tr><td><code>place</code></td><td>Fits the mesh's pose and scale to the masks.</td><td></td></tr>
     <tr><td><code>agent</code></td><td>The agent refines the mesh, and the app checks each result.</td><td>GPU</td></tr>
-    <tr><td><code>align</code></td><td>Turns the mesh upright.</td><td></td></tr>
-    <tr><td><code>estimate</code></td><td>The job's model estimates the mass and the friction. It needs the API
-      key.</td><td></td></tr>
+    <tr><td><code>align</code></td><td>Turns the mesh upright and transfers materials to recompute mass and
+      inertia.</td><td></td></tr>
+    <tr><td><code>estimate</code></td><td>The job's model estimates the friction. It needs the API key.</td><td></td></tr>
     <tr><td><code>mjcf</code></td><td>Builds the MuJoCo model.</td><td></td></tr>
     <tr><td><code>usd</code></td><td>Builds the USD model.</td><td></td></tr>
     <tr><td><code>urdf</code></td><td>Builds the URDF model.</td><td></td></tr>
@@ -148,7 +150,7 @@
 <p><code>topics</code> and <code>frames</code> read the input. The others are the build stages. The agent stage has a time budget: see
   <a href="#agent">The agent and API keys</a>. The agent and estimate stages use the API key. With the agent set to
   None, the job has no key, so the estimate, mjcf, usd and urdf stages are skipped: see
-  <a href="#physics">Mass and friction</a>.</p>
+  <a href="#physics">Mass, materials and friction</a>.</p>
 </section>
 
 <section id="topics">
@@ -186,10 +188,10 @@
   <dt>View 0</dt>
   <dd>In manual mode, view 0 is the pick that you make view 0 (★), or else the pick with the best quality. In auto
     mode, the app takes the best view whose mask stays off the image border. View 0 sets the frame of every mesh, and
-    it is the first photo that the job's model sees when it estimates the mass and the friction. You can change it in
-    the review.</dd>
+    it is the first photo that the job's model sees when it estimates the friction. You can change it in the
+    review.</dd>
   <dt>Agent</dt>
-  <dd>The model that refines the mesh and estimates the mass and the friction. See <a href="#agent">The agent and API
+  <dd>The model that refines the mesh and estimates the friction. See <a href="#agent">The agent and API
     keys</a>.</dd>
   <dt>Use LiDAR for metric scale</dt>
   <dd>See <a href="#lidar">Metric scale and LiDAR</a>.</dd>
@@ -303,13 +305,13 @@
     capable model, and it costs twice as much per token. Your Anthropic organization must keep data for 30 days to
     use it.</li>
 
-  <li>None runs no agent and needs no key. Without a key, the job has no mass, friction or simulation models: see
-    <a href="#physics">Mass and friction</a>. A job built before the estimate stage keeps the mass and the models
-    that it had, also with the agent set to None.</li>
+  <li>None runs no agent and needs no key. Without a key, the job has VoMP's mass and materials, but no friction
+    estimate and no simulation models: see <a href="#physics">Mass, materials and friction</a>. A job built before
+    the estimate stage keeps the models that it had, also with the agent set to None.</li>
 
 </ul>
 <p>GPT-6.2-Astra and Claude Opus 5.5 run at xhigh effort. Claude Fable 5.2 runs at high effort, because at xhigh its
-  turns run longer and use many more tokens. The agent has 600 s to edit the mesh. Time spent exporting GLBs does not
+  turns run longer and use many more tokens. The agent has 900 s to edit the mesh. Time spent exporting GLBs does not
   count, up to 600 s in each round. The agent is skipped when it is turned off, or when the mean mask IoU is below 0.5
   (see <a href="#results">Results</a>). Physics then uses the posed mesh.</p>
 
@@ -317,7 +319,7 @@
 <p>After the agent hands off a mesh, the app checks it. It checks that the agent finished, and it compares the mesh's
   surface with the original's.</p>
 <p>The agent works in rounds, each with a new agent that gets the last check's findings. The first round builds, in
-  the 600 s above. When the check fails and the agent can fix the flaw, a repair round follows, with 450 s for a
+  the 900 s above. When the check fails and the agent can fix the flaw, a repair round follows, with 450 s for a
   repair, up to 2 repairs. When the flaw needs a new plan, a planning round with 300 s to plan comes before the next
   repair. It writes a plan and builds nothing. The job delivers the best mesh of the rounds: a mesh whose check passed wins,
   then one whose surface findings do not block, then one that did not come from an export, then the later one. A mesh
@@ -569,53 +571,54 @@ time_offset_s: 0.0</pre>
   <dt>Agent</dt>
   <dd>The agent's rows: see <a href="#agent">The agent and API keys</a>.</dd>
   <dt>Physics</dt>
-  <dd>The material, the mass, the center of mass and the friction: see <a href="#physics">Mass and friction</a>.</dd>
+  <dd>The mass, the center of mass, the materials and the friction: see <a href="#physics">Mass, materials and
+    friction</a>.</dd>
 </dl>
 </section>
 
 <section id="physics">
-<h2>Mass and friction</h2>
-<p>The estimate stage runs after align, on the mesh that is turned upright. The job's model, which is the same model
-  as the agent and uses the same API key, looks at up to 4 of the job's photos, with view 0 first and the others
-  spread evenly over the rest of the views. It also gets the mesh's measurements: its size along each axis, its
-  filled volume, its convex hull volume and its surface area. The filled volume counts every voxel that the surface
-  passes through, so it is too large for thin or slender parts, such as a plate or a pencil. The prompt says this
-  and gives the voxel edge. The model is also told whether the metric scale came from LiDAR. The model names the
-  material and decides whether the object is solid or hollow. Then it gives the mass in kg and one friction value,
-  each with a low and a high bound.</p>
-<p>The app checks the answer. Every field must be there. The mass and the friction must each lie between their low
-  and high bound. The mass and its bounds must be from 0.001 to 10,000 kg, and the friction and its bounds from 0.01
-  to 2. The mass divided by the filled volume must be at most 20,000 kg/m³. When the answer fails a check, the app
-  gives the model the reason and asks once more. A second invalid answer fails the stage.</p>
+<h2>Mass, materials and friction</h2>
+<p>VoMP predicts materials on a 64³ grid right after MV-SAM3D makes the mesh, before the agent edits it. Later mesh
+  edits reuse these predictions: each voxel of the final mesh takes the material of the nearest predicted voxel, so
+  new geometry takes the materials near it. The align stage recomputes the mass and the inertia from the final
+  geometry and scale. VoMP does not run again after the agent. VoMP does not predict friction.</p>
+<p>The estimate stage runs after align. The job's model, which is the same model as the agent and uses the same API
+  key, looks at up to 4 of the job's photos, with view 0 first and the others spread evenly over the rest of the
+  views. It also gets the object's name and the size of the mesh. The model names the material of the object's outer
+  surface and gives one friction value with a low and a high bound. The model gives no mass.</p>
+<p>The app checks the answer. Every field must be there. The friction must lie between its low and high bound, and
+  the friction and its bounds must be from 0.01 to 2. When the answer fails a check, the app gives the model the
+  reason and asks once more. A second invalid answer fails the stage.</p>
 <p>A job with the agent set to None has no API key. Its estimate, mjcf, usd and urdf stages are skipped, and their
-  note says turned off: mass and friction need the job's model and API key. Such a job has no MuJoCo, USD or URDF
-  model. A job built before the estimate stage keeps the mass and the models that it had, also with the agent set
-  to None. That mass came from the materials model that the app used before.</p>
+  note says turned off: the friction needs the job's model and API key. Such a job has VoMP's mass and materials,
+  but no MuJoCo, USD or URDF model. A job built before the estimate stage keeps the models that it had, also with
+  the agent set to None.</p>
 <p>The physics models hold the object as one rigid body. The Results tab gives these rows:</p>
 <dl>
-  <dt>Material</dt>
-  <dd>The material that the model names from the photos and the object's name, and in brackets whether it treats
-    the object as solid or hollow. A job built before the estimate stage has no Material row.</dd>
   <dt>Mass</dt>
-  <dd>The model's mass in kg, with its low and high bound as the range. The app spreads the mass evenly over the
-    mesh's voxels, with 64 voxels along the mesh's longest side. For a solid object, the mass fills the whole volume.
-    For a hollow object, the mass sits in the voxels of the surface. The inertia comes from the same voxels. The
-    model reads the mesh's sizes. A solid object's mass grows with the size cubed, so a 5% size error gives about a
-    16% mass error. A hollow object's mass grows with its surface area, the size squared, so the same size error
-    gives about a 10% mass error.</dd>
+  <dd>The sum of density times voxel volume over the voxels of the final mesh, with 64 voxels along its longest side.
+    The voxels fill the mesh, so a hollow object such as an empty box counts as solid wherever its walls are thicker
+    than a voxel. Mass grows with the size cubed, so a 5% size error gives about a 16% mass error.</dd>
   <dt>Center of mass</dt>
-  <dd>The center of the voxels that hold the mass, as x, y and z in meters. Every voxel has the same density, so the
-    center of mass is the center of the shape. An object with one heavy part, such as a hammer, gets a wrong center
-    of mass. The frame is that of the physics models: z up, x along the long side, and the origin at the center of
-    the footprint at the bottom of the object.</dd>
+  <dd>The mass-weighted mean of the voxel centers, as x, y and z in meters. The frame is that of the physics models:
+    z up, x along the long side, and the origin at the center of the footprint at the bottom of the object.</dd>
+  <dt>Young's modulus (median)</dt>
+  <dd>Stiffness, in pascals (Pa). 1 GPa is 1e9 Pa. In our tests VoMP v1.1 gave about 4 GPa to most objects, steel and
+    glass included.</dd>
+  <dt>Poisson ratio (median)</dt>
+  <dd>How much the material bulges sideways when it is squeezed, with no unit (usually 0 to 0.5).</dd>
+  <dt>Density (median)</dt>
+  <dd>In kg/m³. The mass uses each voxel's own density, not this median. In our tests VoMP v1.1 gave about
+    1,000 kg/m³ to most objects.</dd>
   <dt>Friction</dt>
-  <dd>One friction value for the whole object, with its low and high bound, and the model that estimated it. No
-    partner surface is named. The MuJoCo and USD models use the value on every collision surface and on the floor of
-    their scenes. The URDF holds no friction. A job built before the estimate stage has no estimate, so its models
-    use the default friction, 0.6, and the row says assumed.</dd>
+  <dd>One friction value for the whole object, the surface material that the model named, the low and high bound,
+    and the model that estimated it. No partner surface is named. The MuJoCo and USD models use the value on every
+    collision surface and on the floor of their scenes. The URDF holds no friction. A job built before the estimate
+    stage has no estimate, so its models use the default friction, 0.6, and the row says assumed. A job with the
+    agent set to None that was built since the estimate stage has no Friction row.</dd>
 </dl>
-<p>No object has been weighed to test these numbers. They are estimates that nobody has checked, and the bounds that
-  the model gives are likely too narrow.</p>
+<p>The three material rows are medians of VoMP's prediction over the object's voxels. No object has been weighed, and
+  no friction measured, to test these numbers. The friction bounds that the model gives are likely too narrow.</p>
 </section>
 
 <section id="downloads">
@@ -639,9 +642,8 @@ time_offset_s: 0.0</pre>
     <tr><td><code>posed.glb</code>, <code>aligned.glb</code></td><td>The meshes below.</td><td>Always.</td></tr>
     <tr><td><code>turntable.mp4</code></td><td>The 360 video below.</td><td>When you asked for one.</td></tr>
     <tr><td><code>refined.glb</code></td><td>The agent's GLB.</td><td>When the agent ran.</td></tr>
-    <tr><td><code>summary.json</code></td><td>The mass and friction record below.</td><td>When the agent is not
-      None, and in jobs built before the estimate stage.</td></tr>
-    <tr><td><code>placement.json</code>, <code>selection.json</code></td><td>The records below.</td><td>Always.</td></tr>
+    <tr><td><code>summary.json</code>, <code>placement.json</code>, <code>selection.json</code></td><td>The records
+      below.</td><td>Always.</td></tr>
     <tr><td><code>lidar.json</code></td><td>The LiDAR record below.</td><td>With LiDAR.</td></tr>
     <tr><td><code>agent_result.json</code></td><td>The agent's result: its verdict, reason, limitations and
       counts.</td><td>When the agent ran.</td></tr>
@@ -662,7 +664,7 @@ time_offset_s: 0.0</pre>
   <dd>The GLB that physics used, turned upright, with the bottom at 0, the footprint centered on the origin and the
     long side on x (z up in MuJoCo, y up in glTF). Up is the object's own axis closest to the up of the table or floor
     under it in view 0, or to the cameras' mean up when no plane fits there. Materials that let light through are made
-    opaque.</dd>
+    opaque. VoMP does not read this file: it reads its own opaque copy of the first mesh.</dd>
 </dl>
 
 <h3>Video</h3>
@@ -685,11 +687,12 @@ time_offset_s: 0.0</pre>
     fitted to the SAM 3 masks, and the metric scale. Its check gives each view's mask IoU and how close view 0's DA3
     points lie to the mesh.</dd>
   <dt><code>summary.json</code></dt>
-  <dd>The record of the estimate stage (see <a href="#physics">Mass and friction</a>). It holds the mesh's
-    measurements and the rigid body's mass, center of mass and inertia. It also holds the friction and the model's
-    answer: the material, solid or hollow, the mass and the friction with their bounds, and the model's reason. Then
-    come the model, the number of tries, the time and the photos that the model saw. In a job built before the
-    estimate stage, summary.json holds the older materials model's mass instead and has no estimate.</dd>
+  <dd>The final physics summary (see <a href="#physics">Mass, materials and friction</a>). The align stage writes it
+    from VoMP's predictions moved onto the final mesh: the voxel counts, the median and the 5th to 95th percentile of
+    Young's modulus, Poisson ratio and density, and the mass, center of mass and inertia of the rigid body. The
+    estimate stage adds the friction and the model's answer: the surface material, the friction with its bounds and
+    the model's reason, then the model, the number of tries, the time and the photos that the model saw. A job with
+    the agent set to None, or built before the estimate stage, has no estimate in it.</dd>
   <dt><code>lidar.json</code></dt>
   <dd>The record of the lidar stage: the metric scale, each view's scale, point count and status, how the views were
     combined, the LiDAR source, and the link to the camera (for a rosbag the TF chain or the uploaded calibration; a
@@ -718,7 +721,7 @@ time_offset_s: 0.0</pre>
 <p>An open demo plays its 360 video, muted and looping; its controls pause it. When your system asks for reduced
   motion, the video does not start by itself. Open 3D view to turn the model with the mouse or a finger.</p>
 <p>The facts are those of the Results tab: see <a href="#results">Results</a> and
-  <a href="#physics">Mass and friction</a>. The files are those of the Downloads tab, and each one downloads as
+  <a href="#physics">Mass, materials and friction</a>. The files are those of the Downloads tab, and each one downloads as
   <code>&lt;demo&gt;_&lt;name&gt;</code>: see <a href="#downloads">Downloads</a>. The 3D view shows aligned.glb, the
   mesh turned upright.</p>
 </section>
@@ -729,7 +732,9 @@ time_offset_s: 0.0</pre>
   <dt>Retry</dt>
   <dd>On a failed or cancelled job. It continues from the first stage that is not done, and its label names that
     stage, such as Retry from sam3d. Read input again means that the input was not read yet. After a change of the calibration, or an update that
-    changes how the app finds the scale, Retry starts from lidar. A done job whose 360 video failed shows Retry from
+    changes how the app finds the scale, Retry starts from lidar. A Retry that runs the align stage again starts
+    from vomp when the job has no VoMP output, for example when VoMP failed or an older version built the job. A
+    done job whose 360 video failed shows Retry from
     turntable. It makes the video again and then results.zip. A done job whose scale is out of date shows Run lidar
     and later stages again: see <a href="#lidar">Metric scale and LiDAR</a>.</dd>
   <dt>Cancel job</dt>

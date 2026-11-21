@@ -436,9 +436,8 @@ def page(src, shown, soon=()):
 
 def facts_of(J, job=None):
     """[[label, value]] of the Results tab's rows (app.js renderResults) that a demo shows, from the records in folder
-    J: Input (the source's kind and the views used; job.json, when there is one), Size (the upright extent), Mass
-    (without the range that the Results tab adds for an estimate) and the Agent. Never the input's name, a topic, a
-    path or a LiDAR value."""
+    J: Input (the source's kind and the views used; job.json, when there is one), Size (the upright extent), Mass and
+    the Agent. Never the input's name, a topic, a path or a LiDAR value."""
     J, out = Path(J), []
     sel = read_json(J / "selection.json") or {}
     n = len(sel.get("picks") or [])

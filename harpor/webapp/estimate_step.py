@@ -1,20 +1,23 @@
-"""Estimate stage of a web-app job: the job's model predicts the mass and the friction of the final mesh in one
-request (harpor.physics.estimate).
+"""Estimate stage of a web-app job: the job's model predicts the friction of the final mesh in one request
+(harpor.physics.estimate).
 
 Runs in envs/sam3d from the repo root, after align:
 
     python -m harpor.webapp.estimate_step --job J --key-file F --agent astra|opus|fable
 
-It voxelizes J/physics/aligned.glb and measures it. It puts up to estimate.MAX_VIEWS of the job's input photos
-(run/cameras.json: view 0 first, the others spread evenly over the rest) in a grid of 2 columns, J/physics/
-estimate_views.jpg. Then it sends that image and the prompt to the job's model through harpor.agent.vlm:
-GPT-6.2-Astra for astra (F holds OPENAI_API_KEY), Claude Opus 5.5 for opus and Claude Fable 5.2 for fable (F holds
-ANTHROPIC_API_KEY). An answer that fails the checks of estimate.parse gets one retry, with the reason added to the
-prompt. A second invalid answer or an API error ends the stage.
+It puts up to estimate.MAX_VIEWS of the job's input photos (run/cameras.json: view 0 first, the others spread evenly
+over the rest) in a grid of 2 columns, J/physics/estimate_views.jpg. Then it sends that image and the prompt (the
+object's name and the size of the upright mesh, J/physics/aligned.json "extent_s") to the job's model through
+harpor.agent.vlm: GPT-6.2-Astra for astra (F holds OPENAI_API_KEY), Claude Opus 5.5 for opus and Claude Fable 5.2 for
+fable (F holds ANTHROPIC_API_KEY). An answer that fails the checks of estimate.parse gets one retry, with the reason
+added to the prompt. A second invalid answer or an API error ends the stage.
 
-It writes J/physics/summary.json: the GLB, its measurements ("geometry"), the rigid body that mjcf, usd and urdf
-read (the mass spread evenly over the filled voxels of a solid object, or the surface voxels of a hollow one),
-the friction, and the checked answer with the model, the attempts, the seconds and the views ("estimate").
+J/physics/summary.json comes from the align stage: VoMP's materials moved onto the final mesh, with the rigid body
+that mjcf, usd and urdf read (harpor.physics.material_transfer). This stage adds two keys to it: "friction", which
+mjcf reads (usd takes it from mjcf.json), and "estimate", the checked answer with the agent, the model, the
+attempts, the seconds and the views. Once it has read the key, it removes both keys and the photo grid, so that a
+run that fails after that leaves the stage not done (steps.done). A run that stops earlier (no key file, no key
+line, another agent) changes nothing. Every other key of the summary stays as align wrote it.
 
 The key is read from F into memory only. Each answer has its JSON escapes of plain characters written out
 (vlm.unescape) and then every key of F (controller.read_keys) replaced by "[redacted API key]" (agent_step.scrub)
@@ -23,6 +26,7 @@ replaced again after that: a key split by a character that the cleaning drops is
 """
 
 import argparse
+import math
 import time
 from pathlib import Path
 
@@ -35,6 +39,7 @@ AGENTS = ("astra", "opus", "fable")
 COLUMNS = 2
 TILE = 1024  # each photo fits into TILE x TILE px
 IMAGE_SIDE = 2048  # the long side of the image the model gets
+ADDED = ("friction", "estimate")  # the keys of physics/summary.json that this stage writes
 
 
 def pick_views(n, most=estimate.MAX_VIEWS):
@@ -81,11 +86,14 @@ def views_image(J, out):
     return used
 
 
-def metric_from_lidar(J):
-    """True when select applied a LiDAR scale: run/placement.json's metric_scale is a number (the web app's
-    "Metric scale" row reads it the same way)."""
-    m = (read_json(Path(J) / "run" / "placement.json") or {}).get("metric_scale")
-    return isinstance(m, (int, float)) and not isinstance(m, bool)
+def extent(J):
+    """The size of the upright mesh along x, y and z in meters: J/physics/aligned.json "extent_s". SystemExit when it
+    is not three finite numbers."""
+    ext = (read_json(Path(J) / "physics" / "aligned.json") or {}).get("extent_s")
+    if not isinstance(ext, list) or len(ext) != 3 or not all(
+            isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in ext):
+        raise SystemExit(f"{J}/physics/aligned.json has no extent_s; run the align stage first")
+    return [float(x) for x in ext]
 
 
 def ask(agent, key, text, image):
@@ -98,7 +106,8 @@ def ask(agent, key, text, image):
 
 
 def run(job_dir, key_file, agent):
-    """Estimate the mass and the friction of the job's final mesh (see the module docstring). The summary dict."""
+    """Estimate the friction of the job's final mesh and add it to physics/summary.json (see the module docstring).
+    The summary dict."""
     from harpor.agent import controller, vlm
     from harpor.webapp.agent_step import finite, scrub
 
@@ -111,29 +120,25 @@ def run(job_dir, key_file, agent):
     key = vlm.read_key(key_file, agent)
     if not key:
         raise SystemExit(f"the key file has no {steps.KEY_VAR[agent]} line")
-    glb, out = J / "physics" / "aligned.glb", J / "physics" / "summary.json"
-    sheet = J / "physics" / "estimate_views.jpg"
-    out.unlink(missing_ok=True)
+    out, sheet = J / "physics" / "summary.json", J / "physics" / "estimate_views.jpg"
     sheet.unlink(missing_ok=True)
-    if not glb.is_file():
-        raise SystemExit(f"{glb} is missing; run the align stage first")
-    try:
-        vox = estimate.voxels(glb)
-        geom = estimate.geometry(glb, vox)
-    except ValueError as e:
-        raise SystemExit(str(e)) from None
-    print(f"mesh: {' x '.join(f'{x:.3f}' for x in geom['extent_m'])} m, filled volume {geom['filled_volume_m3']:.4g} "
-          f"m^3, hull volume {geom['hull_volume_m3']:.4g} m^3, surface area {geom['surface_area_m2']:.4g} m^2")
+    summary = read_json(out)
+    if not isinstance(summary, dict):
+        raise SystemExit(f"{out} is missing or does not parse; run the align stage first")
+    if any(k in summary for k in ADDED):  # an earlier run's friction
+        summary = {k: v for k, v in summary.items() if k not in ADDED}
+        write_json(out, summary, indent=1)
+    size = extent(J)
+    print(f"mesh: {' x '.join(f'{x:.3f}' for x in size)} m")
     views = views_image(J, sheet)
-    lidar = metric_from_lidar(J)
-    text = estimate.prompt(printable(steps.job(J)["prompt"]), geom, lidar)
+    text = estimate.prompt(printable(steps.job(J)["prompt"]), size)
     image = vlm.jpeg(sheet, max_side=IMAGE_SIDE)
     model = MODELS[agent]
     start = time.time()
     for attempt in (1, 2):
         answer = scrub(vlm.unescape(ask(agent, key, text, image)), keys)
         try:
-            checked = scrub(estimate.parse(answer, geom), keys)
+            checked = scrub(estimate.parse(answer), keys)
             break
         except ValueError as e:
             why = scrub(printable(e), keys)
@@ -143,18 +148,13 @@ def run(job_dir, key_file, agent):
             text += (f"\n\nYour previous answer was invalid: {why}. "
                      "Answer again with one JSON object that follows the schema exactly.")
     seconds = time.time() - start
-    summary = {"glb": str(glb.resolve()), "geometry": geom,
-               "rigid_body": estimate.rigid_body(vox, checked["mass_kg"], checked["structure"]),
-               "friction": checked["friction"],
-               "estimate": {**checked, "agent": agent, "model": model, "attempts": attempt, "seconds": seconds,
-                            "views": views}}
-    summary = finite(summary)
+    summary = {**summary, **finite({"friction": checked["friction"],
+                                    "estimate": {**checked, "agent": agent, "model": model, "attempts": attempt,
+                                                 "seconds": seconds, "views": views}})}
     write_json(out, summary, indent=1)
     est = summary["estimate"]
-    print(f"estimate: mass {est['mass_kg']:.4g} kg ({est['mass_low_kg']:.4g} to {est['mass_high_kg']:.4g}), friction "
-          f"{est['friction']:.3g} ({est['friction_low']:.3g} to {est['friction_high']:.3g}), {est['material']} "
-          f"({est['structure']}); {model}, {attempt} attempt{'s' if attempt > 1 else ''}, {seconds:.0f} s, "
-          f"scale from {'LiDAR' if lidar else 'depth estimate'}")
+    print(f"estimate: friction {est['friction']:.3g} ({est['friction_low']:.3g} to {est['friction_high']:.3g}) for "
+          f"{est['material']}; {model}, {attempt} attempt{'s' if attempt > 1 else ''}, {seconds:.0f} s")
     return summary
 
 

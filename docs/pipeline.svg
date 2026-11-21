@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1600 900" width="1600" height="900" role="img" aria-labelledby="title desc">
   <title id="title">HARPOR pipeline</title>
-  <desc id="desc">A phone video, a ROS 1 or 2 bag or a Stray Scanner zip becomes a posed, textured mesh through SAM 3 masks, Depth Anything 3 cameras and depth, an optional LiDAR metric scale, view selection with an optional pause for review, MV-SAM3D and a pose fit (A). An optional agent in Blender refines the geometry and appearance; a host check compares the surface with the original and checks that the agent finished, and a failed check starts a repair round, with at most 3 builds; the best candidate is delivered (B). The mesh is turned upright, the job's model estimates the mass and the friction from photos and the mesh's measurements with the agent's API key, and the export writes MJCF, USD and URDF models of one rigid body, an optional 360 video and results.zip (C).</desc>
+  <desc id="desc">A phone video, a ROS 1 or 2 bag or a Stray Scanner zip becomes a posed, textured mesh through SAM 3 masks, Depth Anything 3 cameras and depth, an optional LiDAR metric scale, view selection with an optional pause for review, MV-SAM3D and a pose fit (A). VoMP v1.1 estimates the materials on the canonical mesh right after MV-SAM3D (B). An optional agent in Blender refines the geometry and appearance; a host check compares the surface with the original and checks that the agent finished, and a failed check starts a repair round, with at most 3 builds; the best candidate is delivered (C). The export turns the mesh upright and moves the VoMP materials onto it for the mass and inertia, the job's model estimates the friction from photos with the agent's API key, and the export writes MJCF, USD and URDF models of one rigid body, an optional 360 video and results.zip (D).</desc>
   <defs>
     <style>
       text { font-family: Helvetica, Arial, "Liberation Sans", sans-serif; fill: #1f2d5a; }
@@ -19,10 +19,14 @@
       .c { text-anchor: middle; }
       .box { fill: #ffffff; stroke-width: 1.6; }
       .flow { fill: none; stroke: #4a5568; stroke-width: 2; }
+      .mat { fill: none; stroke: #d9822b; stroke-width: 2.4; }
       .dash { stroke-dasharray: 7 5; }
     </style>
     <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/>
+    </marker>
+    <marker id="am" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d9822b"/>
     </marker>
     <g id="pause">
       <rect x="0" y="0" width="22" height="22" rx="11" fill="#fff3d4" stroke="#e0a526" stroke-width="1.4"/>
@@ -34,7 +38,7 @@
   <rect x="0" y="0" width="1600" height="900" fill="#ffffff"/>
 
   <!-- ===================== A: Reconstruction ===================== -->
-  <rect x="16" y="16" width="1568" height="334" rx="14" fill="#f4f8fc" stroke="#b9d3ea" stroke-width="1.6"/>
+  <rect x="16" y="16" width="1168" height="334" rx="14" fill="#f4f8fc" stroke="#b9d3ea" stroke-width="1.6"/>
   <circle cx="44" cy="44" r="17" fill="#2b7bbf"/>
   <text class="badge c" x="44" y="51">A</text>
   <text class="t1" x="70" y="53">Reconstruction</text>
@@ -46,48 +50,66 @@
   <rect x="36" y="156" width="170" height="28" rx="14" class="box" stroke="#7fb0da"/>
   <text class="ch c" x="121" y="175">Stray Scanner zip</text>
   <path class="flow" d="M206,106 H220 M206,138 H220 M206,170 H220 M220,106 V170"/>
-  <path class="flow" d="M220,138 H267" marker-end="url(#ah)"/>
+  <path class="flow" d="M220,138 H239" marker-end="url(#ah)"/>
 
-  <rect x="268" y="88" width="180" height="100" rx="8" class="box" stroke="#5b9bd1"/>
-  <text class="bt c" x="358" y="128">SAM 3 masks</text>
-  <text class="bs c" x="358" y="150">finds the object</text>
-  <text class="bs c" x="358" y="168">from its name</text>
-  <path class="flow" d="M448,138 H509" marker-end="url(#ah)"/>
+  <rect x="240" y="88" width="180" height="100" rx="8" class="box" stroke="#5b9bd1"/>
+  <text class="bt c" x="330" y="128">SAM 3 masks</text>
+  <text class="bs c" x="330" y="150">finds the object</text>
+  <text class="bs c" x="330" y="168">from its name</text>
+  <path class="flow" d="M420,138 H455" marker-end="url(#ah)"/>
 
-  <rect x="510" y="88" width="190" height="100" rx="8" class="box" stroke="#5b9bd1"/>
-  <text class="bt c" x="605" y="128">Depth Anything 3</text>
-  <text class="bs c" x="605" y="150">cameras and depth</text>
-  <text class="bs c" x="605" y="168">for every frame</text>
-  <path class="flow" d="M700,138 H761" marker-end="url(#ah)"/>
+  <rect x="456" y="88" width="190" height="100" rx="8" class="box" stroke="#5b9bd1"/>
+  <text class="bt c" x="551" y="128">Depth Anything 3</text>
+  <text class="bs c" x="551" y="150">cameras and depth</text>
+  <text class="bs c" x="551" y="168">for every frame</text>
+  <path class="flow" d="M646,138 H681" marker-end="url(#ah)"/>
 
-  <rect x="762" y="88" width="180" height="100" rx="8" class="box" stroke="#5b9bd1"/>
-  <text class="bt c" x="852" y="128">View selection</text>
-  <text class="bs c" x="852" y="150">2 to 12 views</text>
-  <text class="bs c" x="852" y="168">(6 by default)</text>
-  <use href="#pause" xlink:href="#pause" x="931" y="77"/>
-  <path class="flow" d="M942,138 H1002" marker-end="url(#ah)"/>
+  <rect x="682" y="88" width="180" height="100" rx="8" class="box" stroke="#5b9bd1"/>
+  <text class="bt c" x="772" y="128">View selection</text>
+  <text class="bs c" x="772" y="150">2 to 12 views</text>
+  <text class="bs c" x="772" y="168">(6 by default)</text>
+  <use href="#pause" xlink:href="#pause" x="851" y="77"/>
+  <path class="flow" d="M862,138 H897" marker-end="url(#ah)"/>
 
-  <rect x="1003" y="88" width="250" height="100" rx="8" class="box" stroke="#5fa94d"/>
-  <text class="t2 c" x="1128" y="128">MV-SAM3D</text>
-  <text class="bs c" x="1128" y="150">multi-view SAM 3D Objects</text>
-  <text class="bs c" x="1128" y="168">gives a textured mesh</text>
-  <path class="flow" d="M1253,138 H1313" marker-end="url(#ah)"/>
+  <rect x="898" y="88" width="266" height="100" rx="8" class="box" stroke="#5fa94d"/>
+  <text class="t2 c" x="1031" y="128">MV-SAM3D</text>
+  <text class="bs c" x="1031" y="150">multi-view SAM 3D Objects</text>
+  <text class="bs c" x="1031" y="168">gives a textured mesh</text>
 
-  <rect x="1314" y="88" width="250" height="100" rx="8" class="box" stroke="#5fa94d"/>
-  <text class="bt c" x="1439" y="128">Pose fit</text>
-  <text class="bs c" x="1439" y="150">fits pose and scale</text>
-  <text class="mono c" x="1439" y="172">posed.glb</text>
+  <rect x="456" y="236" width="190" height="90" rx="8" class="box dash" stroke="#5b9bd1"/>
+  <text class="bt c" x="551" y="262">LiDAR</text>
+  <text class="bs c" x="551" y="284">sets the metric scale</text>
+  <text class="xs c" x="551" y="306">bag LiDAR or iPhone depth</text>
+  <path class="flow dash" d="M646,281 H772 V189" marker-end="url(#ah)"/>
 
-  <rect x="510" y="236" width="190" height="90" rx="8" class="box dash" stroke="#5b9bd1"/>
-  <text class="bt c" x="605" y="262">LiDAR</text>
-  <text class="bs c" x="605" y="284">sets the metric scale</text>
-  <text class="xs c" x="605" y="306">bag LiDAR or iPhone depth</text>
-  <path class="flow dash" d="M700,281 H852 V189" marker-end="url(#ah)"/>
+  <path class="flow" d="M1031,188 V235" marker-end="url(#ah)"/>
+  <rect x="898" y="236" width="266" height="90" rx="8" class="box" stroke="#5fa94d"/>
+  <text class="bt c" x="1031" y="262">Pose fit</text>
+  <text class="bs c" x="1031" y="284">fits pose and scale</text>
+  <text class="mono c" x="1031" y="308">posed.glb</text>
 
-  <!-- ===================== B: Agent refinement ===================== -->
+  <!-- ===================== B: Materials ===================== -->
+  <rect x="1204" y="16" width="380" height="334" rx="14" fill="#fdf4e8" stroke="#efc591" stroke-width="1.6"/>
+  <circle cx="1232" cy="44" r="17" fill="#d9822b"/>
+  <text class="badge c" x="1232" y="51">B</text>
+  <text class="t1" x="1258" y="53">Materials</text>
+
+  <path class="flow" d="M1164,138 H1223" marker-end="url(#ah)"/>
+  <rect x="1224" y="88" width="340" height="120" rx="8" class="box" stroke="#e39b4f"/>
+  <text class="bt c" x="1394" y="116">VoMP v1.1</text>
+  <text class="bs c" x="1394" y="138">materials on the canonical mesh,</text>
+  <text class="bs c" x="1394" y="157">right after MV-SAM3D</text>
+  <text class="xs c" x="1394" y="181">density, Young's modulus and</text>
+  <text class="xs c" x="1394" y="198">Poisson's ratio per voxel</text>
+
+  <path class="flow" d="M1394,208 V253" marker-end="url(#ah)"/>
+  <rect x="1284" y="254" width="220" height="30" rx="15" fill="#ffecd6" stroke="#e9a95c" stroke-width="1.6"/>
+  <text class="ch c" x="1394" y="274">VoMP materials</text>
+
+  <!-- ===================== C: Agent refinement ===================== -->
   <rect x="16" y="410" width="1060" height="440" rx="14" fill="#f6f1fc" stroke="#cbb5e8" stroke-width="1.6"/>
   <circle cx="44" cy="438" r="17" fill="#7b4fc2"/>
-  <text class="badge c" x="44" y="445">B</text>
+  <text class="badge c" x="44" y="445">C</text>
   <text class="t1" x="70" y="447">Agent refinement</text>
   <text class="tag" x="1056" y="446" text-anchor="end">optional</text>
 
@@ -135,27 +157,35 @@
   <text class="bs c" x="923" y="524">the best stored candidate</text>
   <text class="bs c" x="923" y="543">is delivered as a GLB</text>
   <text class="xs c" x="923" y="574">without the agent,</text>
-  <text class="xs c" x="923" y="591">posed.glb goes on to C</text>
+  <text class="xs c" x="923" y="591">posed.glb goes on to D</text>
 
-  <!-- ===================== C: Mass, friction and export ===================== -->
+  <!-- ===================== D: Mass, friction and export ===================== -->
   <rect x="1096" y="410" width="488" height="440" rx="14" fill="#eef7f5" stroke="#9ccfc2" stroke-width="1.6"/>
   <circle cx="1124" cy="438" r="17" fill="#2f9e88"/>
-  <text class="badge c" x="1124" y="445">C</text>
+  <text class="badge c" x="1124" y="445">D</text>
   <text class="t1" x="1150" y="447">Mass, friction and export</text>
 
-  <rect x="1116" y="470" width="448" height="76" rx="8" class="box" stroke="#4fae98"/>
-  <text class="bt c" x="1340" y="494">Align upright</text>
-  <text class="bs c" x="1340" y="515">the agent's GLB, else posed.glb,</text>
-  <text class="bs c" x="1340" y="534">turned upright on its support</text>
-  <path class="flow" d="M1340,546 V565" marker-end="url(#ah)"/>
+  <rect x="1116" y="470" width="384" height="76" rx="8" class="box" stroke="#4fae98"/>
+  <text class="bt c" x="1308" y="494">Align upright</text>
+  <text class="bs c" x="1308" y="515">the agent's GLB, else posed.glb,</text>
+  <text class="bs c" x="1308" y="534">turned upright on its support</text>
+  <path class="flow" d="M1308,546 V556 M1208,556 H1408"/>
+  <path class="flow" d="M1208,556 V565" marker-end="url(#ah)"/>
+  <path class="flow" d="M1408,556 V565" marker-end="url(#ah)"/>
 
-  <rect x="1116" y="566" width="448" height="96" rx="8" fill="#fffaf3" stroke="#d9822b" stroke-width="2.2"/>
-  <text class="bt c" x="1340" y="590">Mass and friction</text>
-  <text class="bs c" x="1340" y="611">the job's model sees up to 4 photos</text>
-  <text class="bs c" x="1340" y="630">and the mesh's measurements</text>
-  <text class="xs c" x="1340" y="651">same model and API key as the agent</text>
+  <rect x="1116" y="566" width="184" height="96" rx="8" fill="#fbf8ff" stroke="#9b7bd4" stroke-width="1.6"/>
+  <text class="bt c" x="1208" y="590">Friction</text>
+  <text class="bs c" x="1208" y="611">the job's model sees</text>
+  <text class="bs c" x="1208" y="630">up to 4 photos</text>
+  <text class="xs c" x="1208" y="651">the agent's model and key</text>
 
-  <path class="flow" d="M1340,662 V672 M1186,672 H1494"/>
+  <rect x="1316" y="566" width="184" height="96" rx="8" fill="#fffaf3" stroke="#e39b4f" stroke-width="1.6"/>
+  <text class="bt c" x="1408" y="590">VoMP transfer</text>
+  <text class="bs c" x="1408" y="611">materials moved onto</text>
+  <text class="bs c" x="1408" y="630">the final mesh</text>
+  <text class="xs c" x="1408" y="651">mass, COM and inertia</text>
+
+  <path class="flow" d="M1208,662 V672 M1408,662 V672 M1186,672 H1494"/>
   <path class="flow" d="M1186,672 V683" marker-end="url(#ah)"/>
   <path class="flow" d="M1340,672 V683" marker-end="url(#ah)"/>
   <path class="flow" d="M1494,672 V683" marker-end="url(#ah)"/>
@@ -181,16 +211,19 @@
   <text class="xs c" x="1452" y="821">GLBs, MJCF, USD, URDF</text>
 
   <!-- links between the groups, drawn over the group panels -->
-  <path class="flow" d="M1439,188 V374 H330 V469" marker-end="url(#ah)"/>
+  <path class="flow" d="M1031,326 V374 H330 V469" marker-end="url(#ah)"/>
+  <path class="mat" d="M1504,269 H1544 V614 H1502" marker-end="url(#am)"/>
   <path class="flow" d="M1056,515 H1115" marker-end="url(#ah)"/>
 
   <!-- ===================== legend ===================== -->
-  <path class="flow" d="M400,875 H440" marker-end="url(#ah)"/>
-  <text class="lt" x="450" y="880">data flow</text>
-  <rect x="570" y="865" width="34" height="20" rx="4" fill="#ffffff" stroke="#4a5568" stroke-width="1.6" class="dash"/>
-  <text class="lt" x="614" y="880">optional</text>
-  <use href="#pause" xlink:href="#pause" x="710" y="864"/>
-  <text class="lt" x="740" y="880">the job can pause here for your review</text>
-  <text class="mono" x="1060" y="880">posed.glb</text>
-  <text class="lt" x="1150" y="880">a file</text>
+  <path class="flow" d="M300,875 H340" marker-end="url(#ah)"/>
+  <text class="lt" x="350" y="880">data flow</text>
+  <path class="mat" d="M450,875 H490" marker-end="url(#am)"/>
+  <text class="lt" x="500" y="880">VoMP materials</text>
+  <rect x="640" y="865" width="34" height="20" rx="4" fill="#ffffff" stroke="#4a5568" stroke-width="1.6" class="dash"/>
+  <text class="lt" x="684" y="880">optional</text>
+  <use href="#pause" xlink:href="#pause" x="780" y="864"/>
+  <text class="lt" x="810" y="880">the job can pause here for your review</text>
+  <text class="mono" x="1100" y="880">posed.glb</text>
+  <text class="lt" x="1190" y="880">a file</text>
 </svg>

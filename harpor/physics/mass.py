@@ -1,5 +1,4 @@
-"""Rigid-body mass properties from a per-voxel density (build_plan.md note 9). harpor.physics.estimate spreads
-the model's mass evenly over the voxels of the final mesh and calls mass_properties.
+"""Rigid-body mass properties from VoMP's per-voxel density (build_plan.md note 9).
 
 A rigid MuJoCo body holds one mass, one centre of mass and one inertia tensor, so the voxels are
 summed. Each occupied voxel is a solid box of edge h (per axis) and density rho:

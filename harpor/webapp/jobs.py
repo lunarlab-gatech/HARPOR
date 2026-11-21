@@ -17,9 +17,9 @@ appended to logs/<stage>.log, where a line "== <stage> <time>" starts each run.
 job.json "agent" is the job's model (steps.AGENTS): "astra" (GPT-6.2-Astra, with the user's OpenAI API
 key), "opus" or "fable" (Claude Opus 5.5 or Claude Fable 5.2, with the user's Anthropic API key) or
 "none". The agent stage runs it as an agent (the Codex CLI for astra, claude_agent for opus and fable),
-and the estimate stage asks it for the mass and the friction in one request. "none" means no key: the
-agent stage is skipped and physics uses run/posed.glb, and estimate, mjcf, usd and urdf are skipped
-(steps.NO_KEY_SKIP), since only the model gives the mass and the friction.
+and the estimate stage asks it for the friction in one request. "none" means no key: the agent stage is
+skipped and physics uses run/posed.glb, and estimate, mjcf, usd and urdf are skipped (steps.NO_KEY_SKIP),
+since only the model gives the friction. VoMP still gives such a job its mass and materials (align).
 
 job.json "lidar" (steps.lidar) turns on the metric scale from LiDAR: null, {"kind": "rosbag", "topic":
 T} for a LiDAR topic of the job's bag, or {"kind": "stray"} for the depth of a Stray Scanner capture,
@@ -100,9 +100,8 @@ INPUTS = {"video": "a video", "rosbag": "a rosbag", "stray": "a Stray Scanner ca
 DERIVED = {"frames": ("frames/meta.json", "frames/thumbs", "frames/stamps.json", "frames/preview.mp4",
                       "frames/.tmp_preview.mp4"),
            "extract": ("frames/pool.json", "scene", "pool"), "lidar": ("pool/lidar.json", "lidar/check", "lidar/cloud"),
-           "select": ("selection.json", "run"), "agent": ("agent",), "align": ("physics",),
-           "estimate": ("physics/summary.json", "physics/estimate_views.jpg"), "turntable": ("turntable",),
-           "package": ("results.zip",)}
+           "select": ("selection.json", "run"), "vomp": ("run/vomp",), "agent": ("agent",), "align": ("physics",),
+           "estimate": ("physics/estimate_views.jpg",), "turntable": ("turntable",), "package": ("results.zip",)}
 OLDER = "older than this stage"  # the note of a stage that a job folder of an earlier version has no record of
 NO_KEY = {a: f"The server no longer holds the {p} API key (it restarted); paste the key again and press Build."
           for a, p in steps.PROVIDER.items()}
@@ -308,6 +307,13 @@ def progress(job_dir):
     return out
 
 
+def align_runs(job_dir, job, start):
+    """True when a run whose first stage is steps.NAMES[start] runs align, which reads VoMP's output: the run starts
+    at or before align, and align's record is not done or steps.done does not find its outputs (Runner._build)."""
+    st = job["stages"]["align"]
+    return start <= steps.NAMES.index("align") and not (st["status"] == "done" and steps.done("align", job_dir))
+
+
 def key_needed(job_dir, job, first):
     """True when a run from first reaches a stage that takes the key of the job's agent (steps.KEYED,
     steps.needs_key) and runs it. Runner._build runs each stage from its start on unless the stage's record is
@@ -315,13 +321,23 @@ def key_needed(job_dir, job, first):
     cancelled, or done without its outputs. A skipped keyed stage runs again too, and needs the key unless
     steps.skip still gives a reason (a poor Stage A placement skips the agent again). That includes the estimate
     stage of a job folder of an earlier version, which _recover records as skipped (OLDER) although it runs.
-    The server's continue and run.py's resume also ask for the key when resume runs every stage again: a start
-    at or before select, a stale scale or another agent."""
+    A run that runs align (align_runs) also runs the estimate stage, since align writes summary.json again without
+    the estimate. Runner.resume moves a start after align to align when align's outputs are gone, and a start after
+    vomp to vomp when such a run finds VoMP's output missing, so the stages count from there. The server's continue
+    and run.py's resume also ask for the key when resume runs every stage again: a start at or before select, a
+    stale scale or another agent."""
     J = Path(job_dir)
-    i = steps.NAMES.index(first)
+    i, vi, al = steps.NAMES.index(first), steps.NAMES.index("vomp"), steps.NAMES.index("align")
+    if i > al and not steps.done("align", J):
+        i = al
+    runs = align_runs(J, job, i)
+    if i > vi and runs and not steps.done("vomp", J):
+        i = vi
     for s in steps.KEYED:
         if steps.NAMES.index(s) < i or not steps.needs_key(s, job):
             continue
+        if s == "estimate" and runs:
+            return True
         status = job["stages"][s]["status"]
         if status == "done" and steps.done(s, J) or status == "skipped" and steps.skip(s, J):
             continue
@@ -627,8 +643,18 @@ class Runner:
         stage and every stage after it. Another agent drops the key held for the
         old one. From an optional stage (steps.OPTIONAL; a done job's Retry after its 360 video failed):
         it and every stage after it run again, since package zipped its old output. Returns the stage
-        the run starts from: from_stage, or agent when another agent runs and from_stage is later, or lidar by
-        the rule below.
+        the run starts from: from_stage, or an earlier stage that one of the rules below moves it to.
+
+        A run from after align whose align outputs are gone (steps.done; such as a folder of commit c229be7 whose
+        estimate failed after its align deleted summary.json) starts from align, since every later stage reads them.
+        A run from after vomp that runs align (align_runs, or another agent, which clears align) while VoMP's
+        output (run/vomp/summary.json) is missing starts from vomp, since align reads it: VoMP failed, or the job
+        folder comes from a version without that output (VoMP after align before 2026-11-06, or no VoMP in commit
+        c229be7). A run that does not run align, such as a done job's Retry of its 360 video, leaves VoMP and the
+        physics as they are, so an older job keeps its mass and models until it is built again. One exception: a
+        c229be7 job without an agent has no summary.json, so the align rule above moves even its 360-video Retry
+        to align and then to vomp, and the job gets VoMP's mass. The rule for an optional stage looks at the stage
+        that the caller asked for.
 
         A job with LiDAR whose lidar stage is not done (it failed or was cancelled, the calibration was
         uploaded or deleted since it ran, or an older estimator made its record: steps.done) starts from
@@ -649,9 +675,17 @@ class Runner:
             if checked_calibration is not None and steps.lidar(job) is not None and \
                     (job.get("calibration") or {}).get("sha256") != checked_calibration["sha256"]:
                 raise ValueError("the calibration changed while the run was starting; try again")
+            # An optional stage that the caller asked for runs again, with every stage after it, whatever their
+            # records say (results.zip holds its old output, or none), even when a rule below moves the start.
+            rerun = i if from_stage in steps.OPTIONAL else None
             li = steps.NAMES.index("lidar")
             if i > li and steps.lidar({**job, **fields}) is not None and not steps.done("lidar", J):
                 from_stage, i = "lidar", li  # failed, cancelled or stale: the scale first
+            vi, al = steps.NAMES.index("vomp"), steps.NAMES.index("align")
+            if i > al and not steps.done("align", J):
+                from_stage, i = "align", al  # align's outputs are gone, and every later stage reads them
+            if i > vi and (changed or align_runs(J, job, i)) and not steps.done("vomp", J):
+                from_stage, i = "vomp", vi  # align runs and VoMP's output is missing: the materials first
             stages = job["stages"]
             if i <= r:
                 _clear(J, steps.NAMES[i:])
@@ -661,9 +695,9 @@ class Runner:
                 raise ValueError("the views are not selected yet")
             else:
                 pause = False
-                if from_stage in steps.OPTIONAL:  # results.zip holds its old output, or none
-                    _clear(J, steps.NAMES[i:])
-                    stages.update({s: dict(STAGE) for s in steps.NAMES[i:]})
+                if rerun is not None:
+                    _clear(J, steps.NAMES[rerun:])
+                    stages.update({s: dict(STAGE) for s in steps.NAMES[rerun:]})
             if changed and i > r:  # the other agent runs, and the stages after it take its GLB
                 a = steps.NAMES.index("agent")
                 _clear(J, steps.NAMES[a:])
@@ -1005,10 +1039,7 @@ def package(job_dir):
     left = [a for a, p in files if p is not None and p.resolve() in keyed]
     print(f"results.zip: {len(names)} files, {(J / 'results.zip').stat().st_size / 1e6:.1f} MB"
           + (f"; left out (they hold the API key): {left}" if left else ""))
-    # A job without an agent has no summary.json: its estimate stage is skipped (steps.NO_KEY_SKIP). A run folder
-    # may have no job.json, or one without "agent".
-    meta = json.loads((J / "job.json").read_text()) if (J / "job.json").is_file() else {}
-    for arc in ("posed.glb", "aligned.glb") + (() if meta.get("agent") == "none" else ("summary.json",)):
+    for arc in ("posed.glb", "aligned.glb", "summary.json"):
         if arc not in names:
             print(f"  missing: {arc}")
 

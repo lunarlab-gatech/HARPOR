@@ -15,8 +15,8 @@ export MAMBA_ROOT_PREFIX=$G/micromamba PIP_CACHE_DIR=$G/.cache/pip HF_HOME=$G/.c
 
 # cuda_arch sets TORCH_CUDA_ARCH_LIST, the GPUs that the CUDA extensions are built for. A build for the wrong GPU does
 # not run. The list comes from the environment, or else from the GPUs that this machine sees. Set it by hand for a
-# machine without a GPU (a docker build) or for a cluster with mixed GPUs. torch 2.5.1 (envs/sam3d) builds for
-# nothing newer than 9.0, so a Blackwell GPU (10.0 or 12.0) stops the build here.
+# machine without a GPU (a docker build) or for a cluster with mixed GPUs. torch 2.5.1 (envs/sam3d) and 2.4.0
+# (envs/vomp11) build for nothing newer than 9.0, so a Blackwell GPU (10.0 or 12.0) stops the build here.
 cuda_arch() {
   if [ -z "$TORCH_CUDA_ARCH_LIST" ]; then
     TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | sort -u | paste -sd ';' -) \
@@ -25,7 +25,7 @@ cuda_arch() {
   local a
   for a in ${TORCH_CUDA_ARCH_LIST//;/ }; do
     if awk -v a="${a%+PTX}" 'BEGIN { exit !(a + 0 > 9.0) }'; then
-      echo "TORCH_CUDA_ARCH_LIST has $a: torch 2.5.1 (envs/sam3d) builds for 9.0 (Hopper) at most" >&2
+      echo "TORCH_CUDA_ARCH_LIST has $a: HARPOR's torch versions build for 9.0 (Hopper) at most" >&2
       exit 1
     fi
   done

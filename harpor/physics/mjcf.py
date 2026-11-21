@@ -1,11 +1,11 @@
-"""Write a MuJoCo model (MJCF) for one aligned GLB and its rigid-body numbers (build_plan.md note 9).
+"""Write a MuJoCo model (MJCF) for one aligned GLB and its VoMP rigid-body numbers (build_plan.md note 9).
 
     python -m harpor.physics.mjcf --glb aligned.glb --summary summary.json --out DIR [--name chair]
         [--friction F] [--coacd-threshold 0.05]
 
 Writes into DIR:
-  <name>.xml   the object: one body with a free joint, the inertial of summary.json "rigid_body" (mass,
-               COM and fullinertia), visual meshes that do not collide, and convex collision meshes
+  <name>.xml   the object: one body with a free joint, the VoMP inertial (mass, COM and fullinertia
+               from summary.json "rigid_body"), visual meshes that do not collide, and convex collision meshes
   scene.xml    a floor, a light and the object, for the viewer:
                python -m mujoco.viewer --mjcf DIR/scene.xml
   assets/      visual_<k>.obj, texture_<k>.png and collision_<j>.obj
@@ -20,9 +20,10 @@ A mesh geom collides as its convex hull, so the whole object is split into conve
 Every mesh asset uses inertia="shell" (MuJoCo 3.3 or newer), because MuJoCo computes each mesh's
 volume even when the mesh carries no mass, and open meshes (surfaces that are not closed) fail that check.
 All geoms have density 0: the body's mass and inertia come only from <inertial>.
-The friction is summary.json "friction", which the estimate stage writes (harpor.webapp.estimate_step:
-the job's model gives one value for the object). A summary without one, such as one written before
-the estimate stage existed, gets DEFAULT_FRICTION. --friction overrides both. The friction is the sliding friction of every
+VoMP does not predict friction or restitution. The friction is summary.json "friction", which the estimate
+stage adds (harpor.webapp.estimate_step: the job's model gives one value for the object). A summary without
+one gets DEFAULT_FRICTION: VoMP's alone, as align or vomp_run.py writes it, or one of a job built before the
+estimate stage. --friction overrides both. The friction is the sliding friction of every
 collision geom and of the floor in scene.xml, and mjcf.json records the value used. MuJoCo combines
 two geoms of equal priority by taking the larger friction, so in another scene the effective value is
 max(this friction, the partner's). Restitution and contact softness stay at MuJoCo's defaults.

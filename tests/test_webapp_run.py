@@ -107,14 +107,15 @@ def test_a_job_runs_from_the_input_to_its_results(term):
         == ("done", "Wooden box", 4, "auto", "none", True, True)
     assert job["video"]["bytes"] == video.stat().st_size and os.path.samefile(video, J / "video" / "my_cup.mp4")
     assert "topics: skipped: video input" in lines and "agent: skipped: turned off: physics uses the Stage A mesh" in lines
-    # Without an agent there is no model and no key, so nothing gives the mass and the friction.
+    # Without an agent there is no model and no key, so nothing gives the friction. VoMP still gives the mass.
     assert all(f"{name}: skipped: {steps.NO_KEY_SKIP}" in lines for name in steps.NO_KEY_SKIPPED)
     assert all(any(x.startswith(f"{name}: ") for x in lines) for name in jobs.BUILD)
     assert lines[-1] == f"results: {J / 'results.zip'}"
     with zipfile.ZipFile(J / "results.zip") as z:
         names = set(z.namelist())
+        summary = json.loads(z.read("summary.json"))
     assert {"aligned.glb", "turntable.mp4"} <= names and not any(n.startswith(("mjcf/", "usd/", "urdf/")) for n in names)
-    assert "summary.json" not in names
+    assert summary["rigid_body"]["mass"] > 0 and "friction" not in summary and "estimate" not in summary
     # Nothing of the Runner stays.
     assert not (term.runs / jobs.RUNNER_FILE).exists() and not list((term.tmp / "shm").glob("*"))
 

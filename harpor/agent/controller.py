@@ -1,6 +1,6 @@
 """Agent-stage controller (build_plan.md note 5).
 
-Prepares the session folder, runs the agent under a watchdog with a 600 s budget, serves the helper
+Prepares the session folder, runs the agent under a watchdog with a 900 s budget (BUDGET_S), serves the helper
 commands from the host, checks GLBs as paper A.4 describes and against the original's size, and picks the
 deliverable with the fallback order. A session with rounds (prepare_session rounds=True) runs in
 rounds, as PhysAg3D's repair loop does (paper A.3, A.4; run_rounds): a build, then repairs or one planning
@@ -68,7 +68,7 @@ from harpor.fileio import read_json, write_json, write_text
 from harpor.agent import evidence, prompts, surface, tools, validate
 from harpor.agent.server import ToolServer
 
-BUDGET_S = 600.0
+BUDGET_S = 900.0  # a build round's, for every agent; the paper's 600 s ran out in every GPT-6.2-Astra build of 2026-11-21
 MAX_BUILDS = 3  # paper A.4: the build and at most 2 repairs; a planning round (replan) is not a build
 ROUND_BUDGET_S = {"repair": 450.0, "replan": 300.0}  # a build takes the budget_s of the caller
 # What a round leaves in root/session, moved to session/rounds/NN/ when the next round starts (start_round).

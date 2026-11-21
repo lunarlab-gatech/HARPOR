@@ -1,4 +1,4 @@
-"""Write an Isaac Sim physics USD for one aligned GLB and its rigid-body numbers (build_plan.md note 9).
+"""Write an Isaac Sim physics USD for one aligned GLB and its VoMP rigid-body numbers (build_plan.md note 9).
 
     python -m harpor.physics.usd --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME
         [--friction F]
@@ -21,9 +21,9 @@ friction (MJCF_DIR/mjcf.json), so the two models agree, except that omni.physx r
   usd.json     inputs, counts and the check below
 The stage is z up, 1 m and 1 kg per unit, the frame S of harpor.physics.align and summary.json, so
 Isaac Sim's Metrics Assembler has nothing to convert. PhysX averages two materials' friction by
-default, so the ground carries the same value. F is the MJCF's friction unless --friction gives it: the
-estimate stage's value in summary.json, or harpor.physics.mjcf.DEFAULT_FRICTION for a summary without one.
-Restitution 0 is an assumption.
+default, so the ground carries the same value. VoMP gives no friction or restitution. F is the MJCF's
+friction unless --friction gives it: the estimate stage's value in summary.json, or
+harpor.physics.mjcf.DEFAULT_FRICTION for a summary without one. Restitution 0 is an assumption.
 """
 
 import argparse

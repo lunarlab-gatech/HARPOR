@@ -19,14 +19,18 @@ G/webapp_runs (or WEBAPP_RUNS). "The SIF" below is the agent's sandbox: G/sif/ha
   select   envs/web     views select            selection.json "ok" and run/da3_output.npz
            (the job pauses here for review unless auto_continue)
   sam3d    envs/sam3d   mvsam3d sam3d           run/pose.json
+  vomp     envs/vomp11  physics/vomp_run.py     run/vomp/summary.json (whole canonical object)
   place    envs/sam3d   mvsam3d place           run/placement.json
   agent    envs/sam3d   agent_step --agent A    agent/result.json (skipped below 0.5 mask IoU, or when
                                                 the job's agent is "none"); it refines posed.glb (600 s),
                                                 with repair rounds after the host's check of each
                                                 candidate (harpor.agent.validate)
-  align    envs/sam3d   physics_auto align      physics/aligned.json: the final mesh upright, in frame S
-  estimate envs/sam3d   estimate_step           physics/summary.json with "estimate": the job's model
-                        --agent A               gives the mass and the friction in one request
+  align    envs/sam3d   physics_auto align      physics/aligned.json and physics/summary.json: the final
+                                                mesh upright, in frame S, and VoMP's materials moved onto
+                                                it for the mass, the COM and the inertia
+  estimate envs/sam3d   estimate_step           "estimate" in physics/summary.json, and
+                        --agent A               physics/estimate_views.jpg: the job's model gives the
+                                                friction in one request
   mjcf     envs/mujoco  physics.mjcf            physics/mjcf/mjcf.json with "compiled"
   usd      envs/mujoco  physics.usd             physics/usd/usd.json with "checked"
   urdf     envs/mujoco  physics.urdf            physics/urdf/urdf.json with "checked"
@@ -46,32 +50,37 @@ from pathlib import Path
 
 from harpor.fileio import read_json
 
-NAMES = ["topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "place", "agent",
-         "align", "estimate", "mjcf", "usd", "urdf", "turntable", "package"]
-GPU = ("masks", "da3", "sam3d", "agent", "turntable")
+NAMES = ["topics", "frames", "extract", "masks", "prep", "da3", "lidar", "select", "sam3d", "vomp", "place",
+         "agent", "align", "estimate", "mjcf", "usd", "urdf", "turntable", "package"]
+GPU = ("masks", "da3", "sam3d", "vomp", "agent", "turntable")
 # The stages whose failure leaves the job usable, each with the words that start its warning: the build goes on.
 OPTIONAL = {"turntable": "360 video"}
 REVIEW_AFTER = "select"
 STAGES = [{"name": n, "gpu": n in GPU} for n in NAMES]
 CODE = Path(__file__).resolve().parents[2]  # the repo root, which Config.code defaults to
 
-# Copied from the cluster run scripts of Stage A, with two differences. OMP_NUM_THREADS is 16 unless the server's
-# environment sets it. No stage sets TORCH_CUDA_ARCH_LIST: nvdiffrast, which builds its plugin at run time, clears it
-# and builds for the visible GPUs.
+# Copied from the cluster run scripts of Stage A and of VoMP, with two differences. OMP_NUM_THREADS is 16 unless the
+# server's environment sets it. No stage sets TORCH_CUDA_ARCH_LIST: nvdiffrast, which builds its plugin at run time,
+# clears it and builds for the visible GPUs.
 STAGE_A_ENV = ('HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions '
                'OMP_NUM_THREADS=${OMP_NUM_THREADS:-16} CONDA_PREFIX=$G/envs/sam3d '
                'CPATH=$G/envs/sam3d/targets/x86_64-linux/include '
                'LIBRARY_PATH=$G/envs/sam3d/targets/x86_64-linux/lib:$G/envs/sam3d/lib PATH=$G/envs/sam3d/bin:$PATH')
 SAM3_ENV = "HF_HOME=$G/.cache/huggingface"
+VOMP_ACTIVATE = 'eval "$($G/tools/micromamba shell hook -s bash)"; micromamba activate $G/envs/vomp11'
+VOMP_ENV = ('CUDA_HOME=$CONDA_PREFIX HF_HOME=$G/.cache/huggingface TORCH_HOME=$G/.cache/torch '
+            'TORCH_EXTENSIONS_DIR=$G/.cache/torch_extensions_vomp11 OMP_NUM_THREADS=${OMP_NUM_THREADS:-16} '
+            'CPATH=$CONDA_PREFIX/targets/x86_64-linux/include LIBRARY_PATH=$CONDA_PREFIX/targets/x86_64-linux/lib:$CONDA_PREFIX/lib')
 MARKERS = {"topics": "frames/topics.json", "frames": "frames/meta.json", "prep": "pool/prep.json",
            "sam3d": "run/pose.json", "place": "run/placement.json", "agent": "agent/result.json",
-           "align": "physics/aligned.json", "turntable": "turntable/turntable.json", "package": "results.zip"}
+           "align": "physics/aligned.json", "vomp": "run/vomp/summary.json", "turntable": "turntable/turntable.json",
+           "package": "results.zip"}
 MIN_IOU = 0.5
 # job.json "agent": GPT-6.2-Astra (Codex CLI), Claude Opus 5.5 or Claude Fable 5.2 (claude_agent), or no agent stage.
-# The same model gives the mass and the friction in the estimate stage.
+# The same model gives the friction in the estimate stage.
 AGENTS = ("astra", "opus", "fable", "none")
 KEYED = ("agent", "estimate")  # the stages that take the API key of the job's agent (needs_key)
-NO_KEY_SKIP = "turned off: mass and friction need the job's model and API key"
+NO_KEY_SKIP = "turned off: the friction needs the job's model and API key"
 NO_KEY_SKIPPED = ("estimate", "mjcf", "usd", "urdf")  # the stages that a job without an agent skips (NO_KEY_SKIP)
 PROVIDER = {"astra": "OpenAI", "opus": "Anthropic", "fable": "Anthropic"}  # whose API key each agent takes
 KEY_VAR = {"astra": "OPENAI_API_KEY", "opus": "ANTHROPIC_API_KEY", "fable": "ANTHROPIC_API_KEY"}  # the key file's line
@@ -149,6 +158,11 @@ def command(stage, job, cfg, key_file=None):
         lines += [f"export {SAM3_ENV}", f'rm -f "$J/scene/sam3_{job["slug"]}/sam3.json"',
                   run + '$G/envs/sam3seg/bin/python -m harpor.stage_a.sam3_masks --scene "$J/scene" '
                         f"--prompt={q(job['prompt'])} --overwrite{picks}"]
+    elif stage == "vomp":
+        # VoMP runs on the first generated mesh, before placement and agent edits.
+        lines += ['rm -rf "$J/run/vomp"', VOMP_ACTIVATE, f"export {VOMP_ENV}",
+                  'cd $G/VoMP && python $C/harpor/physics/vomp_run.py '
+                  '--glb "$J/run/canonical.glb" --out "$J/run/vomp" --opaque-input']
     elif stage in ("mjcf", "usd", "urdf"):
         from harpor.webapp.physics_auto import sim_name
 
@@ -183,9 +197,11 @@ def command(stage, job, cfg, key_file=None):
 def done(stage, job_dir):
     """True when the stage's outputs are all there (see the module docstring)."""
     J = Path(job_dir)
-    if stage == "estimate":  # a summary written before this stage existed has no "estimate"
+    if stage == "align":  # the summary of VoMP's materials on the final mesh too
+        return (J / MARKERS[stage]).is_file() and (J / "physics/summary.json").is_file()
+    if stage == "estimate":  # align's summary has no "estimate" until this stage adds it
         rec = read_json(J / "physics" / "summary.json")  # None when it does not parse: not done
-        return isinstance(rec, dict) and "estimate" in rec
+        return isinstance(rec, dict) and "estimate" in rec and (J / "physics" / "estimate_views.jpg").is_file()
     if stage in MARKERS:
         return (J / MARKERS[stage]).is_file()
     if stage == "extract":
@@ -268,9 +284,9 @@ def guard(stage, job_dir):
 def skip(stage, job_dir):
     """The reason to skip a stage, else None: topics for a video and a Stray Scanner capture, lidar without
     LiDAR, the agent when the job has none or on a poor Stage A placement, estimate, mjcf, usd and urdf when the
-    job has no agent (NO_KEY_SKIP: the mass and the friction come from the job's model), and turntable unless the
-    job asks for the 360 video. physics_auto also asks about the agent stage of a run folder without job.json:
-    there only the placement decides."""
+    job has no agent (NO_KEY_SKIP: the friction comes from the job's model), and turntable unless the job asks for
+    the 360 video. physics_auto also asks about the agent stage of a run folder without job.json: there only the
+    placement decides."""
     job = _json(Path(job_dir) / "job.json")
     if stage == "topics":
         return {"rosbag": None, "stray": "Stray Scanner capture"}.get(source(job)["kind"], "video input")

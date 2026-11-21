@@ -9,7 +9,7 @@
 set -eo pipefail
 G=$HARPOR_ROOT
 # The targets of the image's links into the data folder (the Dockerfile), and HOME.
-mkdir -p "$HARPOR_DATA"/{cache,weights/sam-3d-objects,runs,tmp,home}
+mkdir -p "$HARPOR_DATA"/{cache,weights/sam-3d-objects,weights/vomp,runs,tmp,home}
 cd /opt/harpor/code
 
 check() {

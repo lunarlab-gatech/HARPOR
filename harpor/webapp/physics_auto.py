@@ -9,11 +9,14 @@ align takes the GLB for physics (steps.next_glb: the agent's delivery, or run/po
 agent was skipped or delivered nothing usable; pick_glb also refuses a delivery whose size is not
 that of posed.glb, which the agent started from) and runs harpor.physics.align on it with --up-near
 at the up hint and --x footprint, plus --opaque when the GLB has transparent or transmissive
-materials, so that aligned.glb is opaque (needs_opaque). --opaque was added for VoMP, which rejected
-such materials, and it stays for now. It writes J/physics/up.json {hint, info, glb, glb_rule,
-opaque} and J/physics/aligned.glb with aligned.json. It deletes J/physics/summary.json first, since
-the mass and inertia of an earlier mesh no longer fit; the estimate stage (harpor.webapp.estimate_step)
-writes a new one for the aligned GLB.
+materials (needs_opaque). --opaque was added for VoMP, which rejects such materials. VoMP now reads only
+its own opaque copy of the canonical mesh (the vomp stage's --opaque-input), so --opaque only keeps
+aligned.glb as it was, and it stays for now. It writes J/physics/up.json {hint, info, glb, glb_rule,
+opaque} and J/physics/aligned.glb with aligned.json. Then it moves the materials that VoMP predicted
+on the canonical mesh onto the aligned GLB (harpor.physics.material_transfer.transfer_job), which
+writes J/physics/summary.json with the mass and inertia of the final geometry, and J/physics/voxels.npz.
+It deletes J/physics/summary.json first, since the mass and inertia of an earlier mesh no longer fit.
+The estimate stage (harpor.webapp.estimate_step) then adds the friction to the new summary.
 
 The up hint (up_hint()) is the normal of the support plane under the object in view 0's DA3
 pointmap: a RANSAC plane fit to the confident points in a band around the mask and below its
@@ -192,12 +195,15 @@ def align_job(job_dir):
 
 
 def main(argv=None):
+    from harpor.physics.material_transfer import transfer_job
+
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="step", required=True)
     sub.add_parser("align").add_argument("--job", required=True, help="job folder")
     a = ap.parse_args(argv)
-    (Path(a.job) / "physics/summary.json").unlink(missing_ok=True)  # the estimate of an earlier mesh
+    (Path(a.job) / "physics/summary.json").unlink(missing_ok=True)  # the mass and the friction of an earlier mesh
     align_job(a.job)
+    transfer_job(a.job)
 
 
 if __name__ == "__main__":

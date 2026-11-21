@@ -8,8 +8,10 @@ and Agentic 3D Object Reconstruction From Casual Images", arXiv 2610.11215v1, 20
 CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
 
 The agent does not read the file directly. `load()` in `__init__.py` applies `CHANGES`, which
-lists every edit with its reason. The only edit is a path: the agent CLI runs inside the work folder
-(`/work`), so `work/run_budget.json` becomes `/work/run_budget.json`. The prompt names no
+lists every edit with its reason. There are two edits. A path: the agent CLI runs inside the work folder
+(`/work`), so `work/run_budget.json` becomes `/work/run_budget.json`. The budget: HARPOR gives a build
+round 900 s (`controller.BUDGET_S`), so "ten-minute (600-second)" becomes "fifteen-minute
+(900-second)"; the deadline in `run_budget.json` stays the authority. The prompt names no
 Codex-specific tool, so no tool names change. Features that the prompt expects from the helpers (the
 original's previews, `review --clay` and a shared detail rig through `review --detail`) are
 implemented in the controller and `tools.py`.

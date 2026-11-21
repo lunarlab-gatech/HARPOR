@@ -6,8 +6,11 @@ HERE = Path(__file__).resolve().parent
 FILE = "refinement_prompt.md"
 WORK = ("The Codex CLI runs in the work folder itself, mounted at /work, so the paper's work/ prefix "
         "would point to /work/work.")
+BUDGET = ("HARPOR gives a build round 900 s (controller.BUDGET_S), not the paper's 600 s. The deadline in "
+          "run_budget.json stays the authority, also for a repair or replan with its own budget.")
 CHANGES = [
     ("Read work/run_budget.json at launch.", "Read /work/run_budget.json at launch.", WORK),
+    ("The full ten-minute (600-second) work", "The full fifteen-minute (900-second) work", BUDGET),
 ]
 # The sentence of the repair right after a planning round, and only there: that plan came from the same check.
 PLAN = " The planning round before this one wrote /work/plan.md from the same check: follow it."

@@ -208,26 +208,37 @@ def test_align_job_refuses_an_agent_glb_of_another_size(tmp_path, capsys):
         assert (A.pick_glb(j)[0] == exp / "001.glb") == used, scale
 
 
-def test_align_writes_no_summary(tmp_path):
-    """The align stage writes physics/aligned.glb and aligned.json and no physics/summary.json: it deletes the summary
-    of an earlier mesh, and the estimate stage writes the next one. So align is done and estimate is not. The
-    run/vomp folder that a job of an earlier version has stays as it is: align neither reads nor deletes it."""
+def test_align_moves_vomps_materials_onto_the_aligned_mesh(tmp_path):
+    """The align stage writes physics/aligned.glb and aligned.json, then moves VoMP's predictions (run/vomp, made on
+    the canonical mesh) onto the aligned mesh. It deletes the summary of an earlier mesh first, so the new
+    physics/summary.json holds the mass of the final voxels and no friction or estimate: align is done, and estimate
+    is not until it adds the friction. Without VoMP's predictions the stage fails and align is not done."""
     from harpor.webapp import steps
 
     j = tmp_path / "job"
     write_run(j / "run", *plane_view())
     box_glb(j / "run" / "posed.glb")
-    (j / "run" / "placement.json").write_text(json.dumps({"check": {"mean_mask_iou": 0.8}}))
-    (j / "run" / "vomp").mkdir()
-    (j / "run" / "vomp" / "summary.json").write_text(json.dumps({"rigid_body": {"mass": 2.0}}))
+    pose = {"rotation_wxyz": [1, 0, 0, 0], "translation": [0, 0, 0], "scale": [1, 1, 1]}
+    (j / "run" / "placement.json").write_text(json.dumps({"check": {"mean_mask_iou": 0.8}, "pose": pose}))
     (j / "physics").mkdir()
-    (j / "physics" / "summary.json").write_text(json.dumps({"rigid_body": {"mass": 1.0}, "estimate": {"mass_kg": 1.0}}))
+    (j / "physics" / "summary.json").write_text(json.dumps({"rigid_body": {"mass": 1.0}, "friction": 0.4,
+                                                            "estimate": {"friction": 0.4}}))
+    (j / "physics" / "estimate_views.jpg").write_bytes(b"jpg")
     assert steps.done("estimate", j)
+    with pytest.raises(ValueError, match="resume from the vomp stage"):
+        A.main(["align", "--job", str(j)])
+    assert not (j / "physics" / "summary.json").exists() and not steps.done("align", j)
+    (j / "run" / "vomp").mkdir()
+    np.savez(j / "run" / "vomp" / "voxels.npz", centers=np.zeros((1, 3)), density=[600.0], youngs_modulus=[2e9],
+             poisson_ratio=[0.3])
+    (j / "run" / "vomp" / "summary.json").write_text(json.dumps({"config": "test", "seconds": {"predict": 1.0}}))
     A.main(["align", "--job", str(j)])
-    assert (j / "physics" / "aligned.glb").is_file() and steps.done("align", j)
-    assert not (j / "physics" / "summary.json").exists() and not steps.done("estimate", j)
-    assert sorted(p.name for p in (j / "physics").iterdir()) == ["aligned.glb", "aligned.json", "up.json"]
-    assert json.loads((j / "run" / "vomp" / "summary.json").read_text()) == {"rigid_body": {"mass": 2.0}}
+    s = json.loads((j / "physics" / "summary.json").read_text())
+    assert steps.done("align", j) and not steps.done("estimate", j)
+    assert "friction" not in s and "estimate" not in s and s["config"] == "test"
+    assert s["median"]["density_kg_m3"] == 600.0 and s["glb"] == str((j / "physics" / "aligned.glb").resolve())
+    assert s["rigid_body"]["mass"] == pytest.approx(600.0 * s["voxels_occupied"] * s["voxel_edge_m"] ** 3)
+    assert (j / "physics" / "voxels.npz").is_file()
 
 
 def test_align_job_needs_a_glb(tmp_path):

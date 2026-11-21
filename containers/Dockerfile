@@ -1,4 +1,4 @@
-# HARPOR in one image: the five envs (setup/install.sh), Blender, Node.js and the Codex CLI for the agent, and the
+# HARPOR in one image: the six envs (setup/install.sh), Blender, Node.js and the Codex CLI for the agent, and the
 # docker CLI that starts the agent's and Blender's sibling containers (controller.container). The weights, caches and
 # jobs are not inside: they live in the data folder, mounted at /data (containers/harpor-docker).
 #
@@ -7,7 +7,7 @@
 #   docker build -f containers/Dockerfile -t harpor:0.1 .
 #
 # TORCH_CUDA_ARCH_LIST sets the GPUs that the CUDA extensions are built for: Ampere (8.0, 8.6), Ada (8.9) and Hopper
-# (9.0). torch 2.5.1 (envs/sam3d) builds for nothing newer. HARPOR_IMAGE is the tag the image gives its sibling
+# (9.0). The pinned torch versions build for nothing newer. HARPOR_IMAGE is the tag the image gives its sibling
 # containers; build with --build-arg HARPOR_IMAGE=... when you tag it otherwise (harpor-docker also passes it).
 FROM ubuntu:22.04
 
@@ -15,7 +15,7 @@ ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 ARG MAX_JOBS=16
 ARG HARPOR_IMAGE=harpor:0.1
 
-# The X and GL libraries are those of containers/harpor-agent.def, which Blender needs.
+# The X and GL libraries are those of containers/harpor-agent.def and of VoMP's install_env.sh (Blender and bpy).
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates curl git bzip2 xz-utils procps \
       libx11-6 libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 libegl1 libxkbcommon0 \
@@ -40,10 +40,11 @@ RUN curl -fsSL https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz |
       | tar -xz -C /usr/local/bin --strip-components=1 docker/docker
 
 # What the stages write goes to the data folder through these links: caches (Hugging Face, torch, the nvdiffrast
-# build), the weights that setup/weights.sh puts inside the sam-3d-objects clone, and the jobs. /opt/gator/bin is
-# where the agent's containers find the helper client, which Apptainer binds there.
+# build), the weights that setup/weights.sh puts inside the clones, and the jobs. /opt/gator/bin is where the agent's
+# containers find the helper client, which Apptainer binds there.
 RUN ln -s /data/cache /opt/harpor/.cache \
     && rm -rf /opt/harpor/sam-3d-objects/checkpoints && ln -s /data/weights/sam-3d-objects /opt/harpor/sam-3d-objects/checkpoints \
+    && rm -rf /opt/harpor/VoMP/weights && ln -s /data/weights/vomp /opt/harpor/VoMP/weights \
     && ln -s /data/runs /opt/harpor/webapp_runs \
     && mkdir -p /opt/gator && ln -s /opt/harpor/code/harpor/agent/bin /opt/gator/bin
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Everything HARPOR runs on, under $HARPOR_ROOT (by default ~/harpor): the five envs, the agent's Apptainer image and
+# Everything HARPOR runs on, under $HARPOR_ROOT (by default ~/harpor): the six envs, the agent's Apptainer image and
 # the weights. It takes one to two hours and about 90 GB. Needs: Linux x86_64, curl, git, bzip2, the X and GL
 # libraries (see the Dockerfile), and an NVIDIA GPU from Ampere to Hopper (compute capability 8.0 to 9.0) with a driver
 # for CUDA 13.0 or newer. The docker image runs this script itself, with the two skips below.
@@ -12,7 +12,7 @@
 # Each step can also run on its own, and a step skips what is already built. Run it again after a failure.
 set -eo pipefail
 S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-for step in web sam3d mvsam3d sam3seg mujoco; do
+for step in web sam3d mvsam3d sam3seg vomp11 mujoco; do
   echo "==== $step $(date +%T)"
   bash "$S/$step.sh"
 done

@@ -1018,7 +1018,11 @@ def test_find_key_reports_files_but_not_the_key(tmp_path):
 def test_paper_prompt_loads_with_recorded_changes(tmp_path):
     text, orig = PR.load(), PR.original()
     assert "work/run_budget.json" not in text.replace("/work/run_budget.json", "")
-    assert len(text) - len(orig) == len(PR.CHANGES)  # each change adds one "/"
+    assert len(text) - len(orig) == sum(len(new) - len(old) for old, new, _ in PR.CHANGES)
+    # The prompt states the build round's budget, which the web app's agent step passes to the controller.
+    from harpor.webapp import agent_step
+    assert agent_step.BUDGET_S == C.BUDGET_S == 900.0
+    assert f"({C.BUDGET_S:.0f}-second) work" in text and "600-second" not in text
     write_glb(tmp_path / "original.glb")
     C.prepare_session(tmp_path / "s", None, [], source="s", metric=False, original=tmp_path / "original.glb")
     assert (tmp_path / "s" / "session" / "prompt.txt").read_text(encoding="utf-8") == PR.load()

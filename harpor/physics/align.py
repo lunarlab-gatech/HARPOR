@@ -1,7 +1,7 @@
-"""Gravity alignment of an agent GLB for simulators (build_plan.md note 9).
+"""Gravity alignment of an agent GLB for VoMP and simulators (build_plan.md note 9).
 
-The agent's GLB is posed in frame W (OpenCV camera of view 0), so it is not gravity-aligned. MuJoCo
-expects +Z up, and so does Blender after its stock glTF import. This module writes a copy of the GLB
+The agent's GLB is posed in frame W (OpenCV camera of view 0), so it is not gravity-aligned. VoMP
+renders with Blender +Z as image-up, and MuJoCo expects +Z up. This module writes a copy of the GLB
 in frame S: z up, the footprint centred on the origin, the bottom at z = 0 and the longest horizontal
 side on x. In glTF axes S is y up, which Blender's stock importer turns back into z up.
 
@@ -18,17 +18,15 @@ rests on its base, and the hint only settles which axis that is (a squat cup, a 
 x comes from one of two rules (--x): pca, the major axis of the surface projected onto the
 horizontal plane, or footprint, the long side of the minimum-area rectangle around the vertices
 seen from above. Use footprint for near-square or open objects, where the PCA axis
-can land on a diagonal. That makes the bounding box larger, and with it the voxel edge of the estimate
-stage (harpor.physics.estimate).
+can land on a diagonal, which also makes the bounding box and VoMP's voxels larger.
 
 The GLB is not re-exported: the BIN chunk is copied byte for byte and the scene's root nodes go under
 one new node that holds the transform, so textures and materials stay exactly as the agent left them.
 
     python -m harpor.physics.align --glb IN.glb --out OUT.glb [--up pca|normals | --up-near X,Y,Z] [--x pca|footprint] [--opaque]
 writes OUT.glb and OUT.json (T_s_from_w, up in W, the camera tilt and the extents in S).
---opaque also removes transmission, volume and IOR extensions and makes every material opaque. The geometry
-is unchanged. It was added for VoMP, which rejected transmissive or partly transparent materials (the glass),
-and it stays for now: removing it would change aligned.glb and the 360 video.
+--opaque also removes transmission, volume and IOR extensions and makes every material opaque, because
+VoMP rejects transmissive or partly transparent materials (the glass). The geometry is unchanged.
 
 """
 

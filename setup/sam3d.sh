@@ -21,8 +21,8 @@ python patching/hydra
 pip install 'huggingface-hub[cli]<1.0'
 pip install --no-build-isolation "git+https://github.com/NVlabs/nvdiffrast.git@v0.3.3"
 # The agent controller (note 5) and the estimate stage (note 9) ask Claude Opus 5.5 and Claude Fable 5.2 through
-# anthropic in this env, and the estimate stage voxelizes the mesh with trimesh. SAM 3D leaves trimesh open, and
-# HARPOR's mesh code was tested with the 5.1.1 of envs/sam3d on ICE.
+# anthropic in this env, and the align stage voxelizes the final mesh with trimesh to move VoMP's materials onto it.
+# SAM 3D leaves trimesh open, and HARPOR's mesh code was tested with the 5.1.1 of envs/sam3d on ICE.
 pip install anthropic==1.15.0 trimesh==5.1.1
 check_imports torch pytorch3d kaolin gsplat nvdiffrast flash_attn anthropic rtree trimesh  # common.sh
 python -c "import torch

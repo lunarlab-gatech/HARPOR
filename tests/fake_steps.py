@@ -28,10 +28,11 @@ aligned size. The agent and estimate stages
 check the key file (mode 0600, an OPENAI_API_KEY line for astra, an ANTHROPIC_API_KEY line for
 opus and fable) and never print the key. The agent stage writes the result record of the agent it
 stands in for. The estimate stage runs the real harpor.webapp.estimate_step with ESTIMATE as the
-model's answer in place of a request: a hollow cardboard box of 0.25 kg with friction 0.4.
+model's answer in place of a request: a cardboard surface with friction 0.4.
 
-mjcf writes a box body with the mass and the friction of physics/summary.json, usd its rigid body as text, and
-urdf one box link with the real harpor.physics.urdf.
+VoMP gives softwood to every voxel of the canonical box, and the real material transfer recomputes the final
+properties in align. mjcf writes a box body with the mass and the friction of physics/summary.json, usd its rigid
+body as text, and urdf one box link with the real harpor.physics.urdf.
 """
 
 import argparse
@@ -62,9 +63,8 @@ FAKE_DA3_SCALE = 0.8  # a job with LiDAR: DA3's depth and camera translations ar
 COLOR = [170, 120, 70, 255]
 FAKE_BLENDER = [sys.executable, "-m", "harpor.agent.fake_agent", "--blender"]  # the videos' Blender
 # The fake model's answer in the estimate stage
-ESTIMATE = {"material": "cardboard", "structure": "hollow", "mass_kg": 0.25, "mass_low_kg": 0.15, "mass_high_kg": 0.4,
-            "friction": 0.4, "friction_low": 0.3, "friction_high": 0.5,
-            "reason": "fake model: an empty cardboard box of this size weighs about a quarter of a kilogram"}
+ESTIMATE = {"material": "cardboard", "friction": 0.4, "friction_low": 0.3, "friction_high": 0.5,
+            "reason": "fake model: dry cardboard slides on a table at about 0.4"}
 
 
 def command(stage, job, cfg, key_file=None):
@@ -371,6 +371,41 @@ def estimate(J, key_file, which="astra"):
     vlm.ask_astra = lambda key, prompt, image: answer
     pace(2)
     estimate_step.run(J, key_file, which)
+
+
+def grid(glb, n=12):
+    """(centers, h, lo, hi): an n^3 voxel grid over the GLB's box in S, the fake VoMP's occupied voxels."""
+    from harpor.physics.align import load_w
+
+    v, _ = load_w(glb)  # glTF -> W is Blender's import, so these are S coordinates (z up)
+    lo, hi = v.min(0), v.max(0)
+    h = (hi - lo) / n
+    g = (np.arange(n) + 0.5) / n
+    return lo + (hi - lo) * np.stack(np.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3), h, lo, hi
+
+
+def vomp(J):
+    """Softwood in every voxel of canonical.glb."""
+    from harpor.physics.mass import mass_properties
+
+    P = J / "run" / "vomp"
+    P.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(P / "work", ignore_errors=True)  # as the real stage: VoMP needs a fresh folder
+    for old in ("materials.npz", "voxels.npz", "summary.json"):
+        (P / old).unlink(missing_ok=True)
+    rho, E, nu = 600.0, 2.0e9, 0.3  # softwood
+    pace(3)
+    centers, h, lo, hi = grid(J / "run/canonical.glb")
+    np.savez(P / "voxels.npz", centers=centers, h=h, density=np.full(len(centers), rho),
+             youngs_modulus=np.full(len(centers), E), poisson_ratio=np.full(len(centers), nu))
+    summary = {"glb": str((J / "run/canonical.glb").resolve()), "config": "fake", "fake": True,
+               "voxels_occupied": len(centers), "voxels_predicted": len(centers), "voxel_edge_m": float(h.max()),
+               "median": {"youngs_modulus_pa": E, "poisson_ratio": nu, "density_kg_m3": rho},
+               "p05_p95": {"youngs_modulus_pa": [E, E], "poisson_ratio": [nu, nu], "density_kg_m3": [rho, rho]},
+               "rigid_body": mass_properties(centers, np.full(len(centers), rho), h),
+               "seconds": {"load": 0.0, "predict": 3 * DELAY}, "gpu_peak_gb": None}
+    (P / "summary.json").write_text(json.dumps(summary, indent=1))
+    print(f"VoMP (fake): mass {summary['rigid_body']['mass']:.2f} kg")
 
 
 def mjcf(J):

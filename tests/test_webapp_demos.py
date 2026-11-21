@@ -137,8 +137,8 @@ def test_add_from_a_finished_job(job, made, tmp_path):
 
 
 def test_demo_facts_are_rows_of_the_results_tab(job):
-    """app.js renderResults on the same job: the Mass row starts with the Mass fact (it adds the model's range when
-    the job has an estimate), and the Agent row starts with the Agent fact (it adds the model)."""
+    """app.js renderResults on the same job: the Mass fact is one of its rows, and the Agent row starts with the
+    Agent fact (it adds the model)."""
     J, view, replies = job
     out = run_app_js(replies, """
         (async () => {
@@ -149,7 +149,7 @@ def test_demo_facts_are_rows_of_the_results_tab(job):
         """)
     rows = {out[i + 1]: out[i + 3] for i in range(len(out) - 3) if out[i] == "dt" and out[i + 2] == "dd"}
     facts = dict(demos.facts_of(J, json.loads((J / "job.json").read_text())))
-    assert rows["Mass"] == facts["Mass"] or rows["Mass"].startswith(facts["Mass"] + " (range ")
+    assert rows["Mass"] == facts["Mass"]
     assert rows["Agent"].startswith(facts["Agent"] + " (")
 
 
