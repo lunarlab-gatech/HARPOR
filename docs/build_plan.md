@@ -51,7 +51,7 @@ Slurm cluster (notes 7 and 10).
 ### Status
 
 What works (the notes hold the main results; git history holds the run logs):
-- The web app runs the whole pipeline from a video on PACE ICE, our Slurm cluster (note 10). A separate static demo gallery is available (`docs/public_site.md`).
+- The web app runs the whole pipeline from a video on PACE ICE, our Slurm cluster (note 10). A separate static demo gallery is available (note 10, Static demo gallery).
 - Stage A: SAM 3 masks, Depth Anything 3 and MV-SAM3D with the pose fitted to the masks (notes 3
   and 4b).
 - Stage B: GPT-6-Astra (the default agent until 2026-11-20) and Claude Opus 5.5 refined meshes under the
@@ -80,7 +80,6 @@ Not verified yet:
 |---|---|
 | `LICENSE` | MIT, for HARPOR's own code. Third-party models and the vendored web libraries keep their own licenses (the Licenses bullet above, and `harpor/webapp/static/vendor/licenses/`) |
 | `docs/build_plan.md` | This file: overview, design and build notes |
-| `docs/public_site.md` | The standalone static demo gallery |
 
 ## Component diagram
 
@@ -1247,12 +1246,27 @@ terminal command as a process of its own.
   `tests/test_help_page.py` checks the page's numbers against the code.
 - Demos: from the app, the header's Demos link opens `demos.html` in a new tab, a gallery of the finished jobs
   that the owner picked (`harpor/webapp/demos.py`). The server takes the demos folder from `--demos DIR` or
-  `WEBAPP_DEMOS` and serves `/demos.html` and `/demos/<name>/<file>`; `docs/public_site.md` (Demos) has the rest.
+  `WEBAPP_DEMOS` and serves `/demos.html` and `/demos/<name>/<file>`; Static demo gallery below has the rest.
 - The node tests in `tests/test_webapp_server.py` and `tests/test_webapp_demos.py` load `app.js`.
   They need `node`, which ICE does not have, so run them on the Mac. Other tests there check the tabs
   and panels of `index.html` and the styles in `style.css`.
 
-**Static demo gallery:** `docs/public_site.md`.
+**Static demo gallery** (`harpor/webapp/demos.py`, `harpor/webapp/site.py`). Keep the picked demos outside the
+repository. Each demo folder holds `demo.json` with its video, poster, GLB and ZIP files. To make, check, build and
+preview them:
+
+```bash
+python -m harpor.webapp.demos add /path/to/job --out /path/to/demos
+python -m harpor.webapp.demos check --help
+python -m harpor.webapp.site build --demos /path/to/demos
+python -m http.server --directory site 8000
+```
+
+`WEBAPP_DEMOS` gives the default demos folder, and `--out DIR` another build folder. `--no-demos` builds an empty
+gallery, also when it replaces a build that held demos. The demo checks and the private-data checks still apply. The
+local app serves the same gallery with `--demos DIR`. The build's `index.html` and `demos.html` show the same
+gallery, with the help page, the styles, the viewer and security headers; it needs no cloud service. Deploy the
+`site/` folder with any static host.
 
 **Security.** The server port on a cluster's compute node is open to the cluster's other users, and in docker
 the agent's Codex container shares the docker network, so every request

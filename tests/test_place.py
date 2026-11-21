@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from harpor import frames as F
 from harpor.stage_a.place import GLB_TURN, P3D_TO_CV, canonical_glb_to_w, quat_wxyz_to_matrix
 
 
@@ -25,3 +26,9 @@ def test_row_vector_rotation_convention():
     V = np.array([[1.0, 0.0, 0.0]]) @ np.linalg.inv(GLB_TURN.T)  # canonical (1, 0, 0) after the undo
     assert np.allclose(canonical_glb_to_w(V, pose), np.array([[0.0, -1.0, 0.0]]) * P3D_TO_CV)
 
+
+def test_gltf_w_roundtrip():
+    assert np.allclose(F.gltf_to_w([1.0, 2.0, 3.0]), [1, -3, 2])  # (x, y, z)_W = (x, -z, y)_glTF
+    p_w = np.random.default_rng(0).normal(size=(50, 3))
+    assert np.allclose(F.gltf_to_w(F.w_to_gltf(p_w)), p_w)
+    assert np.allclose(F.W_FROM_GLTF @ F.GLTF_FROM_W, np.eye(3))

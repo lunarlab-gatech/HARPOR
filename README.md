@@ -98,5 +98,6 @@ default. `--help` lists every option and explains what to do when a job stops to
   ```
 
   Tests that need a package you don't have are skipped.
-- A standalone static demo gallery can be built separately. [docs/public_site.md](docs/public_site.md) explains how.
+- A standalone static demo gallery can be built separately. [docs/build_plan.md](docs/build_plan.md) note 10
+  (Static demo gallery) explains how.
 - HARPOR's code is MIT licensed ([LICENSE](LICENSE)). SAM 3, SAM 3D Objects and MV-SAM3D keep their own SAM License.

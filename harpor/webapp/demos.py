@@ -1,5 +1,5 @@
 """The demos: finished jobs that the site's owner picked, shown at demos.html as a gallery of cards, each a link to
-the demo's 360 video, 3D view and files, in a standalone gallery (docs/public_site.md).
+the demo's 360 video, 3D view and files, in a standalone gallery (build_plan.md note 10, Static demo gallery).
 
     python -m harpor.webapp.demos add SOURCE [--name N] [--title T] [--video MP4] [--glb GLB] [--zip ZIP]
                                              [--fact LABEL=VALUE ...] [--order K] [--out DIR] [--force] [--public-bag]
