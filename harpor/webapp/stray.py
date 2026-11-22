@@ -4,7 +4,7 @@ Runs in envs/web (PyAV, numpy, pillow). video.py calls it for a job whose job.js
 {"kind": "stray"} (an uploaded .zip), and the lidar stage (lidar.py) reads the depth.
 
 The export's format: https://github.com/strayrobots/scanner/blob/main/docs/format.md. Its layout, the unpack
-limits, the pairing, the edit-list trap, the turn from gravity and the depth samples: build_plan.md note 12,
+limits, the pairing, the edit-list trap, the turn from gravity and the depth samples: README.md note 9,
 Stray Scanner source.
 
 How Stray writes them (its DatasetEncoder, VideoEncoder and OdometryEncoder): every saved frame gets
@@ -119,7 +119,7 @@ def _entries(f):
 
 
 def members(infos, zip_bytes):
-    """[(ZipInfo, path under the root)] to extract, after every check (build_plan.md note 12, Stray Scanner
+    """[(ZipInfo, path under the root)] to extract, after every check (README.md note 9, Stray Scanner
     source 2). SystemExit with the reason for a zip that is not a Stray Scanner export or not safe."""
     if len(infos) > MAX_ENTRIES:
         raise SystemExit(_too_many())
@@ -185,7 +185,7 @@ def _extract(z, info, out, left):
 
 
 def unpack(zip_path, dest):
-    """The unpacked export's root, dest/export (build_plan.md note 12, Stray Scanner source 2). Unpacks the
+    """The unpacked export's root, dest/export (README.md note 9, Stray Scanner source 2). Unpacks the
     zip only when dest/.unpacked.json is for another zip (bytes, mtime_ns) or a member is missing. SystemExit
     with the reason for a zip that is not a safe Stray Scanner export, or when the disk cannot take it."""
     zip_path, dest = Path(zip_path), Path(dest)

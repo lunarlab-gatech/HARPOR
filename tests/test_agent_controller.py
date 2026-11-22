@@ -1,4 +1,4 @@
-"""Scripted agent sessions through the controller and its tool server (build_plan.md note 5).
+"""Scripted agent sessions through the controller and its tool server (README.md note 5).
 
 The scripted sessions run in parallel in one fixture, because each fake Blender export imports trimesh.
 """
@@ -699,7 +699,7 @@ def test_apptainer_command_keeps_control_out(tmp_path):
 
 
 def test_note_5_command_is_the_controllers(tmp_path):
-    text = (Path(__file__).resolve().parents[1] / "docs" / "build_plan.md").read_text()
+    text = (Path(__file__).resolve().parents[1] / "README.md").read_text()
     block = text.split("### 5. Stage B", 1)[1].split("```bash\n", 1)[1].split("```", 1)[0]
     root, sock, key, sif = tmp_path / "s", "/tmp/harpor-x", "/home/u/.config/harpor/openai.env", "/sif/harpor-agent.sif"
     doc = (block.replace("\\\n", " ").replace("<root>", str(root.resolve())).replace("<socket dir>", sock)
@@ -1647,7 +1647,7 @@ def test_a_session_with_rounds_runs_in_rounds(round_runs):
     assert (ev["object"], ev["diagonal_m"], ev["rounds"]) == ("sensor depth", pytest.approx(ORIGINAL_SIZE * 3 ** 0.5),
                                                               r["rounds"])
     assert ev["selected"] == {"version": 1, "verdict": "complete", "why": "the only eligible candidate",
-                              "rank": [{"version": 1, "rank": [True, True, 1]}], "ineligible": []}
+                              "rank": [{"version": 1, "rank": [True, 0, 0, True, 1]}], "ineligible": []}
     (c,) = ev["candidates"]
     assert (c["glb"], c["from"], c["sha256"], c["source"], c["agent_verdict"], c["outcome"]) == (
         glb, "work/exports/001.glb", sha, "finish", "complete", "pass")
@@ -1787,7 +1787,7 @@ def test_a_passing_round_ranks_first():
     """rank: a passing round beats a newer failure, which paper A.6's order would not ensure; then a source other
     than an uninspected export, and the newer version. A pass counts only with a report of the candidate's own
     bytes."""
-    assert C.RANK == ("round outcome pass", "source not an export", "version")
+    assert C.RANK == ("round outcome pass", "LiDAR regions resolved", "LiDAR gain", "source not an export", "version")
     assert C.rank(stored(1, "pass")) > C.rank(stored(2)) > C.rank(stored(1))
     assert C.rank(stored(1, source="checkpoint")) > C.rank(stored(2, source="export"))
     assert C.passed(stored(1, "pass")) and not C.passed(stored(1, "pass", sha="b"))
@@ -1827,8 +1827,8 @@ def test_select_candidate_delivers_the_best_eligible_candidate(tmp_path):
     assert pick == {"source": "finish", "glb": root / "control" / "candidates" / "v01" / "candidate.glb",
                     "verdict": "complete", "reason": "the agent's reason", "limitations": ["the agent's limitation"]}
     assert chosen == first and C.check_glb(pick["glb"]) is None
-    assert selected["rank"] == [{"version": 1, "rank": [True, True, 1]},
-                                {"version": 4, "rank": [False, True, 4]}]
+    assert selected["rank"] == [{"version": 1, "rank": [True, 0, 0, True, 1]},
+                                {"version": 4, "rank": [False, 0, 0, True, 4]}]
     assert [(x["from"], x["glb"], x["why"].split(":")[0]) for x in selected["ineligible"]] == [
         ("candidate v02", "control/candidates/v02/candidate.glb", "unparsable"),
         ("candidate v03", "control/candidates/v03/candidate.glb", "wrong size")]

@@ -88,7 +88,7 @@ def vendor_files(static=STATIC):
     for rel, want in VENDOR.items():
         p = Path(static) / "vendor" / rel
         if not p.is_file():
-            raise SiteError(f"static/vendor/{rel} is missing (static/vendor/README.md says where it comes from)")
+            raise SiteError(f"static/vendor/{rel} is missing (README.md note 8, Vendored web files, says where it comes from)")
         data = p.read_bytes()
         if b64sha384(data) != want:
             raise SiteError(f"static/vendor/{rel} does not have its SHA-384; take it again from its npm release")

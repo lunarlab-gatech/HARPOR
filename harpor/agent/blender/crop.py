@@ -1,4 +1,4 @@
-"""Crop windows for the input-view rows of the review sheet (build_plan.md note 5).
+"""Crop windows for the input-view rows of the review sheet (README.md note 5).
 
 Plain numpy, so review.py (inside Blender) and the tests share it. Pixel centers sit at integer
 coordinates, as in the manifest's K.

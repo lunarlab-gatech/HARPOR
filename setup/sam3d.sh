@@ -1,5 +1,5 @@
 #!/bin/bash
-# envs/sam3d: SAM 3D Objects (f91db41) with nvdiffrast and anthropic (build_plan.md notes 4 and 5), about 1 h, under
+# envs/sam3d: SAM 3D Objects (f91db41) with nvdiffrast and anthropic (README.md notes 3 and 5), about 1 h, under
 # $HARPOR_ROOT (by default ~/harpor). MV-SAM3D, the agent controller and most stages run in this env. The weights come
 # from setup/weights.sh. The env brings its own CUDA 12.1 toolkit and gcc 12, so the machine needs only an NVIDIA
 # driver at run time and no GPU at build time (set TORCH_CUDA_ARCH_LIST then, see common.sh).
@@ -20,7 +20,7 @@ PIP_FIND_LINKS="https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.1_cu1
 python patching/hydra
 pip install 'huggingface-hub[cli]<1.0'
 pip install --no-build-isolation "git+https://github.com/NVlabs/nvdiffrast.git@v0.3.3"
-# The agent controller (note 5) and the estimate stage (note 9) ask Claude Opus 5.5 and Claude Fable 5.2 through
+# The agent controller (note 5) and the estimate stage (note 7) ask Claude Opus 5.5 and Claude Fable 5.2 through
 # anthropic in this env, and the align stage voxelizes the final mesh with trimesh to move VoMP's materials onto it.
 # SAM 3D leaves trimesh open, and HARPOR's mesh code was tested with the 5.1.1 of envs/sam3d on ICE.
 pip install anthropic==1.15.0 trimesh==5.1.1

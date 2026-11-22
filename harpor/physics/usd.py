@@ -1,4 +1,4 @@
-"""Write an Isaac Sim physics USD for one aligned GLB and its VoMP rigid-body numbers (build_plan.md note 9).
+"""Write an Isaac Sim physics USD for one aligned GLB and its VoMP rigid-body numbers (README.md note 7).
 
     python -m harpor.physics.usd --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME
         [--friction F]

@@ -1,4 +1,4 @@
-"""Scripted stand-in for the Codex CLI agent, so tests drive every controller path (build_plan.md note 5).
+"""Scripted stand-in for the Codex CLI agent, so tests drive every controller path (README.md note 5).
 
 Run `python -m harpor.agent.fake_agent SCRIPT.json` with the work folder as the current directory and
 HARPOR_TOOL_SOCKET set to the tool server's socket. The script is a list of actions:
@@ -15,6 +15,13 @@ HARPOR_TOOL_SOCKET set to the tool server's socket. The script is a list of acti
   {"do": "write", "path": "run_budget.json", "text": "{}"}
   {"do": "sleep", "seconds": 30}, {"do": "ignore_sigint"}, {"do": "crash"}
   {"do": "read_prompt"}                                      copy stdin to prompt_seen.txt
+  {"do": "use_glb", "path": "/abs/edit.glb"}                 make that GLB the scene (a GLB scene, below)
+  {"do": "sculpt", "patch": "L1", "op": "plane", "strength": 1.0}   lidar_sculpt on the newest review's lidar.json
+  {"do": "rollback"}                                         put back the scene that lidar_sculpt kept in sculpt/
+
+With HARPOR_FAKE_GLB_SCENE set, the fake Blender keeps the scene as a GLB: make_candidate.py copies the original into
+fake_scene/ and candidate.blend names it ({"kind": "glb", "glb": path}), and export_glb.py exports its bytes. The
+sculpt action then edits that GLB with the real sculpt_math (sculpt_glb), as bin/lidar_sculpt.py edits a .blend.
 
 A session with rounds (controller.run_rounds) runs one agent per round: the script may then be
 {"rounds": [[...], [...]]}, and each agent runs the list of its round, run_budget.json's round (none
@@ -52,6 +59,94 @@ def write_glb(path, kind="good", size=1.0):
     if kind == "nan":
         mesh.vertices[0] = float("nan")
     mesh.export(path, file_type="glb")
+
+
+def scene_w(glb):
+    """(trimesh scene, [(node, geometry name, M (node to glTF world), vertices in W)]) of a GLB, read without processing."""
+    import numpy as np
+    import trimesh
+
+    from harpor import frames
+
+    scene = trimesh.load(glb, file_type="glb", force="scene", process=False)
+    parts = []
+    for node in scene.graph.nodes_geometry:
+        M, g = scene.graph[node]
+        v = np.asarray(scene.geometry[g].vertices, float)
+        parts.append((node, g, np.asarray(M, float), frames.gltf_to_w(v @ M[:3, :3].T + M[:3, 3])))
+    return scene, parts
+
+
+def sculpt_glb(src, dst, region, corr, op, strength=1.0, max_displacement=0.05):
+    """bin/lidar_sculpt.py on a GLB in place of a .blend: the visible triangles in W, one sculpt_math pass, and each
+    geometry's new vertices back in its node's local glTF coordinates; UVs, materials and nodes stay. Returns the
+    sculpt report. sculpt_math.SculptError when the pass cannot run."""
+    import numpy as np
+
+    from harpor import frames
+    from harpor.agent.bin import sculpt_math as S
+
+    scene, parts = scene_w(src)
+    V = np.concatenate([p[3] for p in parts])
+    off = np.cumsum([0] + [len(p[3]) for p in parts])
+    F = np.concatenate([np.asarray(scene.geometry[g].faces, np.int64) + o for (_, g, _, _), o in zip(parts, off)])
+    out, rep = S.sculpt(V, F, region, corr, op, strength, max_displacement)
+    for (node, g, M, _), a, b in zip(parts, off[:-1], off[1:]):
+        local = frames.w_to_gltf(out[a:b])
+        Minv = np.linalg.inv(M)
+        scene.geometry[g].vertices = local @ Minv[:3, :3].T + Minv[:3, 3]
+    Path(dst).write_bytes(scene.export(file_type="glb"))
+    return rep
+
+
+def _scene():
+    with contextlib.suppress(OSError, ValueError):
+        s = json.loads(Path("candidate.blend").read_text())
+        return s if isinstance(s, dict) else {}
+    return {}
+
+
+def _new_scene_glb(data):
+    """data as the next fake_scene/NNN.glb; its path."""
+    d = Path("fake_scene").resolve()
+    d.mkdir(exist_ok=True)
+    taken = [int(p.stem) for p in d.glob("[0-9][0-9][0-9].glb")]
+    path = d / f"{max(taken, default=-1) + 1:03d}.glb"
+    path.write_bytes(data)
+    return path
+
+
+def fake_sculpt(a):
+    """The sculpt action: lidar_sculpt.py's checks and edit, on the GLB scene (see the module docstring)."""
+    import hashlib
+    import shutil
+
+    from harpor.agent.bin import sculpt_math as S
+
+    receipts = sorted(Path("reviews").glob("r*"))
+    doc = json.loads((receipts[-1] / "lidar.json").read_text())
+    blend = Path("candidate.blend")
+    if hashlib.sha256(blend.read_bytes()).hexdigest() != doc.get("blend_sha256"):
+        print("lidar_sculpt: candidate.blend changed since the review", flush=True)
+        return
+    region = next(r for r in doc["regions"] if r["id"] == a["patch"])
+    scene = _scene()
+    keep = Path("sculpt") / f"{receipts[-1].name}-before.blend"
+    keep.parent.mkdir(exist_ok=True)
+    if not keep.exists():
+        shutil.copyfile(blend, keep)
+    tmp = Path("fake_scene") / ".sculpt.glb"
+    try:
+        rep = sculpt_glb(scene["glb"], tmp, region, doc["correspondences"][a["patch"]], a.get("op", "plane"),
+                         a.get("strength", 1.0), doc.get("max_displacement_m", 0.05))
+    except S.SculptError as e:
+        print(f"lidar_sculpt: {e}", flush=True)
+        return
+    scene["glb"] = str(_new_scene_glb(tmp.read_bytes()))
+    tmp.unlink()
+    blend.write_text(json.dumps(scene))
+    print(f"lidar_sculpt: {a.get('op', 'plane')} on {a['patch']}: moved {rep['moved']}, at most "
+          f"{rep['max_move_m'] * 1000:.1f} mm", flush=True)
 
 
 def turntable_frames(args, side=96):
@@ -96,12 +191,21 @@ def fake_blender(argv):
     if script == "make_candidate.py":
         import trimesh
 
+        if os.environ.get("HARPOR_FAKE_GLB_SCENE"):
+            d = Path(rest[1]).parent / "fake_scene"
+            d.mkdir(exist_ok=True)
+            (d / "000.glb").write_bytes(Path(rest[0]).read_bytes())
+            Path(rest[1]).write_text(json.dumps({"kind": "glb", "glb": str((d / "000.glb").resolve()), "seconds": 0.0}))
+            return
         size = float(trimesh.load(rest[0], file_type="glb", force="scene", process=False).extents[0])
         Path(rest[1]).write_text(json.dumps({"kind": "good", "size": size, "seconds": 0.0}))
     elif script == "export_glb.py":
         scene = json.loads(Path(blend).read_text())
         time.sleep(scene["seconds"])
-        write_glb(rest[0], scene["kind"], scene["size"])
+        if scene["kind"] == "glb":
+            Path(rest[0]).write_bytes(Path(scene["glb"]).read_bytes())
+        else:
+            write_glb(rest[0], scene["kind"], scene["size"])
         time.sleep(scene.get("pause", 0.0))  # the real script re-imports the GLB before it writes the report
         rep = {"meshes": 1, "materials": int(scene["kind"] != "no_material"), "images": 0, "triangles": 12,
                "nodes": ["mesh"], "warnings": []}
@@ -162,6 +266,16 @@ def run(script):
             os._exit(3)
         elif do == "read_prompt":
             Path("prompt_seen.txt").write_bytes(sys.stdin.buffer.read())
+        elif do == "use_glb":
+            scene = _scene()
+            scene.update(kind="glb", glb=str(_new_scene_glb(Path(a["path"]).read_bytes())), seconds=0.0)
+            Path("candidate.blend").write_text(json.dumps(scene))
+        elif do == "sculpt":
+            fake_sculpt(a)
+        elif do == "rollback":
+            kept = sorted(Path("sculpt").glob("*-before.blend"))
+            if kept:
+                Path("candidate.blend").write_bytes(kept[-1].read_bytes())
         sys.stdout.flush()
 
 

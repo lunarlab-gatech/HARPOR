@@ -1,4 +1,4 @@
-"""Object masks from a text prompt with SAM 3 (build_plan.md note 3).
+"""Object masks from a text prompt with SAM 3 (README.md note 2).
 
 Runs in envs/sam3seg (transformers 5.20.0, weights facebook/sam3), from the repo root:
 

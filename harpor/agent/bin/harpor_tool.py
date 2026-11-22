@@ -1,4 +1,4 @@
-"""Client for the helper commands inside the agent's container (build_plan.md note 5).
+"""Client for the helper commands inside the agent's container (README.md note 5).
 
 The helpers run on the host in the controller's tool server. This script sends its command line over
 the Unix socket in HARPOR_TOOL_SOCKET, prints the reply and exits with the helper's exit code. It uses only

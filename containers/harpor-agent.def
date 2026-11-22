@@ -1,4 +1,4 @@
-# Agent image for Stage B (build_plan.md notes 5 and 7): Node.js, Codex CLI and Blender.
+# Agent image for Stage B (README.md notes 5 and 6): Node.js, Codex CLI and Blender.
 # setup/agent.sh builds it without root (--fakeroot) on a machine with Apptainer:
 #   apptainer build --fakeroot harpor-agent.sif harpor-agent.def
 # The docker image (containers/Dockerfile) installs the same tools at the same versions.

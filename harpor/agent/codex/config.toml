@@ -1,4 +1,4 @@
-# Codex CLI 0.171.0 settings for the agent (build_plan.md note 5), read from CODEX_HOME=/session/codex_home.
+# Codex CLI 0.171.0 settings for the agent (README.md note 5), read from CODEX_HOME=/session/codex_home.
 # The agent runs GPT-6.2-Astra. The paper ran GPT-6-Astra through the Codex CLI at extra-high reasoning effort, and
 # the agent keeps that effort. Every key passes --strict-config with 0.171.0 (checked on ICE on 2026-11-20). The
 # defaults in the comments come from codex-rs at tag rust-v0.162.1 (config/src/config_toml.rs and others).

@@ -1,4 +1,4 @@
-"""Metric scale from LiDAR (build_plan.md note 12).
+"""Metric scale from LiDAR (README.md note 9).
 
 Depth Anything 3 Nested only estimates metric depth. A job with LiDAR compares LiDAR depth with DA3's
 depth inside the object masks, and select multiplies DA3's depth, pointmaps and camera translations by
@@ -88,7 +88,7 @@ RAY_FIT_PX = 3.0  # the crossing is where a line fit to the gap over this many D
 # correct views of a 30 cm box stay at or below 0.1 with DA3 edges blurred by up to 8 px (Gaussian sigma) at 3,500
 # beams per sr, and up to 6 px at 40,000 (8 px gives 0.102). Views locked on a wall close behind a small box lie at
 # 0.34 to 0.5. Thin objects, softer edges and the image's edge can put correct views over it, and a dark object's lock
-# can stay under it (build_plan.md note 12, open issues).
+# can stay under it (README.md note 9, open issues).
 RAY_MAX_FRONT = 0.1
 RAY_PASSES = 3  # at most; a pass traces the rays at the s_i of the pass before ...
 RAY_TOL = 1e-4  # ... until s_i changes by less than this share

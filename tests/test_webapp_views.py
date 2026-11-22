@@ -464,3 +464,30 @@ def test_select_applies_the_lidar_scale(tmp_path):
     with np.load(j2 / "run" / "da3_output.npz") as run:
         assert "metric_scale" not in run.files
     assert not (j2 / "run" / "lidar").exists()
+
+
+def test_copy_geometry_follows_the_picks(tmp_path):
+    """The run's returns follow the ordered picks: run view i holds its pool view's file and entry, the index names
+    the pool index by sha256 and the metric scale, and a pick without XYZ is listed as unavailable. A pool without an
+    index (an older job) gives the run none."""
+    import hashlib
+
+    pool = tmp_path / "geometry"
+    pool.mkdir()
+    entries = {}
+    for k, n in enumerate(("f00000", "f00010", "f00020")):
+        np.savez(pool / f"{n}.npz", xyz=np.full((3, 3), k, float))
+        entries[n] = {"status": "available", "file": f"{n}.npz", "model": "lidar_ray"}
+    entries["f00030"] = {"status": "unavailable", "reason": "no camera points for this view"}
+    (pool / "index.json").write_text(json.dumps({"version": 1, "kind": "rosbag", "views": entries}))
+    run = tmp_path / "run"
+    index = V.copy_geometry(pool, ["f00020", "f00030", "f00000"], run, 1.25)
+    assert [(v["index"], v["pool_name"], v["status"]) for v in index["views"]] == [
+        (0, "f00020", "available"), (1, "f00030", "unavailable"), (2, "f00000", "available")]
+    with np.load(run / "lidar" / "geometry" / "0.npz") as f:
+        assert (f["xyz"] == 2).all()
+    assert not (run / "lidar" / "geometry" / "1.npz").exists()
+    assert index["pool_index_sha256"] == hashlib.sha256((pool / "index.json").read_bytes()).hexdigest()
+    assert index["metric_scale"] == 1.25
+    assert json.loads((run / "lidar" / "geometry" / "index.json").read_text()) == index
+    assert V.copy_geometry(tmp_path / "none", ["f00000"], tmp_path / "run2", None) is None

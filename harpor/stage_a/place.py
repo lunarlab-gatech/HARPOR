@@ -1,4 +1,4 @@
-"""Pose and mask helpers for Stage A (build_plan.md note 2).
+"""Pose and mask helpers for Stage A (README.md note 1).
 
 canonical_glb_to_w moves a SAM 3D canonical GLB into frame W (OpenCV camera axes) with the pose
 that SAM 3D returns. harpor.stage_a.mvsam3d uses these helpers to place its mesh, and load_mask, silhouette
@@ -26,7 +26,7 @@ def canonical_glb_to_w(V, pose):
     """GLB vertices (SAM 3D canonical, y up) -> frame W.
 
     SAM 3D applies Transform3d().scale(s).rotate(R).translate(t) to row vectors, so a point maps
-    to (v * s) @ R + t in PyTorch3D camera axes (build_plan.md note 2).
+    to (v * s) @ R + t in PyTorch3D camera axes (README.md note 1).
     """
     v = np.asarray(V, dtype=float) @ GLB_TURN.T
     R = quat_wxyz_to_matrix(pose["rotation_wxyz"])

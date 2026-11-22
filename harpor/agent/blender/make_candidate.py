@@ -1,4 +1,4 @@
-"""Build candidate.blend from original.glb before the agent's clock starts (build_plan.md note 5).
+"""Build candidate.blend from original.glb before the agent's clock starts (README.md note 5).
 
 blender -b --factory-startup --python-exit-code 1 --python make_candidate.py -- ORIGINAL.glb CANDIDATE.blend
 

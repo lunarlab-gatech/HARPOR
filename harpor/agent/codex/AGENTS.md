@@ -60,3 +60,28 @@ not replace an earlier one; a hand-off whose round did not pass the host's check
 
 Every helper but `finish` ends its output with the seconds left before the deadline, also when it
 fails, but not after a usage error.
+
+## LiDAR geometry (only when `input/lidar/manifest.json` exists)
+
+A job with measured LiDAR returns has `input/lidar/manifest.json` (its `mode` is `inspect` or `sculpt`) and
+`input/lidar/fitting.npz` (the fitting returns: `origin` and `end` in W, meters, and the photo `pixel`). The host keeps
+other views back and checks every hand-off on them; you never see those.
+
+- `original/previews/lidar/summary.json`: the repair regions (`L1`, `L2`, ...) with `status` (`target`, `conflict`
+  or `observation`), `seed`, `normal` and `bounds` in W, the median signed error in meters, `direction` and
+  `suggested_op`; the surfaces without returns; any alignment notice. `lidar_viewNN.png` draws the returns on the
+  photos: red, the mesh sticks out toward the sensor; blue, it lies behind the measured surface; a cross, a miss.
+- Every `review` adds `lidar.json` and `lidar_viewNN.png` to its folder, with each region's current fit, and prints a
+  line per region.
+- `lidar_sculpt --receipt ID --patch L1 --op plane|push [--strength S]` (mode `sculpt` only): one bounded edit of
+  `/work/candidate.blend` from that review's correspondences. `plane` flattens a flat surface onto the measured
+  plane; `push` moves a curved surface along its normals by the measured offset. The rim, seams, UVs, materials and
+  object transforms stay. It refuses a scene that changed since the review, a region that is not a `target`, an
+  ambiguous or too coarse patch, and a result that flips faces. It keeps the reviewed scene in
+  `sculpt/<receipt>-before.blend`; copy that back over `candidate.blend` to undo.
+
+Example: `review` (receipt `r002-...`, "lidar L1 target ... median signed -9.8 mm; suggested plane"), then
+`lidar_sculpt --receipt r002-... --patch L1 --op plane`, `review` again (L1 near 0 mm), `checkpoint`, and `finish`
+with a reason that names the measured repair (L1) apart from the repairs inferred from the photos. Do not sculpt a
+`conflict` or `observation` region, or for an alignment notice. In mode `inspect` the helper is off and the LiDAR
+evidence only informs your judgment.

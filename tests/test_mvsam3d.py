@@ -286,7 +286,7 @@ def test_sam3d_pose_names_the_units_of_the_run(tmp_path, monkeypatch):
         np.savez(out / "da3_output.npz", **arrays, **extra)
         M.sam3d(tmp_path / "MV-SAM3D", tmp_path / "sam-3d-objects", out, seed=42)
         pose = json.loads((out / "pose.json").read_text())
-        assert pose["frame"] == f"canonical -> view 0 camera, PyTorch3D axes, row vectors (note 2), {units}"
+        assert pose["frame"] == f"canonical -> view 0 camera, PyTorch3D axes, row vectors (note 1), {units}"
         assert pose["views"] == ["0", "1"] and pose["translation"] == [0.0, 0.0, 0.6]
 
 

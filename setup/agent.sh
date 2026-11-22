@@ -1,5 +1,5 @@
 #!/bin/bash
-# The agent's Apptainer image, sif/harpor-agent.sif (build_plan.md note 5), under $HARPOR_ROOT (by default ~/harpor):
+# The agent's Apptainer image, sif/harpor-agent.sif (README.md note 5), under $HARPOR_ROOT (by default ~/harpor):
 # Node.js, the Codex CLI and Blender, from containers/harpor-agent.def. A machine that runs HARPOR without the docker
 # image needs it for the agent and the 360 video. The docker image has these
 # tools inside and runs them in sibling containers instead, so it skips this script.

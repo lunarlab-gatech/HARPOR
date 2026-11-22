@@ -1,4 +1,4 @@
-"""Render the original and the candidate with the same cameras and lights (build_plan.md note 5).
+"""Render the original and the candidate with the same cameras and lights (README.md note 5).
 
 blender -b --factory-startup --python-exit-code 1 --python review.py -- ARGS.json
 

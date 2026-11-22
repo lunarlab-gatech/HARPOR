@@ -2038,7 +2038,7 @@ def test_app_js_360_video_setting():
     assert out == {"ticked": [True, False], "sent": [True, False], "names": ["Wooden box", ""]}
 
 
-# ---- the LiDAR UI (build_plan.md note 12): upload kinds, the LiDAR box, the review, the failure, the results ----
+# ---- the LiDAR UI (README.md note 9): upload kinds, the LiDAR box, the review, the failure, the results ----
 
 CAM = "/cam/image_rect/compressed"
 LIVOX = {"topic": "/livox/lidar", "type": "CustomMsg", "msgtype": "livox_ros_driver2/msg/CustomMsg", "frame_id": "livox_frame",

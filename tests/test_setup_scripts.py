@@ -1,4 +1,4 @@
-"""The scripts in setup/ (build_plan.md notes 3 to 10) and the docker image's files in containers/. The scripts run for
+"""The scripts in setup/ (README.md notes 2 to 8) and the docker image's files in containers/. The scripts run for
 real but offline: each tool that needs the network or a GPU is a stub that logs its call."""
 
 import re
@@ -10,8 +10,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "setup"
-NOTES = {"install": ["7"], "web": ["7", "10"], "sam3d": ["4", "7"], "mvsam3d": ["4b", "7"], "sam3seg": ["3", "7"],
-         "vomp11": ["7", "9"], "mujoco": ["7", "9"], "agent": ["5", "7"], "weights": ["7"]}
+NOTES = {"install": ["6"], "web": ["6", "8"], "sam3d": ["3", "6"], "mvsam3d": ["4", "6"], "sam3seg": ["2", "6"],
+         "vomp11": ["6", "7"], "mujoco": ["6", "7"], "agent": ["5", "6"], "weights": ["6"]}
 CONTAINERS = ROOT / "containers"
 # One stub under every tool's name. Besides logging, it makes what the script's next step needs.
 STUB = r"""#!/bin/bash
@@ -36,14 +36,14 @@ def stub(path):
 
 
 def note(number):
-    """One note of build_plan.md, from its heading up to the next note's."""
-    text = (ROOT / "docs" / "build_plan.md").read_text()
+    """One note of README.md, from its heading up to the next note's."""
+    text = (ROOT / "README.md").read_text()
     return re.search(rf"^### {number}\. .*?(?=^### |\Z)", text, re.M | re.S).group()
 
 
 @pytest.fixture
 def run(tmp_path):
-    """run(script, VARIABLE=value, ...) runs setup/<script>.sh with the root tmp_path/root, envs/sam3d from note 4, a
+    """run(script, VARIABLE=value, ...) runs setup/<script>.sh with the root tmp_path/root, envs/sam3d from note 3, a
     GPU of capability 8.6 (GPUS) and no module command. None removes a variable. It returns the process and the
     stubs' calls."""
     for tool in ("git", "curl", "tar", "pip", "python", "nvidia-smi", "nproc"):
@@ -76,11 +76,11 @@ def test_script_names_the_root_and_its_notes_and_the_readme_name_it(script):
 
 
 def test_the_docs_name_only_files_that_exist():
-    """Every relative link in README.md and docs/*.md, and every file in the Files table of build_plan.md, is a file
+    """Every relative link in README.md and docs/*.md, and every file in the Files table of README.md, is a file
     of the repo. docs/research.md was removed, and its README link and table row had stayed."""
     docs = [ROOT / "README.md", *(ROOT / "docs").glob("*.md")]
     links = [(p, m) for p in docs for m in re.findall(r"\]\(([^)\s#]+)", p.read_text()) if not re.match(r"[a-z]+:", m)]
-    table = (ROOT / "docs" / "build_plan.md").read_text().split("### Files", 1)[1].split("\n## ", 1)[0]
+    table = (ROOT / "README.md").read_text().split("### Files", 1)[1].split("\n## ", 1)[0]
     files = re.findall(r"^\| `([^`]+)` \|", table, flags=re.M)
     assert links and [f"{p.name}: {m}" for p, m in links if not (p.parent / m).exists()] == []
     assert files and [f for f in files if not (ROOT / f).exists()] == []
@@ -184,7 +184,7 @@ def test_the_build_uses_the_cores_it_has_unless_told(run_cuda, script):
 def test_mvsam3d_stops_without_envs_sam3d(run, tmp_path):
     (tmp_path / "root" / "envs" / "sam3d" / "bin" / "python").unlink()
     p, calls = run("mvsam3d")
-    assert p.returncode != 0 and "note 4" in p.stderr
+    assert p.returncode != 0 and "note 3" in p.stderr
     assert not any("/git " in c or " install " in c for c in calls)
 
 

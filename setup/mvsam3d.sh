@@ -1,11 +1,11 @@
 #!/bin/bash
-# MV-SAM3D and Depth Anything 3 (build_plan.md note 4b), about 10 min, under $HARPOR_ROOT (by default ~/harpor).
+# MV-SAM3D and Depth Anything 3 (README.md note 4), about 10 min, under $HARPOR_ROOT (by default ~/harpor).
 # Build envs/sam3d first (setup/sam3d.sh). MV-SAM3D reuses it and SAM 3D's weights: its requirement files are
 # byte-identical, and its code goes first on sys.path. DA3 gets its own venv, because its unpinned dependencies could
 # change torch in envs/sam3d, and it runs as its own step. The DA3 weights come from setup/weights.sh.
 set -eo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-[ -x envs/sam3d/bin/python ] || { echo "no $G/envs/sam3d: build it first (setup/sam3d.sh, build_plan.md note 4)" >&2; exit 1; }
+[ -x envs/sam3d/bin/python ] || { echo "no $G/envs/sam3d: build it first (setup/sam3d.sh, README.md note 3)" >&2; exit 1; }
 echo "== clones $(date +%T)"
 [ -d MV-SAM3D ] || git clone -q https://github.com/devinli123/MV-SAM3D.git
 git -C MV-SAM3D checkout -q abb04b5e8af5bc33b0265bdf19937e76bbb6bcdd

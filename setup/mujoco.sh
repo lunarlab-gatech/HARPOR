@@ -1,5 +1,5 @@
 #!/bin/bash
-# envs/mujoco, the Python of the MJCF, USD and URDF stages (build_plan.md notes 7 and 9), under $HARPOR_ROOT (by default
+# envs/mujoco, the Python of the MJCF, USD and URDF stages (README.md notes 6 and 7), under $HARPOR_ROOT (by default
 # ~/harpor).
 # Rebuilt on 2026-11-01 from the installed versions in envs/mujoco on ICE (pip freeze). First run as a recipe on 2026-11-08.
 # MuJoCo moved from 3.16.0 to 4.0.0 on 2026-11-11.

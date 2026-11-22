@@ -1,5 +1,5 @@
 #!/bin/bash
-# envs/web: the web app's server, the terminal command and the CPU stages (build_plan.md note 10), a minute, under
+# envs/web: the web app's server, the terminal command and the CPU stages (README.md note 8), a minute, under
 # $HARPOR_ROOT (by default ~/harpor). The versions are those of envs/web on ICE (2026-11-08).
 set -exo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"

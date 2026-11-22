@@ -1,5 +1,5 @@
 """Claude Opus 5.5 or Claude Fable 5.2 as the Stage B agent, through our own Messages API loop
-(build_plan.md note 5).
+(README.md note 5).
 
 The controller starts it as the session's agent process, from the repo root, with its own
 interpreter:

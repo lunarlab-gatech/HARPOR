@@ -1,4 +1,4 @@
-"""One request with one image to the job's VLM, and the parse of its JSON answer (build_plan.md note 5).
+"""One request with one image to the job's VLM, and the parse of its JSON answer (README.md note 5).
 
 harpor.webapp.estimate_step calls them for the friction of the final mesh. Opus is Claude Opus 5.5 and Fable is Claude Fable 5.2, both
 through the anthropic SDK (beta messages with the server-side refusal fallback, as claude_agent; effort high;

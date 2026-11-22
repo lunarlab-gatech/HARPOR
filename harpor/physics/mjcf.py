@@ -1,4 +1,4 @@
-"""Write a MuJoCo model (MJCF) for one aligned GLB and its VoMP rigid-body numbers (build_plan.md note 9).
+"""Write a MuJoCo model (MJCF) for one aligned GLB and its VoMP rigid-body numbers (README.md note 7).
 
     python -m harpor.physics.mjcf --glb aligned.glb --summary summary.json --out DIR [--name chair]
         [--friction F] [--coacd-threshold 0.05]

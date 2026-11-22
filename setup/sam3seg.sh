@@ -1,5 +1,5 @@
 #!/bin/bash
-# envs/sam3seg: SAM 3 masks through transformers 5.20.0 (build_plan.md note 3), a few minutes, under $HARPOR_ROOT (by
+# envs/sam3seg: SAM 3 masks through transformers 5.20.0 (README.md note 2), a few minutes, under $HARPOR_ROOT (by
 # default ~/harpor). transformers 5.20 needs torch 2.6 or newer, so it cannot share envs/sam3d. The SAM 3 weights come
 # from setup/weights.sh. torch 2.14.1+cu130 needs an NVIDIA driver for CUDA 13.0 (R580 or newer) at run time.
 set -exo pipefail

@@ -1,4 +1,4 @@
-"""Helper commands export_glb, review, checkpoint and finish (build_plan.md note 5).
+"""Helper commands export_glb, review, checkpoint and finish (README.md note 5).
 
 The agent calls them by name inside its container. The client in bin/ sends each command line to the
 controller's tool server (server.py), which runs this module on the host. The host-only control
@@ -474,9 +474,33 @@ def review(work, control, blender, clay=False, detail=()):
         rec = {"receipt": receipt, "glb": str(glb.relative_to(work)), "sha256": sha, "clay": clay, "cached": cached,
                "sheet": str((out / "sheet.png").relative_to(work)),
                "review": str((out / "review.json").relative_to(work)), "time": time.time()}
+        rec["lidar"] = _review_lidar(work, control, fd, out, host, rec)
         put_json(fd, "receipt.json", rec)
     log_event(control, "review", receipt=receipt, glb=rec["glb"], sha256=sha)
     return rec
+
+
+def _review_lidar(work, control, fd, out, host, rec):
+    """The LiDAR part of a review (lidar_geometry.review_outputs): lidar.json and lidar_viewNN.png in the receipt
+    folder, through its descriptor, and the summary lines; [] for a session without LiDAR evidence. lidar.json names
+    the .blend that the export came from (the newest export_done of that GLB), which lidar_sculpt checks."""
+    from harpor.agent import lidar_geometry
+
+    if lidar_geometry.active(control) is None:
+        return []
+    done = [e for e in read_events(control) if e.get("event") == "export_done" and e.get("glb") == rec["glb"]]
+    try:
+        view = json.loads(read_file(out / "review.json", 1 << 24))
+    except (OSError, ValueError):
+        view = None
+    m = lidar_geometry.manifest(control)
+    files, lines = lidar_geometry.review_outputs(work, control, host, view, {
+        "receipt": rec["receipt"], "glb": rec["glb"], "sha256": rec["sha256"],
+        "blend_sha256": done[-1].get("blend_sha256") if done else None,
+        "max_displacement_m": m["settings"]["max_displacement_m"]})
+    for name, data in (files or {}).items():
+        put(fd, name, data)
+    return lines
 
 
 def _receipt(work, control, receipt):
@@ -575,6 +599,10 @@ def _command(a, work, control, blender):
         ious = [f"{v['name']} {v['iou_candidate']:.2f}" for v in rev["views"] if "iou_candidate" in v]
         if ious:
             print("candidate mask IoU: " + ", ".join(ious[:12]))
+        for line in rec.get("lidar", [])[:8]:
+            print(line)
+        if rec.get("lidar"):
+            print(f"lidar details {Path(rec['review']).parent / 'lidar.json'} and lidar_viewNN.png")
     elif a.cmd == "checkpoint":
         meta = checkpoint(work, control, a.receipt, a.defect)
         print(f"checkpoint {meta['glb']} (read-only, needs_review)")
@@ -587,7 +615,7 @@ def _command(a, work, control, blender):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="harpor-tools", description="HARPOR agent helpers (build_plan.md note 5).")
+    p = argparse.ArgumentParser(prog="harpor-tools", description="HARPOR agent helpers (README.md note 5).")
     sub = p.add_subparsers(dest="cmd", required=True)
     e = sub.add_parser("export_glb", help="export the saved .blend to a GLB, outside the time budget")
     e.add_argument("--blend", help="a .blend inside /work; default /work/candidate.blend")

@@ -70,7 +70,7 @@ DONE, FAILED, BAD, WAITS = 0, 1, 2, 3  # exit codes
 ALWAYS = ("runs", "key_file")  # the flags that every next command repeats
 # The flags that reach job.json at the Start route, so a next command repeats them until then (Run.again).
 SETTINGS = ("prompt", "camera_topic", "lidar_topic", "calibration", "no_lidar", "n_views", "picks", "view0", "review",
-            "turntable", "agent")
+            "turntable", "agent", "lidar_geometry")
 LATE_SETTINGS = ("calibration", "view0")  # those that a job whose build has started still takes
 LEFT_OUT = {"available": "usable, not picked", "excluded": "excluded", "no_mask": "no mask of the object",
             "small": "the mask is under 1% of the image", "inconsistent": "the mask disagrees with the other views"}
@@ -441,6 +441,8 @@ class Run:
         body = {"mode": "manual" if a.picks else "auto", "prompt": a.prompt, "agent": a.agent or "none",
                 "api_key": self.key, "auto_continue": not a.review, "turntable": a.turntable,
                 "picks": [int(x) for x in a.picks.split(",")] if a.picks else []}
+        if a.lidar_geometry is not None:
+            body["lidar_geometry"] = a.lidar_geometry
         if a.n_views is not None:
             body["n_views"] = a.n_views
         if a.view0 is not None:
@@ -481,7 +483,8 @@ class Run:
         # The routes' rule for the key (jobs.key_needed), from where the continue below starts: the server's default,
         # sam3d, for a job in review, else the first stage not done or skipped.
         start = "sam3d" if job["status"] == "review" else first_not_done({"stages": jobs.progress(J)})
-        if viewed or a.calibration or (lidar and not steps.done("lidar", J)) \
+        mode = {} if a.lidar_geometry in (None, steps.lidar_geometry(job)) else {"lidar_geometry": a.lidar_geometry}
+        if viewed or a.calibration or mode or (lidar and not steps.done("lidar", J)) \
                 or (start in jobs.BUILD and jobs.key_needed(J, job, start)):
             self.take_key(steps.agent(job))
         if a.calibration:
@@ -491,12 +494,14 @@ class Run:
         if job["status"] == "review":
             if job["stages"][steps.REVIEW_AFTER]["status"] != "done":
                 return self.ended(job)  # the automatic selection failed, so the build cannot go on yet
-            self.call("POST", "/continue", json={"api_key": self.key})
+            self.call("POST", "/continue", json={"api_key": self.key, **mode})
             return self.follow()
         first = first_not_done({"stages": jobs.progress(J)})
+        if first is None and mode:  # a done job's agent runs again in the other LiDAR geometry mode
+            first = "agent"
         if first is None:
             return self.ended({**job, "status": "done"})
-        self.call("POST", "/continue", json={"from": first, "api_key": self.key})
+        self.call("POST", "/continue", json={"from": first, "api_key": self.key, **mode})
         return self.follow()
 
     def drive(self):
@@ -541,6 +546,10 @@ def parser():
     ap.add_argument("--view0", metavar="F", help="the frame of view 0; in a review, a pool frame such as f00012")
     ap.add_argument("--review", action="store_true", help="stop after the views are selected")
     ap.add_argument("--turntable", action="store_true", help="render a 360 video of the object")
+    ap.add_argument("--lidar-geometry", choices=steps.GEOMETRY_MODES, metavar="MODE",
+                    help="how the agent uses the measured LiDAR returns: off, inspect (overlays and informational "
+                         f"findings; default {steps.GEOMETRY_DEFAULT}) or sculpt (the sculpt helper and the host's "
+                         "acceptance check, for a calibrated source)")
     ap.add_argument("--agent", choices=steps.AGENTS, help="the agent that refines the object (default none)")
     ap.add_argument("--key-file", metavar="F",
                     help="the agent's key file (default ~/.config/harpor/openai.env or anthropic.env)")

@@ -1,5 +1,5 @@
 #!/bin/bash
-# VoMP v1.1 (641a22d) in envs/vomp11 (build_plan.md note 9): Python 3.11, torch 2.4.0 cu121, bpy 4.2.0 pip module, under
+# VoMP v1.1 (641a22d) in envs/vomp11 (README.md note 7): Python 3.11, torch 2.4.0 cu121, bpy 4.2.0 pip module, under
 # $HARPOR_ROOT (by default ~/harpor). The weights come from setup/weights.sh.
 # This follows VoMP's install_env.sh with CUDA_VERSION=12.1, minus the sudo apt steps (they install the X and GL libs,
 # which the machine must already have; the Dockerfile installs them), diff-gaussian-rasterization (splat path only)

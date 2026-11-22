@@ -1,4 +1,4 @@
-"""Export the open .blend to GLB once and re-import it to check it (build_plan.md note 5).
+"""Export the open .blend to GLB once and re-import it to check it (README.md note 5).
 
 blender -b --factory-startup candidate.blend --python-exit-code 1 --python export_glb.py -- OUT.glb REPORT.json
 

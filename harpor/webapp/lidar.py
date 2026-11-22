@@ -1,8 +1,9 @@
-"""The metric scale from LiDAR: the web app's lidar stage (build_plan.md note 12).
+"""The metric scale from LiDAR: the web app's lidar stage (README.md note 9).
 
 Runs in envs/web (numpy, scipy, pillow, rosbags; CPU only), from the repo root, after da3:
 
     python -m harpor.webapp.lidar scale --job J
+    python -m harpor.webapp.lidar geometry --job J   # an older job: keep its returns, scale unchanged (geometry)
 
 J/job.json "lidar" (steps.lidar) names the source. SOURCES has one function per kind that gives the
 LiDAR samples of the pool frames: "rosbag" (rosbag_samples), a LiDAR topic of the job's bag, and
@@ -13,7 +14,7 @@ time as pixels of scene/images/<name>.png and their depth in meters. The samples
 the Inputs tab are cached in J/lidar/samples.npz and J/lidar/clouds.npz, keyed in J/lidar/samples.json. The
 stage writes J/lidar/cloud/<view>.glb (cloud_glb) with the check images, also when the record is not ok,
 before pool/lidar.json. How the samples, the time matching, the intrinsics and the clouds work:
-build_plan.md note 12 (Rosbag source, Stray Scanner source, Points for the Inputs tab).
+README.md note 9 (Rosbag source, Stray Scanner source, Points for the Inputs tab).
 
 Each cloud also compares the LiDAR with DA3, at the job's s (references: a view's own s only when the job has none):
 "diff" holds the LiDAR points that have a ratio r, also those outside the mask, which do not affect s, with their
@@ -21,12 +22,15 @@ signed gap in meters, z (1 - s / r): z - s x DA3's depth without a baseline, pos
 a rosbag job, "da3" holds DA3's surface at s (da3_surface). A Stray capture's K stays inside stray_samples, so it has
 "diff" only.
 
+The stage also keeps each pool view's measured returns for the agent's LiDAR geometry check (write_geometry):
+J/lidar/geometry/<view>.npz and index.json, referenced with its sha256 from pool/lidar.json "geometry".
+
 The estimate is lidar_scale.estimate, with the check images in J/lidar/check. For a rosbag job it also follows
 the LiDAR's rays (rays: the camera points of the samples and the LiDAR's origin in the camera frame). The record,
 pool/lidar.json, gains source, extrinsic {source, file, calibration_sha256, chain, link, camera_axes,
 camera_axes_from, T_cam_lidar}, intrinsics {source, K, D, model, R, size, frame_size}, time {base, window_ms,
 offset_ms, log_minus_header_ms {camera, lidar}, log_minus_last_point_ms, scan_period_ms, scan_period_from,
-point_times} and the warnings of both steps (a Stray capture's fields: build_plan.md note 12, pool/lidar.json),
+point_times} and the warnings of both steps (a Stray capture's fields: README.md note 9, pool/lidar.json),
 and is written last.
 extrinsic.calibration_sha256 (null without a calibration) lets steps.done see a record that an upload or a
 delete of the calibration made stale. When the samples cannot be made (no TF link, no intrinsics, ...), the
@@ -53,7 +57,7 @@ WINDOW_S = 0.05  # points within +-50 ms of a camera stamp, or within half a sca
 WINDOW_MAX_S = 0.1  # up to +-100 ms (a 5 Hz LiDAR): see window()
 READ_S = 0.4  # scans are read at least +-0.4 s from each frame's log time, and further for a slow LiDAR (read_span)
 CLOCK_TOL_S = 0.2  # the camera's and the LiDAR's log-minus-stamp offsets agree this well (time_base): the header base
-CACHE_VERSIONS = {"rosbag": 7, "stray": 6}  # of lidar/samples.json, by kind; another version is a miss
+CACHE_VERSIONS = {"rosbag": 8, "stray": 7}  # of lidar/samples.json, by kind; another version is a miss (8, 7: frames)
 SCAN_POINTS = 60_000  # the most points of a view's whole scan in its cloud (lidar/cloud/<view>.glb)
 SCAN_KEEP = 20_000  # while reading, each scan also keeps a random subset of its points, at most this many, for the clouds
 DA3_POINTS = 60_000  # the most points of DA3's surface in a view's cloud
@@ -527,7 +531,7 @@ def to_samples(xyz, T, intr, frame_size):
 
 
 def rosbag_samples(J, job, spec, names):
-    """({frame name: (N, 3) [u, v, z]}, info, clouds) of a rosbag job's LiDAR topic (build_plan.md note 12,
+    """({frame name: (N, 3) [u, v, z]}, info, clouds) of a rosbag job's LiDAR topic (README.md note 9,
     Rosbag source). info: source, extrinsic, intrinsics, time and warnings; clouds: {frame name: (xyz, scan)}.
     Failed with the reason."""
     from harpor.webapp import steps
@@ -639,10 +643,15 @@ def _rosbag_samples(J, names, path, topic, cam, camera, lid, source, job):
     info["time"] = {**trec, "window_ms": round(window(period) / 1e6, 3), "scan_period_ms": round(period / 1e6, 3),
                     "scan_period_from": period_from, "point_times": point_times}
     add = (offset or 0) if base == "header" else 0  # the offset relates the header clocks, not the log times
-    samples, clouds = {}, {}
+    samples, clouds, info["frames"] = {}, {}, {}
+    half = int(window(period))
     for n in frames:  # only the scans read for this frame
         near = [s for s in scans if any(a <= s[0] < b for a, b in wins[n])]
         t_cam = int(stamps["header_ns" if base == "header" else "log_ns"][int(n[1:])]) + add
+        # The acquisition of the frame's points (write_geometry): the point window and the scans near enough to give
+        # points, by stamp; two frames that share a scan are one viewpoint for the LiDAR geometry's split.
+        info["frames"][n] = {"t_ns": t_cam, "window_ns": [t_cam - half, t_cam + half],
+                             "scans": sorted(int(s[0]) for s in near if abs(int(s[0]) - t_cam) <= period)}
         samples[n], xyz = to_samples(frame_points(near, base, t_cam, period), T[n], intr, sizes[n])
         scan = to_camera(frame_points([(s[0], s[1], *s[4], s[5]) for s in near], base, t_cam, period), T[n], intr)
         scan = scan[np.isfinite(scan).all(1)]
@@ -718,6 +727,15 @@ def stray_samples(J, job, spec, names):
     progress(0.1)
     print(f"reading the depth images of {len(frames)} frames, turned {90 * k} degrees", flush=True)
     samples, clouds = {}, {}
+    try:
+        stamp = stray.read_odometry(root)["timestamp"]
+    except SystemExit:
+        stamp = None
+    frame_info = {n: {"frame": int(n[1:]), "t_s": None if stamp is None or int(n[1:]) >= len(stamp)
+                      else float(stamp[int(n[1:])])} for n in frames}
+    for n, x in frame_info.items():  # one depth image per frame: its own acquisition
+        if x["t_s"] is not None:
+            x["window_ns"] = [int(round(x["t_s"] * 1e9))] * 2
     missing, unsure = [], []  # frames without a depth image; with one but without its confidence
     bad = {}  # {frame: why its depth or confidence image cannot be used}
     for j, n in enumerate(frames):
@@ -758,7 +776,7 @@ def stray_samples(J, job, spec, names):
             "intrinsics": {"source": "stray: depth scaled to the frame size", "depth_size": video.get("depth_size"),
                            "frame_size": list(sizes[frames[0]]), "turns": k, "min_confidence": min_conf,
                            "z_range_m": list(stray.Z_RANGE), "K_from": K_from},
-            "time": {"base": "frame index"}, "warnings": warnings}
+            "time": {"base": "frame index"}, "warnings": warnings, "frames": frame_info}
     if not bad:  # else the next run reads the damaged frames again (a disk error may have passed)
         cache_write(J, key, samples, info, clouds)
     return samples, {**info, "source": {**info["source"], "cache": "miss"}}, clouds
@@ -893,6 +911,133 @@ def write_clouds(folder, clouds, points, compare=None):
     return out
 
 
+# ---- the measured returns for LiDAR geometry (harpor.agent.lidar_geometry) ----
+
+GEOMETRY_VERSION = 1  # of J/lidar/geometry; = harpor.agent.lidar_geometry.VERSION
+IN_MASK, BOUNDARY, MIXED, CONF_MISSING, CONF_LOW, EXCLUDED, OFFSET, HIDDEN = 1, 2, 4, 8, 16, 32, 64, 128
+EDGE_FRAC = 0.01  # a return this share of the prepared image's diagonal (at least 1 px) from the mask's edge is ambiguous
+
+
+def _sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _flags(px, z, inside, mask, offset, visible):
+    """The flags of a view's returns (harpor.agent.lidar_geometry): IN_MASK at its prepared pixel; BOUNDARY within
+    EDGE_FRAC of the mask's edge; MIXED when a nearer return lies in its 3x3 neighborhood of 2 px cells by more than
+    lidar_scale's z-buffer tolerance (an occluded point or a background return through a gap); EXCLUDED outside the
+    prepared image or nearer than lidar_scale.MIN_Z; OFFSET for a sensor beside the camera, and HIDDEN when the scale's
+    visibility check (the z-buffer or the LiDAR's rays) found the return hidden from the camera. A mask by itself cannot
+    show that an offset LiDAR hit the surface that the camera sees, so HIDDEN supports it."""
+    from scipy.ndimage import binary_dilation, binary_erosion, minimum_filter
+
+    h, w = mask.shape
+    f = np.zeros(len(z), np.uint16)
+    iu, iv = lidar_scale.pixel(px[:, 0]), lidar_scale.pixel(px[:, 1])
+    ok = inside & (iu >= 0) & (iu < w) & (iv >= 0) & (iv < h) & np.isfinite(z) & (z >= lidar_scale.MIN_Z)
+    f[~ok] |= EXCLUDED
+    iu, iv = np.clip(iu, 0, w - 1), np.clip(iv, 0, h - 1)
+    f[ok & mask[iv, iu]] |= IN_MASK
+    r = max(1, int(round(EDGE_FRAC * np.hypot(w, h))))
+    edge = binary_dilation(mask, iterations=r) & ~binary_erosion(mask, iterations=r)
+    f[ok & edge[iv, iu]] |= BOUNDARY
+    if ok.any():
+        cu, cv = iu // 2, iv // 2
+        grid = np.full((h // 2 + 1, w // 2 + 1), np.inf)
+        np.minimum.at(grid, (cv[ok], cu[ok]), z[ok])
+        near = minimum_filter(grid, size=3, mode="constant", cval=np.inf)[cv, cu]
+        far = z > near * (1 + lidar_scale.ZBUFFER_TOL) + lidar_scale.ZBUFFER_ABS
+        f[ok & far] |= MIXED
+    if offset:
+        f |= OFFSET
+        if visible is not None:
+            f[ok & mask[iv, iu] & ~visible] |= HIDDEN
+    return f
+
+
+def sensor_profile(info, kind):
+    """The calibrated profile of the source's sensor (harpor.agent.lidar_geometry.PROFILES), or None: "livox" for a
+    bag whose LiDAR topic, frame or message type is Livox's."""
+    src = info.get("source") or {}
+    name = " ".join(str(src.get(k) or "") for k in ("topic", "frame_id", "type")).lower()
+    return "livox" if kind == "rosbag" and ("livox" in name or "custommsg" in name) else None
+
+
+def write_geometry(J, names, samples, info, clouds, kind, points=None):
+    """J/lidar/geometry/<view>.npz for each pool view with measured XYZ, then J/lidar/geometry/index.json; returns
+    {index, sha256} for pool/lidar.json, which the stage writes last. Each NPZ holds xyz (the measured endpoints in
+    camera meters: a rosbag's clouds rows, which are the samples' rows, in the same rectified optical frame; a Stray
+    capture's upright, confidence-filtered points), origin (the sensor in camera meters: the calibrated LiDAR origin of
+    a bag's frame, or 0 for the aligned depth camera), pixel (the measured pixel in the prepared image, through prep's
+    crop: lidar_scale.source_to_grid, pixel centres at integers), row (the samples' row IDs) and flags (_flags). The
+    endpoints are the measurements, also where DA3 disagrees: the scale's trimmed rows and the viewer's differences
+    with DA3 are not used. A view without XYZ (a Stray export without intrinsics) is listed as unavailable with the
+    reason. The index records the capture, the calibration, the prep and mask identity, the schema version and each
+    file's sha256. points: lidar_scale.estimate's points_out (its visibility check, for an offset sensor)."""
+    from PIL import Image
+
+    J = Path(J)
+    folder = J / "lidar" / "geometry"
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir(parents=True, mode=0o700)
+    prep = json.loads((J / "pool" / "prep.json").read_text())
+    crops = {v["name"]: v["crop"] for v in prep["views"]}
+    job = json.loads((J / "job.json").read_text())
+    src = Path(job["video"]["path"])
+    st = src.stat() if src.is_file() else None
+    views = {}
+    for n in names:
+        mask_file = J / "pool" / "masks" / f"{n}.png"
+        rec = {"status": "unavailable", "mask_sha256": _sha(mask_file) if mask_file.is_file() else None,
+               "time": (info.get("frames") or {}).get(n)}
+        views[n] = rec
+        xyz = clouds.get(n, (None, None))[0]
+        if n not in samples or n not in crops or not mask_file.is_file():
+            rec["reason"] = "the view has no samples, crop or mask"
+            continue
+        if xyz is None:
+            rec["reason"] = ("no camera points for this view: the export has no intrinsics" if kind == "stray"
+                             else "no camera points for this view")
+            continue
+        uvz, xyz = np.asarray(samples[n], float), np.asarray(xyz, float)
+        if len(uvz) != len(xyz):
+            rec["reason"] = f"{len(uvz)} samples but {len(xyz)} camera points"
+            continue
+        mask = np.array(Image.open(mask_file)) > 0
+        hp, wp = mask.shape
+        gu, gv = lidar_scale.source_to_grid(uvz[:, 0], uvz[:, 1], crops[n], (wp, hp))
+        px = np.stack([gu, gv], 1)
+        origin = np.asarray(((info.get("rays") or {}).get(n) or {}).get("origin") or [0.0, 0.0, 0.0], float)
+        offset = bool(np.linalg.norm(origin) > 1e-6)
+        visible = None
+        if points and n in points and "index" in points[n]:
+            visible = np.zeros(len(uvz), bool)
+            visible[np.asarray(points[n]["index"], int)] = True
+        flags = _flags(px, uvz[:, 2], np.isfinite(px).all(1), mask, offset, visible)
+        conf = "not_provided" if kind == "rosbag" else (
+            "measured" if (info.get("intrinsics") or {}).get("min_confidence") else "missing")
+        if conf == "missing":
+            flags |= CONF_MISSING
+        f = folder / f"{n}.npz"
+        replace(f, lambda tmp: np.savez(tmp, xyz=xyz, origin=origin, pixel=px,
+                                        row=np.arange(len(xyz), dtype=np.int64), flags=flags))
+        rec.update(status="available", file=f.name, sha256=_sha(f), returns=int(len(xyz)),
+                   model="lidar_ray" if kind == "rosbag" else "aligned_depth_camera", origin=origin.tolist(),
+                   confidence=conf, counts={k: int(((flags & b) > 0).sum()) for k, b in (
+                       ("in_mask", IN_MASK), ("boundary", BOUNDARY), ("mixed", MIXED), ("excluded", EXCLUDED),
+                       ("hidden", HIDDEN))})
+    index = {"version": GEOMETRY_VERSION, "kind": kind, "profile": sensor_profile(info, kind),
+             "sensor": {k: (info.get("source") or {}).get(k) for k in ("topic", "type", "frame_id")},
+             "capture": {"input": {"name": src.name, "bytes": st.st_size if st else None,
+                                   "mtime_ns": st.st_mtime_ns if st else None},
+                         "calibration_sha256": (info.get("extrinsic") or {}).get("calibration_sha256")},
+             "prep_sha256": _sha(J / "pool" / "prep.json"), "crops": {n: crops.get(n) for n in names},
+             "views": views}
+    write_json(folder / "index.json", index, indent=1)  # after every NPZ
+    return {"index": "lidar/geometry/index.json", "sha256": _sha(folder / "index.json"),
+            "views": sum(v["status"] == "available" for v in views.values())}
+
+
 # ---- the stage ----
 
 def record(rec, info, t0, kind):
@@ -925,7 +1070,7 @@ def scale(job_dir):
         raise SystemExit("the pool has no views with DA3 depth; run prep and da3 first")
     progress(0)
     check, cloud = J / "lidar" / "check", J / "lidar" / "cloud"
-    for old in (check, cloud):  # the check images and clouds of views that left the pool
+    for old in (check, cloud, J / "lidar" / "geometry"):  # the check images, clouds and returns of views that left
         shutil.rmtree(old, ignore_errors=True)
     out = J / "pool" / "lidar.json"
     out.unlink(missing_ok=True)
@@ -963,6 +1108,11 @@ def scale(job_dir):
     # With the check images, also when not ok.
     write_clouds(cloud, shown, pts, compared(shown, pts, references(est), cameras))
     rec = record(est, info, t0, spec["kind"])
+    try:  # the measured returns for the agent's LiDAR geometry; a failure leaves the scale as it is
+        rec["geometry"] = write_geometry(J, names, samples, info, clouds, spec["kind"], pts)
+    except (OSError, ValueError, KeyError) as e:
+        rec["geometry"] = None
+        rec["warnings"].append(f"the LiDAR returns were not kept for the agent's geometry check: {e}")
     write_json(out, rec, indent=1)  # last: with ok, the stage's done marker
     lines = lidar_scale.summary(rec)
     print("\n".join(lines[:-1]))
@@ -975,13 +1125,49 @@ def scale(job_dir):
     return rec
 
 
+def geometry(job_dir):
+    """Keep the measured returns of a job whose lidar stage ran before write_geometry existed, without changing its
+    scale: the source's samples again, lidar_scale.estimate for the visibility flags, write_geometry, and
+    pool/lidar.json's "geometry"; then, when the job has a run, its picks' returns (views.copy_geometry, in run/prep.json's
+    order). The record's s stays, since the run was built with it; the estimate's s now is recorded beside it."""
+    from harpor.stage_a.mvsam3d import view_names
+    from harpor.webapp import steps, views
+
+    J = Path(job_dir)
+    job = steps.job(J)
+    spec = steps.lidar(job)
+    rec = read_json(J / "pool" / "lidar.json")
+    if spec is None or not isinstance(rec, dict) or not steps.done("lidar", J):
+        raise SystemExit("the job has no current LiDAR scale record; run the lidar stage instead")
+    names = view_names(J / "pool")
+    samples, info, clouds = SOURCES[spec["kind"]](J, job, spec, names)
+    pts = {}
+    cameras = rays(info, clouds) if spec["kind"] == "rosbag" else None
+    est = lidar_scale.estimate(J / "pool", {n: samples[n] for n in names if n in samples}, points_out=pts,
+                               source=spec["kind"], rays=cameras)
+    rec["geometry"] = {**write_geometry(J, names, samples, info, clouds, spec["kind"], pts),
+                       "upgraded": {"s_kept": rec["s"], "s_now": est["s"]}}
+    write_json(J / "pool" / "lidar.json", rec, indent=1)
+    print(f"LiDAR returns of {rec['geometry']['views']} pool views kept; scale kept at {rec['s']:.6g} "
+          f"(the estimate now gives {est['s']})")
+    prep = read_json(J / "run" / "prep.json")
+    if isinstance(prep, dict):
+        index = views.copy_geometry(J / "lidar" / "geometry", [v["pool_name"] for v in prep["views"]], J / "run",
+                                    prep.get("metric_scale"))
+        print(f"run: {sum(v['status'] == 'available' for v in index['views'])} of {len(index['views'])} views have "
+              f"returns, profile {index['profile']}")
+    return rec
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="step", required=True)
     sub.add_parser("scale", help="the metric scale of a job's pool from its LiDAR").add_argument(
         "--job", required=True, help="job folder with job.json")
+    sub.add_parser("geometry", help="keep the measured returns of an older job, scale unchanged").add_argument(
+        "--job", required=True, help="job folder with job.json")
     a = ap.parse_args(argv)
-    scale(a.job)
+    scale(a.job) if a.step == "scale" else geometry(a.job)
 
 
 if __name__ == "__main__":

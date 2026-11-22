@@ -1,4 +1,4 @@
-"""The Claude Opus 5.5 agent loop (harpor/agent/claude_agent.py) with fake clients (build_plan.md note 5).
+"""The Claude Opus 5.5 agent loop (harpor/agent/claude_agent.py) with fake clients (README.md note 5).
 
 No test reaches the network. The scripted responses are the SDK's own beta types
 (BetaMessage.model_validate), so their content blocks behave like real ones; one test runs the real

@@ -15,7 +15,7 @@
 #   HF_TOKEN      a Hugging Face Read token with access to facebook/sam3 and facebook/sam-3d-objects (weights only)
 #
 # The container runs as you, so the data folder stays yours. It gets the docker socket, because the agent and Blender
-# run in sibling containers of the same image (build_plan.md note 5): this gives it the same power over docker that
+# run in sibling containers of the same image (README.md note 5): this gives it the same power over docker that
 # you have. The web app listens on localhost only; reach it from another computer with ssh -L PORT:localhost:PORT.
 set -euo pipefail
 IMAGE=${HARPOR_IMAGE:-harpor:0.1}

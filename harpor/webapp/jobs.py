@@ -31,6 +31,12 @@ upload or a delete of the calibration makes the lidar stage's record stale (step
 record of an older estimator (lidar_scale.VERSIONS), so the next Build or retry starts from lidar
 (Runner.resume). A Stray Scanner capture needs no calibration: its depth is aligned with the color camera.
 
+job.json "lidar_geometry" (steps.lidar_geometry: off, inspect or sculpt; "inspect" at first, and for an older
+record without it) is how the agent stage uses the measured LiDAR returns (harpor.agent.lidar_geometry). inspect gives
+the agent overlays and the host informational findings; sculpt adds the sculpt helper and the host's acceptance
+policy, where the source has a calibrated profile. A job without usable returns runs its ordinary refinement. A
+change of only this mode reruns the agent stage and every stage after it (Runner.resume), with the same key.
+
 job.json "turntable" (false at first) asks for the 360 video: the turntable stage
 (steps.py) renders it after urdf. It is optional (steps.OPTIONAL): when it fails, the job gets a warning
 and the build goes on to package.
@@ -135,7 +141,7 @@ def create_job(runs_dir, filename):
              "mode": "auto", "prompt": None, "slug": None, "n_views": 6, "picks": [], "view0": None,
              "auto_continue": False, "overrides": {"locked": [], "excluded": [], "instance": {}},
              "lidar": {"kind": "stray"} if k == "stray" else None,
-             "calibration": None, "turntable": False,
+             "calibration": None, "turntable": False, "lidar_geometry": steps.GEOMETRY_DEFAULT,
              "stages": {s: dict(STAGE) for s in steps.NAMES}, "current": None, "error": None, "warnings": [],
              "key_ok": False})
     return job_id, path
@@ -602,13 +608,13 @@ class Runner:
 
     def resume(self, job_id, from_stage, api_key=None, checked_calibration=None, **fields):
         """Queue the stages from from_stage on; api_key replaces the key held for the job, and fields
-        (overrides, view0, agent) are written to job.json first, under the same lock.
+        (overrides, view0, agent, lidar_geometry) are written to job.json first, under the same lock.
 
         From a stage up to select (the user changed an instance or the picks): the stages from there
         rerun, except da3, which reruns only when prep made a view it has not seen; the outputs of
         select and later are deleted; and the job stops at the review again (always when it was in
         review, else unless auto_continue). From sam3d on (Build, or a retry after a failure): the
-        stages that finished are skipped, except that another agent than the job's reruns the agent
+        stages that finished are skipped, except that another agent or LiDAR geometry mode than the job's reruns the agent
         stage and every stage after it. Another agent drops the key held for the
         old one. From an optional stage (steps.OPTIONAL; a done job's Retry after its 360 video failed):
         it and every stage after it run again, since package zipped its old output. Returns the stage
@@ -636,6 +642,9 @@ class Runner:
             self._idle(job_id, job)
             agent = steps.agent({**job, **fields})
             changed = agent != steps.agent(job)
+            # Another LiDAR geometry mode reruns the agent stage and the stages after it too, but keeps the key: the
+            # two decisions are separate (another agent drops the key held for the old one).
+            changed_mode = steps.lidar_geometry({**job, **fields}) != steps.lidar_geometry(job)
             if checked_calibration is not None and steps.lidar(job) is not None and \
                     (job.get("calibration") or {}).get("sha256") != checked_calibration["sha256"]:
                 raise ValueError("the calibration changed while the run was starting; try again")
@@ -662,7 +671,7 @@ class Runner:
                 if rerun is not None:
                     _clear(J, steps.NAMES[rerun:])
                     stages.update({s: dict(STAGE) for s in steps.NAMES[rerun:]})
-            if changed and i > r:  # the other agent runs, and the stages after it take its GLB
+            if (changed or changed_mode) and i > r:  # the agent runs again, and the stages after it take its GLB
                 a = steps.NAMES.index("agent")
                 _clear(J, steps.NAMES[a:])
                 stages.update({s: dict(STAGE) for s in steps.NAMES[a:]})

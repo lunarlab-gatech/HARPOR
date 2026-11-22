@@ -99,9 +99,11 @@ def test_commands_have_the_ice_environment():
     assert sc["sam3d"].endswith("$G/envs/sam3d/bin/python -m harpor.stage_a.mvsam3d sam3d --mv-root $G/MV-SAM3D "
                                 '--sam3d-root $G/sam-3d-objects --out "$J/run"')
     assert sc["agent"].endswith('-m harpor.webapp.agent_step --job "$J" --sif $G/sif/harpor-agent.sif '
-                                "--key-file /dev/shm/harpor-webapp-1/k.env --agent astra")
+                                "--key-file /dev/shm/harpor-webapp-1/k.env --agent astra --lidar-geometry inspect")
     opus = steps.command("agent", {**JOB, "agent": "opus"}, ICE, key_file="/dev/shm/harpor-webapp-1/k.env")[0][2]
-    assert opus == sc["agent"][:-len("astra")] + "opus"
+    assert opus == sc["agent"].replace("--agent astra", "--agent opus")
+    sculpt = steps.command("agent", {**JOB, "lidar_geometry": "sculpt"}, ICE, key_file="/dev/shm/harpor-webapp-1/k.env")
+    assert sculpt[0][2] == sc["agent"].replace("--lidar-geometry inspect", "--lidar-geometry sculpt")
     # The estimate stage: the job's model in envs/sam3d, with the same key file and agent.
     assert sc["align"].endswith(f'\nexport {STAGE_A}\ncd $C && $G/envs/sam3d/bin/python -m harpor.webapp.physics_auto '
                                 'align --job "$J"')
@@ -2150,3 +2152,30 @@ def test_fake_build_end_to_end(make_runner, tmp_path):
     assert all(s["seconds"] is not None for s in jobs.progress(J) if s["name"] not in skipped)
     assert not list(runner.key_dir.iterdir())
     assert not any(KEY.encode() in p.read_bytes() for p in all_files(tmp_path))
+
+
+def test_the_lidar_geometry_setting(make_runner, monkeypatch):
+    """job.json lidar_geometry: inspect for a new job and for an older record without it; another mode alone reruns
+    the agent stage and the stages after it (the keyed stages ran, so the key reached them), not the earlier ones."""
+    assert steps.lidar_geometry({}) == steps.lidar_geometry({"lidar_geometry": None}) == "inspect"
+    with pytest.raises(ValueError, match="lidar_geometry is one of off, inspect, sculpt"):
+        steps.lidar_geometry({"lidar_geometry": "carve"})
+    runner, cfg = make_runner()
+
+    def command(stage, job, cfg, key_file=None):
+        J = cfg.runs / job["id"]
+        return ["bash", "-c", f"touch done_{stage} && echo {stage}:{job.get('lidar_geometry')} >> ran"], str(J), {}
+
+    monkeypatch.setattr(steps, "command", command)
+    monkeypatch.setattr(steps, "done", lambda stage, J: (Path(J) / f"done_{stage}").exists() or stage == "frames")
+    monkeypatch.setattr(steps, "skip", lambda stage, J: None)
+    job_id, J = ready_job(cfg)
+    assert jobs.load(J)["lidar_geometry"] == "inspect"
+    runner.submit_build(job_id, KEY, agent="astra", auto_continue=True)
+    wait(J, "done")
+    assert "agent:inspect" in (J / "ran").read_text().split()
+    (J / "ran").unlink()
+    assert runner.resume(job_id, "package", KEY, lidar_geometry="sculpt") == "agent"
+    wait(J, "done")
+    ran = (J / "ran").read_text().split()
+    assert ran[0] == "agent:sculpt" and "select:sculpt" not in ran and jobs.load(J)["lidar_geometry"] == "sculpt"

@@ -4,10 +4,10 @@
 # facebook/sam-3d-objects on Hugging Face, then set HF_TOKEN to a Read token. The script keeps the token in
 # $HARPOR_ROOT/.cache/huggingface/token, where `hf auth login` would keep it, because the stages need it too.
 #
-#   SAM 3D Objects  facebook/sam-3d-objects               sam-3d-objects/checkpoints/hf (note 4)
-#   SAM 3           facebook/sam3                         the Hugging Face cache (note 3)
-#   DA3             depth-anything/DA3NESTED-GIANT-LARGE-1.1  the Hugging Face cache (note 4b)
-#   VoMP v1.1       nvidia/PhysicalAI-Simulation-VoMP-Model   VoMP/weights/vomp_1_1 (note 9)
+#   SAM 3D Objects  facebook/sam-3d-objects               sam-3d-objects/checkpoints/hf (note 3)
+#   SAM 3           facebook/sam3                         the Hugging Face cache (note 2)
+#   DA3             depth-anything/DA3NESTED-GIANT-LARGE-1.1  the Hugging Face cache (note 4)
+#   VoMP v1.1       nvidia/PhysicalAI-Simulation-VoMP-Model   VoMP/weights/vomp_1_1 (note 7)
 #
 # MoGe and DINOv2 are not here: SAM 3D downloads them into the caches on its first run.
 # In the docker image, sam-3d-objects/checkpoints, VoMP/weights and .cache are links into the data folder, so the

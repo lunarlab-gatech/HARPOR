@@ -1,0 +1,4 @@
+#!/bin/sh
+# LiDAR sculpt helper (README.md note 5): one plane or push pass on /work/candidate.blend in the agent's own Blender.
+exec blender -b --factory-startup --disable-autoexec /work/candidate.blend --python-exit-code 1 \
+    --python "$(dirname "$0")/lidar_sculpt.py" -- "$@"

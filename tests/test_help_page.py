@@ -196,6 +196,7 @@ def test_help_page_gives_the_rank_and_the_time_off_the_clock():
     helpers whose time does not count (tools.OFF_CLOCK), with the cap that holds in each round."""
     text = sections(HELP.read_text())["agent"]
     words = {"round outcome pass": "a mesh whose check passed wins",
+             "LiDAR regions resolved": "fixed more of the LiDAR regions", "LiDAR gain": "larger LiDAR gain",
              "source not an export": "did not come from an export", "version": "then the later one"}
     assert tuple(words) == controller.RANK
     at = [text.index(w) for w in words.values()]

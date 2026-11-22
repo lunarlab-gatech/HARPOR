@@ -1,4 +1,4 @@
-"""Run VoMP v1.1 on one GLB: per-voxel materials and rigid-body mass properties (build_plan.md note 9).
+"""Run VoMP v1.1 on one GLB: per-voxel materials and rigid-body mass properties (README.md note 7).
 
 Run it in the VoMP env from the VoMP clone, because inference.json names its weights by relative path:
     cd $VOMP && python <repo>/harpor/physics/vomp_run.py --glb canonical.glb --out RUN_DIR [--opaque-input]

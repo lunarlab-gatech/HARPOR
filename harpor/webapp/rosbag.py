@@ -3,8 +3,8 @@
 Runs in envs/web (rosbags 0.11.8, pure Python, with numpy and pillow). video.py calls it for a job
 whose job.json has "source": {"kind": "rosbag", "topic": T}. rosbags reads a ROS1 .bag, a ROS2 bag
 folder (metadata.yaml next to the .db3 or .mcap files) and a single ROS2 .mcap or .db3 file, without
-ROS. The message types (typestore), the LiDAR decoders, TF and the intrinsics (camera_model): build_plan.md
-note 12, Rosbag source 1-6.
+ROS. The message types (typestore), the LiDAR decoders, TF and the intrinsics (camera_model): README.md
+note 9, Rosbag source 1-6.
 
 image_topics lists the topics of sensor_msgs/msg/Image and sensor_msgs/msg/CompressedImage in one pass
 over the bag. Depth and float images (16UC1, 32FC1, 16SC1, 64FC1, compressedDepth), encodings that
@@ -318,7 +318,7 @@ def preview(r, msgs, side):
 def image_topics(path, previews=None, side=320, progress=None):
     """{"topics": [...], "skipped": [...], "lidar": [...], "lidar_skipped": [...], "tf": [...]} of the
     bag (topics.json in video.py without "preview"), from one pass over the camera topics and all of
-    /tf_static and /tf, and the first message of each LiDAR topic (build_plan.md note 12, Rosbag source 2).
+    /tf_static and /tf, and the first message of each LiDAR topic (README.md note 9, Rosbag source 2).
     The stage reads /tf near any frame, so the listing reads all of it, and keeps one value of each link.
     Topics are sorted rectified first, then by message count, highest first; LiDAR topics by message count.
     previews: a dict that gets {topic: the middle message (else the first or the last that decodes) as

@@ -1,4 +1,4 @@
-"""Rigid-body mass properties from VoMP's per-voxel density (build_plan.md note 9).
+"""Rigid-body mass properties from VoMP's per-voxel density (README.md note 7).
 
 A rigid MuJoCo body holds one mass, one centre of mass and one inertia tensor, so the voxels are
 summed. Each occupied voxel is a solid box of edge h (per axis) and density rho:

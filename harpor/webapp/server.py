@@ -80,7 +80,9 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       jobs.lidar_settings checks it (400 with the reason). Without it a
                                       Stray job keeps its own (LiDAR on, unless a Start turned it off) and
                                       the other jobs get null. turntable (default false) renders a 360
-                                      video of the object at the end (the turntable stage)
+                                      video of the object at the end (the turntable stage).
+                                      lidar_geometry (off, inspect or sculpt; default the job's, else
+                                      inspect) is the agent's use of the measured LiDAR returns
   GET    /api/jobs/{id}/selection     selection.json with "sam3": the SAM 3 instances of every pool frame,
                                       and "lidar": the metric scale's record in short (lidar_compact) for a
                                       job with LiDAR, else null; its calibration_changed is true when the
@@ -97,7 +99,9 @@ Routes (JSON unless said otherwise; {id} is a job id):
                                       starts at or before select (or from lidar, when the scale
                                       is stale: another calibration or estimator) needs the API key when
                                       the agent stage is done, since a done job has dropped it. A later
-                                      start needs it when the run runs the agent or estimate stage
+                                      start needs it when the run runs the agent or estimate stage.
+                                      lidar_geometry? (off, inspect or sculpt): another mode than the job's
+                                      reruns the agent stage and the stages after it, with the same key rule
                                       (jobs.key_needed). It answers 400 when the job's LiDAR would fail the
                                       lidar stage's checks (jobs.lidar_settings), before anything is deleted
   POST   /api/jobs/{id}/cancel
@@ -658,6 +662,7 @@ def make_app(cfg, token, key_dir=None):
         turntable = b.get("turntable", False)
         if type(turntable) is not bool:
             raise Bad(400, "turntable is true or false")
+        geometry = geometry_of(b, job)
         agent = agent_of(b)  # astra when the body names none
         # A Stray job keeps its own setting (on when it was made) unless the body says otherwise.
         value = b.get("lidar") if "lidar" in b or steps.source(job)["kind"] != "stray" else steps.lidar(job)
@@ -673,7 +678,7 @@ def make_app(cfg, token, key_dir=None):
         runner_call(runner.submit_build, job_id, key, checked_calibration=checked, mode=mode,
                     prompt=prompt.strip(), n_views=n_views, picks=picks if mode == "manual" else [], view0=view0,
                     auto_continue=auto_continue, agent=agent, overrides={"locked": [], "excluded": [], "instance": {}},
-                    lidar=lidar, turntable=turntable)
+                    lidar=lidar, turntable=turntable, lidar_geometry=geometry)
         return {"status": "queued", "key": msg}
 
     @app.post("/api/jobs/{job_id}/start")
@@ -821,10 +826,18 @@ def make_app(cfg, token, key_dir=None):
                            "changed, or the job finished, which drops the key); paste the key again")
         return key
 
+    def geometry_of(b, job):
+        """The body's lidar_geometry (off, inspect or sculpt), else the job's (steps.lidar_geometry); 400 otherwise."""
+        try:
+            return steps.lidar_geometry({"lidar_geometry": b["lidar_geometry"]} if "lidar_geometry" in b else job)
+        except ValueError as e:
+            raise Bad(400, str(e)) from None
+
     def continue_job(job_id, b):
         J = job_dir(job_id)
         job = idle(J)
         first, agent = b.get("from") or "sam3d", agent_of(b, job)
+        geometry = geometry_of(b, job)
         key = (b.get("api_key") or None) if agent != "none" else None  # no key when the agent is off
         if first == "frames":  # analyze the input again (it failed, was cancelled or the server stopped); no key
             if job["stages"]["frames"]["status"] == "done":
@@ -836,17 +849,19 @@ def make_app(cfg, token, key_dir=None):
         if first not in jobs.BUILD:
             raise Bad(400, f"from is frames or one of {jobs.BUILD}")
         changed = agent != steps.agent(job)  # the other agent's stage runs anew (Runner.resume)
+        changed_mode = geometry != steps.lidar_geometry(job)  # so does another LiDAR geometry mode
         # Runner.resume runs every stage again from a start at or before select, also from lidar when the
         # scale is stale (the calibration or the estimator changed after the scale was found). The done stages
         # that take the key (steps.KEYED) then need it, and the job's LiDAR must pass the lidar stage's checks
         # (lidar_check). From a later start, a keyed stage needs the key when the run runs it (jobs.key_needed).
         stale, checked = lidar_check(J, job, first)
         again = steps.NAMES.index(first) <= steps.NAMES.index(steps.REVIEW_AFTER) or stale
-        if changed or again or jobs.key_needed(J, job, first):
+        if changed or changed_mode or again or jobs.key_needed(J, job, first):
             key = held_key(job_id, b, agent)
         elif key is not None:
             check_key(key, agent)
-        first = runner_call(runner.resume, job_id, first, key, agent=agent, checked_calibration=checked)
+        first = runner_call(runner.resume, job_id, first, key, agent=agent, checked_calibration=checked,
+                            **({"lidar_geometry": geometry} if changed_mode else {}))
         # from: the agent stage when the agent changed
         return {"status": "queued", "from": first}
 

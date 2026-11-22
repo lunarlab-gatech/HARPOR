@@ -228,7 +228,7 @@ def test_view_ratio_resists_range_noise_and_hidden_points():
 
 def near_field_scene(yaw, seed, z=0.4, size=(0.3, 0.2, 0.2), wall=2.0, baseline=0.15, noise=0.03, density=3500,
                      depth_noise=0.0, x=0.0, scale=1.25, crop=(0, 0, 640, 480), grid=(504, 378), keep=1.0):
-    """One view of note 12's near case: a box of size (m) at z (and x to the right), turned by yaw about the
+    """One view of note 9's near case: a box of size (m) at z (and x to the right), turned by yaw about the
     vertical, before a wall at z = wall. A 640x480 camera (f 500) at the origin; DA3's depth on a grid (w x h) over
     prep's crop is the true depth / scale, times e^N(0, depth_noise) at each pixel. A sparse random LiDAR (density
     beams per sr, as a Mid-360) baseline m to the camera's right, with range noise (m); a dark box returns only the
@@ -279,7 +279,7 @@ def near_field_view(yaw, seed, rays=False, **kw):
 
 
 def test_near_views_with_many_hidden_points_agree():
-    """Note 12's near case: a 30 x 20 x 20 cm box at 0.4 m before a wall at 2 m, seen by a sparse LiDAR 15 cm beside
+    """Note 9's near case: a 30 x 20 x 20 cm box at 0.4 m before a wall at 2 m, seen by a sparse LiDAR 15 cm beside
     the camera with 3 cm of range noise. About 30% of each view's valid points are wall points that the camera
     cannot see and the z-buffer misses. The trim drops them, all on the far side, so each view is a candidate with
     the right s. With the IQR of all valid points every view was scattered, and combine failed with a reason that
@@ -295,7 +295,7 @@ def test_near_views_with_many_hidden_points_agree():
 @pytest.mark.parametrize("depth_noise, bound, view_bound", [(0.0, 0.002, 0.012), (0.01, 0.002, 0.012),
                                                               (0.02, 0.006, 0.018)])
 def test_the_rays_remove_the_near_field_bias(depth_noise, bound, view_bound):
-    """Note 12's near case on an orbit of 9 views. Without rays, s came out 0.55% high and the views at yaw +10
+    """Note 9's near case on an orbit of 9 views. Without rays, s came out 0.55% high and the views at yaw +10
     and +20 deg 1.7% and 2.2% high. Range noise moves each point along the epipolar line, so the depth and the mask
     were read at the wrong pixel, and the LiDAR sees a face of the box that the camera cannot. Along the rays, for
     these seeds, each view is within 1.2% and s is 0.12% high (0.09% with 1% DA3 noise). Over 30 seed sets s is 0.06%

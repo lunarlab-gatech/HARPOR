@@ -1,4 +1,4 @@
-"""Write a URDF for one aligned GLB from its MJCF folder (build_plan.md note 9).
+"""Write a URDF for one aligned GLB from its MJCF folder (README.md note 7).
 
     python -m harpor.physics.urdf --glb aligned.glb --summary summary.json --mjcf MJCF_DIR --out DIR --name NAME
 

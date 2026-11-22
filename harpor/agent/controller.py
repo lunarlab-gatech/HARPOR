@@ -1,4 +1,4 @@
-"""Agent-stage controller (build_plan.md note 5).
+"""Agent-stage controller (README.md note 5).
 
 Prepares the session folder, runs the agent under a watchdog with a 900 s budget (BUDGET_S), serves the helper
 commands from the host, checks GLBs as paper A.4 describes and against the original's size, and picks the
@@ -64,7 +64,7 @@ import trimesh
 
 from harpor import frames as F
 from harpor.fileio import read_json, write_json, write_text
-from harpor.agent import evidence, prompts, surface, tools, validate
+from harpor.agent import evidence, lidar_geometry, prompts, surface, tools, validate
 from harpor.agent.server import ToolServer
 
 BUDGET_S = 900.0  # a build round's, for every agent; the paper's 600 s ran out in every GPT-6.2-Astra build of 2026-11-21
@@ -74,8 +74,10 @@ REPAIR_BUDGET_S = 450.0  # a build takes the budget_s of the caller
 ROUND_FILES = ("codex.jsonl", "claude.jsonl", "stderr.log", "claude_stdout.log", "last_message.txt", "prompt.txt")
 # Of result.json's rounds: no why, a finding's text.
 FINDING_KEYS = ("code", "measured", "expected")
-# What a stored candidate's rank compares, in order (rank): a passing round comes first, ahead of paper A.6's order.
-RANK = ("round outcome pass", "source not an export", "version")
+# What a stored candidate's rank compares, in order (rank): a passing round comes first, ahead of paper A.6's order;
+# then, with LiDAR evidence, the host-verifiable regions it resolved and its mean gain on them in whole multiples of
+# the range tolerance (lidar_geometry.rank_terms: a gain inside the tolerance is a tie).
+RANK = ("round outcome pass", "LiDAR regions resolved", "LiDAR gain", "source not an export", "version")
 AGENT_DIR = Path(__file__).resolve().parent
 REPO = AGENT_DIR.parents[1]  # claude_agent runs from here, as `python -m harpor.agent.claude_agent`
 CODEX_ENV = {"CODEX_HOME": "/session/codex_home"}
@@ -284,7 +286,7 @@ def agent_record(agent, effort=None, model=None):
 
 
 def prepare_session(root, prompt, views, *, source, metric, original=None, agent="codex", effort=None, model=None,
-                    rounds=False):
+                    rounds=False, lidar=None):
     """Write the session folder of a refinement of original.
 
     prompt: None for the refinement prompt (harpor.agent.prompts). views: dicts with K, w2c
@@ -292,12 +294,13 @@ def prepare_session(root, prompt, views, *, source, metric, original=None, agent
     through the Codex CLI, at the xhigh effort of codex/config.toml) or "claude" (model through
     claude_agent at effort: by default Claude Opus 5.5 at xhigh; model can also be Claude Fable 5.2).
     rounds: run the session in rounds (has_rounds, run_rounds); control/rounds.json marks it, and
-    prompts.GUIDANCE is added to the prompt.
+    prompts.GUIDANCE is added to the prompt. lidar: the LiDAR geometry request
+    (harpor.webapp.agent_step.geometry_request: {requested, index, reason}), or None for none; its evidence is frozen
+    in control/lidar and work/input/lidar (lidar_geometry.freeze), and the prompt gets prompts.lidar_text of the mode
+    that runs. control/lidar/manifest.json records the requested and the effective mode.
     """
     record = agent_record(agent, effort, model)
     prompt = prompts.load() if prompt is None else prompt
-    if rounds:
-        prompt += prompts.GUIDANCE
     root, work = Path(root), Path(root) / "work"
     for d in ("input", "exports", "reviews", "checkpoints"):
         (work / d).mkdir(parents=True, exist_ok=True)
@@ -314,7 +317,6 @@ def prepare_session(root, prompt, views, *, source, metric, original=None, agent
         shutil.copyfile(AGENT_DIR / "codex" / "AGENTS.md", work / "AGENTS.md")
     else:  # claude_agent sends this file as the system prompt; the copy is the record
         shutil.copyfile(AGENT_DIR / "claude" / "SYSTEM.md", root / "session" / "system.md")
-    (root / "session" / "prompt.txt").write_text(prompt, encoding="utf-8")
     entries = []
     for i, v in enumerate(views):
         e = {"index": i, "K": np.asarray(v["K"], float).tolist(), "w2c": np.asarray(v["w2c"], float).tolist(),
@@ -339,6 +341,13 @@ def prepare_session(root, prompt, views, *, source, metric, original=None, agent
     shutil.copyfile(original, root / "original.glb")
     (work / "original" / "previews").mkdir(parents=True)
     shutil.copyfile(original, work / "original" / "original.glb")
+    mode = None
+    if lidar is not None:
+        mode = lidar_geometry.freeze(root, entries, lidar)["mode"]["effective"]
+    prompt += prompts.lidar_text(mode)
+    if rounds:
+        prompt += prompts.GUIDANCE
+    (root / "session" / "prompt.txt").write_text(prompt, encoding="utf-8")
     return work
 
 
@@ -675,6 +684,10 @@ def make_previews(root, blender, timeout=300):
                       "candidate": None, "original": str(out.parent / "original.glb"), "detail": []})
     with open(root / "control" / "previews.log", "w") as log:
         ok = tools.run_ok(tools.blender_argv(blender, "review.py", args), log, timeout)
+        try:  # the LiDAR baseline and its overlays, after the render, whose crop windows they use
+            lidar_geometry.baseline(root)
+        except Exception as e:  # noqa: BLE001 - recorded; review and validate build it again
+            log.write(f"lidar baseline failed: {type(e).__name__}: {e}\n")
     args.unlink()
     return ok and (out / "sheet.png").is_file()
 
@@ -687,6 +700,12 @@ def build_candidate(root, blender, timeout=300):
     with open(control / "candidate.log", "w") as log:
         ok = tools.run_ok(cmd, log, timeout)
     return ok and (work / "candidate.blend").is_file()
+
+
+def lidar_mode(root):
+    """The session's effective LiDAR geometry mode (control/lidar/manifest.json), or None without one."""
+    m = lidar_geometry.manifest(Path(root) / "control")
+    return (m or {}).get("mode", {}).get("effective")
 
 
 def has_rounds(root):
@@ -790,13 +809,49 @@ def _written(errors, path, data):
     return len(errors) == before
 
 
+def round_checkpoints(root, rejected):
+    """The picks of this round's checkpoints, newest first, that still match their logged sha256 and pass check_glb
+    and check_size (as select_deliverable takes them), each labeled needs_review with its defect."""
+    root = Path(root)
+    out = []
+    for e in reversed([e for e in tools.round_events(root / "control") if e.get("event") == "checkpoint"]):
+        glb = root / "work" / e["glb"]
+        try:
+            why = None if tools.sha256(glb) == e.get("sha256") else "changed after checkpoint"
+        except OSError:
+            why = "missing or not a regular file after checkpoint"
+        why = why or check_glb(glb) or check_size(glb, root / "original.glb")
+        if why:
+            rejected.append({"from": "checkpoint", "glb": os.path.relpath(glb, root), "why": why})
+            continue
+        out.append(dict(source="checkpoint", glb=glb, verdict="needs_review", reason=e.get("defect"), limitations=[]))
+    return out
+
+
+def check_checkpoints(root, n, kind, errors, rejected):
+    """After the round's finish was found demonstrably worse on the LiDAR evidence (lidar_geometry.demonstrably_worse):
+    store and check the round's earlier checkpoints too (round_checkpoints), newest first, until one is not worse, so
+    that select_candidate can deliver a good checkpoint of the same round. Each keeps its needs_review status."""
+    for pick in round_checkpoints(root, rejected):
+        cand = _host_step(errors, store_candidate, root, n, kind, pick)
+        if not cand:
+            continue
+        report = _host_step(errors, validate.check, Path(root) / cand["glb"], Path(root) / "control",
+                            Path(root) / "original.glb")
+        final = validate.round_report(Path(root) / "control", report, pick, errors)
+        _written(errors, (Path(root) / cand["glb"]).with_name("report.json"), {**cand, "report": final})
+        if report and not lidar_geometry.demonstrably_worse(report):
+            break
+
+
 def check_round(root, n, kind):
     """The end of build or repair round n: the round's pick (select_deliverable on its events), stored as a
     candidate (store_candidate), the host's check of the stored copy (validate.check) and
     validate.round_report of them. A copy of the report goes to work/evidence/round_NN.json for the next round's
     agent, and then into the candidate's record. A step that fails is a validation_error of the round (_host_step).
-    Returns {pick, rejected, version, sha256, report}; pick is None when select_deliverable failed, and version when
-    nothing was stored."""
+    When the LiDAR check finds the round's finish demonstrably worse, its checkpoints are checked as well
+    (check_checkpoints). Returns {pick, rejected, version, sha256, report}; pick is None when select_deliverable
+    failed, and version when nothing was stored."""
     root = Path(root)
     control, errors, report = root / "control", [], None
     pick, rejected = _host_step(errors, select_deliverable, root) or (None, [])
@@ -810,6 +865,8 @@ def check_round(root, n, kind):
         final = validate.round_report(control, report, pick, errors)  # the record names the copy that failed
     if cand and not _written(errors, (root / cand["glb"]).with_name("report.json"), {**cand, "report": final}):
         final = validate.round_report(control, report, pick, errors)  # the candidate stays unchecked, its round fails
+    if pick and pick["source"] == "finish" and report and lidar_geometry.demonstrably_worse(report):
+        check_checkpoints(root, n, kind, [], rejected)
     return {"pick": pick, "rejected": rejected, "version": cand and cand["version"],
             "sha256": cand["sha256"] if cand else final["sha256"], "report": final}
 
@@ -841,13 +898,18 @@ def passed(cand):
 
 def rank(cand):
     """A stored candidate's rank, highest first (RANK). A passing round always wins, ahead of paper A.6's order on
-    purpose: that order would let a reviewed failure beat a later pass."""
-    return (passed(cand), cand["source"] != "export", cand["version"])
+    purpose: that order would let a reviewed failure beat a later pass. With LiDAR evidence, more resolved regions,
+    then a larger gain beyond the tolerance, come before the source and the version."""
+    report = cand.get("report") or {}
+    mine = report if report.get("sha256") == cand["sha256"] else None
+    resolved, gain = lidar_geometry.rank_terms(mine)
+    return (passed(cand), resolved, gain, cand["source"] != "export", cand["version"])
 
 
 def eligibility(root, cand):
     """None when a stored candidate may be delivered (paper A.6), else why not: its copy must still have its sha256,
-    pass check_glb and keep the original's size (check_size). The surface check's findings are report only."""
+    pass check_glb and keep the original's size (check_size), and the LiDAR check must not have found it worse than
+    the original in sculpt mode (lidar_geometry.demonstrably_worse). The surface check's findings are report only."""
     root = Path(root)
     glb = root / cand["glb"]
     try:
@@ -855,7 +917,13 @@ def eligibility(root, cand):
             return "changed after it was stored"
     except OSError:
         return "missing or not a regular file"
+    report = cand.get("report") or {}
+    if report.get("sha256") == cand["sha256"] and lidar_geometry.demonstrably_worse(report):
+        return LIDAR_WORSE
     return check_glb(glb) or check_size(glb, root / "original.glb") or None
+
+
+LIDAR_WORSE = "the host's LiDAR check found it worse than the original on reserved returns"
 
 
 def ranking(root):
@@ -922,6 +990,10 @@ def select_candidate(root, last=None):
     order = [{"version": c["version"], "rank": list(rank(c))} for c in ranked]
     if not ranked:
         pick = dict(last) if last and last["verdict"] == "unchanged" else original_pick(root)
+        worse = [x for x in others if x["why"] == LIDAR_WORSE]
+        if pick["source"] == "fallback_original" and worse:
+            pick["reason"] = (f"the unchanged original is returned: the host's LiDAR check found {len(worse)} stored "
+                              "candidate(s) worse than the original on reserved returns")
         selected = {"version": None, "verdict": pick["verdict"], "rank": order, "ineligible": others,
                     "why": "no stored candidate is eligible" if others else "no build or repair handed off a GLB"}
         return pick, None, selected
@@ -968,7 +1040,8 @@ def run_rounds(root, cmd, env, blender, sock_dir, watchdog):
             kind = next_round(rounds)
             if kind:
                 prompt = prompts.round_prompt(REPAIR_BUDGET_S, validate.feedback(ends[n]["report"]),
-                                              best_candidate(root), f"evidence/round_{n:02d}.json") + prompts.GUIDANCE
+                                              best_candidate(root), f"evidence/round_{n:02d}.json",
+                                              lidar_mode(root)) + prompts.GUIDANCE
     except SystemExit as e:
         if not isinstance(e.code, str) or not runs:
             raise
@@ -1046,6 +1119,9 @@ def run_session(root, cmd, env=None, *, blender, sock_dir, **watchdog):
     if rounds is not None:
         result.update(rounds=rounds, candidate=candidate_summary(chosen, selected))
     result["surface"] = surface.compare(glb, root / "original.glb")
+    lid = lidar_geometry.manifest(root / "control")
+    if lid is not None:  # the requested and the effective LiDAR geometry mode, and why it is unavailable
+        result["lidar_geometry"] = {**lid["mode"], "status": lid.get("status"), "reason": lid.get("reason")}
     if info["agent"] == "claude":
         result.update(claude_usage(*logs))
     write_json(root / "result.json", result)

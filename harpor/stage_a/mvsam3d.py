@@ -1,4 +1,4 @@
-"""Stage A, multi-view: MV-SAM3D with Depth Anything 3 cameras and depth (build_plan.md note 4b).
+"""Stage A, multi-view: MV-SAM3D with Depth Anything 3 cameras and depth (README.md note 4).
 
 Four steps write into one run folder, each in its own process:
 
@@ -193,7 +193,7 @@ def sam3d(mv_root, sam3d_root, out, seed):
     # MV-SAM3D's pose is in the units of the pointmaps. They are meters when select applied a LiDAR scale, as in place().
     units = "meters (LiDAR scale applied in select)" if "metric_scale" in da.files else "DA3 units (meters)"
     pose = {"rotation_wxyz": arr(res["rotation"]), "translation": arr(res["translation"]), "scale": arr(res["scale"]),
-            "frame": f"canonical -> view 0 camera, PyTorch3D axes, row vectors (note 2), {units}",
+            "frame": f"canonical -> view 0 camera, PyTorch3D axes, row vectors (note 1), {units}",
             "views": names, "view0": names[0], "seed": seed, "glb_extents": np.asarray(res["glb"].extents).tolist(),
             "glb_faces": int(len(res["glb"].faces)), "seconds": round(time.time() - t0, 1),
             "peak_gib": round(torch.cuda.max_memory_allocated() / 2**30, 1)}
@@ -240,7 +240,7 @@ def view_ious(x_w, faces, cams, masks, size=512):
 
 
 def fit_scale(x_w, faces, cams, masks, lo=0.7, hi=1.3, size=384, limits=(0.3, 3.0)):
-    """Scale about the mesh's box center that maximizes the mean mask IoU over all views (note 4b).
+    """Scale about the mesh's box center that maximizes the mean mask IoU over all views (note 4).
 
     MV-SAM3D's predicted scale can be off (11% too large on its own example) while the cameras and
     the depth are right, so only the size is fitted; the rotation and the center stay. The search
@@ -331,7 +331,7 @@ def similar_pose(pose, k, R_w, shift_w, center_w):
 def fit_pose(x_w, faces, cams, masks, size=384, max_evals=400, shift_limit=0.25, rot_limit=20.0,
              scale_limits=(0.5, 2.0), rot_gain=0.005):
     """Second stage after fit_scale: shift, size and a small rotation about the box center that
-    maximize the mean mask IoU over all views (note 4b). fit_scale alone cannot move the mesh, and
+    maximize the mean mask IoU over all views (note 4). fit_scale alone cannot move the mesh, and
     MV-SAM3D's position can be off (the round table: 17 cm).
 
     Coordinate descent over log scale, the shift (in box diagonals) and an axis-angle rotation

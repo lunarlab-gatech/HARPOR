@@ -1,4 +1,4 @@
-"""controller.NETWORK, the pattern behind result.json's network_commands (build_plan.md note 5)."""
+"""controller.NETWORK, the pattern behind result.json's network_commands (README.md note 5)."""
 
 from harpor.agent import controller as C
 

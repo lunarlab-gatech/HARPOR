@@ -22,6 +22,7 @@ G/webapp_runs (or WEBAPP_RUNS). "The SIF" below is the agent's sandbox: G/sif/ha
   vomp     envs/vomp11  physics/vomp_run.py     run/vomp/summary.json (whole canonical object)
   place    envs/sam3d   mvsam3d place           run/placement.json
   agent    envs/sam3d   agent_step --agent A    agent/result.json (skipped below 0.5 mask IoU, or when
+                        --lidar-geometry M
                                                 the job's agent is "none"); it refines posed.glb (600 s),
                                                 with repair rounds after the host's check of each
                                                 candidate (harpor.agent.validate)
@@ -119,6 +120,21 @@ def agent(job):
     raise ValueError(f"agent is one of {', '.join(AGENTS)}")
 
 
+GEOMETRY_MODES = ("off", "inspect", "sculpt")  # = harpor.agent.lidar_geometry.MODES (envs/web has no trimesh)
+GEOMETRY_DEFAULT = "inspect"  # job.json lidar_geometry of a record without it (= lidar_geometry.DEFAULT_MODE)
+
+
+def lidar_geometry(job):
+    """job.json's "lidar_geometry": off, inspect or sculpt, GEOMETRY_DEFAULT for an older record without it.
+    ValueError for anything else."""
+    m = job.get("lidar_geometry", GEOMETRY_DEFAULT)
+    if m is None:
+        return GEOMETRY_DEFAULT
+    if isinstance(m, str) and m in GEOMETRY_MODES:
+        return m
+    raise ValueError(f"lidar_geometry is one of {', '.join(GEOMETRY_MODES)}")
+
+
 def turntable(job):
     """True when the job asks for the 360 video (job.json "turntable")."""
     return job["turntable"] is True
@@ -185,7 +201,8 @@ def command(stage, job, cfg, key_file=None):
                 "da3": '-m harpor.stage_a.mvsam3d da3 --da3-root $G/Depth-Anything-3 --out "$J/pool"',
                 "sam3d": '-m harpor.stage_a.mvsam3d sam3d --mv-root $G/MV-SAM3D --sam3d-root $G/sam-3d-objects --out "$J/run"',
                 "place": '-m harpor.stage_a.mvsam3d place --out "$J/run"',
-                "agent": '-m harpor.webapp.agent_step --job "$J"' + sif + keyed,
+                "agent": '-m harpor.webapp.agent_step --job "$J"' + sif + keyed
+                         + f" --lidar-geometry {lidar_geometry(job)}",
                 "align": '-m harpor.webapp.physics_auto align --job "$J"',
                 "estimate": '-m harpor.webapp.estimate_step --job "$J"' + keyed}[stage]
         if stage == "prep":  # a view that lost its mask must not stay in the pool from an earlier prep

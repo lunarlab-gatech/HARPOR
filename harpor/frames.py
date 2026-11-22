@@ -1,4 +1,4 @@
-"""Coordinate frames (build_plan.md note 2).
+"""Coordinate frames (README.md note 1).
 
 Frames:
   W     OpenCV frame of input view 0: x right, y down, z forward. Metric if the depth is metric.

@@ -1,4 +1,4 @@
-"""How much of the original's surface a candidate keeps: the source map rho of paper Sec. 3.2 and A.2 (build_plan.md
+"""How much of the original's surface a candidate keeps: the source map rho of paper Sec. 3.2 and A.2 (README.md
 note 5).
 
 compare(glb, original) reads both GLBs with harpor.physics.mjcf.load_s. The session's GLBs are all in

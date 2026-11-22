@@ -28,7 +28,7 @@ are always in, "excluded" views never (pool names such as "f00012"). Picks that 
 
 A long object needs views that show two of its sides. A view that looks straight at one side shows
 that side's length but not the depth behind it, and MV-SAM3D makes the hidden side about as long as
-the one it sees, so a box comes out close to a square (build_plan.md note 4b). When the cameras go
+the one it sees, so a box comes out close to a square (README.md note 4). When the cameras go
 around the object (no gap over 120 deg) and the smallest rectangle around the object's points, seen
 from above, is at least 1.2 times as long as it is wide (footprint()), a view within 25 deg of a
 side's normal is "face_on". A mask that touches the image border also harms a long object: one such
@@ -43,7 +43,7 @@ scale it also copies each pick's LiDAR points, J/lidar/cloud/<name>.glb (lidar.p
 J/run/lidar/<i>.glb, for the Inputs tab.
 
 A job with LiDAR (job.json "lidar"): select stops before it removes anything unless J/pool/lidar.json
-is ok, and build_run applies its scale s (build_plan.md note 12, Where the scale enters).
+is ok, and build_run applies its scale s (README.md note 9, Where the scale enters).
 
 selection.json "ring" places every camera center on the best-fit plane of the camera centers, seen
 from above (u right, v up; flip v for SVG), with the object center as "center". selection.json
@@ -51,6 +51,7 @@ from above (u right, v up; flip v for SVG), with the object center as "center". 
 """
 
 import argparse
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -270,11 +271,12 @@ def face_on_views(names, view, good):
     return face_on, {"long_short": round(float(ratio), 2), "face_on": face_on}
 
 
-def build_run(pool_dir, names, run_dir, metric=None, clouds=None):
+def build_run(pool_dir, names, run_dir, metric=None, clouds=None, geometry=None):
     """Copy the pool views names (anchor first) into run_dir as views 0..N-1, with da3_output.npz
     sliced to them, and write run_dir/prep.json. metric: the LiDAR scale s, applied to the sliced
     arrays (lidar_scale.apply_scale), or None. clouds: a folder of <name>.glb (the lidar stage's
-    points), copied to run_dir/lidar/<i>.glb for each pick that has one, or None."""
+    points), copied to run_dir/lidar/<i>.glb for each pick that has one, or None. geometry: the lidar stage's
+    measured returns, J/lidar/geometry (copy_geometry), or None."""
     pool_dir, run_dir = Path(pool_dir), Path(run_dir)
     if run_dir.exists():
         shutil.rmtree(run_dir)
@@ -286,6 +288,8 @@ def build_run(pool_dir, names, run_dir, metric=None, clouds=None):
         if (Path(clouds) / f"{n}.glb").is_file():
             (run_dir / "lidar").mkdir(exist_ok=True)
             shutil.copyfile(Path(clouds) / f"{n}.glb", run_dir / "lidar" / f"{i}.glb")
+    if geometry is not None:
+        copy_geometry(geometry, names, run_dir, metric)
     with np.load(pool_dir / "da3_output.npz") as da:
         stem = {Path(str(f)).stem: k for k, f in enumerate(da["image_files"])}
         order, count, arrays = [stem[n] for n in names], len(da["image_files"]), {}
@@ -300,6 +304,33 @@ def build_run(pool_dir, names, run_dir, metric=None, clouds=None):
          "views": [{"name": str(i), "pool_name": n, "frame": frame_of(n)} for i, n in enumerate(names)]},
         indent=1))
     replace(run_dir / "da3_output.npz", np.savez, **arrays)  # last: with selection.json, the stage's done marker
+
+
+def copy_geometry(geometry, names, run_dir, metric):
+    """The measured returns of the picks (names, in run order) from geometry (J/lidar/geometry, harpor.webapp.lidar
+    .write_geometry) as run_dir/lidar/geometry/<i>.npz, then its index.json: each run view's index, pool name, the
+    pool index's entry and its file's sha256, the pool index's own sha256 and the metric scale. A pick without
+    measured XYZ is listed unavailable with the pool's reason. A job whose lidar stage kept no returns (an older job)
+    gets no index: its agent stage then reports the LiDAR geometry as unavailable."""
+    src = Path(geometry) / "index.json"
+    if not src.is_file():
+        return None
+    pool = json.loads(src.read_text())
+    out = Path(run_dir) / "lidar" / "geometry"
+    out.mkdir(parents=True, exist_ok=True)
+    views = []
+    for i, n in enumerate(names):
+        v = dict((pool.get("views") or {}).get(n) or {"status": "unavailable", "reason": "no entry in the pool index"})
+        rec = {**v, "index": i, "pool_name": n}
+        if v.get("status") == "available":
+            shutil.copyfile(Path(geometry) / v["file"], out / f"{i}.npz")
+            rec.update(file=f"{i}.npz", pool_file=v["file"])
+        views.append(rec)
+    index = {"version": pool.get("version"), "kind": pool.get("kind"), "profile": pool.get("profile"),
+             "pool_index_sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
+             "metric_scale": None if metric is None else float(metric), "views": views}
+    write_json(out / "index.json", index, indent=1)
+    return index
 
 
 def metric_scale(job_dir, job):
@@ -472,7 +503,8 @@ def select(job_dir):
         warn(f"view 0 (frame {frame_of(anchor)}) looks straight at one side; its pose can come out a quarter turn off")
 
     build_run(job_dir / "pool", picks, job_dir / "run", metric=metric,
-              clouds=None if metric is None else job_dir / "lidar" / "cloud")
+              clouds=None if metric is None else job_dir / "lidar" / "cloud",
+              geometry=None if metric is None else job_dir / "lidar" / "geometry")
     sel = record(out, status, picks, anchor)
     if sel["min_spacing_deg"] is not None and sel["min_spacing_deg"] < MIN_SPACING_DEG:
         sel["warnings"].append(f"two picks are only {sel['min_spacing_deg']:.0f} deg apart")

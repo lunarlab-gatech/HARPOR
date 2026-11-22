@@ -1,9 +1,9 @@
-"""The turntable stage of a web-app job: a 360 video of the finished object (build_plan.md note 10).
+"""The turntable stage of a web-app job: a 360 video of the finished object (README.md note 8).
 
     python -m harpor.webapp.turntable render --job J (--sif SIF | --blender CMD)   (envs/sam3d)
     python -m harpor.webapp.turntable encode --job J                               (envs/web)
 
-render runs blender/turntable.py (build_plan.md note 5) on the GLB that physics used (physics/up.json "glb":
+render runs blender/turntable.py (README.md note 5) on the GLB that physics used (physics/up.json "glb":
 the agent's GLB, else run/posed.glb), turned upright with physics/aligned.json "T_s_from_w".
 So the video shows the object and pose of aligned.glb, with the GLB's own materials. Blender runs in the agent's SIF, in a container that sees only
 J/turntable, the GLB (read-only) and the Blender scripts (read-only), for at most RENDER_TIMEOUT_S. It writes

@@ -1,4 +1,4 @@
-"""360-degree turntable of one GLB, as PNG frames (build_plan.md note 5).
+"""360-degree turntable of one GLB, as PNG frames (README.md note 5).
 
 blender -b --factory-startup --python-exit-code 1 --python turntable.py -- ARGS.json
 

@@ -320,8 +320,15 @@
 <p>The agent works in rounds, each with a new agent that gets the last check's findings. The first round builds, in
   the 900 s above. When the check fails and the agent can fix the flaw, a repair round follows, with 450 s for a
   repair, up to 2 repairs. The surface comparison is reported but does not fail the check. The job delivers the best
-  mesh of the rounds: a mesh whose check passed wins, then one that did not come from an export, then the later one. A
-  mesh whose check did not pass is delivered as needs review.</p>
+  mesh of the rounds: a mesh whose check passed wins, then one that fixed more of the LiDAR regions, then one with the
+  larger LiDAR gain, then one that did not come from an export, then the later one. A mesh whose check did not pass is
+  delivered as needs review.</p>
+
+<p>LiDAR geometry (job setting lidar_geometry: off, inspect or sculpt; inspect by default). A job with LiDAR keeps the
+  measured returns of its views. In inspect the agent sees them drawn on the photos and the check reports where the
+  mesh and the returns disagree. In sculpt the agent can also flatten or push a reported region onto the returns, and
+  the check scores each mesh on views that the agent never sees: a mesh that got worse there is not delivered. Sculpt
+  needs a sensor with measured range noise; until a source has one, its jobs run inspect.</p>
 
 <h3>GPT-6.2-Astra and the network</h3>
 <p>GPT-6.2-Astra runs the Codex CLI in a container that can reach the network. Text in your video or images, such as a

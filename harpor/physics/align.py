@@ -1,4 +1,4 @@
-"""Gravity alignment of an agent GLB for VoMP and simulators (build_plan.md note 9).
+"""Gravity alignment of an agent GLB for VoMP and simulators (README.md note 7).
 
 The agent's GLB is posed in frame W (OpenCV camera of view 0), so it is not gravity-aligned. VoMP
 renders with Blender +Z as image-up, and MuJoCo expects +Z up. This module writes a copy of the GLB

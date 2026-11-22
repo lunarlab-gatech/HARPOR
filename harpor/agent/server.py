@@ -1,4 +1,4 @@
-"""Tool server: runs the agent's helper commands on the host (build_plan.md note 5).
+"""Tool server: runs the agent's helper commands on the host (README.md note 5).
 
 The agent's container sees the socket folder read-only and the client in bin/, nothing else of the
 controller. Each request runs `python -m harpor.agent.tools` on the host with the control folder,

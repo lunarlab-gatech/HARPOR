@@ -530,10 +530,11 @@ def test_clouds_compare_with_da3(points_bag, tmp_path, monkeypatch):
         assert read_diff(J / "lidar" / "cloud" / f"{v['name']}.glb")[1]["s"] == v["s"]
 
 
-def test_scale_is_the_only_command(tmp_path, capsys):
+def test_scale_and_geometry_are_the_only_commands(tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         L.main(["clouds", "--job", str(tmp_path)])
-    assert e.value.code == 2 and "invalid choice: 'clouds'" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert e.value.code == 2 and "invalid choice: 'clouds'" in err and "scale, geometry" in err
 
 
 def test_rays_take_every_frame_of_the_samples():
@@ -1062,7 +1063,7 @@ def test_the_samples_cache(points_bag, tmp_path, monkeypatch):
     with np.load(J / "lidar" / "clouds.npz") as f:
         assert sorted(f.files) == sorted(f"{n}_{k}" for n in frames for k in ("xyz", "scan"))
         assert all(len(f[f"{n}_xyz"]) == meta["points"][n] for n in frames)
-    assert meta["key"] == {"version": 7, "kind": "rosbag",
+    assert meta["key"] == {"version": 8, "kind": "rosbag",
                            "input": {"name": "points.bag", "bytes": points_bag.stat().st_size,
                                      "mtime_ns": points_bag.stat().st_mtime_ns},
                            "topics": {"camera": CAMERA, "lidar": POINTS}, "calibration_sha256": None,
@@ -1297,7 +1298,7 @@ def test_a_stray_capture_gives_the_scale_and_its_cache(tmp_path, capsys, monkeyp
 
     meta = json.loads((J / "lidar" / "samples.json").read_text())
     zipped = J / "video" / "capture.zip"
-    assert meta["key"] == {"version": 6, "kind": "stray",
+    assert meta["key"] == {"version": 7, "kind": "stray",
                            "input": {"name": "capture.zip", "bytes": zipped.stat().st_size,
                                      "mtime_ns": zipped.stat().st_mtime_ns},
                            "turns": 1, "frame_sizes": [[240, 320]], "min_confidence": 2, "z_range_m": [0.1, 5.0]}
@@ -1406,3 +1407,124 @@ def test_stray_samples_without_depth_and_each_failure(tmp_path, monkeypatch):
     assert failed(J) == "LiDAR of kind rosbag needs a rosbag input; this job's input is a Stray Scanner capture"
     set_job(J, lidar={"kind": "stray"})
     assert scaled(J)["ok"]
+
+
+# ---- the measured returns for the agent's LiDAR geometry (write_geometry) ----
+
+def geometry(J):
+    return json.loads((J / "lidar" / "geometry" / "index.json").read_text())
+
+
+def test_the_measured_returns_of_a_rosbag(points_bag, tmp_path, monkeypatch):
+    """Each pool view keeps its measured endpoints row for row with the samples, the LiDAR's origin in the same
+    rectified optical frame, its pixels through prep's crop, its acquisition, and flags; the index is in
+    pool/lidar.json by sha256. A cache hit keeps them; an interrupted write leaves no index; another calibration
+    makes the agent stage report them as stale."""
+    from harpor.webapp import agent_step
+
+    J = make_job(tmp_path, points_bag)
+    rec = scaled(J)
+    index = geometry(J)
+    assert rec["geometry"]["sha256"] == hashlib.sha256((J / "lidar" / "geometry" / "index.json").read_bytes()).hexdigest()
+    names = mvsam3d.view_names(J / "pool")
+    prep = {v["name"]: v["crop"] for v in json.loads((J / "pool" / "prep.json").read_text())["views"]}
+    with np.load(J / "lidar" / "samples.npz") as f:
+        samples = {n: f[n] for n in names}
+    K = F.intrinsics(*SIZE)
+    for n in names:
+        v = index["views"][n]
+        assert (v["status"], v["model"], v["confidence"]) == ("available", "lidar_ray", "not_provided")
+        assert v["time"]["scans"] and v["time"]["window_ns"][0] < v["time"]["t_ns"] < v["time"]["window_ns"][1]
+        with np.load(J / "lidar" / "geometry" / v["file"]) as g:
+            xyz, px, row, flags, origin = g["xyz"], g["pixel"], g["row"], g["flags"], g["origin"]
+        assert len(xyz) == len(samples[n]) == len(px) and (row == np.arange(len(xyz))).all()
+        assert np.allclose(origin, T_CAM_LIDAR[:3, 3], atol=1e-6) and np.allclose(v["origin"], origin)
+        uv = xyz[:, :2] / xyz[:, 2:] * [K[0, 0], K[1, 1]] + K[:2, 2]  # the endpoints project to the samples' pixels
+        assert np.allclose(uv, samples[n][:, :2], atol=2e-3) and np.allclose(xyz[:, 2], samples[n][:, 2], rtol=1e-5)
+        size = Image.open(J / "pool" / "masks" / f"{n}.png").size
+        gu, gv = lidar_scale.source_to_grid(samples[n][:, 0], samples[n][:, 1], prep[n], size)
+        assert np.allclose(px, np.c_[gu, gv])
+        assert (flags & L.OFFSET).all() and (flags & L.IN_MASK).sum() > 100 and v["counts"]["in_mask"] > 100
+        assert v["counts"]["boundary"] > 0 and v["mask_sha256"]
+    assert steps.done("lidar", J)
+    assert scaled(J)["source"]["cache"] == "hit" and geometry(J)["views"].keys() == index["views"].keys()
+    assert all(geometry(J)["views"][n]["time"] == index["views"][n]["time"] for n in names)  # kept on a cache hit
+    # An interrupted write: the third NPZ fails, so no index, and the scale is still found.
+    real, calls = L.replace, []
+
+    def flaky(path, save, *a, **kw):
+        calls.append(path)
+        if len(calls) == 3:
+            raise OSError("disk full")
+        return real(path, save, *a, **kw)
+
+    monkeypatch.setattr(L, "replace", flaky)
+    rec = scaled(J)
+    assert rec["ok"] and rec["geometry"] is None and "disk full" in rec["warnings"][-1]
+    assert not (J / "lidar" / "geometry" / "index.json").exists()
+    monkeypatch.setattr(L, "replace", real)
+    job = json.loads((J / "job.json").read_text())
+    assert "kept no measured returns" in agent_step.geometry_request(J, job, "inspect")["reason"]
+    scaled(J)
+    upload(J, {"T_cam_lidar": T_CAM_LIDAR.tolist(), "time_offset_s": 0.0})  # another calibration: stale
+    job = json.loads((J / "job.json").read_text())
+    assert "missing, failed or stale" in agent_step.geometry_request(J, job, "inspect")["reason"]
+
+
+def test_the_measured_returns_of_a_portrait_stray_capture(tmp_path):
+    """The aligned depth camera: origin 0, the upright confidence-filtered points, measured confidence. Without
+    intrinsics every view is unavailable with the reason."""
+    J = make_stray_job(tmp_path, portrait=1)
+    rec = scaled(J)
+    index = geometry(J)
+    names = mvsam3d.view_names(J / "pool")
+    assert rec["geometry"]["views"] == len(names) and index["kind"] == "stray"
+    K = F.intrinsics(240, 320)
+    with np.load(J / "lidar" / "samples.npz") as f:
+        samples = {n: f[n] for n in names}
+    for n in names:
+        v = index["views"][n]
+        assert (v["model"], v["confidence"], v["origin"]) == ("aligned_depth_camera", "measured", [0.0, 0.0, 0.0])
+        assert v["time"]["frame"] == int(n[1:])
+        with np.load(J / "lidar" / "geometry" / v["file"]) as g:
+            xyz, flags = g["xyz"], g["flags"]
+        uv = xyz[:, :2] / xyz[:, 2:] * [K[0, 0], K[1, 1]] + K[:2, 2]
+        assert len(xyz) == len(samples[n]) and np.allclose(uv, samples[n][:, :2], atol=2e-3)
+        assert not (flags & (L.OFFSET | L.CONF_MISSING)).any()
+    root = J / "video" / "stray" / "export"
+    lines = (root / "odometry.csv").read_text().splitlines()
+    (root / "odometry.csv").write_text("\n".join(", ".join(x.split(", ")[:9]) for x in lines) + "\n")
+    (root / "camera_matrix.csv").write_text("1,0,0\n0,1,0\n")
+    (J / "lidar" / "samples.json").unlink()
+    bare = scaled(J)
+    assert bare["geometry"]["views"] == 0
+    assert all(v["status"] == "unavailable" and "no intrinsics" in v["reason"] for v in geometry(J)["views"].values())
+
+
+def test_an_older_job_keeps_its_returns_without_a_new_scale(points_bag, tmp_path):
+    """lidar geometry on a job whose lidar stage ran before the returns were kept: the index and pool/lidar.json's
+    geometry appear, the record's scale stays (also when the estimate would give another), and the stage stays done."""
+    J = make_job(tmp_path, points_bag)
+    rec = scaled(J)
+    shutil_rmtree(J / "lidar" / "geometry")
+    old = {k: v for k, v in rec.items() if k != "geometry"}
+    old["s"] = rec["s"] * 1.0001  # the run was built with this one
+    (J / "pool" / "lidar.json").write_text(json.dumps(old))
+    new = L.geometry(J)
+    assert new["s"] == old["s"] and new["geometry"]["upgraded"] == {"s_kept": old["s"], "s_now": rec["s"]}
+    assert new["geometry"]["sha256"] == hashlib.sha256((J / "lidar" / "geometry" / "index.json").read_bytes()).hexdigest()
+    assert steps.done("lidar", J) and json.loads((J / "pool" / "lidar.json").read_text()) == new
+    assert geometry(J)["profile"] is None and geometry(J)["sensor"]["topic"] == POINTS
+
+
+def test_the_livox_profile_is_chosen_by_the_sensor():
+    assert L.sensor_profile({"source": {"topic": "/livox/lidar", "type": "CustomMsg"}}, "rosbag") == "livox"
+    assert L.sensor_profile({"source": {"topic": "/points", "frame_id": "livox_frame"}}, "rosbag") == "livox"
+    assert L.sensor_profile({"source": {"topic": "/lidar/points", "type": "PointCloud2"}}, "rosbag") is None
+    assert L.sensor_profile({"source": {"kind": "stray"}}, "stray") is None
+
+
+def shutil_rmtree(path):
+    import shutil
+
+    shutil.rmtree(path)

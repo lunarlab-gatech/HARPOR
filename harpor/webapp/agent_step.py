@@ -1,5 +1,5 @@
 """Agent stage of a web-app job: GPT-6.2-Astra, Claude Opus 5.5 or Claude Fable 5.2 refines the Stage A mesh
-(build_plan.md note 5).
+(README.md note 5).
 
 Runs in envs/sam3d from the repo root, with apptainer on the PATH:
 
@@ -28,6 +28,13 @@ result is, and as
 strict JSON (finite: browsers' JSON.parse takes no NaN or Infinity). It is written
 whether the session ends or stops, since the controller keeps it after every round; agent/result.json is finite too.
 
+LiDAR geometry (--lidar-geometry off, inspect or sculpt; job.json lidar_geometry, by default
+lidar_geometry.DEFAULT_MODE). geometry_request asks for the job's measured returns only when LiDAR is on for the job,
+its scale record is current (steps.done), selection, prep and placement agree on the applied metric scale, and the
+run's geometry index belongs to the pool's (its sha256) with the same masks. Otherwise the session runs its ordinary
+photo-guided refinement, and control/lidar/manifest.json says why the geometry is unavailable. result.json gets
+lidar_geometry: the requested and effective modes and the status.
+
 SIGTERM (Cancel in the web app) ends the step as it ends a helper of harpor.agent.tools: the Blender
 processes the step started are killed, and SystemExit unwinds the controller, whose cleanup kills
 the agent's process group (the agent runs in a session of its own, so the signal to this step's
@@ -42,6 +49,7 @@ import shutil
 import signal
 from pathlib import Path
 
+from harpor.agent import lidar_geometry
 from harpor.agent.tools import MODELS, printable
 from harpor.fileio import read_json, write_json
 from harpor.webapp import steps
@@ -112,7 +120,56 @@ def source(prompt, n, kind):
             f"pose (scale, shift, small rotation) fitted to the {n} SAM 3 masks")
 
 
-def run(job_dir, sif, key_file, agent="astra"):
+def _same(a, b):
+    return isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(a - b) <= 1e-9 * max(abs(a), 1.0)
+
+
+def geometry_request(J, job, requested):
+    """The LiDAR geometry request for controller.prepare_session: {requested, index (J/run/lidar/geometry/index.json)
+    or None, reason (why it is unavailable)}. See the module docstring for the conditions."""
+    import hashlib
+
+    J = Path(J)
+    req = {"requested": requested, "index": None, "reason": None}
+
+    def no(why):
+        return {**req, "reason": why}
+
+    if requested == "off":
+        return req
+    if job.get("lidar") is None or steps.lidar(job) is None:
+        return no("LiDAR is off for this job")
+    if not steps.done("lidar", J):
+        return no("the LiDAR scale record is missing, failed or stale; run the LiDAR stage again")
+    rec = read_json(J / "pool" / "lidar.json") or {}
+    geo = rec.get("geometry")
+    if not isinstance(geo, dict) or not geo.get("sha256"):
+        return no("this job's LiDAR stage kept no measured returns (a job from before LiDAR geometry); rerun the LiDAR "
+                  "and selection stages to upgrade it")
+    s = rec.get("s")
+    sel = ((read_json(J / "selection.json") or {}).get("metric_scale") or {}).get("s")
+    prep = (read_json(J / "run" / "prep.json") or {}).get("metric_scale")
+    place = (read_json(J / "run" / "placement.json") or {}).get("metric_scale")
+    if not (_same(s, sel) and _same(s, prep) and _same(s, place)):
+        return no(f"the metric scale differs between the LiDAR record ({s}), selection ({sel}), the run ({prep}) and "
+                  f"placement ({place}); run selection again")
+    pool_index = J / "lidar" / "geometry" / "index.json"
+    run_index = J / "run" / "lidar" / "geometry" / "index.json"
+    if not pool_index.is_file() or hashlib.sha256(pool_index.read_bytes()).hexdigest() != geo["sha256"]:
+        return no("the LiDAR returns changed since the scale record; run the LiDAR stage again")
+    index = read_json(run_index)
+    if not isinstance(index, dict) or index.get("pool_index_sha256") != geo["sha256"]:
+        return no("the run's LiDAR returns are not those of the current LiDAR stage; run selection again")
+    pool = read_json(pool_index) or {}
+    for v in index.get("views") or []:
+        want = ((pool.get("views") or {}).get(v.get("pool_name")) or {}).get("mask_sha256")
+        mask = J / "run" / "masks" / f"{v.get('index')}.png"
+        if want and mask.is_file() and hashlib.sha256(mask.read_bytes()).hexdigest() != want:
+            return no(f"view {v.get('index')}'s mask changed since the LiDAR stage; run it and selection again")
+    return {**req, "index": str(run_index)}
+
+
+def run(job_dir, sif, key_file, agent="astra", lidar_mode=None):
     from harpor.agent import controller
     from harpor.stage_a import mvsam3d
 
@@ -129,9 +186,16 @@ def run(job_dir, sif, key_file, agent="astra"):
     out.unlink(missing_ok=True)
     evidence.unlink(missing_ok=True)
     views = mvsam3d.session_views(J / "run")
+    mode = lidar_mode or job.get("lidar_geometry") or lidar_geometry.DEFAULT_MODE
+    if mode not in lidar_geometry.MODES:
+        raise SystemExit(f"--lidar-geometry is {', '.join(lidar_geometry.MODES)}, not {mode!r}")
+    request = geometry_request(J, job, mode)
     controller.prepare_session(root, None, views, source=source(job["prompt"], len(views), steps.source(job)["kind"]),
                                metric=True, original=J / "run" / "posed.glb", agent=AGENTS[agent],
-                               effort=EFFORT.get(agent), model=MODEL.get(agent), rounds=True)
+                               effort=EFFORT.get(agent), model=MODEL.get(agent), rounds=True, lidar=request)
+    lid = lidar_geometry.manifest(root / "control") or {}
+    print(f"LiDAR geometry: requested {mode}, effective {lid.get('mode', {}).get('effective')}"
+          + (f" ({lid['reason']})" if lid.get("reason") else ""), flush=True)
     try:
         controller.run_container_session(root, sif, key_file, budget_s=BUDGET_S)
     finally:
@@ -165,11 +229,13 @@ def main(argv=None):
     ap.add_argument("--key-file", required=True,
                     help="env file with OPENAI_API_KEY=... (astra) or ANTHROPIC_API_KEY=... (opus, fable)")
     ap.add_argument("--agent", choices=sorted(AGENTS), default="astra")
+    ap.add_argument("--lidar-geometry", choices=lidar_geometry.MODES, default=None,
+                    help=f"LiDAR geometry mode; default job.json lidar_geometry, else {lidar_geometry.DEFAULT_MODE}")
     a = ap.parse_args(argv)
     from harpor.agent import tools
 
     signal.signal(signal.SIGTERM, tools._on_sigterm)  # the helpers' own stop path; see the module docstring
-    run(a.job, a.sif, a.key_file, a.agent)
+    run(a.job, a.sif, a.key_file, a.agent, a.lidar_geometry)
 
 
 if __name__ == "__main__":
