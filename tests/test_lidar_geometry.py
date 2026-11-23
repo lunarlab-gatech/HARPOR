@@ -253,6 +253,37 @@ def test_the_baseline_names_the_bowed_face_its_direction_and_the_unobserved_face
     assert pngs == [f"lidar_view{i:02d}.png" for i in range(LF.N_VIEWS) if i not in (3, 6)]
 
 
+def test_a_rounded_edge_divides_two_sides(tmp_path):
+    """A connected box mesh with rounded edges, as a reconstruction gives, divides into its six sides. Each face turns
+    at most a few degrees from the next, so a rule that compares only neighbors joins the whole box into one
+    surface; the surface's mean normal cuts each edge."""
+    sphere = trimesh.creation.icosphere(subdivisions=4)
+    u = sphere.vertices
+    glb = tmp_path / "rounded.glb"
+    trimesh.Trimesh(np.sign(u) * np.abs(u) ** 0.25 * (LF.DIMS / 2), sphere.faces, process=False).export(glb)
+    mesh = G.Mesh(glb)
+    p = mesh.adjacency()
+    turn = np.degrees(np.arccos(np.clip((mesh.normals[p[:, 0]] * mesh.normals[p[:, 1]]).sum(1), -1, 1)))
+    assert turn.max() < 10 < G.BASE["crease_deg"]  # no sharp edge anywhere
+    comp, _ = G.surfaces(mesh, G.BASE)
+    ids = np.unique(comp)
+    share = np.array([mesh.areas[comp == i].sum() for i in ids]) / mesh.areas.sum()
+    top = ids[np.argsort(-share)[:6]]
+    assert np.sort(share)[::-1][:6].sum() > 0.9
+    axes = np.r_[np.eye(3), -np.eye(3)]  # W's axes are glTF's, permuted and signed
+    dirs = []
+    for i in top:
+        sel = comp == i
+        n = (mesh.normals[sel] * mesh.areas[sel, None]).sum(0)
+        dirs.append(n / np.linalg.norm(n))
+    near = np.array(dirs) @ axes.T
+    assert sorted(np.argmax(near, 1).tolist()) == list(range(6)) and (near.max(1) > np.cos(np.radians(5))).all()
+    # Each side's share of the area is about that of its face of the box (18 x 24, 36 x 24 and 36 x 18 cm, twice).
+    d = LF.DIMS
+    faces = np.repeat([d[1] * d[2], d[0] * d[2], d[0] * d[1]], 2)
+    assert np.allclose(np.sort(share)[::-1][:6], np.sort(faces / faces.sum())[::-1], atol=0.015)
+
+
 def test_a_correct_box_has_no_region(roots):
     rec = baseline(roots["clean"])
     assert rec["regions"] == [] and not rec["alignment"]["common_shift"] and rec["alignment"]["excluded"] == []

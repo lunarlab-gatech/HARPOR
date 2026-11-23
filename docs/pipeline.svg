@@ -1,228 +1,128 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1600 900" width="1600" height="900" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1648 416" width="1648" height="416" role="img" aria-labelledby="title desc">
   <title id="title">HARPOR pipeline</title>
-  <desc id="desc">A phone video, a ROS 1 or 2 bag or a Stray Scanner zip becomes a posed, textured mesh through SAM 3 masks, Depth Anything 3 cameras and depth, an optional LiDAR metric scale, view selection with an optional pause for review, MV-SAM3D and a pose fit (A). VoMP v1.1 estimates the materials on the canonical mesh right after MV-SAM3D (B). An optional agent in Blender refines the geometry and appearance; a host check compares the surface with the original and checks that the agent finished, and a failed check starts a repair round, with at most 3 builds; the best candidate is delivered (C). The export turns the mesh upright and moves the VoMP materials onto it for the mass and inertia, the job's model estimates the friction from photos with the agent's API key, and the export writes MJCF, USD and URDF models of one rigid body, an optional 360 video and results.zip (D).</desc>
+  <desc id="desc">A capture and an object name become a posed, textured mesh through SAM 3, Depth Anything 3, view selection, MV-SAM3D and a pose fit. LiDAR or depth, when the capture has it, sets the metric scale (A), and its returns go to the agent (the fitting returns) and to the host check (the reserved returns) (C). VoMP estimates the materials from the MV-SAM3D mesh (B). An optional VLM agent refines the mesh in Blender, and a failed host check starts a repair round, with at most 3 builds (C). The mass, the inertia and the friction are estimated, and the export writes MJCF, USD and URDF files (D).</desc>
   <defs>
     <style>
-      text { font-family: Helvetica, Arial, "Liberation Sans", sans-serif; fill: #1f2d5a; }
-      .t1 { font-size: 26px; font-weight: 700; }
-      .t2 { font-size: 20px; font-weight: 700; }
-      .bt { font-size: 17px; font-weight: 700; }
-      .bs { font-size: 14px; fill: #4a5568; }
-      .xs { font-size: 13px; fill: #4a5568; }
-      .tag { font-size: 14px; fill: #6b5a8a; font-style: italic; }
-      .ch { font-size: 14px; }
-      .mono { font-family: Menlo, Consolas, "DejaVu Sans Mono", monospace; font-size: 14px; }
-      .lt { font-size: 14px; fill: #4a5568; }
-      .badge { font-size: 19px; font-weight: 700; fill: #ffffff; }
-      .num { font-size: 13px; font-weight: 700; fill: #ffffff; }
-      .halo { paint-order: stroke; stroke-width: 6px; stroke-linejoin: round; }
+      text { font-family: Helvetica, Arial, "Liberation Sans", sans-serif; fill: #1f2937; }
+      .pt { font-size: 17px; font-weight: 700; }
+      .note { font-size: 14px; font-weight: 400; font-style: italic; fill: #5b6472; }
+      .bt { font-size: 16px; font-weight: 700; }
+      .bs { font-size: 13px; fill: #5b6472; }
+      .lab { font-size: 13px; fill: #5b6472; }
+      .badge { font-size: 14px; font-weight: 700; fill: #ffffff; }
+      .m { font-family: "Times New Roman", Times, serif; font-style: italic; font-size: 15px; }
       .c { text-anchor: middle; }
+      .halo { paint-order: stroke; stroke: #ffffff; stroke-width: 5px; stroke-linejoin: round; }
       .box { fill: #ffffff; stroke-width: 1.6; }
-      .flow { fill: none; stroke: #4a5568; stroke-width: 2; }
-      .mat { fill: none; stroke: #d9822b; stroke-width: 2.4; }
-      .dash { stroke-dasharray: 7 5; }
+      .flow { fill: none; stroke: #4b5563; stroke-width: 1.8; }
+      .dash { stroke-dasharray: 6 4; }
     </style>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4b5563"/>
     </marker>
-    <marker id="am" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#d9822b"/>
-    </marker>
-    <g id="pause">
-      <rect x="0" y="0" width="22" height="22" rx="11" fill="#fff3d4" stroke="#e0a526" stroke-width="1.4"/>
-      <rect x="7.5" y="6" width="2.6" height="10" fill="#b7791f"/>
-      <rect x="12" y="6" width="2.6" height="10" fill="#b7791f"/>
-    </g>
   </defs>
 
-  <rect x="0" y="0" width="1600" height="900" fill="#ffffff"/>
+  <rect x="0" y="0" width="1648" height="416" fill="#ffffff"/>
 
-  <!-- ===================== A: Reconstruction ===================== -->
-  <rect x="16" y="16" width="1168" height="334" rx="14" fill="#f4f8fc" stroke="#b9d3ea" stroke-width="1.6"/>
-  <circle cx="44" cy="44" r="17" fill="#2b7bbf"/>
-  <text class="badge c" x="44" y="51">A</text>
-  <text class="t1" x="70" y="53">Reconstruction</text>
+  <!-- stage panels -->
+  <rect x="180" y="16" width="738" height="200" rx="10" fill="#eef4fb" stroke="#c9dcf1" stroke-width="1.4"/>
+  <circle cx="204" cy="38" r="11" fill="#2c5d9e"/>
+  <text class="badge c" x="204" y="43">A</text>
+  <text class="pt" x="222" y="44" fill="#2c5d9e">Reconstruction</text>
+  <rect x="942" y="276" width="304" height="124" rx="10" fill="#fdf3e7" stroke="#f0d2ad" stroke-width="1.4"/>
+  <circle cx="966" cy="298" r="11" fill="#b5651d"/>
+  <text class="badge c" x="966" y="303">B</text>
+  <text class="pt" x="984" y="304" fill="#b5651d">Materials</text>
+  <rect class="dash" x="942" y="16" width="304" height="200" rx="10" fill="#f4f0fb" stroke="#c8b8e6" stroke-width="1.4"/>
+  <circle cx="966" cy="38" r="11" fill="#6a4aa8"/>
+  <text class="badge c" x="966" y="43">C</text>
+  <text class="pt" x="984" y="44" fill="#6a4aa8">Agent refinement<tspan class="note" dx="6">(optional)</tspan></text>
+  <rect x="1270" y="16" width="358" height="200" rx="10" fill="#ecf6f3" stroke="#b9ded4" stroke-width="1.4"/>
+  <circle cx="1294" cy="38" r="11" fill="#2e7d6b"/>
+  <text class="badge c" x="1294" y="43">D</text>
+  <text class="pt" x="1312" y="44" fill="#2e7d6b">Mass, friction and export</text>
 
-  <rect x="36" y="92" width="170" height="28" rx="14" class="box" stroke="#7fb0da"/>
-  <text class="ch c" x="121" y="111">Phone video</text>
-  <rect x="36" y="124" width="170" height="28" rx="14" class="box" stroke="#7fb0da"/>
-  <text class="ch c" x="121" y="143">ROS 1 or 2 bag</text>
-  <rect x="36" y="156" width="170" height="28" rx="14" class="box" stroke="#7fb0da"/>
-  <text class="ch c" x="121" y="175">Stray Scanner zip</text>
-  <path class="flow" d="M206,106 H220 M206,138 H220 M206,170 H220 M220,106 V170"/>
-  <path class="flow" d="M220,138 H239" marker-end="url(#ah)"/>
+  <!-- inputs: capture frames, object name, LiDAR or depth -->
+  <rect x="59" y="70" width="70" height="50" rx="4" fill="#e5e7eb" stroke="#9aa3af" stroke-width="1.4"/>
+  <rect x="53" y="76" width="70" height="50" rx="4" fill="#f3f4f6" stroke="#9aa3af" stroke-width="1.4"/>
+  <rect x="47" y="82" width="70" height="50" rx="4" fill="#ffffff" stroke="#9aa3af" stroke-width="1.4"/>
+  <path d="M53,125 L71,102 L83,115 L93,107 L111,125 Z" fill="#cfd5dd"/>
+  <circle cx="99" cy="95" r="5" fill="#cfd5dd"/>
+  <text class="bt c" x="88" y="153">Capture</text>
+  <text class="bs c" x="88" y="170">video, bag or Stray</text>
+  <rect x="32" y="183" width="112" height="26" rx="13" fill="#f5f6f8" stroke="#9aa3af" stroke-width="1.4"/>
+  <text class="bs c" x="88" y="201" font-style="italic" fill="#1f2937">“object name”</text>
+  <rect class="dash" x="28" y="237" width="120" height="30" rx="15" fill="#f5f6f8" stroke="#9aa3af" stroke-width="1.4"/>
+  <text class="bs c" x="88" y="257" fill="#1f2937">LiDAR or depth</text>
 
-  <rect x="240" y="88" width="180" height="100" rx="8" class="box" stroke="#5b9bd1"/>
-  <text class="bt c" x="330" y="128">SAM 3 masks</text>
-  <text class="bs c" x="330" y="150">finds the object</text>
-  <text class="bs c" x="330" y="168">from its name</text>
-  <path class="flow" d="M420,138 H455" marker-end="url(#ah)"/>
+  <!-- A: reconstruction -->
+  <rect class="box" x="194" y="62" width="100" height="78" rx="6" stroke="#5b8fd0"/>
+  <text class="bt c" x="244" y="97">SAM 3</text>
+  <text class="bs c" x="244" y="118">object masks</text>
+  <rect class="box" x="322" y="62" width="156" height="78" rx="6" stroke="#5b8fd0"/>
+  <text class="bt c" x="400" y="97">Depth Anything 3</text>
+  <text class="bs c" x="400" y="118">cameras, depth</text>
+  <rect class="box" x="506" y="62" width="134" height="78" rx="6" stroke="#5b8fd0"/>
+  <text class="bt c" x="573" y="97">View selection</text>
+  <text class="bs c" x="573" y="118">2 to 12 views</text>
+  <rect class="box" x="668" y="62" width="112" height="78" rx="6" stroke="#5b8fd0"/>
+  <text class="bt c" x="724" y="97">MV-SAM3D</text>
+  <text class="bs c" x="724" y="118">textured mesh</text>
+  <rect class="box" x="808" y="62" width="96" height="78" rx="6" stroke="#5b8fd0"/>
+  <text class="bt c" x="856" y="97">Pose fit</text>
+  <text class="bs c" x="856" y="118">pose, scale</text>
 
-  <rect x="456" y="88" width="190" height="100" rx="8" class="box" stroke="#5b9bd1"/>
-  <text class="bt c" x="551" y="128">Depth Anything 3</text>
-  <text class="bs c" x="551" y="150">cameras and depth</text>
-  <text class="bs c" x="551" y="168">for every frame</text>
-  <path class="flow" d="M646,138 H681" marker-end="url(#ah)"/>
+  <!-- B: materials -->
+  <rect class="box" x="1010" y="314" width="168" height="78" rx="6" stroke="#e09a4f"/>
+  <text class="bt c" x="1094" y="349">VoMP</text>
+  <text class="bs c" x="1094" y="370"><tspan class="m">ρ</tspan>, <tspan class="m">E</tspan>, <tspan class="m">ν</tspan> per voxel</text>
 
-  <rect x="682" y="88" width="180" height="100" rx="8" class="box" stroke="#5b9bd1"/>
-  <text class="bt c" x="772" y="128">View selection</text>
-  <text class="bs c" x="772" y="150">2 to 12 views</text>
-  <text class="bs c" x="772" y="168">(6 by default)</text>
-  <use href="#pause" xlink:href="#pause" x="851" y="77"/>
-  <path class="flow" d="M862,138 H897" marker-end="url(#ah)"/>
+  <!-- C: agent refinement -->
+  <rect class="box" x="956" y="62" width="136" height="78" rx="6" stroke="#9175c9"/>
+  <text class="bt c" x="1024" y="97">VLM agent</text>
+  <text class="bs c" x="1024" y="118">refines in Blender</text>
+  <rect class="box" x="1120" y="62" width="112" height="78" rx="6" stroke="#9175c9"/>
+  <text class="bt c" x="1176" y="97">Host check</text>
+  <text class="bs c" x="1176" y="118">vs. original</text>
 
-  <rect x="898" y="88" width="266" height="100" rx="8" class="box" stroke="#5fa94d"/>
-  <text class="t2 c" x="1031" y="128">MV-SAM3D</text>
-  <text class="bs c" x="1031" y="150">multi-view SAM 3D Objects</text>
-  <text class="bs c" x="1031" y="168">gives a textured mesh</text>
+  <!-- D: mass, friction and export -->
+  <rect class="box" x="1284" y="62" width="176" height="78" rx="6" stroke="#4fa892"/>
+  <text class="bt c" x="1372" y="89">Physical properties</text>
+  <text class="bs c" x="1372" y="110">mass, inertia (VoMP)</text>
+  <text class="bs c" x="1372" y="127">friction (VLM, photos)</text>
+  <path d="M1556,65 L1582,80 L1556,95 L1530,80 Z" fill="#d7efe8" stroke="#2e7d6b" stroke-width="1.4" stroke-linejoin="round"/>
+  <path d="M1530,80 L1556,95 L1556,125 L1530,110 Z" fill="#a9dacb" stroke="#2e7d6b" stroke-width="1.4" stroke-linejoin="round"/>
+  <path d="M1556,95 L1582,80 L1582,110 L1556,125 Z" fill="#7cc4b0" stroke="#2e7d6b" stroke-width="1.4" stroke-linejoin="round"/>
+  <text class="bt c" x="1556" y="153">Sim-ready model</text>
+  <text class="bs c" x="1556" y="170">MJCF, USD, URDF</text>
 
-  <rect x="456" y="236" width="190" height="90" rx="8" class="box dash" stroke="#5b9bd1"/>
-  <text class="bt c" x="551" y="262">LiDAR</text>
-  <text class="bs c" x="551" y="284">sets the metric scale</text>
-  <text class="xs c" x="551" y="306">bag LiDAR or iPhone depth</text>
-  <path class="flow dash" d="M646,281 H772 V189" marker-end="url(#ah)"/>
+  <!-- data flow -->
+  <path class="flow" d="M132,101 H193" marker-end="url(#ah)"/>
+  <path class="flow" d="M144,196 H244 V141" marker-end="url(#ah)"/>
+  <path class="flow" d="M294,101 H321" marker-end="url(#ah)"/>
+  <path class="flow" d="M478,101 H505" marker-end="url(#ah)"/>
+  <path class="flow" d="M640,101 H667" marker-end="url(#ah)"/>
+  <path class="flow" d="M780,101 H807" marker-end="url(#ah)"/>
+  <path class="flow" d="M904,101 H955" marker-end="url(#ah)"/>
+  <path class="flow" d="M1092,101 H1119" marker-end="url(#ah)"/>
+  <path class="flow" d="M1232,101 H1283" marker-end="url(#ah)"/>
+  <path class="flow" d="M1460,101 H1522" marker-end="url(#ah)"/>
+  <path class="flow" d="M1176,140 V168 H1024 V141" marker-end="url(#ah)"/>
+  <text class="lab halo" x="1100" y="187" text-anchor="middle">repair, at most 3 builds</text>
+  <path class="flow dash" d="M148,252 H1210 V141" marker-end="url(#ah)"/>
+  <path class="flow dash" d="M573,252 V141" marker-end="url(#ah)"/>
+  <circle cx="573" cy="252" r="3" fill="#4b5563"/>
+  <path class="flow dash" d="M980,252 V141" marker-end="url(#ah)"/>
+  <circle cx="980" cy="252" r="3" fill="#4b5563"/>
+  <text class="lab halo" x="582" y="240" text-anchor="start">metric scale</text>
+  <text class="lab halo" x="989" y="240" text-anchor="start">fitting returns</text>
+  <text class="lab halo" x="1219" y="240" text-anchor="start">reserved returns</text>
+  <path d="M724,244 V260" stroke="#ffffff" stroke-width="8"/>
+  <path class="flow" d="M724,140 V353 H1009" marker-end="url(#ah)"/>
+  <path class="flow" d="M1178,353 H1372 V141" marker-end="url(#ah)"/>
+  <text class="lab halo" x="1381" y="240" text-anchor="start">materials</text>
 
-  <path class="flow" d="M1031,188 V235" marker-end="url(#ah)"/>
-  <rect x="898" y="236" width="266" height="90" rx="8" class="box" stroke="#5fa94d"/>
-  <text class="bt c" x="1031" y="262">Pose fit</text>
-  <text class="bs c" x="1031" y="284">fits pose and scale</text>
-  <text class="mono c" x="1031" y="308">posed.glb</text>
-
-  <!-- ===================== B: Materials ===================== -->
-  <rect x="1204" y="16" width="380" height="334" rx="14" fill="#fdf4e8" stroke="#efc591" stroke-width="1.6"/>
-  <circle cx="1232" cy="44" r="17" fill="#d9822b"/>
-  <text class="badge c" x="1232" y="51">B</text>
-  <text class="t1" x="1258" y="53">Materials</text>
-
-  <path class="flow" d="M1164,138 H1223" marker-end="url(#ah)"/>
-  <rect x="1224" y="88" width="340" height="120" rx="8" class="box" stroke="#e39b4f"/>
-  <text class="bt c" x="1394" y="116">VoMP v1.1</text>
-  <text class="bs c" x="1394" y="138">materials on the canonical mesh,</text>
-  <text class="bs c" x="1394" y="157">right after MV-SAM3D</text>
-  <text class="xs c" x="1394" y="181">density, Young's modulus and</text>
-  <text class="xs c" x="1394" y="198">Poisson's ratio per voxel</text>
-
-  <path class="flow" d="M1394,208 V253" marker-end="url(#ah)"/>
-  <rect x="1284" y="254" width="220" height="30" rx="15" fill="#ffecd6" stroke="#e9a95c" stroke-width="1.6"/>
-  <text class="ch c" x="1394" y="274">VoMP materials</text>
-
-  <!-- ===================== C: Agent refinement ===================== -->
-  <rect x="16" y="410" width="1060" height="440" rx="14" fill="#f6f1fc" stroke="#cbb5e8" stroke-width="1.6"/>
-  <circle cx="44" cy="438" r="17" fill="#7b4fc2"/>
-  <text class="badge c" x="44" y="445">C</text>
-  <text class="t1" x="70" y="447">Agent refinement</text>
-  <text class="tag" x="1056" y="446" text-anchor="end">optional</text>
-
-  <rect x="36" y="470" width="340" height="140" rx="10" fill="#fbf8ff" stroke="#8a63c9" stroke-width="2.2"/>
-  <circle cx="114" cy="492" r="10" fill="#7b4fc2"/>
-  <text class="num c" x="114" y="497">1</text>
-  <text class="bt" x="132" y="498">Agent in Blender</text>
-  <text class="bs c" x="206" y="524">GPT-6.2-Astra, Claude Opus 5.5</text>
-  <text class="bs c" x="206" y="543">or Claude Fable 5.2</text>
-  <text class="bs c" x="206" y="570">refines geometry and appearance</text>
-  <text class="xs c" x="206" y="592">first build: 600 s</text>
-  <path class="flow" d="M376,540 H419" marker-end="url(#ah)"/>
-
-  <rect x="420" y="470" width="300" height="150" rx="8" class="box" stroke="#9b7bd4"/>
-  <circle cx="512" cy="492" r="10" fill="#7b4fc2"/>
-  <text class="num c" x="512" y="497">2</text>
-  <text class="bt" x="530" y="498">Host check</text>
-  <text class="xs c" x="570" y="518">after each build or repair</text>
-  <rect x="438" y="532" width="12" height="12" rx="2" fill="#7b4fc2"/>
-  <text class="lt" x="458" y="543">surface vs. the original</text>
-  <text class="xs" x="458" y="560">a report, not a test</text>
-  <rect x="438" y="576" width="12" height="12" rx="2" fill="#b8b2c4"/>
-  <text class="lt" x="458" y="587">the agent finished</text>
-  <text class="xs" x="458" y="604">with complete or unchanged</text>
-
-  <path class="flow" d="M500,620 V750 H377" marker-end="url(#ah)"/>
-  <text class="bs halo" x="512" y="716" stroke="#f6f1fc">fail</text>
-  <rect x="36" y="690" width="340" height="120" rx="8" class="box dash" stroke="#9b7bd4"/>
-  <circle cx="134" cy="712" r="10" fill="#7b4fc2"/>
-  <text class="num c" x="134" y="717">3</text>
-  <text class="bt" x="152" y="718">Repair round</text>
-  <text class="bs c" x="206" y="744">a new agent gets the findings</text>
-  <text class="bs c" x="206" y="764">at most 3 builds</text>
-  <path class="flow" d="M206,690 V611" marker-end="url(#ah)"/>
-  <text class="xs halo" x="216" y="655" stroke="#f6f1fc">next round</text>
-
-  <path class="flow" d="M720,540 H789" marker-end="url(#ah)"/>
-  <text class="xs c halo" x="755" y="564" stroke="#f6f1fc">pass, or</text>
-  <text class="xs c halo" x="755" y="580" stroke="#f6f1fc">last round</text>
-  <rect x="790" y="470" width="266" height="140" rx="8" class="box" stroke="#9b7bd4"/>
-  <circle cx="852" cy="492" r="10" fill="#7b4fc2"/>
-  <text class="num c" x="852" y="497">4</text>
-  <text class="bt" x="870" y="498">Best candidate</text>
-  <text class="bs c" x="923" y="524">the best stored candidate</text>
-  <text class="bs c" x="923" y="543">is delivered as a GLB</text>
-  <text class="xs c" x="923" y="574">without the agent,</text>
-  <text class="xs c" x="923" y="591">posed.glb goes on to D</text>
-
-  <!-- ===================== D: Mass, friction and export ===================== -->
-  <rect x="1096" y="410" width="488" height="440" rx="14" fill="#eef7f5" stroke="#9ccfc2" stroke-width="1.6"/>
-  <circle cx="1124" cy="438" r="17" fill="#2f9e88"/>
-  <text class="badge c" x="1124" y="445">D</text>
-  <text class="t1" x="1150" y="447">Mass, friction and export</text>
-
-  <rect x="1116" y="470" width="384" height="76" rx="8" class="box" stroke="#4fae98"/>
-  <text class="bt c" x="1308" y="494">Align upright</text>
-  <text class="bs c" x="1308" y="515">the agent's GLB, else posed.glb,</text>
-  <text class="bs c" x="1308" y="534">turned upright on its support</text>
-  <path class="flow" d="M1308,546 V556 M1208,556 H1408"/>
-  <path class="flow" d="M1208,556 V565" marker-end="url(#ah)"/>
-  <path class="flow" d="M1408,556 V565" marker-end="url(#ah)"/>
-
-  <rect x="1116" y="566" width="184" height="96" rx="8" fill="#fbf8ff" stroke="#9b7bd4" stroke-width="1.6"/>
-  <text class="bt c" x="1208" y="590">Friction</text>
-  <text class="bs c" x="1208" y="611">the job's model sees</text>
-  <text class="bs c" x="1208" y="630">up to 4 photos</text>
-  <text class="xs c" x="1208" y="651">the agent's model and key</text>
-
-  <rect x="1316" y="566" width="184" height="96" rx="8" fill="#fffaf3" stroke="#e39b4f" stroke-width="1.6"/>
-  <text class="bt c" x="1408" y="590">VoMP transfer</text>
-  <text class="bs c" x="1408" y="611">materials moved onto</text>
-  <text class="bs c" x="1408" y="630">the final mesh</text>
-  <text class="xs c" x="1408" y="651">mass, COM and inertia</text>
-
-  <path class="flow" d="M1208,662 V672 M1408,662 V672 M1186,672 H1494"/>
-  <path class="flow" d="M1186,672 V683" marker-end="url(#ah)"/>
-  <path class="flow" d="M1340,672 V683" marker-end="url(#ah)"/>
-  <path class="flow" d="M1494,672 V683" marker-end="url(#ah)"/>
-
-  <rect x="1116" y="684" width="140" height="60" rx="8" class="box" stroke="#4fae98"/>
-  <text class="bt c" x="1186" y="708">MJCF</text>
-  <text class="xs c" x="1186" y="728">CoACD hulls</text>
-  <rect x="1270" y="684" width="140" height="60" rx="8" class="box" stroke="#4fae98"/>
-  <text class="bt c" x="1340" y="708">USD</text>
-  <text class="xs c" x="1340" y="728">for Isaac Sim</text>
-  <rect x="1424" y="684" width="140" height="60" rx="8" class="box" stroke="#4fae98"/>
-  <text class="bt c" x="1494" y="708">URDF</text>
-  <text class="xs c" x="1494" y="728">MJCF meshes</text>
-  <text class="xs c" x="1340" y="764">one rigid body each; friction in MJCF and USD only</text>
-
-  <rect x="1116" y="780" width="196" height="52" rx="8" class="box dash" stroke="#4fae98"/>
-  <text class="bt c" x="1214" y="802">360° video</text>
-  <text class="xs c" x="1214" y="821">optional, Blender</text>
-  <path class="flow" d="M1312,806 H1339" marker-end="url(#ah)"/>
-  <path class="flow" d="M1530,744 V779" marker-end="url(#ah)"/>
-  <rect x="1340" y="780" width="224" height="52" rx="8" fill="#ffffff" stroke="#2f9e88" stroke-width="2"/>
-  <text class="mono c" x="1452" y="802" font-weight="700">results.zip</text>
-  <text class="xs c" x="1452" y="821">GLBs, MJCF, USD, URDF</text>
-
-  <!-- links between the groups, drawn over the group panels -->
-  <path class="flow" d="M1031,326 V374 H330 V469" marker-end="url(#ah)"/>
-  <path class="mat" d="M1504,269 H1544 V614 H1502" marker-end="url(#am)"/>
-  <path class="flow" d="M1056,515 H1115" marker-end="url(#ah)"/>
-
-  <!-- ===================== legend ===================== -->
-  <path class="flow" d="M300,875 H340" marker-end="url(#ah)"/>
-  <text class="lt" x="350" y="880">data flow</text>
-  <path class="mat" d="M450,875 H490" marker-end="url(#am)"/>
-  <text class="lt" x="500" y="880">VoMP materials</text>
-  <rect x="640" y="865" width="34" height="20" rx="4" fill="#ffffff" stroke="#4a5568" stroke-width="1.6" class="dash"/>
-  <text class="lt" x="684" y="880">optional</text>
-  <use href="#pause" xlink:href="#pause" x="780" y="864"/>
-  <text class="lt" x="810" y="880">the job can pause here for your review</text>
-  <text class="mono" x="1100" y="880">posed.glb</text>
-  <text class="lt" x="1190" y="880">a file</text>
+  <!-- legend -->
+  <path class="flow dash" d="M20,398 H54"/>
+  <text class="lab" x="62" y="403">optional</text>
 </svg>

@@ -39,6 +39,7 @@ from harpor import frames as F
 from harpor.fileio import read_json, replace, write_json
 
 VERSION = 1  # of the evidence files, the scorer and the settings: another version is a cache miss
+SURFACES = 2  # of the surface split in baseline.json; 2 grows each surface against its mean normal
 MODES = ("off", "inspect", "sculpt")
 DEFAULT_MODE = "inspect"  # job.json's lidar_geometry when a record has none (README.md note 8)
 # Per-return flags (harpor.webapp.lidar.write_geometry). BLOCKING returns are never scored.
@@ -444,21 +445,47 @@ def _sparse_adj(n, pairs):
 
 
 def surfaces(mesh, s):
-    """Connected surfaces of similarly oriented faces: (component per face, smoothed face normals). Faces meet across
-    an edge when their smoothed normals differ by less than crease_deg."""
-    from scipy.sparse.csgraph import connected_components
+    """Connected surfaces of similarly oriented faces: (surface per face, smoothed face normals). A surface grows from
+    the flattest face not yet in one, across shared edges. A face joins when its smoothed normal is within crease_deg
+    of the face that reaches it and of the surface's mean normal so far. The second test cuts a rounded edge: there
+    each face turns only a little from the next, but the faces past the middle of the edge face the other side."""
+    from collections import deque
 
     n = len(mesh.faces)
-    pairs = mesh.adjacency()
-    A = _sparse_adj(n, pairs)
+    A = _sparse_adj(n, mesh.adjacency()).tocsr()
+    A.sort_indices()
     w = mesh.normals * mesh.areas[:, None]
     sm = w + A @ w
     sm /= np.maximum(np.linalg.norm(sm, axis=1), 1e-12)[:, None]
-    if len(pairs):
-        keep = (sm[pairs[:, 0]] * sm[pairs[:, 1]]).sum(1) > math.cos(math.radians(s["crease_deg"]))
-        pairs = pairs[keep]
-    _, comp = connected_components(_sparse_adj(n, pairs), directed=False)
-    return comp, sm
+    cos_t = math.cos(math.radians(s["crease_deg"]))
+    flat = (mesh.normals * sm).sum(1)  # 1 where the face's neighbors face its way: the middle of a side
+    order = np.lexsort((np.arange(n), -flat))
+    N, area, ptr, nbr = sm.tolist(), mesh.areas.tolist(), A.indptr.tolist(), A.indices.tolist()
+    comp = [-1] * n
+    k = 0
+    for seed in order.tolist():
+        if comp[seed] >= 0:
+            continue
+        comp[seed] = k
+        ax, ay, az = (c * area[seed] for c in N[seed])
+        mean = N[seed]
+        q = deque([seed])
+        while q:
+            f = q.popleft()
+            nfx, nfy, nfz = N[f]
+            for g in nbr[ptr[f]:ptr[f + 1]]:
+                if comp[g] >= 0:
+                    continue
+                gx, gy, gz = N[g]
+                if nfx * gx + nfy * gy + nfz * gz > cos_t and mean[0] * gx + mean[1] * gy + mean[2] * gz > cos_t:
+                    comp[g] = k
+                    ax, ay, az = ax + gx * area[g], ay + gy * area[g], az + gz * area[g]
+                    r = math.sqrt(ax * ax + ay * ay + az * az)
+                    if r > 0:
+                        mean = (ax / r, ay / r, az / r)
+                    q.append(g)
+        k += 1
+    return np.asarray(comp, np.int64), sm
 
 
 def usable(ev, sc, s):
@@ -771,7 +798,8 @@ def baseline(root):
         sil = np.round(silhouettes(control, root / "original.glb", s["silhouette_px"]), 4).tolist()
     except Exception as e:  # noqa: BLE001 - evaluate then has no silhouette check
         sil = {"error": f"{type(e).__name__}: {e}"}
-    rec = {"version": VERSION, "key": m["key"], "glb_sha256": sha256_file(root / "original.glb"),
+    rec = {"version": VERSION, "surfaces_version": SURFACES, "key": m["key"],
+           "glb_sha256": sha256_file(root / "original.glb"),
            "diagonal_m": mesh.diagonal, "mode": m["mode"]["effective"], "alignment": al,
            "regions": [{k: v for k, v in r.items() if k not in ("faces", "patch", "band")}
                        | {"faces": int(len(r["faces"])), "patch_faces": int(len(r["patch"]))} for r in regs],
@@ -965,7 +993,7 @@ def review_outputs(work, control, glb, review=None, extra=None):
         return None, []
     try:
         rec = read_json(Path(control) / "lidar" / "baseline.json")
-        if not isinstance(rec, dict) or rec.get("key") != m["key"]:
+        if not isinstance(rec, dict) or rec.get("key") != m["key"] or rec.get("surfaces_version") != SURFACES:
             rec = baseline(root)
         ev, s = load_evidence(control), m["settings"]
         with np.load(Path(control) / "lidar" / "baseline.npz") as f:
@@ -1039,7 +1067,7 @@ def _evaluate(glb, control, original, m):
     s = m["settings"]
     tol, sculpt = s["range_tol_m"], m["mode"]["effective"] == "sculpt"
     rec = read_json(control / "lidar" / "baseline.json")
-    if not isinstance(rec, dict) or rec.get("key") != m["key"]:
+    if not isinstance(rec, dict) or rec.get("key") != m["key"] or rec.get("surfaces_version") != SURFACES:
         rec = baseline(root)
     with np.load(control / "lidar" / "baseline.npz") as f:
         base = {k: f[k] for k in f.files}

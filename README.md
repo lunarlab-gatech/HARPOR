@@ -8,7 +8,7 @@ mesh and MJCF, USD and URDF files with an estimated mass, materials and friction
 geometry and the appearance in Blender, and the host checks each result. The research focus is estimating and refining
 the mass and the friction of rigid objects.
 
-![HARPOR pipeline: a capture becomes a posed mesh through SAM 3, Depth Anything 3, view selection, MV-SAM3D and a pose fit (A); VoMP estimates the materials right after MV-SAM3D (B); an optional agent refines the geometry and appearance, and a host check compares each candidate's surface with the original and checks that the agent finished (C); the mesh is turned upright, the VoMP materials are moved onto it for the mass and the inertia, the job's model estimates the friction from photos, and the export writes MJCF, USD and URDF files, an optional 360 video and results.zip (D)](docs/pipeline.svg)
+![HARPOR pipeline: a capture and an object name become a posed, textured mesh through SAM 3, Depth Anything 3, view selection, MV-SAM3D and a pose fit, and LiDAR or depth sets the metric scale when the capture has it (A); VoMP estimates the materials from the MV-SAM3D mesh (B); an optional VLM agent refines the mesh in Blender, and a failed host check starts a repair round, with at most 3 builds; the LiDAR returns go to the agent (the fitting returns) and to the host check (the reserved returns) (C); the mass, the inertia and the friction are estimated, and the export writes MJCF, USD and URDF files (D)](docs/pipeline.svg)
 
 HARPOR finds the object in the frames with SAM 3, gets cameras and depth from Depth Anything 3 and picks the views.
 LiDAR or iPhone depth sets the metric scale when the capture has it. MV-SAM3D builds a textured mesh from the views,
@@ -682,7 +682,10 @@ a deterministic sample spread over the image, and each view weighs the same. Wit
 reserved, and every region is inspection only.
 
 *Baseline and regions.* Before the clock starts, `make_previews` calls `lidar_geometry.baseline`. It scores the
-original and splits it into surfaces: connected faces whose smoothed normals bend less than 35 degrees across an edge.
+original and splits it into surfaces. A surface grows from the flattest face not yet in one, across shared edges. A
+face joins when its smoothed normal is within 35 degrees of the face that reaches it and of the surface's mean normal.
+The mean-normal test cuts a rounded edge, where each face turns only a little from the next: on the 11/20 box mesh a
+test against neighbors alone joined all six sides into one surface.
 A region is the part of a surface where the error passes the range tolerance (its core), with three rings of faces
 around it (its patch). The whole surface is used when the error covers more than 70% of it. A region's status:
 - `target`: at least 2 distinct fitting groups see a displacement of one sign beyond the tolerance, and their

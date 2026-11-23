@@ -29,7 +29,7 @@ from pathlib import Path
 from harpor.agent import lidar_geometry, surface, tools
 from harpor.fileio import read_json, write_json
 
-VERSION = 4  # of the report; 3 added lidar and the full cache key, 4 the see-through rule of the LiDAR check
+VERSION = 5  # of the report; 3 added lidar and the full cache key, 4 the see-through rule, 5 the surface split
 
 MAX_FEEDBACK, MAX_TEXT = 6000, 300  # characters of feedback, and of one text in it before quoting
 LOCAL, NONE, REPORT_ONLY = "local", "none", "report only"
